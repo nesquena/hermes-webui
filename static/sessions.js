@@ -567,10 +567,14 @@ async function loadSession(sid){
     if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
   }
   // Phase 1: Load metadata only (~1KB) for fast session switching.
+  // Resolve model immediately: old sessions can persist stale provider-shaped
+  // IDs (e.g. openai/gpt-5.4-mini) and assigning those to S.session creates a
+  // short race where the composer can display/send the wrong model before the
+  // deferred resolver catches up.
   // Guard against network/server failures to prevent a permanently stuck loading state.
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=1`);
   } catch(e) {
     const _msgInner = $('msgInner');
     if(_msgInner){
