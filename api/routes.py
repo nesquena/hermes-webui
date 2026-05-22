@@ -2241,6 +2241,7 @@ from api.upload import handle_upload, handle_upload_extract, handle_transcribe
 from api.streaming import (
     _sse,
     _run_agent_streaming,
+    _run_agent_streaming_subprocess,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
 )
@@ -7935,7 +7936,7 @@ def _handle_btw(handler, body):
     from api.background import track_btw
     track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
     thr = threading.Thread(
-        target=_run_agent_streaming,
+        target=_run_agent_streaming_subprocess,
         args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
         kwargs={"ephemeral": True, "model_provider": model_provider},
         daemon=True,
@@ -7991,7 +7992,7 @@ def _handle_background(handler, body):
         `get_results()` would see a forever-`running` task and return nothing.
         """
         try:
-            _run_agent_streaming(
+            _run_agent_streaming_subprocess(
                 bg_sid,
                 prompt,
                 s.model,
@@ -8212,7 +8213,7 @@ def _start_chat_stream_for_session(
         STREAM_GOAL_RELATED[stream_id] = True
     diag.stage("worker_thread_start") if diag else None
     thr = threading.Thread(
-        target=_run_agent_streaming,
+        target=_run_agent_streaming_subprocess,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
         kwargs={"model_provider": model_provider, "goal_related": goal_related},
         daemon=True,
