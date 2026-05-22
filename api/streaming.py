@@ -36,6 +36,7 @@ from api.config import (
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import visible_messages_for_anchor
+from api.display_sanitization import is_context_compression_marker, sanitize_display_messages
 from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
@@ -2299,15 +2300,7 @@ def _dedupe_replayed_active_context(previous_context, result_messages):
 
 
 def _is_context_compression_marker(msg):
-    if not isinstance(msg, dict):
-        return False
-    text = _message_text(msg.get('content', '')).lower()
-    return (
-        'context compaction' in text
-        or 'context compression' in text
-        or 'context was auto-compressed' in text
-        or 'active task list was preserved across context compression' in text
-    )
+    return is_context_compression_marker(msg)
 
 
 def _compact_summary_text(raw_text: str | None, limit: int = 320) -> str | None:
@@ -2532,9 +2525,10 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     If Hermes Agent returns a normal append-only history, append that delta to
     the UI transcript. If the model/context history was compacted and no longer
     has the prior context as a prefix, keep the previous UI transcript and append
-    only compaction marker messages plus the current user turn onward.
+    only the current visible turn onward. Context-compression markers remain
+    model-facing recovery material and are never persisted into display history.
     """
-    previous_display = list(previous_display or [])
+    previous_display = list(sanitize_display_messages(previous_display))
     # Deduplicate stale _partial messages that accumulated in previous_display.
     # A bug in cancel_stream() could insert multiple identical _partial messages
     # when _stripped was empty but _has_reasoning/_has_tools was True. The
@@ -2570,12 +2564,10 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
-        marker_candidates = [
-            m for m in result_messages[:current_user_idx if current_user_idx is not None else len(result_messages)]
-            if _is_context_compression_marker(m)
-        ]
         turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
-        candidates = marker_candidates + turn_candidates
+        candidates = turn_candidates
+
+    candidates = sanitize_display_messages(candidates)
 
     merged = previous_display[:]
     seen = {_message_identity(m) for m in merged}
@@ -5245,7 +5237,7 @@ def _run_agent_streaming(
                         })
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
-            raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
+            raw_session = s.compact() | {'messages': sanitize_display_messages(s.messages), 'tool_calls': tool_calls}
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
             # Emit one last metering packet for the live message-header TPS label.
             meter_stats = meter().get_stats()

@@ -21,6 +21,7 @@ from api.config import (
 )
 from api.workspace import get_last_workspace
 from api.usage import prompt_cache_hit_percent
+from api.display_sanitization import sanitize_display_messages
 from api.agent_sessions import (
     _is_continuation_session,
     read_importable_agent_session_rows,
@@ -419,7 +420,9 @@ class Session:
         self.workspace = str(Path(workspace).expanduser().resolve())
         self.model = model
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
-        self.messages = messages or []
+        raw_messages = messages or []
+        display_messages = sanitize_display_messages(raw_messages)
+        self.messages = display_messages
         self.tool_calls = tool_calls or []
         self.created_at = created_at or time.time()
         self.updated_at = updated_at or time.time()
@@ -437,7 +440,16 @@ class Session:
         self.pending_user_message = pending_user_message
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
-        self.context_messages = context_messages if isinstance(context_messages, list) else []
+        raw_context_messages = context_messages if isinstance(context_messages, list) else []
+        if raw_context_messages:
+            self.context_messages = raw_context_messages
+        elif len(display_messages) < len(raw_messages):
+            # Legacy/polluted sidecars may only have the internal compaction
+            # reference in messages. Keep that recovery material model-facing
+            # while removing it from the visible transcript.
+            self.context_messages = copy.deepcopy(raw_messages)
+        else:
+            self.context_messages = []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
         self.compression_anchor_summary = compression_anchor_summary
@@ -499,6 +511,10 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        raw_messages = list(self.messages or [])
+        self.messages = sanitize_display_messages(raw_messages)
+        if len(self.messages) < len(raw_messages) and not self.context_messages:
+            self.context_messages = copy.deepcopy(raw_messages)
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -604,15 +620,17 @@ class Session:
             return None
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        _raw_message_count = len(data.get('messages') or [])
         session = cls(**data)
-        if _collapsed_partials:
+        _display_markers_removed = len(session.messages or []) < _raw_message_count
+        if _collapsed_partials or _display_markers_removed:
             try:
-                # Self-heal bloated sessions on first full load without touching
-                # recency/index ordering; save() creates a .bak because this
-                # intentionally shrinks the transcript (#2592).
+                # Self-heal bloated or marker-polluted sessions on first full load
+                # without touching recency/index ordering; save() creates a .bak
+                # because this intentionally shrinks the display transcript.
                 session.save(touch_updated_at=False, skip_index=True)
             except Exception:
-                logger.debug("Failed to persist collapsed duplicate partials for %s", sid, exc_info=True)
+                logger.debug("Failed to persist sanitized display messages for %s", sid, exc_info=True)
         return session
 
     @classmethod

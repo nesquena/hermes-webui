@@ -1,5 +1,8 @@
 from api.models import Session, reconciled_state_db_messages_for_session
+from api.display_sanitization import sanitize_display_messages
 import contextlib
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 from api.streaming import (
@@ -52,6 +55,68 @@ def test_session_persists_model_context_separately_from_display_transcript(tmp_p
     assert _sanitize_messages_for_api(_session_context_messages(reloaded)) == compacted_context
 
 
+def test_legacy_compaction_marker_sidecar_loads_context_but_sanitizes_display(tmp_path, monkeypatch):
+    """Polluted sidecar messages are repaired on full load without losing model context."""
+    state_dir = tmp_path / "state"
+    session_dir = state_dir / "sessions"
+    session_dir.mkdir(parents=True)
+
+    import api.models as models
+
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+
+    payload = {
+        "session_id": "legacy1217polluted",
+        "title": "Polluted compaction marker",
+        "workspace": str(tmp_path),
+        "model": "test-model",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "messages": [
+            {"role": "user", "content": "visible prompt"},
+            {"role": "assistant", "content": "visible answer"},
+            {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary"},
+            {"role": "user", "content": "latest prompt"},
+        ],
+    }
+    (session_dir / "legacy1217polluted.json").write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    reloaded = Session.load("legacy1217polluted")
+    assert reloaded is not None
+
+    assert [m["content"] for m in reloaded.messages] == [
+        "visible prompt",
+        "visible answer",
+        "latest prompt",
+    ]
+    assert [m["content"] for m in reloaded.context_messages] == [
+        "visible prompt",
+        "visible answer",
+        "[CONTEXT COMPACTION — REFERENCE ONLY] summary",
+        "latest prompt",
+    ]
+
+
+def test_done_payload_messages_are_sanitized_before_client_assignment():
+    raw_messages = [
+        {"role": "user", "content": "visible prompt"},
+        {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary"},
+        {"role": "assistant", "content": "visible answer"},
+    ]
+
+    assert sanitize_display_messages(raw_messages) == [
+        {"role": "user", "content": "visible prompt"},
+        {"role": "assistant", "content": "visible answer"},
+    ]
+
+    src = Path("api/streaming.py").read_text(encoding="utf-8")
+    assert "'messages': sanitize_display_messages(s.messages)" in src
+
+
 def test_workspace_prefixed_current_user_after_compaction_is_not_duplicated():
     previous_display = [
         {"role": "user", "content": "older prompt"},
@@ -74,7 +139,7 @@ def test_workspace_prefixed_current_user_after_compaction_is_not_duplicated():
         "Ok, mache weiter",
     )
 
-    assert [m["role"] for m in merged] == ["user", "assistant", "assistant", "user", "assistant"]
+    assert [m["role"] for m in merged] == ["user", "assistant", "user", "assistant"]
     assert [m["content"] for m in merged[-2:]] == [
         "Ok, mache weiter",
         "continuing",
@@ -201,10 +266,10 @@ def test_compacted_agent_result_keeps_old_prompts_and_appends_current_turn():
         "first answer",
         "second prompt that must remain visible",
         "second answer",
-        "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.",
         "new question after compaction",
         "new answer after compaction",
     ]
+    assert all("CONTEXT COMPACTION" not in m["content"] for m in merged)
 
 
 def test_append_only_agent_result_preserves_normal_delta_behavior():
@@ -304,10 +369,10 @@ def test_repeated_user_text_after_compaction_is_not_dropped():
     assert [m["content"] for m in merged] == [
         "continue",
         "old answer",
-        "[CONTEXT COMPACTION — REFERENCE ONLY] summary",
         "continue",
         "new answer",
     ]
+    assert all("CONTEXT COMPACTION" not in m["content"] for m in merged)
 
 
 def test_session_context_falls_back_to_display_messages_for_legacy_sessions(tmp_path):
