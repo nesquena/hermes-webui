@@ -4068,6 +4068,29 @@ function autoReadLastAssistant(){
 // ── Reconnect banner (B4/B5: reload resilience) ──
 const INFLIGHT_KEY = 'hermes-webui-inflight'; // localStorage key for in-flight session tracking
 const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state'; // localStorage snapshots for mid-stream reload recovery
+const INFLIGHT_STATE_DEFAULT_LIMITS = {
+  maxSessions:8,
+  messages:24,
+  toolCalls:48,
+  stringChars:60000,
+  jsonChars:1500000,
+};
+
+function _boundedInflightInt(value, fallback, min, max){
+  const n=parseInt(value,10);
+  if(!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+function _inflightStateLimits(){
+  const configured=(typeof window!=='undefined'&&window._inflightStateLimits&&typeof window._inflightStateLimits==='object')?window._inflightStateLimits:{};
+  return {
+    maxSessions:_boundedInflightInt(configured.maxSessions, INFLIGHT_STATE_DEFAULT_LIMITS.maxSessions, 1, 25),
+    messages:_boundedInflightInt(configured.messages, INFLIGHT_STATE_DEFAULT_LIMITS.messages, 1, 100),
+    toolCalls:_boundedInflightInt(configured.toolCalls, INFLIGHT_STATE_DEFAULT_LIMITS.toolCalls, 1, 200),
+    stringChars:_boundedInflightInt(configured.stringChars, INFLIGHT_STATE_DEFAULT_LIMITS.stringChars, 1000, 500000),
+    jsonChars:_boundedInflightInt(configured.jsonChars, INFLIGHT_STATE_DEFAULT_LIMITS.jsonChars, 100000, 4000000),
+  };
+}
 
 function _readInflightStateMap(){
   try{
@@ -4078,13 +4101,75 @@ function _readInflightStateMap(){
     return {};
   }
 }
+function _isStorageQuotaError(err){
+  return !!err && (
+    err.name==='QuotaExceededError' ||
+    err.name==='NS_ERROR_DOM_QUOTA_REACHED' ||
+    err.code===22 ||
+    err.code===1014
+  );
+}
+function _truncateInflightValue(value, maxChars){
+  const limits=_inflightStateLimits();
+  const stringLimit=_boundedInflightInt(maxChars, limits.stringChars, 1000, 500000);
+  if(typeof value==='string'){
+    if(value.length<=stringLimit) return value;
+    return value.slice(0,stringLimit)+'\n\n[truncated for browser recovery storage]';
+  }
+  if(Array.isArray(value)) return value.map(v=>_truncateInflightValue(v, Math.max(2000, Math.floor(stringLimit/2))));
+  if(value&&typeof value==='object'){
+    const out={};
+    for(const [k,v] of Object.entries(value)) out[k]=_truncateInflightValue(v, stringLimit);
+    return out;
+  }
+  return value;
+}
+function _compactInflightState(state){
+  const limits=_inflightStateLimits();
+  const messages=Array.isArray(state.messages)?state.messages.slice(-limits.messages):[];
+  const toolCalls=Array.isArray(state.toolCalls)?state.toolCalls.slice(-limits.toolCalls):[];
+  return _truncateInflightValue({
+    streamId:state.streamId||null,
+    messages,
+    uploaded:Array.isArray(state.uploaded)?state.uploaded.slice(-20):[],
+    toolCalls,
+  }, limits.stringChars);
+}
+function _writeInflightStateMap(all){
+  const limits=_inflightStateLimits();
+  const entries=Object.entries(all||{})
+    .sort((a,b)=>Number(b[1]&&b[1].updated_at||0)-Number(a[1]&&a[1].updated_at||0))
+    .slice(0,limits.maxSessions);
+  const compact={};
+  for(const [sid,entry] of entries) compact[sid]=entry;
+  let json=JSON.stringify(compact);
+  if(json.length>limits.jsonChars){
+    const current=entries[0];
+    json=JSON.stringify(current?{[current[0]]:current[1]}:{});
+  }
+  if(json.length>limits.jsonChars){
+    localStorage.removeItem(INFLIGHT_STATE_KEY);
+    return false;
+  }
+  localStorage.setItem(INFLIGHT_STATE_KEY,json);
+  return true;
+}
 function saveInflightState(sid, state){
   if(!sid||!state) return;
+  const entry={..._compactInflightState(state),updated_at:Date.now()};
   try{
     const all=_readInflightStateMap();
-    all[sid]={...state,updated_at:Date.now()};
-    localStorage.setItem(INFLIGHT_STATE_KEY, JSON.stringify(all));
-  }catch(_){ }
+    all[sid]=entry;
+    _writeInflightStateMap(all);
+  }catch(err){
+    if(!_isStorageQuotaError(err)) return;
+    try{
+      localStorage.removeItem(INFLIGHT_STATE_KEY);
+      _writeInflightStateMap({[sid]:entry});
+    }catch(_){
+      try{localStorage.removeItem(INFLIGHT_STATE_KEY);}catch(__){}
+    }
+  }
 }
 function loadInflightState(sid, streamId){
   if(!sid) return null;
@@ -4171,7 +4256,16 @@ function restoreLiveTurnHtmlForSession(sid){
 }
 
 function markInflight(sid, streamId) {
-  localStorage.setItem(INFLIGHT_KEY, JSON.stringify({sid, streamId, ts: Date.now()}));
+  const payload=JSON.stringify({sid, streamId, ts: Date.now()});
+  try{
+    localStorage.setItem(INFLIGHT_KEY, payload);
+  }catch(err){
+    if(!_isStorageQuotaError(err)) return;
+    try{
+      localStorage.removeItem(INFLIGHT_STATE_KEY);
+      localStorage.setItem(INFLIGHT_KEY, payload);
+    }catch(_){}
+  }
 }
 function clearInflight() {
   localStorage.removeItem(INFLIGHT_KEY);

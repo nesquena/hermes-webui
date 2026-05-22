@@ -4355,6 +4355,11 @@ _SETTINGS_DEFAULTS = {
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "pinned_sessions_limit": 3,  # maximum active pinned sessions shown in the sidebar
+    "inflight_state_max_sessions": 8,  # max active-stream recovery snapshots kept in browser localStorage
+    "inflight_state_max_messages": 24,  # max recent messages kept per recovery snapshot
+    "inflight_state_max_tool_calls": 48,  # max recent tool-call records kept per recovery snapshot
+    "inflight_state_max_string_chars": 60000,  # max string length kept inside a recovery snapshot field
+    "inflight_state_max_json_chars": 1500000,  # max serialized recovery snapshot payload before pruning
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
@@ -4485,6 +4490,11 @@ _SETTINGS_ENUM_VALUES = {
 }
 _SETTINGS_INT_RANGES = {
     "pinned_sessions_limit": (1, 99),
+    "inflight_state_max_sessions": (1, 25),
+    "inflight_state_max_messages": (1, 100),
+    "inflight_state_max_tool_calls": (1, 200),
+    "inflight_state_max_string_chars": (1000, 500000),
+    "inflight_state_max_json_chars": (100000, 4000000),
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",

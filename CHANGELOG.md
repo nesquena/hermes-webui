@@ -7,6 +7,18 @@
 
 - Add a workspace-panel Artifacts tab that lists files detected from the active session’s tool calls and transcript, filters dependency/build noise, and opens entries in the existing preview flow.
 
+## [v0.51.117] — 2026-05-22 — Release CO (stage-pr2766 — 1-PR — in-flight recovery storage quota-safe)
+
+### Fixed
+
+- **PR #2766** by @george-andraws — Make in-flight recovery storage quota-safe so a full browser `localStorage` budget no longer blocks chat submission with `QuotaExceededError: Failed to execute 'setItem' on 'Storage': Setting the value of 'hermes-webui-inflight' exceeded the quota.` The fix has four parts: (1) compact recovery snapshots before writing to keep only recent messages, tool calls, uploaded-file metadata, stream id, and updated timestamp; (2) truncate individual large strings per field (`60000` chars default) and prune the serialized payload (`1500000` chars default); (3) catch quota errors specifically on `markInflight()`, drop the larger `hermes-webui-inflight-state` key, then retry the tiny marker write; (4) expose 5 new configurable settings (`inflight_state_max_sessions`, `_max_messages`, `_max_tool_calls`, `_max_string_chars`, `_max_json_chars`) with int-range validation so operators can tune the budget. Self-healing on the very first chat submit after upgrade for users with already-quota-exhausted storage — no manual reload required. Graceful degradation if storage is still too full even after compaction (clears recovery snapshots but never blocks chat submit).
+
+## [v0.51.116] — 2026-05-22 — Release CN (stage-pr2676 — 1-PR — per-skill enable/disable toggle in Skills panel, CLI-parity with `hermes skills config`)
+
+### Added
+
+- **PR #2676** by @lucasrc — Each skill in the Skills panel now has a toggle pill (enabled/disabled) so users can turn individual skills on or off directly from the WebUI without editing `config.yaml`. Achieves parity with the existing `hermes skills config` CLI subcommand (interactive TUI that toggles `skills.disabled` in config). The disabled state is mirrored through to `skills.platform_disabled.webui` when that key is present. Disabled skills remain visible in the panel (muted via `opacity: .45`) instead of being filtered out, so users can re-enable them later. New endpoint: `POST /api/skills/toggle` validates the skill exists in the filesystem before mutating config, wraps the YAML read-modify-write under the existing `_cfg_lock` for thread safety, and calls `reload_config()` so the change takes effect immediately. Toggle pill uses theme variables (`--accent-bg-strong`, `--accent`, `--border`, `--muted`, `--accent-text`) so it adapts automatically to each skin: gold for default, red for ares, blue for poseidon, purple for sisyphus, grey for mono — verified empirically across light + dark variants. i18n keys (`skill_enabled`, `skill_disabled`, `skill_toggle_failed`) translated across all 10 locales. Default-state safety: fresh installs (no `skills.disabled` key in config) return `disabled: False` for every skill — no regression risk for new users.
+
 ## [v0.51.115] — 2026-05-22 — Release CM (stage-pr2731 — 1-PR — clarify prompt collapse/expand with chevron-icon polish)
 
 ### Added

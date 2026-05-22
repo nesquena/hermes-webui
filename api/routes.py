@@ -231,7 +231,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                 if not skill_matches_platform(frontmatter):
                     continue
                 name = frontmatter.get("name", skill_dir.name)[:64]
-                if name in seen_names or name in disabled:
+                if name in seen_names:
                     continue
                 description = frontmatter.get("description", "")
                 if not description:
@@ -248,6 +248,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                         "name": name,
                         "description": description,
                         "category": _skill_category_from_path(skill_md, search_dirs),
+                        "disabled": name in disabled,
                     }
                 )
             except (UnicodeDecodeError, PermissionError) as e:
@@ -939,6 +940,11 @@ from api.config import (
     get_webui_session_save_mode,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
+    _get_config_path,
+    _load_yaml_config_file,
+    _save_yaml_config_file,
+    reload_config,
+    _cfg_lock,
 )
 from api.helpers import (
     require,
@@ -5484,6 +5490,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/skills/delete":
         return _handle_skill_delete(handler, body)
+
+    if parsed.path == "/api/skills/toggle":
+        return _handle_skill_toggle(handler, body)
 
     # ── Memory (POST) ──
     if parsed.path == "/api/memory/write":
@@ -10949,6 +10958,81 @@ def _handle_skill_delete(handler, body):
     skill_dir = matches[0].parent
     shutil.rmtree(str(skill_dir))
     return j(handler, {"ok": True, "name": body["name"]})
+
+
+def _normalize_names_list(names) -> list[str]:
+    """Normalize a config value (None/str/list) into a deduplicated str list."""
+    if names is None:
+        return []
+    if isinstance(names, str):
+        names = [names]
+    elif not isinstance(names, list):
+        names = list(names) if names else []
+    return list(dict.fromkeys(str(d).strip() for d in names if str(d).strip()))
+
+
+def _toggle_name_in_list(names, name: str, enabled: bool) -> list[str]:
+    """Add or remove *name* from *names*, returning a new list."""
+    names = _normalize_names_list(names)
+    if enabled:
+        return [d for d in names if d != name]
+    if name not in names:
+        names.append(name)
+    return names
+
+
+def _handle_skill_toggle(handler, body):
+    """Toggle a skill's enabled/disabled state in the active profile's config.yaml.
+
+    Writes through to ``skills.platform_disabled.webui`` when that key exists
+    so the toggle takes effect for WebUI sessions (the agent's
+    ``get_disabled_skill_names`` checks platform-specific lists first when
+    ``HERMES_SESSION_PLATFORM`` is set).
+    """
+    try:
+        require(body, "name", "enabled")
+    except ValueError as e:
+        return bad(handler, str(e))
+
+    name = body["name"].strip()
+    enabled = bool(body["enabled"])
+
+    # Validate the skill exists in the filesystem
+    skills_dir = _active_skills_dir()
+    search_dirs = _active_skill_search_dirs(skills_dir)
+    skill_dir, skill_md = _find_skill_in_dirs(name, search_dirs)
+    if not skill_md:
+        return bad(handler, f"Skill '{name}' not found", 404)
+
+    config_path = _get_config_path()
+    with _cfg_lock:
+        cfg = _load_yaml_config_file(config_path)
+
+        # Ensure skills section exists as a dict
+        if "skills" not in cfg or not isinstance(cfg["skills"], dict):
+            cfg["skills"] = {}
+        skills_cfg = cfg["skills"]
+
+        # Always update the global disabled list
+        skills_cfg["disabled"] = _toggle_name_in_list(
+            skills_cfg.get("disabled"), name, enabled
+        )
+
+        # Write-through to platform_disabled.webui if it exists so that the
+        # toggle takes effect for WebUI sessions (the agent checks the
+        # platform-specific list first when HERMES_SESSION_PLATFORM=webui).
+        platform_disabled = skills_cfg.get("platform_disabled")
+        if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
+            platform_disabled["webui"] = _toggle_name_in_list(
+                platform_disabled["webui"], name, enabled
+            )
+
+        cfg["skills"] = skills_cfg
+        _save_yaml_config_file(config_path, cfg)
+
+    reload_config()  # outside with block — reload_config() acquires the lock itself
+
+    return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
 
 def _handle_memory_write(handler, body):
