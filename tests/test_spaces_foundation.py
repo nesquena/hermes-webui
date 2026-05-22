@@ -12239,6 +12239,13 @@ layout:
     assert exported["progress_event"]["redaction_status"] == "metadata_only"
     assert imported["progress_event"].get("event_id") != exported["progress_event"].get("event_id")
 
+    assert exported["autonomy_policy"]["action"] == "space.agent.export"
+    assert exported["autonomy_policy"]["approval_required"] is True
+    assert exported["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
+    assert exported["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert exported["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert exported["autonomy_policy"]["metadata_only"] is True
+
     assert scoped_progress["recent_event_count"] == 2
     assert scoped_progress["recent_family_counts"] == {"tool": 2}
     assert [event["run_id"] for event in scoped_progress["recent_events"]] == [

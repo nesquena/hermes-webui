@@ -92,7 +92,7 @@ Remaining:
 
 ### Phase 5 — Autonomy policy, prompt-injection preflight, model-routing hints
 
-Status: **metadata-only status surface plus creator preview/commit, active-space instruction/context, repair prompt, source-refresh preflight, and camera-stream tool receipts implemented; broader per-action enforcement and actual model-routing decisions remain**.
+Status: **metadata-only status surface plus creator preview/commit, active-space instruction/context, repair prompt, source-refresh preflight, camera-stream tool receipts, and package-export policy receipts implemented; broader per-action enforcement and actual model-routing decisions remain**.
 
 Delivered:
 - `api/capy_policy.py` exposes allow-listed autonomy modes, approval gates, prompt-preflight status, model-routing hints, and bounded/deduplicated action-policy receipts without echoing raw env/provider/model secrets.
@@ -102,10 +102,11 @@ Delivered:
 - Direct active-space instruction aliases (`space.current.agentInstructions` / `space.current.specialInstructions`) now run `active_space_instructions` prompt preflight, return metadata-only action-policy receipts, and withhold hostile instruction text before it can be injected into agent context.
 - Space metadata mutation aliases (`space.spaces.saveSpaceMeta` / `space.current.saveMeta`) now preflight `agentInstructions`/`specialInstructions` before persistence, block hostile instruction writes without creating revisions, and return metadata-only action-policy receipts for passing instruction updates.
 - Camera-stream tool actions (`space.camera.add_stream` / `camera.add_stream`) now return metadata-only autonomy-policy receipts requiring prompt preflight and the `destructive_external_action` gate with a `hint:vision` model-route hint, while approved private stream references remain url-digest/host-class metadata only.
+- Space Agent package export responses now include a metadata-only `space.agent.export` autonomy-policy receipt with supervised-mode approval gates, required prompt-preflight status, and `hint:reasoning` model-route evidence; the export UI renders the policy beside package progress without displaying package YAML, widget bodies, renderer/source/API-auth fields, prompts, scripts, archives, or credentials.
 - Active-space context receipts, repair prompts, widget-runtime prompts, and source-refresh ingestion paths now use protected prompt-preflight boundaries before advisory context or user-provided instructions can influence an agent/tool action.
 
 Remaining:
-- Extend pass/warn/block preflight and action-policy receipts to additional high-risk browser/development/recovery/tool boundaries beyond the current creator/context/repair/source-refresh/camera coverage.
+- Extend pass/warn/block preflight and action-policy receipts to additional high-risk browser/development/recovery/tool boundaries beyond the current creator/context/repair/source-refresh/camera/package-export coverage.
 - Wire model-routing hints into actual Capy/Hermes execution decisions while preserving Brendan's provider-agnostic OpenAI/xAI/LM Studio setup.
 
 ### Phase 6 — Structured progress events

@@ -1128,11 +1128,13 @@
     const promptStatus = safeDisplayMetadataText(data.prompt_preflight_status || 'required', 'required') || 'required';
     const routeHint = safeModelRouteHint(data.model_route_hint || '');
     const selectedRoute = safeSelectedModelRoutePreview(data.model_route, routeHint);
+    const action = safeProgressPublicId(data.action || '');
     const flags = [];
     if (data.metadata_only === true) flags.push('metadata-only');
     if (data.local_only === true) flags.push('local-only');
     return '<div class="capy-spaces-card capy-spaces-action-policy"><h4>Action policy</h4>' +
       '<div class="capy-spaces-muted">Mode: '+escapeHtml(label)+' · Approval required: '+approvalRequired+' · Prompt preflight: '+escapeHtml(promptStatus)+'</div>' +
+      (action ? '<div class="capy-spaces-muted">Action: '+escapeHtml(action)+'</div>' : '') +
       '<div class="capy-spaces-muted">Gates: '+escapeHtml(gates.join(', '))+'</div>' +
       (routeHint ? '<div class="capy-spaces-muted">Model route hint: '+escapeHtml(routeHint)+'</div>' : '') +
       (selectedRoute ? '<div class="capy-spaces-muted">Model route: '+escapeHtml(selectedRoute)+'</div>' : '') +
@@ -1466,7 +1468,7 @@
       '<div class="capy-spaces-muted">Safe metadata package generated. Package contents are intentionally not displayed in this UI.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(filename)+'</strong>' +
       '<div class="capy-spaces-muted">Format: '+escapeHtml(format)+' · Space ID: '+escapeHtml(safeSpaceId)+' · Widgets: '+widgetCount+'</div></div></div></div>' +
-      renderPackageProgressEvidence(data && data.progress_event) + '</div>';
+      renderActionPolicyEvidence(data && data.autonomy_policy) + renderPackageProgressEvidence(data && data.progress_event) + '</div>';
   }
 
   function safeImportMetadataText(value, fallback){

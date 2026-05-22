@@ -6458,6 +6458,17 @@ def _space_agent_import_action_policy_receipt(action: str, preflight_receipt: di
     )
 
 
+def _space_agent_export_action_policy_receipt() -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        "space.agent.export",
+        approval_gates=["creator_commit", "generated_widget_execution"],
+        prompt_preflight_status="required",
+        model_route_hint="hint:reasoning",
+    )
+
+
 def _space_agent_import_warnings(space_yaml: str, widget_files: dict[str, str]) -> list[dict[str, str]]:
     warnings: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -6686,6 +6697,7 @@ def export_space_agent_package(space_id: str, *, format: str = "yaml") -> dict[s
         }
     else:
         raise ValueError("Unsupported export format")
+    response["autonomy_policy"] = _space_agent_export_action_policy_receipt()
     response["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="package.export")
     return response
 

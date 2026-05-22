@@ -1631,6 +1631,7 @@ global.fetch = async function(path, opts = {}) {
       space_yaml: 'id: lab\nname: Lab\nrenderer: <script>bad()</script>\napi_key: SECRET',
       widgets: {'widgets/weather.yaml': 'id: weather\nscript: <script>bad()</script>\ntoken: SECRET'},
       progress_event: { event_id: 'evt-export-package', event_type: 'tool.completed', family: 'tool', run_id: 'package.export:' + (body.space_id || 'lab'), redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      autonomy_policy: { available: true, action: 'space.agent.export', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit', 'generated_widget_execution'], prompt_preflight_status: 'required', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       archive_b64: body.format === 'zip' ? 'U0VDUkVUX0FSQ0hJVkVfSU1BR0lOQVJZ=' : undefined,
       zip_b64: body.format === 'zip' ? 'U0VDUkVUX1pJUF9JTUFHSU5BUlk=' : undefined,
     });
@@ -6289,6 +6290,9 @@ def test_spaces_ui_export_yaml_posts_space_id_and_renders_safe_metadata_only(dri
     assert "Package progress" in out["rootHtml"]
     assert "tool.completed" in out["rootHtml"]
     assert "metadata-only progress receipt" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "space.agent.export" in out["rootHtml"]
+    assert "Prompt preflight: required" in out["rootHtml"]
     assert "space_yaml" not in out["rootHtml"]
     assert "widgets/weather.yaml" not in out["rootHtml"]
     assert "zip_b64" not in out["rootHtml"]
