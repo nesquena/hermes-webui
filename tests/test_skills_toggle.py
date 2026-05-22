@@ -139,12 +139,15 @@ def test_platform_disabled_write_through(tmp_path, monkeypatch):
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(yaml.dump(config), encoding="utf-8")
 
-    # Create a fake skill directory so filesystem validation passes
-    skills_dir = tmp_path / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    (skills_dir / "skill-a").mkdir(parents=True, exist_ok=True)
-    (skills_dir / "skill-a" / "SKILL.md").write_text("---\nname: skill-a\n---\nA skill", encoding="utf-8")
-    monkeypatch.setattr("api.routes._active_skills_dir", lambda: skills_dir)
+    # Mock _find_skill_in_dirs to avoid agent.skill_utils import in CI
+    fake_dir = tmp_path / "skills" / "skill-a"
+    fake_dir.mkdir(parents=True, exist_ok=True)
+    fake_md = fake_dir / "SKILL.md"
+    fake_md.write_text("---\nname: skill-a\n---\nA skill", encoding="utf-8")
+    monkeypatch.setattr(
+        "api.routes._find_skill_in_dirs",
+        lambda name, dirs: (fake_dir, fake_md),
+    )
 
     handler = MagicMock()
 
@@ -178,11 +181,15 @@ def test_platform_disabled_no_write_through_when_key_absent(tmp_path, monkeypatc
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(yaml.dump(config), encoding="utf-8")
 
-    skills_dir = tmp_path / "skills"
-    skills_dir.mkdir(parents=True, exist_ok=True)
-    (skills_dir / "skill-b").mkdir(parents=True, exist_ok=True)
-    (skills_dir / "skill-b" / "SKILL.md").write_text("---\nname: skill-b\n---\nB skill", encoding="utf-8")
-    monkeypatch.setattr("api.routes._active_skills_dir", lambda: skills_dir)
+    # Mock _find_skill_in_dirs to avoid agent.skill_utils import in CI
+    fake_dir = tmp_path / "skills" / "skill-b"
+    fake_dir.mkdir(parents=True, exist_ok=True)
+    fake_md = fake_dir / "SKILL.md"
+    fake_md.write_text("---\nname: skill-b\n---\nB skill", encoding="utf-8")
+    monkeypatch.setattr(
+        "api.routes._find_skill_in_dirs",
+        lambda name, dirs: (fake_dir, fake_md),
+    )
 
     handler = MagicMock()
     _handle_skill_toggle(handler, {"name": "skill-b", "enabled": False})
