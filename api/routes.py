@@ -2529,6 +2529,15 @@ _LOGIN_LOCALE = {
         "invalid_pw": "\ube44\ubc00\ubc88\ud638\uac00 \uc62c\ubc14\ub974\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4",
         "conn_failed": "\uc5f0\uacb0 \uc2e4\ud328",
     },
+    "tr": {
+        "lang": "tr-TR",
+        "title": "Oturum a\u00e7",
+        "subtitle": "Devam etmek i\u00e7in \u015fifrenizi girin",
+        "placeholder": "\u015eifre",
+        "btn": "Oturum a\u00e7",
+        "invalid_pw": "Ge\u00e7ersiz \u015fifre",
+        "conn_failed": "Ba\u011flant\u0131 ba\u015far\u0131s\u0131z",
+    },
 }
 
 
