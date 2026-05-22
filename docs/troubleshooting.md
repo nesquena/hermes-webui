@@ -85,6 +85,88 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 
 ---
 
+## Existing Hermes setup opens onboarding or reports `needs_provider`
+
+**Symptom.** You already use Hermes from the CLI or another running profile,
+but WebUI opens the first-run wizard. `/api/onboarding/status` may report
+`completed=false`, `system.setup_state=needs_provider`,
+`system.provider_configured=false`, or `system.config_exists=false`.
+
+**Why.** WebUI reads Hermes config and credentials from the `HERMES_HOME` of
+the running WebUI process. If WebUI was launched for an isolated support trial
+such as `HERMES_HOME=~/hermes-onboarding-test/.hermes`, or a repo `.env` points
+`HERMES_HOME` / `HERMES_WEBUI_STATE_DIR` somewhere unexpected, the existing
+Hermes setup is invisible. In that case the wizard is accurately reporting the
+empty trial home; it does not mean the real Hermes install lost its provider
+setup.
+
+**Diagnostic.**
+
+1. Check only the non-secret onboarding fields:
+   ```bash
+   python3 - <<'PY'
+   import json, urllib.request
+
+   status = json.load(urllib.request.urlopen(
+       "http://127.0.0.1:8789/api/onboarding/status",
+       timeout=10,
+   ))
+   system = status.get("system", {})
+   print("completed=", status.get("completed"))
+   for key in (
+       "config_path",
+       "config_exists",
+       "setup_state",
+       "provider_configured",
+       "provider_ready",
+       "chat_ready",
+       "current_provider",
+       "current_model",
+       "env_path",
+   ):
+       print(f"{key}={system.get(key)}")
+   PY
+   ```
+2. Check whether repo-local `.env` overrides are changing the active state. Do
+   not print the whole file:
+   ```bash
+   test -f .env && grep -nE '^(HERMES_HOME|HERMES_WEBUI_STATE_DIR|HERMES_WEBUI_PORT|HERMES_WEBUI_HOST)=' .env || true
+   ```
+3. Compare those paths with the Hermes home or profile you meant to run. For a
+   named profile, the home usually looks like `~/.hermes/profiles/<profile>` and
+   WebUI state usually belongs under that profile, for example
+   `~/.hermes/profiles/<profile>/webui`.
+
+**Fix.** Stop the WebUI process that is using the wrong state, then restart it
+with the intended Hermes home and WebUI state directory:
+
+```bash
+HERMES_HOME="$HOME/.hermes" \
+HERMES_WEBUI_STATE_DIR="$HOME/.hermes/webui" \
+HERMES_WEBUI_PORT=8789 \
+python3 bootstrap.py --no-browser
+```
+
+For a named Hermes profile, point both variables at that profile instead:
+
+```bash
+HERMES_HOME="$HOME/.hermes/profiles/<profile>" \
+HERMES_WEBUI_STATE_DIR="$HOME/.hermes/profiles/<profile>/webui" \
+HERMES_WEBUI_PORT=8789 \
+python3 bootstrap.py --no-browser
+```
+
+If you use `ctl.sh`, put the intended values in the repo `.env` or pass them
+inline to `./ctl.sh restart` so future daemon restarts keep the same state.
+
+**When to file a bug.** If `system.config_path` points at the intended Hermes
+home, `system.config_exists=true`, and WebUI still reports `needs_provider` for
+a provider that works from the same environment in `hermes`, collect the
+diagnostic output above plus the provider name/model with secrets redacted and
+file an issue.
+
+---
+
 ## "Response interrupted." marker keeps saying "no agent output was recovered"
 
 **Symptom.** After the WebUI process restarts mid-turn (manual restart, OOM, crash, …), the affected chat shows an `**Response interrupted.**` marker with the wording *"The user message above was preserved, but no agent output was recovered."*, even though the run-journal for that turn is present on disk and contains the partial tokens the agent had already streamed.

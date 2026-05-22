@@ -128,6 +128,21 @@ Do not paste the full payload if it contains unexpected sensitive local paths
 or values. Redact paths and provider details when the human asks for a public
 GitHub or Discord support report.
 
+## Existing-user sanity check
+
+If the human says they already use Hermes successfully, treat a new WebUI
+wizard or `setup_state=needs_provider` result as a state-selection problem until
+the paths prove otherwise. Compare `system.config_path`, `system.env_path`, and
+`system.config_exists` from `/api/onboarding/status` with the intended Hermes
+home or profile. If those fields point at an isolated trial directory, empty
+profile, Docker volume, or unexpected `.env` override, the root cause is that
+WebUI was launched against the wrong state, not that the existing provider
+credentials disappeared.
+
+Report that distinction explicitly. Only restart WebUI against real Hermes
+state after the human confirms that is what they want; otherwise keep the
+isolated trial isolated.
+
 ## Pass criteria
 
 A local onboarding trial passes when:

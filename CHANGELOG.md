@@ -3,6 +3,13 @@
 
 ## [Unreleased]
 
+### Documentation
+
+- Documented the onboarding failure mode where an already-configured Hermes
+  setup appears to need provider setup because WebUI was launched with an
+  isolated or unexpected `HERMES_HOME`; added path-check diagnostics and restart
+  guidance to the onboarding and troubleshooting docs.
+
 ## [v0.51.115] — 2026-05-22 — Release CM (stage-pr2731 — 1-PR — clarify prompt collapse/expand with chevron-icon polish)
 
 ### Added

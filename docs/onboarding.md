@@ -64,6 +64,13 @@ For an assistant-led trial run, follow the safety rules, evidence commands, and
 pass/fail criteria in
 [`docs/onboarding-agent-checklist.md`](onboarding-agent-checklist.md).
 
+An isolated trial intentionally cannot see your existing Hermes config,
+credentials, profiles, memory, sessions, or cron jobs. If that trial reports
+`completed=false`, `setup_state=needs_provider`, or `config_exists=false` while
+your normal Hermes install already works, do not redo provider setup in the
+trial home. Restart WebUI with the intended `HERMES_HOME` and
+`HERMES_WEBUI_STATE_DIR` instead.
+
 If your repo has a `.env` file, remember that the bootstrap loads it. Remove or
 adjust any `HERMES_HOME`, `HERMES_WEBUI_STATE_DIR`, or `HERMES_WEBUI_PORT`
 entries there before using the isolated command above.
