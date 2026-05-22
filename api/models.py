@@ -1712,6 +1712,48 @@ def _repair_stale_pending(session) -> bool:
         return False
 
 
+def _last_non_tool_role(messages) -> str:
+    if not isinstance(messages, list):
+        return ''
+    for message in reversed(messages):
+        role = _message_role(message)
+        if role and role != 'tool':
+            return role
+    return ''
+
+
+def _inactive_cache_tail_needs_disk_check(cached) -> bool:
+    if cached is None:
+        return False
+    if getattr(cached, 'active_stream_id', None) or getattr(cached, 'pending_user_message', None):
+        return False
+    return _last_non_tool_role(getattr(cached, 'messages', None) or []) == 'user'
+
+
+def _cache_has_stale_unsaved_user_tail(cached, disk_session) -> bool:
+    """Return True when an inactive cached session has an unsaved user tail.
+
+    A completed turn is saved to the sidecar before the browser reloads it.  In
+    rare compaction/reconnect paths the in-process cache can retain a recovered
+    or optimistic user row after the saved assistant tail even though the row was
+    never persisted.  If /api/session serves that cache entry, the visible
+    transcript appears to end on the old prompt and the saved assistant answer
+    looks missing until a fork/reload resets the cache.
+    """
+    if cached is None or disk_session is None:
+        return False
+    if getattr(cached, 'active_stream_id', None) or getattr(cached, 'pending_user_message', None):
+        return False
+    cached_messages = getattr(cached, 'messages', None) or []
+    disk_messages = getattr(disk_session, 'messages', None) or []
+    if len(cached_messages) <= len(disk_messages):
+        return False
+    return (
+        _last_non_tool_role(cached_messages) == 'user'
+        and _last_non_tool_role(disk_messages) == 'assistant'
+    )
+
+
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping the messages array).
 
@@ -1725,6 +1767,19 @@ def get_session(sid, metadata_only=False):
         if cached is not None:
             SESSIONS.move_to_end(sid)  # LRU: mark as recently used
     if cached is not None:
+        if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
+            try:
+                disk_session = Session.load(sid)
+                if _cache_has_stale_unsaved_user_tail(cached, disk_session):
+                    with LOCK:
+                        SESSIONS[sid] = disk_session
+                        SESSIONS.move_to_end(sid)
+                    cached = disk_session
+            except Exception:
+                logger.debug(
+                    "stale cached user-tail check failed for session %s",
+                    sid, exc_info=True,
+                )
         if not metadata_only and _session_has_pending_journal_retry(cached):
             try:
                 _try_retry_journal_recovery_in_place(cached)
