@@ -761,9 +761,13 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
     until the final done snapshot redraws the whole turn.
     """
     src = (REPO_ROOT / "static/messages.js").read_text()
-    assert "let reasoningText=''" in src, \
+    # reasoningText is initialised at closure scope in attachLiveStream.
+    # On initial connect it defaults to ''; on reconnect it restores from
+    # INFLIGHT so the already-rendered content survives the session switch.
+    assert ("let reasoningText=''" in src
+            or "let reasoningText = _lastLiveAssistant" in src), \
         "messages.js must track streamed reasoning text separately from assistant text"
-    assert "let liveReasoningText=''" in src or 'let liveReasoningText = ""' in src, \
+    assert ("let liveReasoningText=''" in src or "let liveReasoningText = reasoningText" in src), \
         "messages.js must track the currently active reasoning segment separately from cumulative reasoning"
     assert "source.addEventListener('reasoning'" in src or 'source.addEventListener("reasoning"' in src, \
         "messages.js must listen for live reasoning SSE events"
