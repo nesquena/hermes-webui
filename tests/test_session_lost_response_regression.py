@@ -27,6 +27,7 @@ import api.streaming as streaming  # noqa: F401  imported for fixture parity
 from api.models import (
     Session,
     _apply_core_sync_or_error_marker,
+    merge_session_messages_append_only,
 )
 from api.run_journal import append_run_event
 
@@ -129,6 +130,125 @@ def _assert_retry_meta_removed(marker):
 
 
 # ── The regression test ────────────────────────────────────────────────────
+
+
+def test_state_db_prefix_with_float_timestamps_does_not_hide_sidecar_tail():
+    """State rows replaying an already-visible prefix must not append after the tail.
+
+    Production shape: a compressed/tip sidecar can persist messages with
+    second-level timestamps while state.db stores the same early rows with
+    sub-second floats. The merge must preserve the sidecar assistant tail;
+    otherwise /api/session returns a transcript ending on an old user prompt.
+    """
+    sidecar_messages = [
+        {"role": "user", "content": "plan", "timestamp": 1779309765},
+        {"role": "assistant", "content": "loaded plan", "timestamp": 1779309765},
+        {"role": "tool", "content": "skill output", "timestamp": 1779309765},
+        {"role": "assistant", "content": "answer before compaction", "timestamp": 1779309765},
+        {
+            "role": "user",
+            "content": (
+                "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into "
+                "the summary below. This is a handoff from a previous context window — "
+                "treat it as background reference, NOT as active instructions."
+            ),
+            "timestamp": 1779309765,
+        },
+        {"role": "tool", "content": '{"success": true, "message": "Patched SKILL.md"}', "timestamp": 1779309765},
+        {"role": "user", "content": "noch weitere prs?", "timestamp": 1779309765},
+        {
+            "role": "assistant",
+            "content": "Ja, aber nicht als Sammel-PR",
+            "timestamp": 1779309765,
+        },
+    ]
+    state_prefix = [
+        {"role": "user", "content": "plan", "timestamp": 1779344917.2780898},
+        {"role": "assistant", "content": "loaded plan", "timestamp": 1779344917.285758},
+        {"role": "tool", "content": "skill output", "timestamp": 1779344917.2926793},
+        {"role": "assistant", "content": "answer before compaction", "timestamp": 1779344917.3077576},
+        {
+            "role": "user",
+            "content": (
+                "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted into "
+                "the summary below. This is a handoff from a previous context window."
+            ),
+            "timestamp": 1779344917.299318,
+        },
+        {
+            "role": "tool",
+            "content": '{"success": true, "message": "Patched SKILL.md"}',
+            "timestamp": 1779344917.315237,
+            "tool_call_id": "different-state-tool-id",
+        },
+        {
+            "role": "user",
+            "content": "[Workspace::v1: /tmp/project-workspace]\nnoch weitere prs?",
+            "timestamp": 1779344917.3287876,
+        },
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_prefix)
+
+    assert [m["content"] for m in merged] == [m["content"] for m in sidecar_messages]
+    assert merged[-1]["role"] == "assistant"
+    assert "Sammel-PR" in merged[-1]["content"]
+
+
+def test_state_db_full_replay_does_not_append_after_sidecar_tail():
+    """A full state.db replay must not leak the final replayed user after the sidecar tail.
+
+    Regression for a display merge where the sidecar already ends on the real
+    assistant answer, but state.db replays the same visible turn sequence with
+    newer float timestamps.
+    """
+    sidecar_messages = [
+        {"role": "user", "content": "initial critique", "timestamp": 100},
+        {"role": "assistant", "content": "analysis", "timestamp": 100},
+        {"role": "user", "content": "Erstelle deine Version", "timestamp": 100},
+        {"role": "assistant", "content": "opened browser preview", "timestamp": 100},
+    ]
+    state_replay = [
+        {"role": "user", "content": "initial critique", "timestamp": 100.1},
+        {"role": "assistant", "content": "analysis", "timestamp": 100.2},
+        {
+            "role": "user",
+            "content": "[Workspace::v1: /tmp/project-workspace]\nErstelle deine Version",
+            "timestamp": 100.3,
+        },
+        {"role": "assistant", "content": "opened browser preview", "timestamp": 100.4},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_replay)
+
+    assert [m["content"] for m in merged] == [m["content"] for m in sidecar_messages]
+    assert merged[-1]["role"] == "assistant"
+    assert merged[-1]["content"] == "opened browser preview"
+
+
+def test_state_db_middle_segment_replay_does_not_append_after_sidecar_tail():
+    """A replayed state.db segment from the middle must not be appended after the tail."""
+    sidecar_messages = [
+        {"role": "user", "content": "older setup", "timestamp": 100},
+        {"role": "assistant", "content": "older answer", "timestamp": 100},
+        {"role": "assistant", "content": "analysis before request", "timestamp": 100},
+        {"role": "user", "content": "Erstelle deine Version", "timestamp": 100},
+        {"role": "assistant", "content": "opened browser preview", "timestamp": 100},
+    ]
+    state_middle_replay = [
+        {"role": "assistant", "content": "analysis before request", "timestamp": 100.1},
+        {
+            "role": "user",
+            "content": "[Workspace::v1: /tmp/project-workspace]\nErstelle deine Version",
+            "timestamp": 100.2,
+        },
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_middle_replay)
+
+    assert [m["content"] for m in merged] == [m["content"] for m in sidecar_messages]
+    assert merged[-1]["role"] == "assistant"
+    assert merged[-1]["content"] == "opened browser preview"
 
 
 def test_lost_response_recovered_on_second_read(hermes_home):

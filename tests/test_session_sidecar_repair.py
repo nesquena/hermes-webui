@@ -48,11 +48,13 @@ def _isolate_stream_state():
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
     config.STREAM_PARTIAL_TEXT.clear()
+    config.ACTIVE_RUNS.clear()
     yield
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
     config.STREAM_PARTIAL_TEXT.clear()
+    config.ACTIVE_RUNS.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -109,6 +111,11 @@ def _register_active_stream(stream_id):
     """Register stream_id as live in the same state _run_agent_streaming uses."""
     with config.STREAMS_LOCK:
         config.STREAMS[stream_id] = queue.Queue()
+
+
+def _register_active_run(stream_id):
+    """Register stream_id as an active worker without an attached SSE stream."""
+    config.register_active_run(stream_id, session_id="stale_sid", phase="running")
 
 
 class TestRepairStalePendingNoDeadlock:
@@ -1107,6 +1114,25 @@ class TestRepairStalePendingIntegration:
         finally:
             with config.STREAMS_LOCK:
                 config.STREAMS.pop("live_stream", None)
+
+    def test_skips_when_worker_alive_without_sse_stream(self, hermes_home, monkeypatch):
+        """Pre-check: if ACTIVE_RUNS still owns the worker, repair is skipped.
+
+        STREAMS is the browser/SSE observation layer and may disappear while the
+        backend worker is still running. A detached-but-active worker must not be
+        mistaken for a WebUI restart or crashed turn.
+        """
+        s = _make_stale_session(stream_id="detached_stream")
+        s.save()
+
+        _register_active_run("detached_stream")
+
+        assert "detached_stream" in _active_stream_ids()
+        result = _repair_stale_pending(s)
+        assert result is False
+        assert s.pending_user_message == "Hello hermes"
+        assert s.active_stream_id == "detached_stream"
+        assert s.messages == []
 
     def test_skips_when_no_pending(self, hermes_home, monkeypatch):
         """Pre-check: if pending_user_message is None, repair is skipped."""

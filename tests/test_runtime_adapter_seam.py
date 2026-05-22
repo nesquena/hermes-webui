@@ -26,7 +26,63 @@ def test_runtime_adapter_interface_and_legacy_journal_methods_exist():
     assert runtime.runtime_adapter_enabled({}) is False
     assert runtime.runtime_adapter_mode({"HERMES_WEBUI_RUNTIME_ADAPTER": "legacy-journal"}) == "legacy-journal"
     assert runtime.runtime_adapter_enabled({"HERMES_WEBUI_RUNTIME_ADAPTER": "legacy-journal"}) is True
+    assert runtime.runtime_adapter_mode({"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"}) == "runner-local"
+    assert runtime.runtime_adapter_runner_enabled({"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"}) is True
     assert runtime.runtime_adapter_mode({"HERMES_WEBUI_RUNTIME_ADAPTER": "sidecar"}) == "legacy-direct"
+
+
+def test_runtime_adapter_factory_selects_only_explicit_default_off_modes():
+    runtime = importlib.import_module("api.runtime_adapter")
+    calls = []
+
+    class FakeRunnerClient:
+        pass
+
+    def legacy_factory():
+        calls.append("legacy")
+        return runtime.LegacyJournalRuntimeAdapter(start_run_delegate=lambda request: {"stream_id": "s"})
+
+    def runner_factory():
+        calls.append("runner")
+        return FakeRunnerClient()
+
+    assert runtime.build_runtime_adapter(environ={}) is None
+
+    legacy = runtime.build_runtime_adapter(
+        environ={"HERMES_WEBUI_RUNTIME_ADAPTER": "legacy-journal"},
+        legacy_adapter_factory=legacy_factory,
+        runner_client_factory=runner_factory,
+    )
+    assert isinstance(legacy, runtime.LegacyJournalRuntimeAdapter)
+
+    runner = runtime.build_runtime_adapter(
+        environ={"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"},
+        legacy_adapter_factory=legacy_factory,
+        runner_client_factory=runner_factory,
+    )
+    assert isinstance(runner, runtime.RunnerRuntimeAdapter)
+    assert calls == ["legacy", "runner"]
+
+
+def test_runner_local_factory_requires_injected_client_and_does_not_fallback_to_legacy():
+    runtime = importlib.import_module("api.runtime_adapter")
+    calls = []
+
+    def legacy_factory():
+        calls.append("legacy")
+        return runtime.LegacyJournalRuntimeAdapter(start_run_delegate=lambda request: {"stream_id": "s"})
+
+    try:
+        runtime.build_runtime_adapter(
+            environ={"HERMES_WEBUI_RUNTIME_ADAPTER": "runner-local"},
+            legacy_adapter_factory=legacy_factory,
+        )
+    except NotImplementedError as exc:
+        assert "runner client factory" in str(exc)
+    else:
+        raise AssertionError("runner-local must require an injected runner client factory")
+
+    assert calls == []
 
 
 def test_legacy_journal_adapter_start_run_delegates_without_owning_runtime_state():
@@ -414,6 +470,7 @@ def test_rfc_defines_slice4c_runner_backend_harness_gate():
     rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
 
     assert "#### Slice 4c: Feature-flagged runner backend and restart/reattach harness" in rfc
+    assert "Status as of 2026-05-21: shipped in v0.51.105 via #2696" in rfc
     assert "`HERMES_WEBUI_RUNTIME_ADAPTER=runner-local`" in rfc
     assert "`legacy-direct` remains the default" in rfc
     assert "No route-shape drift" in rfc
@@ -421,6 +478,22 @@ def test_rfc_defines_slice4c_runner_backend_harness_gate():
     assert "discard the first WebUI adapter instance" in rfc
     assert "No runtime-surrogate globals" in rfc
     assert "no live chat route switch to the runner backend before the restart/reattach" in rfc
+
+
+def test_rfc_defines_slice4d_supervised_runner_route_gate():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#### Slice 4d: Supervised runner backend route gate" in rfc
+    assert "After `runner-local` selection exists" in rfc
+    assert "route-selection harness before live\nbrowser chat can use it" in rfc
+    assert "Route remains default-off" in rfc
+    assert "Restart/reattach harness proves ownership moved" in rfc
+    assert "No public response-shape drift" in rfc
+    assert "No runtime-surrogate globals" in rfc
+    assert "Explicit context payloads" in rfc
+    assert "active-run discovery, session-to-run lookup, command capability\n  metadata, artifact events, and provider/tool routing" in rfc
+    assert "WebUI remains the rich workbench while\n  only execution ownership moves" in rfc
 
 
 def test_runner_runtime_adapter_passes_explicit_start_payload_without_env_mutation(monkeypatch):

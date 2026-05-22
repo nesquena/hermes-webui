@@ -2058,6 +2058,14 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
         # Skip persisted error markers — never send them to the LLM as prior context.
         if msg.get('_error'):
             continue
+        # Skip _partial markers with no visible content. Partial messages that
+        # carry actual text (e.g. "Python is a high-level…") are kept so the
+        # model can continue from the cut-off point (#893). But empty partials
+        # (reasoning-only or tool-only cancellations where thinking markup was
+        # stripped) have nothing for the model to continue from and cause
+        # API 400 errors on strict providers (empty assistant content).
+        if msg.get('_partial') and not str(msg.get('content') or '').strip():
+            continue
         role = msg.get('role')
         if role == 'tool':
             tid = msg.get('tool_call_id') or ''
@@ -2091,6 +2099,10 @@ def _api_safe_message_positions(messages):
             continue
         if _is_reasoning_only_assistant_message(msg):
             continue
+        if msg.get('_error'):
+            continue
+        if msg.get('_partial') and not str(msg.get('content') or '').strip():
+            continue
         role = msg.get('role')
         if role == 'tool':
             tid = msg.get('tool_call_id') or ''
@@ -2100,6 +2112,26 @@ def _api_safe_message_positions(messages):
         if sanitized.get('role'):
             out.append((idx, sanitized))
     return out
+
+
+def _deduplicate_context_messages(messages):
+    """Remove duplicate messages from context by identity, keeping first occurrence.
+
+    Prevents the agent from seeing the same message twice in conversation_history
+    when result_messages contain duplicates that weren't caught by display-merge.
+    """
+    if not messages:
+        return messages
+    seen = set()
+    deduped = []
+    for msg in messages:
+        key = _message_identity(msg)
+        if key is not None and key in seen:
+            continue
+        if key is not None:
+            seen.add(key)
+        deduped.append(msg)
+    return deduped
 
 
 def _restore_reasoning_metadata(previous_messages, updated_messages):
@@ -2186,6 +2218,22 @@ def _message_identity(msg):
         # render two adjacent user bubbles ("Ok" and "[Workspace...]\nOk").
         text = _strip_workspace_prefix(text, include_legacy=True)
     if not text and not msg.get('tool_call_id') and not msg.get('tool_calls'):
+        # Empty assistant messages (e.g. _partial markers with no visible
+        # content) previously returned None, making them invisible to the
+        # merge dedup in _merge_display_messages_after_agent_result. This
+        # caused exponential accumulation: each turn's merge copied ALL
+        # prior _partial messages because they had no identity to track.
+        # Now, _partial messages with empty text get a stable identity
+        # keyed on their role + _partial flag + reasoning/tool metadata,
+        # so the merge can dedup identical empty partials.
+        if msg.get('_partial'):
+            reasoning_key = " ".join(str(msg.get('reasoning') or '').split())[:200]
+            return (
+                role,
+                '',  # empty text
+                '',  # no tool_call_id
+                '__partial__' + reasoning_key,
+            )
         return None
     return (
         role,
@@ -2487,6 +2535,30 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     only compaction marker messages plus the current user turn onward.
     """
     previous_display = list(previous_display or [])
+    # Deduplicate stale _partial messages that accumulated in previous_display.
+    # A bug in cancel_stream() could insert multiple identical _partial messages
+    # when _stripped was empty but _has_reasoning/_has_tools was True. The
+    # merge's _message_identity previously returned None for empty _partial
+    # messages, so the seen-set couldn't catch them — they doubled each turn.
+    # Scan backwards and keep only the LAST occurrence of each unique _partial
+    # identity, then reverse back to original order.
+    _partial_seen = set()
+    _deduped_rev = []
+    for m in reversed(previous_display):
+        if isinstance(m, dict) and m.get('_partial'):
+            key = _message_identity(m)
+            if key is not None:
+                if key in _partial_seen:
+                    continue
+                _partial_seen.add(key)
+        _deduped_rev.append(m)
+    _deduped = list(reversed(_deduped_rev))
+    if len(_deduped) < len(previous_display):
+        logger.debug(
+            "Deduplicated %d stale _partial messages from previous_display (was %d, now %d)",
+            len(previous_display) - len(_deduped), len(previous_display), len(_deduped),
+        )
+    previous_display = _deduped
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not result_messages:
@@ -4216,6 +4288,10 @@ def _run_agent_streaming(
                 ),
                 msg_text,
             )
+            # Dedup before feeding to agent — merge_session_messages_append_only
+            # can produce duplicates when context_messages and state.db share
+            # messages with different timestamps.
+            _previous_context_messages = _deduplicate_context_messages(_previous_context_messages)
             _pre_compression_count = getattr(
                 getattr(agent, 'context_compressor', None),
                 'compression_count', 0,
@@ -4379,7 +4455,7 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _next_context_messages,
                 )
-                s.context_messages = _next_context_messages
+                s.context_messages = _deduplicate_context_messages(_next_context_messages)
                 s.messages = _merge_display_messages_after_agent_result(
                     _previous_messages,
                     _previous_context_messages,
@@ -4526,7 +4602,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
-                                s.context_messages = _next_context_messages
+                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
@@ -5346,7 +5422,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
-                                s.context_messages = _next_context_messages
+                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,

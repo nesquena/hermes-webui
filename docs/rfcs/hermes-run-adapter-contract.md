@@ -4,7 +4,7 @@
 - **Author:** @Michaelyklam
 - **Updated by:** @franksong2702
 - **Created:** 2026-05-11
-- **Revised:** 2026-05-17
+- **Revised:** 2026-05-21
 - **Tracking issue:** [#1925](https://github.com/nesquena/hermes-webui/issues/1925)
 
 ## Credit and Scope
@@ -52,7 +52,7 @@ The immediate goal is not to build a sidecar. The immediate goal is to define th
 browser contract, classify current runtime state, and gate the first reversible
 journal slice.
 
-## Current Gate State — 2026-05-19
+## Current Gate State — 2026-05-21
 
 Slice 1 is now past the first active validation gate:
 
@@ -99,11 +99,16 @@ adapter-seam work:
   facade normalizes an injected runner client's start / observe / status /
   control responses without owning `AIAgent`, streams, cancellation flags,
   approval queues, clarify queues, goal state, or cached-agent tables.
-- The next implementation gate is a feature-flagged runner backend plus
-  restart/reattach harness. It must stay default-off, keep legacy fallback
-  intact, pass explicit profile/workspace/model payloads instead of mutating
-  WebUI process globals, and avoid recreating `STREAMS` / `CANCEL_FLAGS` /
-  approval queues / clarify queues under new names.
+- #2627 shipped the Slice 4c runner-backend harness gate in v0.51.96.
+- #2696 shipped the first Slice 4c implementation in v0.51.105: the default-off
+  `runner-local` adapter selection point and `build_runtime_adapter(...)`
+  factory wiring around an injected runner client. Live browser chat routes still
+  stay on the legacy backend, and no supervised runner process exists yet.
+- The next implementation gate is a supervised/local runner backend proposal and
+  route-selection harness. It must stay default-off, keep legacy fallback intact,
+  pass explicit profile/workspace/model payloads instead of mutating WebUI
+  process globals, and avoid recreating `STREAMS` / `CANCEL_FLAGS` / approval
+  queues / clarify queues under new names.
 
 The next gate is runner-backend plumbing, not queue implementation
 by default. Queue / continue routing should only move before Slice 4 if a future
@@ -780,6 +785,12 @@ client/backend and explicit route selection.
 
 #### Slice 4c: Feature-flagged runner backend and restart/reattach harness
 
+Status as of 2026-05-21: shipped in v0.51.105 via #2696. The code adds a
+default-off `runner-local` adapter selection point plus factory wiring for an
+injected runner client, while keeping live browser chat routes on the legacy
+backend. The restart/reattach harness remains synthetic/fake-runner based until a
+later slice introduces a supervised runner process.
+
 After the facade exists, the next narrow implementation slice should add a real
 runner-client/backend selection point and a synthetic restart/reattach harness,
 without routing normal browser chat to that backend yet.
@@ -829,6 +840,61 @@ Non-goals for Slice 4c:
 - no live chat route switch to the runner backend before the restart/reattach
   harness is reviewed;
 - no server-side queue endpoint or queue scheduler just for adapter symmetry.
+
+#### Slice 4d: Supervised runner backend route gate
+
+After `runner-local` selection exists, the next reviewable gate should define the
+first supervised/local runner backend and the route-selection harness before live
+browser chat can use it. This is still a contract/test slice first: no default-on
+runner mode, no removal of `legacy-direct` or `legacy-journal`, and no claim that
+production WebUI turns survive restart until the harness demonstrates it.
+
+Scope:
+
+- define the runner process/client lifecycle: how a run is spawned, supervised,
+  observed, and terminated without placing new active-run maps in the main WebUI
+  request process;
+- define the route-selection point for `/api/chat/start` without changing the
+  public response shape while the default remains legacy-backed;
+- specify how runner-owned events become WebUI journal events with stable
+  cursors, terminal state, and replay ordering;
+- specify cancellation, approval, clarify, goal, and staged queue behavior as
+  runner-client `ControlResult` responses, with unsupported controls bounded and
+  visible rather than silently falling back to legacy process-local callbacks;
+- carry the runtime API gap matrix forward: missing Hermes-owned capabilities
+  such as active-run discovery, session-to-run lookup, command capability
+  metadata, artifact events, and provider/tool routing should remain explicit
+  gaps or temporary adapter state, not private WebUI runtime replicas.
+
+Acceptance tests for Slice 4d:
+
+1. **Route remains default-off.** Unset `HERMES_WEBUI_RUNTIME_ADAPTER` and
+   `legacy-direct` keep `/api/chat/start` on the existing path; `runner-local`
+   is the only mode allowed to select the runner route.
+2. **Restart/reattach harness proves ownership moved.** A fake or local runner
+   starts a run, the first WebUI server/adapter instance is discarded, a new
+   adapter instance discovers the same active or terminal run, replay catches up
+   from cursor, and cancel remains available if the run is still active.
+3. **No public response-shape drift.** Chat start and control responses remain
+   stable while adapter-only fields stay internal or explicitly documented as a
+   new contract revision.
+4. **No runtime-surrogate globals.** The main WebUI server does not gain new
+   module-level maps for runner-owned streams, cancel flags, approval/clarify
+   callbacks, cached agents, goal state, or queue schedulers.
+5. **Explicit context payloads.** Runner startup carries session, profile,
+   workspace, attachments, provider/model, toolsets, source, and metadata as
+   payload fields rather than depending on process-global environment mutation in
+   the WebUI server.
+
+Non-goals for Slice 4d:
+
+- no default-on runner backend;
+- no removal of the legacy in-process backends;
+- no server-side queue endpoint or scheduler just for adapter symmetry;
+- no permanent WebUI-owned active-run discovery cache when the missing capability
+  belongs in a runner or future Hermes Runtime API;
+- no broad UI/product surface migration; WebUI remains the rich workbench while
+  only execution ownership moves.
 
 ## First Meaningful Success Criteria
 
