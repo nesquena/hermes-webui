@@ -56,6 +56,18 @@ def test_boot_model_hydration_prefers_active_session_over_persisted_model():
     )
 
 
+def test_hard_refresh_hydrates_saved_session_model_before_revealing_model_chip():
+    boot_js = Path("static/boot.js").read_text(encoding="utf-8")
+    load_marker = "await loadSession(saved);"
+    assert load_marker in boot_js
+    saved_restore = boot_js[boot_js.index(load_marker) : boot_js.index("await checkInflightOnBoot(saved);return;", boot_js.index(load_marker))]
+    assert "await _startBootModelDropdown();" in saved_restore
+    assert saved_restore.index("await _startBootModelDropdown();") > saved_restore.index(load_marker)
+    assert saved_restore.index("await _startBootModelDropdown();") < saved_restore.index("S._bootReady=true;"), (
+        "hard refresh must hydrate/re-apply the active session model before S._bootReady lets syncModelChip display stale static HTML defaults"
+    )
+
+
 def test_new_chat_does_not_send_stale_dropdown_model_when_session_has_default_model():
     assert "model:S.session.model||$('modelSelect').value" in MESSAGES_JS
     assert "model_provider:S.session.model_provider||null" in MESSAGES_JS

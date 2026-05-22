@@ -1654,6 +1654,12 @@ function applyBotName(){
         return;
       }
       await loadSession(saved);
+      // Hard refresh starts from the static HTML model list. Hydrate the live
+      // catalog after the saved session is known, then re-apply that session's
+      // model before S._bootReady lets syncModelChip reveal the composer label.
+      // Otherwise the chip can display the static default (e.g. GPT-5.4 Mini)
+      // even though S.session already points at the Codex/current model.
+      if(S.session) await _startBootModelDropdown();
       // If the restored session has no messages it is an ephemeral scratch pad —
       // treat the page as a fresh start rather than resuming a blank conversation.
       // loadSession() already ran, so loadDir() has populated the workspace file tree.
