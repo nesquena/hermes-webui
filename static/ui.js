@@ -4835,23 +4835,27 @@ function syncTopbar(){
       // a session-scoped option instead of displaying the previous/static
       // selection. Only fall back if that repair path is unavailable.
       if(!applied){
-        const sessionOption=(typeof _ensureModelOptionInDropdown==='function')
-          ? _ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null)
-          : null;
-        if(sessionOption){
-          currentModel=sessionOption;
+        const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
+        const missingModelIsRoutable=_providerDefersMissingModelFallback(S.session.model_provider||window._activeProvider||null);
+        // Also defer if a live model fetch is still in flight — the model may be
+        // in the list once the fetch completes. Persisting now would corrupt the
+        // session with the wrong model before live models arrive (#1169).
+        const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+        if(liveStillPending||missingModelIsRoutable){
+          // Live fetch in flight — don't touch sel.value or S.session.model yet.
+          // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
+          // Named custom providers/OpenRouter can also route vendor-prefixed IDs
+          // outside the static catalog, so preserve the user's explicit choice.
+          if(typeof _ensureModelOptionInDropdown==='function'){
+            const sessionOption=_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null);
+            if(sessionOption) currentModel=sessionOption;
+          }
         } else {
-          const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
-          const missingModelIsRoutable=_providerDefersMissingModelFallback(S.session.model_provider||window._activeProvider||null);
-          // Also defer if a live model fetch is still in flight — the model may be
-          // in the list once the fetch completes. Persisting now would corrupt the
-          // session with the wrong model before live models arrive (#1169).
-          const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
-          if(liveStillPending||missingModelIsRoutable){
-            // Live fetch in flight — don't touch sel.value or S.session.model yet.
-            // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
-            // Named custom providers/OpenRouter can also route vendor-prefixed IDs
-            // outside the static catalog, so preserve the user's explicit choice.
+          const sessionOption=(typeof _ensureModelOptionInDropdown==='function')
+            ? _ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null)
+            : null;
+          if(sessionOption){
+            currentModel=sessionOption;
           } else {
             const fallback=_applySessionModelFallback(modelSel);
             if(fallback&&!deferModelCorrection){
