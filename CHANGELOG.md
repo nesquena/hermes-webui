@@ -7,6 +7,13 @@
 
 - Add a sidebar quick profile switcher so profiles can be changed without opening an active chat or the Profiles panel.
 
+## [v0.51.115] — 2026-05-22 — Release CM (stage-pr2731 — 1-PR — clarify prompt collapse/expand with chevron-icon polish)
+
+### Added
+
+- **PR #2731** by @Michaelyklam — Clarification prompts now include a compact Collapse/Expand control so users can temporarily shrink a blocking decision card and reread the chat context behind it before responding. The toggle uses Lucide chevron icons (chevron-down expanded → click to collapse, chevron-up collapsed → click to expand) and a small circular pill matching the existing composer-button design language. The collapsed card sits cleanly above the composer at every tested viewport (desktop 1920×1080, mobile iPhone 14 390×844) without edge clipping. New clarification prompts still open expanded so users notice them.
+
+
 ## [v0.51.114] — 2026-05-22 — Release CL (stage-407 — 1-PR — update-check recovery from remote re-tags)
 
 ### Fixed
