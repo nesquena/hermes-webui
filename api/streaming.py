@@ -3255,6 +3255,9 @@ def _run_agent_streaming(
                 logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
         try:
             q.put_nowait((event, data))
+            # Release the GIL after every SSE event so the threaded HTTP server
+            # can serve /api/sessions and other endpoints during long agent runs.
+            time.sleep(0)
         except Exception:
             logger.debug("Failed to put event to queue")
 
