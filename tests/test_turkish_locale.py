@@ -77,10 +77,11 @@ def locale_keys(src: str, locale_key: str) -> list[str]:
 
 def test_turkish_locale_block_exists():
     src = read(REPO / "static" / "i18n.js")
-    assert "\n  tr: {" in src
-    assert "_lang: 'tr'" in src
-    assert "_label: 'Türkçe'" in src
-    assert "_speech: 'tr-TR'" in src
+    tr_block = extract_locale_block(src, "tr")
+    assert tr_block
+    assert "_lang: 'tr'" in tr_block
+    assert "_label: 'Türkçe'" in tr_block
+    assert "_speech: 'tr-TR'" in tr_block
 
 
 def test_turkish_locale_includes_representative_translations():

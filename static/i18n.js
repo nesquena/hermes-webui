@@ -13022,6 +13022,8 @@ const LOCALES = {
 
   tr: {
 
+
+
     offline_title: 'Bağlantı kesildi',
     offline_browser_detail: 'Tarayıcınız bu cihazın çevrimdışı olduğunu bildiriyor.',
     offline_network_detail: 'Hermes\'e şu anda bu tarayıcıdan ulaşılamıyor.',
@@ -13039,6 +13041,16 @@ const LOCALES = {
     mic_no_speech: 'Konuşma algılanmadı. Tekrar deneyin.',
     mic_network: 'Konuşma tanıma kullanılamıyor.',
     mic_error: 'Ses girişi hatası:',
+    voice_dictate: 'Dikte',
+    voice_dictate_active: 'Dikteyi durdur',
+    voice_mode_toggle: 'Ses modu',
+    voice_mode_toggle_active: 'Ses modundan çık',
+    voice_listening: 'Dinleniyor\\u2026',
+    voice_speaking: 'Konuşuyor\\u2026',
+    voice_thinking: 'Düşünüyor\\u2026',
+    voice_error: 'Ses bu tarayıcıda desteklenmiyor',
+    voice_mode_active: 'Ses modu açık',
+    voice_mode_off: 'Ses modu kapalı',
     session_imported: 'Oturum içe aktarıldı',
     import_failed: 'İçe aktarma başarısız oldu:',
     import_invalid_json: 'Geçersiz JSON',
@@ -13159,16 +13171,16 @@ const LOCALES = {
     model_custom_label: 'Özel model kimliği',
     model_custom_placeholder: 'örneğin openai/gpt-5.4',
     model_search_placeholder: 'Modelleri ara\\u2026',
-    session_toolsets: 'Session Toolsets', // TODO: translate
-    session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
-    session_toolsets_global: 'Global (default)', // TODO: translate
-    session_toolsets_custom: 'Custom', // TODO: translate
-    session_toolsets_placeholder: 'tool1, tool2, \u2026', // TODO: translate
-    session_toolsets_apply: 'Apply', // TODO: translate
-    session_toolsets_clear: 'Clear (use global)', // TODO: translate
-    session_toolsets_applied: 'Toolsets updated', // TODO: translate
-    session_toolsets_cleared: 'Toolsets cleared — using global config', // TODO: translate
-    session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
+    session_toolsets: 'Oturum araç setleri',
+    session_toolsets_desc: 'Bu oturum için kullanılabilir araçları kısıtlayın (boş = genel yapılandırma)',
+    session_toolsets_global: 'Genel (varsayılan)',
+    session_toolsets_custom: 'Özel',
+    session_toolsets_placeholder: 'araç1, araç2, \u2026',
+    session_toolsets_apply: 'Uygula',
+    session_toolsets_clear: 'Temizle (geneli kullan)',
+    session_toolsets_applied: 'Araç setleri güncellendi',
+    session_toolsets_cleared: 'Araç setleri temizlendi — genel yapılandırma kullanılıyor',
+    session_toolsets_failed: 'Araç setleri güncellenemedi: ',
     model_search_no_results: 'Hiçbir model bulunamadı',
     model_group_configured: 'Yapılandırılmış',
     ws_search_placeholder: 'Çalışma alanlarını arayın\\u2026',
@@ -13197,17 +13209,17 @@ const LOCALES = {
     available_commands: 'Mevcut komutlar:',
     type_slash: 'Komutları görmek için / yazın',
     conversation_cleared: 'Görüşme temizlendi',
-    command_label: 'Emretmek',
+    command_label: 'Komut',
     context_compaction_label: 'Bağlam sıkıştırma',
     retrieval_context_label: 'Dizine alınmış bağlam',
     retrieval_context_preview: 'Daha önceki mesajlar depolanır ve bağlam araçlarıyla alınabilir',
     preserved_task_list_label: 'Korunmuş görev listesi',
     reference_only_label: 'Yalnızca referans',
     model_usage: 'Kullanım: /model <isim>',
-    no_model_match: 'Eşleşen model yok"',
+    no_model_match: 'Eşleşen model yok: "',
     switched_to: 'Şuraya geçildi:',
     workspace_usage: 'Kullanım: /workspace <isim>',
-    no_workspace_match: 'Eşleşen çalışma alanı yok "',
+    no_workspace_match: 'Eşleşen çalışma alanı yok: "',
     switched_workspace: 'Çalışma alanına geçildi:',
     workspace_switch_failed: 'Çalışma alanı anahtarı başarısız oldu:',
     new_session: 'Yeni oturum oluşturuldu',
@@ -13220,9 +13232,9 @@ const LOCALES = {
     focus_label: 'Odak',
     token_usage_on: 'Jeton kullanımı açık',
     token_usage_off: 'Jeton kullanımı kapalı',
-    usage_cache_hit_detail: 'Önbellek: %{0} isabet ({1} okuma / {2} yazma)',
-    usage_cached_percent: '%{0} önbelleğe alındı',
-    theme_usage: 'Kullanım: /tema',
+    usage_cache_hit_detail: 'Önbellek: {0}% isabet ({1} okuma / {2} yazma)',
+    usage_cached_percent: '{0}% önbelleğe alındı',
+    theme_usage: 'Kullanım: /theme ',
     theme_set: 'Tema:',
     no_active_session: 'Aktif oturum yok',
     cmd_queue: 'Bir sonraki dönüş için bir mesajı sıraya koy',
@@ -13367,8 +13379,8 @@ const LOCALES = {
     save: 'Kaydetmek',
     edit: 'Düzenlemek',
     clear: 'Temizle',
-    create: 'Yaratmak',
-    remove: 'Kaldırmak',
+    create: 'Oluştur',
+    remove: 'Kaldır',
     save_title: 'Değişiklikleri kaydet',
     edit_title: 'Bu dosyayı düzenle',
     saved: 'Kaydedildi',
@@ -13379,9 +13391,9 @@ const LOCALES = {
     double_click_rename: 'Yeniden adlandırmak için çift tıklayın',
     renamed_to: 'Yeniden adlandırıldı',
     rename_failed: 'Yeniden adlandırma başarısız oldu:',
-    delete_title: 'Silmek',
-    delete_confirm: (name) => `${name}을(를) nerelisin?`,
-    delete_dir_confirm: (name) => `"${name}" ne işe yaradı?`,
+    delete_title: 'Sil',
+    delete_confirm: (name) => `${name} silinsin mi?`,
+    delete_dir_confirm: (name) => `"${name}" klasörü ve tüm içeriği silinsin mi?`,
     rename_title: 'Yeniden isimlendirmek',
     rename_prompt: 'Yeni isim:',
     deleted: 'Silindi',
@@ -13389,7 +13401,7 @@ const LOCALES = {
     reveal_in_finder: 'Dosya Yöneticisinde Göster',
     reveal_failed: 'Açıklanamadı:',
     copy_file_path: 'Dosya yolunu kopyala',
-    download_folder: 'Download Folder', // TODO: translate
+    download_folder: 'İndirme klasörü',
     path_copied: 'Dosya yolu panoya kopyalandı',
     path_copy_failed: 'Yol kopyalanamadı:',
     session_rename: 'Konuşmayı yeniden adlandır',
@@ -13404,7 +13416,7 @@ const LOCALES = {
     workspace_auto_create_folder: 'Mevcut değilse klasör oluşturun',
     folder_add_as_space_btn: 'Alan Olarak Ekle',
     folder_add_as_space_msg: 'Bu klasör çalışma alanı listenize yeni bir alan olarak eklensin mi?',
-    archive_extracted: (n, c) => `${c}개 압축 파일에서 ${n}개 파일 압축 해제됨`,
+    archive_extracted: (n, c) => `${c} arşivden ${n} dosya çıkarıldı`,
     folder_add_as_space_title: 'Alan olarak eklensin mi?',
     remove_title: 'Kaldırmak',
     empty_dir: '(boş)',
@@ -13441,13 +13453,13 @@ const LOCALES = {
     session_delete_desc: 'Bu görüşmeyi kalıcı olarak kaldır',
     session_delete_confirm: 'Bu görüşme silinsin mi?',
     session_delete_worktree_desc: 'Yalnızca WebUI görüşmesini silin; çalışma ağacını diskte tut',
-    session_delete_worktree_confirm: (path) => `Ne düşünüyorsunuz? ${path}의 worktree는 디스크에 남아 있습니다.`,
+    session_delete_worktree_confirm: (path) => `Bu görüşme silinsin mi? ${path} worktree diske kalır.`,
     session_deleted: 'Görüşme silindi',
     session_deleted_worktree: 'Görüşme silindi. Worktree diskte kalır.',
     session_worktree_remove: 'Çalışma ağacını kaldır',
-    session_worktree_remove_desc: (path) => `${path}의 git worktree를 디스크에서 삭제합니다`,
-    session_worktree_remove_confirm: (path) => `git worktree를 디스크에서 삭제하시겠습니까?\n\n경로: ${path}\n\n전체 worktree 디렉토리가 삭제됩니다. WebUI에 보존됩니다.`,
-    session_worktree_remove_not_exists: (path) => `${path}의 worktree가 디스크에 더 이상 존재하지 않습니다.`,
+    session_worktree_remove_desc: (path) => `${path} git worktree'sini diskten siler`,
+    session_worktree_remove_confirm: (path) => `Git worktree diskten silinsin mi?\n\nYol: ${path}\n\nTüm worktree dizini silinir. Oturum verileri WebUI'de kalır.`,
+    session_worktree_remove_not_exists: (path) => `${path} worktree'si artık diskte yok.`,
     session_worktree_remove_confirm_label: 'Kaldırmak',
     session_worktree_removed: 'Worktree kaldırıldı.',
     session_worktree_remove_failed: 'Çalışma ağacı kaldırılamadı:',
@@ -13456,8 +13468,8 @@ const LOCALES = {
     session_worktree_remove_locked_by_terminal: 'Kaldırılamıyor — etkin bir terminal oturumu bu çalışma ağacını kullanıyor.',
     session_worktree_remove_unsafe_blocked: 'Bu çalışma ağacını kaldırmadan önce yerel değişiklikleri veya gönderilmemiş taahhütleri çözümleyin.',
     session_worktree_remove_dirty_warning: 'UYARI: Bu çalışma ağacında kaybolacak kaydedilmemiş değişiklikler var.',
-    session_worktree_remove_untracked_warning: (count) => `${count}개의 추적되지 않은 파일이 영구적으로 삭제됩니다.`,
-    session_worktree_remove_ahead_warning: (ahead) => `${ahead} 푸시되지 않은 커밋이 손실됩니다.`,
+    session_worktree_remove_untracked_warning: (count) => `${count} izlenmeyen dosya kalıcı olarak silinecek.`,
+    session_worktree_remove_ahead_warning: (ahead) => `${ahead} gönderilmemiş commit kaybolacak.`,
     session_select_mode: 'Seçme',
     session_select_mode_desc: 'Toplu olarak yönetilecek konuşmaları seçin',
     session_select_all: 'Tümünü seç',
@@ -13508,18 +13520,18 @@ const LOCALES = {
     settings_tab_appearance: 'Dış görünüş',
     settings_tab_preferences: 'Tercihler',
     settings_tab_plugins: 'Eklentiler',
-    settings_plugins_title: 'Plugins',  // TODO: translate
-    settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',  // TODO: translate
-    settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',  // TODO: translate
-    plugins_unnamed: 'Unnamed plugin',  // TODO: translate
-    plugins_no_description: 'No description provided.',  // TODO: translate
-    plugins_no_hooks: 'No registered lifecycle hooks',  // TODO: translate
-    plugins_registered_hooks: 'Registered hooks',  // TODO: translate
-    plugins_enabled: 'Enabled',  // TODO: translate
-    plugins_disabled: 'Disabled',  // TODO: translate
-    plugins_active_provider: 'Active (provider)',  // TODO: translate
-    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
-    plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
+    settings_plugins_title: 'Eklentiler',
+    settings_plugins_meta: 'Yüklü Hermes eklentilerini ve yaşam döngüsü kancalarını görüntüleyin. Bu panel salt okunurdur.',
+    settings_plugins_empty: 'Görünür Hermes eklentisi yok. Burada görmek için Hermes CLI/config üzerinden yükleyin veya etkinleştirin.',
+    plugins_unnamed: 'Adsız eklenti',
+    plugins_no_description: 'Açıklama yok.',
+    plugins_no_hooks: 'Kayıtlı yaşam döngüsü kancası yok',
+    plugins_registered_hooks: 'Kayıtlı kancalar',
+    plugins_enabled: 'Etkin',
+    plugins_disabled: 'Devre dışı',
+    plugins_active_provider: 'Etkin (sağlayıcı)',
+    plugins_provider_no_hooks: 'Sağlayıcı eklentisi — agent görünürlük kancası yok',
+    plugins_load_failed: 'Eklentiler yüklenemedi: ',
     settings_tab_system: 'Sistem',
     settings_title: 'Ayarlar',
     settings_save_btn: 'Ayarları Kaydet',
@@ -13653,7 +13665,7 @@ const LOCALES = {
     kanban_board_icon: 'Simge (emoji, isteğe bağlı)',
     kanban_board_color: 'Renk (isteğe bağlı)',
     kanban_board_name_required: 'Ad gerekli',
-    kanban_board_slug_required: 'Sümüklüböcek gerekli',
+    kanban_board_slug_required: 'Slug gerekli',
     kanban_card_complete: 'tamamlamak',
     kanban_card_archive: 'arşiv',
     kanban_unassigned: 'atanmamış',
@@ -13665,19 +13677,19 @@ const LOCALES = {
     tab_logs: 'Günlükler',
     tab_settings: 'Ayarlar',
 
-    logs_title: 'Logs',  // TODO: translate
-    logs_file: 'File',  // TODO: translate
-    logs_tail: 'Tail',  // TODO: translate
-    logs_auto_refresh: 'Auto-refresh (5s)',  // TODO: translate
-    logs_wrap: 'Wrap lines',  // TODO: translate
-    logs_copy_all: 'Copy all',  // TODO: translate
-    logs_empty: 'No log lines yet.',  // TODO: translate
-    logs_loading: 'Loading logs…',  // TODO: translate
-    logs_load_failed: 'Logs failed to load',  // TODO: translate
-    logs_status_idle: 'Choose a log file to view recent lines.',  // TODO: translate
-    logs_no_mtime: 'not written yet',  // TODO: translate
-    logs_truncated_hint: 'Showing the tail of a large log file; older bytes were skipped to keep memory bounded.',  // TODO: translate
-    logs_copied: 'Logs copied',  // TODO: translate
+    logs_title: 'Günlükler',
+    logs_file: 'Dosya',
+    logs_tail: 'Son satırlar',
+    logs_auto_refresh: 'Otomatik yenile (5 sn)',
+    logs_wrap: 'Satırları kaydır',
+    logs_copy_all: 'Tümünü kopyala',
+    logs_empty: 'Henüz günlük satırı yok.',
+    logs_loading: 'Günlükler yükleniyor\u2026',
+    logs_load_failed: 'Günlükler yüklenemedi',
+    logs_status_idle: 'Son satırları görmek için bir günlük dosyası seçin.',
+    logs_no_mtime: 'henüz yazılmadı',
+    logs_truncated_hint: 'Büyük günlük dosyasının sonu gösteriliyor; bellek sınırı için eski veriler atlandı.',
+    logs_copied: 'Günlükler kopyalandı',
     logs_severity: 'Şiddet',
     logs_severity_all: 'Tüm',
     logs_severity_errors: 'Hatalar',
@@ -13686,10 +13698,10 @@ const LOCALES = {
     new_conversation: 'Yeni görüşme',
     filter_conversations: 'Konuşmaları filtrele...',
     session_time_unknown: 'Bilinmiyor',
-    session_time_minutes_ago: (n) => `${n} milyon dolar`,
-    session_time_hours_ago: (n) => `${n}sa`,
-    session_time_days_ago: (n) => `${n}d`,
-    session_time_last_week: '1 saat',
+    session_time_minutes_ago: (n) => `${n} dk önce`,
+    session_time_hours_ago: (n) => `${n} sa önce`,
+    session_time_days_ago: (n) => `${n} gün önce`,
+    session_time_last_week: 'geçen hafta',
     session_time_bucket_today: 'Bugün',
     session_time_bucket_yesterday: 'Dün',
     session_time_bucket_this_week: 'Bu hafta',
@@ -13852,9 +13864,9 @@ const LOCALES = {
     onboarding_notice_setup_required: 'Burada basit bir sağlayıcı yolu seçin. Gelişmiş OAuth akışları şimdilik Hermes CLI\'ye ait olmaya devam ediyor.',
     onboarding_notice_setup_already_ready: 'Çalışan bir Hermes sağlayıcı kurulumu zaten algılandı. Burada saklayabilir veya değiştirebilirsiniz.',
     onboarding_oauth_provider_ready_title: 'Sağlayıcının kimliği zaten doğrulandı',
-    onboarding_oauth_provider_ready_body: 'Bu örnek, Hermes CLI aracılığıyla ayarlanmış bir OAuth sağlayıcısını (<strong>{provider</strong>) kullanacak şekilde yapılandırılmıştır. Burada API anahtarına gerek yoktur; kurulumu tamamlamak için Devam\'a tıklayın.',
+    onboarding_oauth_provider_ready_body: 'Bu örnek, Hermes CLI aracılığıyla ayarlanmış bir OAuth sağlayıcısını (<strong>{provider}</strong>) kullanacak şekilde yapılandırılmıştır. Burada API anahtarına gerek yoktur; kurulumu tamamlamak için Devam\'a tıklayın.',
     onboarding_oauth_provider_not_ready_title: 'OAuth sağlayıcısının kimliği henüz doğrulanmadı',
-    onboarding_oauth_provider_not_ready_body: 'Bu örnek, API anahtarı yerine OAuth kullanan <strong>{provider</strong>\'i kullanacak şekilde yapılandırılmıştır. Kimlik doğrulaması yapmak için bir terminalde <code>hermes auth</code> veya <code>hermes model</code>\'i çalıştırın, ardından Web kullanıcı arayüzünü yeniden yükleyin.',
+    onboarding_oauth_provider_not_ready_body: 'Bu örnek, API anahtarı yerine OAuth kullanan <strong>{provider}</strong> sağlayıcısını kullanır. Kimlik doğrulamak için terminalde <code>hermes auth</code> veya <code>hermes model</code> çalıştırın, ardından WebUI\'yi yeniden yükleyin.',
     onboarding_oauth_switch_hint: 'Veya API anahtarı kurulumuna geçmek için aşağıdan farklı bir sağlayıcı seçin:',
     onboarding_notice_workspace: 'Bu değerler normal uygulamayla aynı ayar API\'lerini yeniden kullanır.',
     onboarding_workspace_label: 'Çalışma alanı',
@@ -13866,17 +13878,17 @@ const LOCALES = {
     provider_category_self_hosted: 'Açık / kendi kendine barındırılan',
     provider_category_specialized: 'Uzmanlaşmış',
     onboarding_api_key_label: 'API anahtarı',
-    oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
-    oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
-    oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
-    oauth_codex_polling: 'Waiting for authorization...', // TODO: translate
-    oauth_codex_success: 'Codex OAuth login successful!', // TODO: translate
-    oauth_codex_error: 'OAuth login failed', // TODO: translate
-    oauth_codex_expired: 'Code expired, please try again', // TODO: translate
+    oauth_login_codex: 'Codex (ChatGPT) ile giriş yap',
+    oauth_codex_step1: 'Adım 1: Bu URL\'yi ziyaret edin ve kodu girin',
+    oauth_codex_step2: 'Adım 2: Bu kodu sayfaya girin',
+    oauth_codex_polling: 'Yetkilendirme bekleniyor...',
+    oauth_codex_success: 'Codex OAuth girişi başarılı!',
+    oauth_codex_error: 'OAuth girişi başarısız',
+    oauth_codex_expired: 'Kodun süresi doldu, lütfen tekrar deneyin',
     onboarding_api_key_placeholder: 'Mevcut kayıtlı anahtarı korumak için boş bırakın',
-    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
-    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
-    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
+    onboarding_api_key_label_optional: 'API anahtarı (isteğe bağlı)',
+    onboarding_api_key_placeholder_optional: 'Anahtarsız sunucular için boş bırakın',
+    onboarding_api_key_help_keyless: 'Çoğu LM Studio / Ollama / vLLM kurulumu anahtarsız çalışır — sunucunuz kimlik doğrulama gerektirmiyorsa boş bırakın. Bağlantıyı test et düğmesini kullanın.',
     onboarding_api_key_help_prefix: 'Hermes .env dosyanızda gizli olarak kaydedildi',
     onboarding_base_url_label: 'Temel URL',
     onboarding_base_url_placeholder: 'https://uç noktanız.example/v1',
@@ -13902,19 +13914,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Devam etmeden önce bir model seçin.',
     onboarding_error_provider_required: 'Devam etmeden önce bir kurulum modu seçin.',
     onboarding_error_base_url_required: 'Özel uç noktalar için temel URL gereklidir.',
-    onboarding_probe_test_button: 'Test connection', // TODO: translate
-    onboarding_probe_probing: 'Testing connection…', // TODO: translate
-    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
-    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
-    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
-    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
-    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
-    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
-    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
-    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
-    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
-    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
+    onboarding_probe_test_button: 'Bağlantıyı test et',
+    onboarding_probe_probing: 'Bağlantı test ediliyor\u2026',
+    onboarding_probe_ok: 'Bağlandı. {n} model mevcut.',
+    onboarding_probe_error_generic: 'Yapılandırılmış temel URL\'ye ulaşılamadı.',
+    onboarding_probe_error_invalid_url: 'Temel URL http:// veya https:// ile başlamalı.',
+    onboarding_probe_error_dns: 'Ana bilgisayar çözülemedi. URL\'yi kontrol edin veya IP adresini kullanın.',
+    onboarding_probe_error_connect_refused: 'Bağlantı reddedildi — sunucu bu adreste çalışmıyor olabilir. Docker içinden localhost yerine ana bilgisayar IP\'sini deneyin.',
+    onboarding_probe_error_timeout: 'Uç nokta zamanında yanıt vermedi. Sunucunun çalıştığını ve URL\'nin doğru olduğunu kontrol edin.',
+    onboarding_probe_error_http_4xx: 'Uç nokta istemci hatası döndürdü. Kimlik doğrulama ve URL yolunu kontrol edin (genelde /v1 ile biter).',
+    onboarding_probe_error_http_5xx: 'Uç nokta sunucu hatası döndürdü. LM Studio / Ollama günlüklerini kontrol edin.',
+    onboarding_probe_error_parse: 'Uç nokta beklenen biçimde model listesi döndürmedi. URL\'nin OpenAI uyumlu API köküne işaret ettiğini doğrulayın.',
+    onboarding_probe_error_unreachable: 'Yapılandırılmış temel URL\'ye ulaşılamadı.',
+    onboarding_error_probe_failed: 'Yapılandırılmış temel URL doğrulanamadı.',
     onboarding_error_workspace_required: 'Çalışma alanı gerekli.',
     onboarding_error_model_required: 'Model gerekli.',
     onboarding_complete: 'İlk katılım tamamlandı',
@@ -14174,34 +14186,34 @@ const LOCALES = {
     tts_listen: 'Dinlemek',
     tts_not_supported: 'Konuşma sentezi bu tarayıcıda desteklenmiyor.',
     settings_label_tts: 'Yanıtlar için Metinden Konuşmaya',
-    settings_desc_tts: '도움말 메시지에 스피커 버튼 표시',
+    settings_desc_tts: 'Yardım mesajlarında hoparlör düğmesini göster',
     settings_label_tts_auto_read: 'Yanıtları sesli olarak otomatik oku',
     settings_desc_tts_auto_read: 'Tamamlandığında her yeni asistanın yanıtını otomatik olarak söyleyin. Yazmaya başladığınızda duraklar.',
     // Composer voice-mode pref (#1488)
-    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
-    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
+    settings_label_voice_mode: 'Eller serbest ses modu düğmesi',
+    settings_desc_voice_mode: 'Dikte mikrofonunun yanında ses modu düğmesini gösterir. Duraklamadan sonra Hermes otomatik gönderir ve yanıtları sesli okur. Konuşma tanıma ve TTS destekleyen tarayıcı gerektirir.',
     settings_label_tts_voice: 'Ses',
-    settings_desc_tts_voice: '음성 합성 음성 선택',
+    settings_desc_tts_voice: 'Ses sentezi sesini seçin',
     settings_label_tts_rate: 'Konuşma hızı',
     settings_label_tts_pitch: 'Konuşma perdesi',
-    checkpoint_date: 'Date',  // TODO: translate
-    checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
-    checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
-    checkpoint_diff_title: 'Changes in checkpoint',  // TODO: translate
-    checkpoint_empty: 'No checkpoints found for this workspace.',  // TODO: translate
-    checkpoint_error: 'Failed to load checkpoints',  // TODO: translate
-    checkpoint_files: 'Files',  // TODO: translate
-    checkpoint_loading: 'Loading checkpoints…',  // TODO: translate
-    checkpoint_message: 'Message',  // TODO: translate
-    checkpoint_restore: 'Restore',  // TODO: translate
-    checkpoint_restore_confirm_message: (ckpt) => `Restore workspace to checkpoint "${ckpt}"? This will overwrite files with the saved versions. Files added after this checkpoint will not be deleted.`,  // TODO: translate
-    checkpoint_restore_confirm_title: 'Restore checkpoint?',  // TODO: translate
-    checkpoint_restored: 'Checkpoint restored',  // TODO: translate
-    checkpoint_title: 'Checkpoints',  // TODO: translate
-    checkpoint_view_diff: 'View diff',  // TODO: translate
-    insights_activity_by_day: 'Activity by Day',  // TODO: translate
-    insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
-    insights_cost: 'Estimated Cost',  // TODO: translate
+    checkpoint_date: 'Tarih',
+    checkpoint_diff_files_changed: (n) => `${n} dosya değişti`,
+    checkpoint_diff_no_changes: 'Bu kontrol noktası ile mevcut çalışma alanı arasında fark bulunamadı.',
+    checkpoint_diff_title: 'Kontrol noktasındaki değişiklikler',
+    checkpoint_empty: 'Bu çalışma alanı için kontrol noktası bulunamadı.',
+    checkpoint_error: 'Kontrol noktaları yüklenemedi',
+    checkpoint_files: 'Dosyalar',
+    checkpoint_loading: 'Kontrol noktaları yükleniyor\u2026',
+    checkpoint_message: 'Mesaj',
+    checkpoint_restore: 'Geri yükle',
+    checkpoint_restore_confirm_message: (ckpt) => `Çalışma alanı "${ckpt}" kontrol noktasına geri yüklensin mi? Kayıtlı sürümlerle dosyaların üzerine yazılır. Sonradan eklenen dosyalar silinmez.`,
+    checkpoint_restore_confirm_title: 'Kontrol noktası geri yüklensin mi?',
+    checkpoint_restored: 'Kontrol noktası geri yüklendi',
+    checkpoint_title: 'Kontrol noktaları',
+    checkpoint_view_diff: 'Farkı görüntüle',
+    insights_activity_by_day: 'Güne göre etkinlik',
+    insights_activity_by_hour: 'Saate göre etkinlik',
+    insights_cost: 'Tahmini maliyet',
     insights_daily_tokens: 'Günlük Jetonlar',
     insights_model_name: 'Modeli',
     insights_model_sessions: 'Oturumlar',
@@ -14209,32 +14221,23 @@ const LOCALES = {
     insights_model_cost: 'Maliyet',
     insights_model_share: 'Paylaşmak',
     insights_no_usage_data: 'Henüz kullanım verisi yok',
-    insights_footer: 'Showing data from the last {days} days',  // TODO: translate
-    insights_input_tokens: 'Input',  // TODO: translate
-    insights_messages: 'Messages',  // TODO: translate
-    insights_models: 'Models',  // TODO: translate
-    insights_no_cost: 'N/A',  // TODO: translate
-    insights_output_tokens: 'Output',  // TODO: translate
-    insights_peak_hour: 'Peak: {hour}',  // TODO: translate
-    insights_sessions: 'Sessions',  // TODO: translate
-    insights_title: 'Usage Analytics',  // TODO: translate
-    insights_token_breakdown: 'Token Breakdown',  // TODO: translate
-    insights_tokens: 'Tokens',  // TODO: translate
-    insights_total: 'Total',  // TODO: translate
-    settings_desc_api_redact: 'Self-hosted users can disable for transparency (not recommended for shared instances).',  // TODO: translate
-    settings_label_api_redact: 'Redact sensitive data in API responses',  // TODO: translate
-    voice_error: 'Voice not supported in this browser',  // TODO: translate
-    voice_listening: 'Listening…',  // TODO: translate
-    voice_mode_active: 'Voice mode on',  // TODO: translate
-    voice_mode_off: 'Voice mode off',  // TODO: translate
-    voice_speaking: 'Speaking…',  // TODO: translate
-    voice_thinking: 'Thinking…',  // TODO: translate
-    // Composer voice buttons (#1488)
-    voice_dictate: 'Dictate',  // TODO: translate
-    voice_dictate_active: 'Stop dictation',  // TODO: translate
-    voice_mode_toggle: 'Voice mode',  // TODO: translate
-    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
-    subagent_children: 'Subagent sessions',  // TODO: translate
+    insights_footer: 'Son {days} günün verileri gösteriliyor',
+    insights_input_tokens: 'Giriş',
+    insights_messages: 'Mesajlar',
+    insights_models: 'Modeller',
+    insights_no_cost: 'Yok',
+    insights_output_tokens: 'Çıkış',
+    insights_peak_hour: 'Zirve: {hour}',
+    insights_sessions: 'Oturumlar',
+    insights_title: 'Kullanım analitiği',
+    insights_token_breakdown: 'Jeton dağılımı',
+    insights_tokens: 'Jetonlar',
+    insights_total: 'Toplam',
+    settings_desc_api_redact: 'Kendi sunucunuzda şeffaflık için devre dışı bırakılabilir (paylaşımlı örneklerde önerilmez).',
+    settings_label_api_redact: 'API yanıtlarında hassas verileri gizle',
+    subagent_children: 'Alt agent oturumları',
+  
+  
   }
 };
 
