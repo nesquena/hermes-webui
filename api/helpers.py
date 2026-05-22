@@ -4,8 +4,21 @@ Hermes Web UI -- HTTP helper functions.
 import json as _json
 import os
 import re as _re
+import ssl
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
+
+
+# Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
+# connections often end this way when a browser tab sleeps, a phone switches
+# networks, or Tailscale leaves the socket half-closed.
+_CLIENT_DISCONNECT_ERRORS = (
+    BrokenPipeError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    TimeoutError,
+    ssl.SSLError,
+)
 
 
 def require(body: dict, *fields) -> None:
@@ -65,6 +78,15 @@ def _accepts_gzip(handler) -> bool:
     return 'gzip' in ae
 
 
+def _safe_write(handler, body: bytes) -> None:
+    """Write response body, silently ignoring client disconnect errors."""
+    try:
+        handler.end_headers()
+        handler.wfile.write(body)
+    except _CLIENT_DISCONNECT_ERRORS:
+        pass
+
+
 def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
     """Send a JSON response.
 
@@ -89,8 +111,7 @@ def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
     if extra_headers:
         for k, v in extra_headers.items():
             handler.send_header(k, v)
-    handler.end_headers()
-    handler.wfile.write(body)
+    _safe_write(handler, body)
 
 
 def t(handler, payload, status: int=200, content_type: str='text/plain; charset=utf-8') -> None:
@@ -101,8 +122,7 @@ def t(handler, payload, status: int=200, content_type: str='text/plain; charset=
     handler.send_header('Content-Length', str(len(body)))
     handler.send_header('Cache-Control', 'no-store')
     _security_headers(handler)
-    handler.end_headers()
-    handler.wfile.write(body)
+    _safe_write(handler, body)
 
 
 MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
