@@ -869,6 +869,24 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId){
   }
   return null;
 }
+function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
+  if(!modelId||!sel) return null;
+  const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
+  if(applied) return applied;
+  const opt=document.createElement('option');
+  opt.value=modelId;
+  opt.textContent=typeof getModelLabel==='function'?getModelLabel(modelId):modelId;
+  opt.dataset.custom='1';
+  const provider=preferredProviderId||_providerFromModelValue(modelId)||'';
+  if(provider) opt.dataset.provider=provider;
+  sel.appendChild(opt);
+  sel.value=modelId;
+  if(sel.id==='modelSelect'){
+    if(typeof syncModelChip==='function') syncModelChip();
+    _refreshOpenModelDropdown();
+  }
+  return modelId;
+}
 function _modelStateFromAppliedDropdown(sel, modelValue){
   const state=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel,modelValue)
@@ -4813,28 +4831,36 @@ function syncTopbar(){
       }
     } else {
       const applied=_applyModelToDropdown(currentModel,modelSel,S.session.model_provider||null);
-      // If the model isn't in the current provider list, reset to the configured
-      // default rather than silently retaining the previous chat's selection (#1771).
+      // If the session model is missing from the current provider list, inject
+      // a session-scoped option instead of displaying the previous/static
+      // selection. Only fall back if that repair path is unavailable.
       if(!applied){
-        const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
-        const missingModelIsRoutable=_providerDefersMissingModelFallback(S.session.model_provider||window._activeProvider||null);
-        // Also defer if a live model fetch is still in flight — the model may be
-        // in the list once the fetch completes. Persisting now would corrupt the
-        // session with the wrong model before live models arrive (#1169).
-        const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
-        if(liveStillPending||missingModelIsRoutable){
-          // Live fetch in flight — don't touch sel.value or S.session.model yet.
-          // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
-          // Named custom providers/OpenRouter can also route vendor-prefixed IDs
-          // outside the static catalog, so preserve the user's explicit choice.
+        const sessionOption=(typeof _ensureModelOptionInDropdown==='function')
+          ? _ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null)
+          : null;
+        if(sessionOption){
+          currentModel=sessionOption;
         } else {
-          const fallback=_applySessionModelFallback(modelSel);
-          if(fallback&&!deferModelCorrection){
-            S.session.model=fallback.model;
-            S.session.model_provider=fallback.model_provider||null;
-            currentModel=fallback.model;
-            // Persist the correction so the session doesn't re-inject on next load.
-            _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
+          const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
+          const missingModelIsRoutable=_providerDefersMissingModelFallback(S.session.model_provider||window._activeProvider||null);
+          // Also defer if a live model fetch is still in flight — the model may be
+          // in the list once the fetch completes. Persisting now would corrupt the
+          // session with the wrong model before live models arrive (#1169).
+          const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+          if(liveStillPending||missingModelIsRoutable){
+            // Live fetch in flight — don't touch sel.value or S.session.model yet.
+            // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
+            // Named custom providers/OpenRouter can also route vendor-prefixed IDs
+            // outside the static catalog, so preserve the user's explicit choice.
+          } else {
+            const fallback=_applySessionModelFallback(modelSel);
+            if(fallback&&!deferModelCorrection){
+              S.session.model=fallback.model;
+              S.session.model_provider=fallback.model_provider||null;
+              currentModel=fallback.model;
+              // Persist the correction so the session doesn't re-inject on next load.
+              _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
+            }
           }
         }
       }
