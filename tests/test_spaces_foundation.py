@@ -8451,6 +8451,9 @@ layout:
 
     assert imported["ok"] is True
     assert imported["action"] == "space.import"
+    assert imported["autonomy_policy"]["action"] == "space.import"
+    assert imported["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert imported["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
     assert imported["source"] == "space-agent-yaml"
     assert imported["space"]["space_id"] == "tool-import-demo"
     assert imported["warnings"] == [

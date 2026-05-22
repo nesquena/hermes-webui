@@ -4975,7 +4975,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = reset_template(template_name, space_id=_space_tool_space_id_alias(data) or None)
         return {"ok": True, "action": name, **result}
     if name in {"space.import", "space.package.import", "space.agent.import"}:
-        result = import_space_agent_package(data, space_id=_space_tool_non_current_space_id(data) or None)
+        result = import_space_agent_package(
+            data,
+            space_id=_space_tool_non_current_space_id(data) or None,
+            action=name,
+        )
         return {"ok": True, "action": name, **result}
     if name in {
         "space.export",
