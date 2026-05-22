@@ -37,6 +37,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): show recovery restore receipts`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving confirmed Safe Recovery full-Space and widget revision restores prepend a metadata-only `Recovery action receipt` with Action policy and structured Recovery progress evidence after the recovery panel refreshes.
+  - Reused the existing action-policy and progress receipt renderers with a recovery-specific heading so restore receipts expose supervised mode, approval gates, prompt-preflight status, model-route hint, safe run id, and metadata-only progress status without rendering or echoing raw prompts, generated widget bodies, renderer/source/API-auth fields, scripts, or secret-looking values.
+  - Validation at completion: focused RED failed before implementation (`Recovery action receipt` missing), focused GREEN passed (`2 passed`), full Spaces UI JS behavior suite passed (`200 passed`), full Spaces foundation suite passed (`515 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality reviews, and a `/tmp` real-static headless Visual/UI QA harness passed with no rendered DOM leaks. Screenshot artifact: `/tmp/capy-spaces-qa/recovery-restore-policy-after.png`.
+
 - `feat(spaces): scope package import policy receipts`
   - Added RED/GREEN backend coverage proving `space.import` tool-adapter package imports return an invoked-action autonomy-policy receipt (`autonomy_policy.action == "space.import"`) instead of collapsing all import evidence to the canonical direct helper name.
   - Passed the normalized import tool alias into the existing safe package-import policy receipt builder, so `space.import`, `space.package.import`, and `space.agent.import` remain distinguishable while preserving prompt-preflight status, `creator_commit` / `generated_widget_execution` approval gates, `hint:reasoning`, metadata-only receipts, and import quarantine/redaction behavior.

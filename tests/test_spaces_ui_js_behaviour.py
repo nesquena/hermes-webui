@@ -1577,6 +1577,8 @@ global.fetch = async function(path, opts = {}) {
       space: { space_id: body.space_id || 'lab', name: 'Lab restored', description: 'Restored safely', widgets: [{ id: 'weather', kind: 'markdown', title: 'Weather restored', renderer: '<script>bad()</script>', api_key: 'SECRET' }], revision_event_id: 'rev-restore' },
       restored_event_id: body.event_id || 'rev1',
       revision_event_id: 'rev-restore',
+      progress_event: { event_id: 'evt-recovery-restore', event_type: 'tool.completed', family: 'tool', run_id: 'recovery.restore:' + (body.space_id || 'lab'), redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
+      autonomy_policy: { available: true, action: 'space.recovery.restore', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit', 'generated_widget_execution'], prompt_preflight_status: 'required', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       renderer: '<script>bad()</script>',
       api_key: 'SECRET',
     });
@@ -1589,6 +1591,8 @@ global.fetch = async function(path, opts = {}) {
       widget: { id: body.widget_id || 'weather', kind: 'markdown', title: 'Weather restored', renderer: '<script>bad()</script>', api_key: 'SECRET' },
       restored_event_id: body.event_id || 'rev1',
       revision_event_id: 'rev-widget-restore',
+      progress_event: { event_id: 'evt-recovery-widget-restore', event_type: 'tool.completed', family: 'tool', run_id: 'recovery.widget.restore:' + (body.space_id || 'lab'), redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
+      autonomy_policy: { available: true, action: 'space.recovery.restore_widget', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit', 'generated_widget_execution'], prompt_preflight_status: 'required', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       renderer: '<script>bad()</script>',
       api_key: 'SECRET',
     });
@@ -5990,10 +5994,18 @@ def test_spaces_ui_recovery_restore_revision_uses_shared_confirm_and_refreshes(d
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "broken", "event_id": "rev-before-break"}
     assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "Recovery action receipt" in out["recoveryHtml"]
+    assert "Action policy" in out["recoveryHtml"]
+    assert "Action: space.recovery.restore" in out["recoveryHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: required" in out["recoveryHtml"]
+    assert "Gates: Creator commit approval, Generated widget execution approval" in out["recoveryHtml"]
+    assert "Recovery progress" in out["recoveryHtml"]
+    assert "tool.completed · tool · run recovery.restore:broken · metadata-only progress receipt" in out["recoveryHtml"]
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
     assert "api_key" not in out["recoveryHtml"]
     assert "SECRET" not in out["recoveryHtml"]
+    assert "ignore previous instructions" not in out["recoveryHtml"]
 
 
 def test_spaces_ui_recovery_restore_revision_fails_closed_without_shared_dialog(driver_path):
@@ -6012,11 +6024,17 @@ def test_spaces_ui_recovery_restore_widget_revision_uses_shared_confirm_and_refr
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "broken", "event_id": "rev-before-break", "widget_id": "safe-widget"}
     assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "Recovery action receipt" in out["recoveryHtml"]
+    assert "Action policy" in out["recoveryHtml"]
+    assert "Action: space.recovery.restore_widget" in out["recoveryHtml"]
+    assert "Recovery progress" in out["recoveryHtml"]
+    assert "tool.completed · tool · run recovery.widget.restore:broken · metadata-only progress receipt" in out["recoveryHtml"]
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
     assert "api_key" not in out["recoveryHtml"]
     assert "api_auth" not in out["recoveryHtml"]
     assert "SECRET" not in out["recoveryHtml"]
+    assert "ignore previous instructions" not in out["recoveryHtml"]
 
 
 def test_spaces_ui_recovery_restore_widget_revision_fails_closed_without_shared_dialog(driver_path):

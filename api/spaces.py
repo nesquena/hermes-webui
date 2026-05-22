@@ -524,11 +524,11 @@ def _recovery_toggle_action_policy_receipt(action: str) -> dict[str, Any]:
     )
 
 
-def _recovery_restore_action_policy_receipt() -> dict[str, Any]:
+def _recovery_restore_action_policy_receipt(action: str = "space.recovery.restore") -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
     return action_policy_receipt(
-        "space.recovery.restore",
+        action,
         approval_gates=["creator_commit", "generated_widget_execution"],
         prompt_preflight_status="required",
         model_route_hint="hint:reasoning",
@@ -6159,6 +6159,8 @@ def restore_widget_revision(space_id: str, event_id: str, widget_id: str) -> dic
         "widget": read_widget_detail(sid, wid),
         "restored_event_id": safe_event_id,
         "revision_event_id": saved["revision_event_id"],
+        "autonomy_policy": _recovery_restore_action_policy_receipt("space.recovery.restore_widget"),
+        "progress_event": _record_space_recovery_progress_event(sid, action="widget.restore"),
     }
 
 
@@ -8733,6 +8735,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "recovery.restore",
         "recovery.widget.disable",
         "recovery.widget.enable",
+        "recovery.widget.restore",
         "save-meta",
         "save-layout",
         "shared-slot.set",
@@ -8773,7 +8776,7 @@ def _record_space_repair_progress_event(space_id: str) -> dict[str, Any]:
 def _record_space_recovery_progress_event(space_id: str, *, action: str) -> dict[str, Any]:
     """Best-effort metadata-only progress producer for recovery admin actions."""
     safe_action = str(action or "").strip().lower()
-    if safe_action not in {"disable", "enable", "restore", "widget.disable", "widget.enable"}:
+    if safe_action not in {"disable", "enable", "restore", "widget.disable", "widget.enable", "widget.restore"}:
         safe_action = "toggle"
     return _record_space_tool_progress_event(space_id, run_prefix=f"recovery.{safe_action}")
 

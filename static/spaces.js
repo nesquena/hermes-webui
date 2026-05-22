@@ -1142,7 +1142,7 @@
       '</div>';
   }
 
-  function renderPackageProgressEvidence(event){
+  function renderPackageProgressEvidence(event, title){
     const data = event && typeof event === 'object' && !Array.isArray(event) ? event : null;
     if (!data) return '';
     const eventId = safeProgressPublicId(data.event_id);
@@ -1156,10 +1156,29 @@
     if (family) details.push(family);
     if (runId) details.push('run '+runId);
     details.push(redaction+' progress receipt');
-    return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Package progress</strong>' +
+    const safeTitle = safeDisplayMetadataText(title || 'Package progress', 'Package progress') || 'Package progress';
+    return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(safeTitle)+'</strong>' +
       '<div class="capy-spaces-muted">'+escapeHtml(details.join(' · '))+'</div>' +
-      '<div class="capy-spaces-muted">Structured event metadata only; raw prompts, tool bodies, and package contents are omitted.</div>' +
+      '<div class="capy-spaces-muted">Structured event metadata only; raw prompts, tool bodies, and generated contents are omitted.</div>' +
       '</div></div></div>';
+  }
+
+  function renderRecoveryActionReceipt(data){
+    const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    if (!result) return '';
+    const policy = renderActionPolicyEvidence(result.autonomy_policy);
+    const progress = renderPackageProgressEvidence(result.progress_event, 'Recovery progress');
+    if (!policy && !progress) return '';
+    return '<div class="capy-spaces-card" role="status"><h3>Recovery action receipt</h3>' +
+      '<div class="capy-spaces-muted">Confirmed recovery action completed with metadata-only policy and progress evidence. Raw widget bodies, prompts, implementation fields, and secrets stay omitted.</div>' +
+      policy + progress + '</div>';
+  }
+
+  function prependRecoveryActionReceipt(data){
+    const root = document.getElementById('capySpacesRecovery');
+    if (!root) return;
+    const receipt = renderRecoveryActionReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
   function renderCreatorPreviewResult(data){
@@ -3731,8 +3750,9 @@
       if (!eventId) return;
       const ok = await showConfirmDialog({title: 'Restore recovery revision?', message: 'Restore Space "'+spaceId+'" to revision '+eventId.slice(0, 12)+' from safe recovery? The current manifest remains in revision history, and generated widget bodies are not displayed here.', confirmLabel: 'Restore revision', danger: true, focusCancel: true});
       if (!ok) return;
-      await postSpacesJson('api/spaces/revision/restore', {space_id: spaceId, event_id: eventId});
+      const restoreResult = await postSpacesJson('api/spaces/revision/restore', {space_id: spaceId, event_id: eventId});
       await loadCapySpacesRecovery();
+      prependRecoveryActionReceipt(restoreResult || {});
       return;
     }
     if (action === 'restoreRecoveryWidgetRevision') {
@@ -3741,8 +3761,9 @@
       if (!eventId || !widgetId) return;
       const ok = await showConfirmDialog({title: 'Restore recovery widget revision?', message: 'Restore widget "'+widgetId+'" from revision '+eventId.slice(0, 12)+' in safe recovery? Other widgets are left unchanged, and generated widget bodies are not displayed here.', confirmLabel: 'Restore widget', danger: true, focusCancel: true});
       if (!ok) return;
-      await postSpacesJson('api/spaces/revision/restore-widget', {space_id: spaceId, event_id: eventId, widget_id: widgetId});
+      const restoreResult = await postSpacesJson('api/spaces/revision/restore-widget', {space_id: spaceId, event_id: eventId, widget_id: widgetId});
       await loadCapySpacesRecovery();
+      prependRecoveryActionReceipt(restoreResult || {});
       return;
     }
     if (action === 'disableRecoverySpace') {

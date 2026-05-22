@@ -9378,6 +9378,16 @@ def test_restore_widget_revision_restores_one_widget_without_leaking_sources(mon
     revisions = spaces.list_revision_events(created["space_id"])
     assert revisions[0]["event_type"] == "widget.restored"
     assert revisions[0]["details"] == {"restored_event_id": original["revision_event_id"], "widget_id": "weather"}
+    assert restored["autonomy_policy"]["action"] == "space.recovery.restore_widget"
+    assert restored["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
+    assert restored["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert restored["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert restored["autonomy_policy"]["metadata_only"] is True
+    assert restored["progress_event"]["event_type"] == "tool.completed"
+    assert restored["progress_event"]["family"] == "tool"
+    assert restored["progress_event"]["run_id"] == f"recovery.widget.restore:{created['space_id']}"
+    assert restored["progress_event"]["space_id"] == created["space_id"]
+    assert restored["progress_event"]["redaction_status"] == "metadata_only"
     serialized = json.dumps({"restored": restored, "revisions": revisions}).lower()
     assert "keptbutneverreturned" not in serialized
     assert "secret_source_do_not_leak" not in serialized
