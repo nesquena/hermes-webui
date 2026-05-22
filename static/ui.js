@@ -401,10 +401,15 @@ function _dashboardIsBrowserLoopback(){
   return host==='127.0.0.1'||host==='localhost'||host==='::1';
 }
 function _dashboardBrowserUrl(status){
-  if(!status||!status.running||!status.port) return '';
+  if(!status||!status.running) return '';
+  if(status.browser_url||status.url){
+    try{return new URL(status.browser_url||status.url).toString().replace(/\/$/,'');}
+    catch(_){}
+  }
+  if(!status.port) return '';
   let source;
-  try{source=new URL(status.url||('http://127.0.0.1:'+status.port));}
-  catch(_){source=new URL('http://127.0.0.1:'+status.port);}
+  try{source=new URL('http://127.0.0.1:'+status.port);}
+  catch(_){return '';}
   const browserHost=window.location.hostname||source.hostname;
   const displayHost=browserHost.includes(':')&&!browserHost.startsWith('[')?'['+browserHost+']':browserHost;
   return source.protocol+'//'+displayHost+':'+status.port;
@@ -728,6 +733,8 @@ window.addEventListener('visibilitychange',()=>{
 let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
 const MODEL_STATE_KEY='hermes-webui-model-state';
+const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
+const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
 
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
@@ -809,6 +816,71 @@ function _clearPersistedModelState(){
   localStorage.removeItem('hermes-webui-model');
   localStorage.removeItem(MODEL_STATE_KEY);
 }
+function _pendingSessionModelKey(sessionId){
+  return PENDING_SESSION_MODEL_PREFIX+String(sessionId||'');
+}
+function _rememberPendingSessionModel(sessionId, model, modelProvider){
+  const sid=String(sessionId||'').trim();
+  const value=String(model||'').trim();
+  if(!sid||!value) return;
+  const provider=modelProvider?String(modelProvider).trim():(_providerFromModelValue(value)||null);
+  try{
+    sessionStorage.setItem(_pendingSessionModelKey(sid), JSON.stringify({
+      model:value,
+      model_provider:provider||null,
+      saved_at:Date.now(),
+    }));
+  }catch(_){}
+}
+function _readPendingSessionModel(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return null;
+  try{
+    const raw=sessionStorage.getItem(_pendingSessionModelKey(sid));
+    if(!raw) return null;
+    const parsed=JSON.parse(raw);
+    const model=String(parsed&&parsed.model||'').trim();
+    if(!model){
+      sessionStorage.removeItem(_pendingSessionModelKey(sid));
+      return null;
+    }
+    const savedAt=Number(parsed.saved_at||0);
+    if(savedAt&&Date.now()-savedAt>PENDING_SESSION_MODEL_MAX_AGE_MS){
+      sessionStorage.removeItem(_pendingSessionModelKey(sid));
+      return null;
+    }
+    return {
+      model,
+      model_provider:parsed&&parsed.model_provider?String(parsed.model_provider):(_providerFromModelValue(model)||null),
+    };
+  }catch(_){
+    try{sessionStorage.removeItem(_pendingSessionModelKey(sid));}catch(__){}
+    return null;
+  }
+}
+function _clearPendingSessionModel(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return;
+  try{sessionStorage.removeItem(_pendingSessionModelKey(sid));}catch(_){}
+}
+function _applyPendingSessionModelForSession(sessionId){
+  if(!S.session||S.session.session_id!==sessionId) return false;
+  const pending=_readPendingSessionModel(sessionId);
+  if(!pending) return false;
+  const sameModel=String(S.session.model||'')===pending.model;
+  const sameProvider=String(S.session.model_provider||'')===String(pending.model_provider||'');
+  if(sameModel&&sameProvider){
+    _clearPendingSessionModel(sessionId);
+    return false;
+  }
+  S.session.model=pending.model;
+  S.session.model_provider=pending.model_provider||null;
+  const retry=_persistSessionModelCorrection(pending.model,pending.model_provider||null,{propagateErrors:true});
+  if(retry&&typeof retry.then==='function'){
+    retry.then(()=>_clearPendingSessionModel(sessionId)).catch(()=>{});
+  }
+  return true;
+}
 function _findModelInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   const options=Array.from(sel.options);
@@ -864,19 +936,38 @@ function _applyModelToDropdown(modelId, sel, preferredProviderId){
   }
   return null;
 }
+function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
+  if(!modelId||!sel) return null;
+  const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
+  if(applied) return applied;
+  const opt=document.createElement('option');
+  opt.value=modelId;
+  opt.textContent=typeof getModelLabel==='function'?getModelLabel(modelId):modelId;
+  opt.dataset.custom='1';
+  const provider=preferredProviderId||_providerFromModelValue(modelId)||'';
+  if(provider) opt.dataset.provider=provider;
+  sel.appendChild(opt);
+  sel.value=modelId;
+  if(sel.id==='modelSelect'){
+    if(typeof syncModelChip==='function') syncModelChip();
+    _refreshOpenModelDropdown();
+  }
+  return modelId;
+}
 function _modelStateFromAppliedDropdown(sel, modelValue){
   const state=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel,modelValue)
     : {model:modelValue,model_provider:null};
   return {model:state.model||modelValue,model_provider:state.model_provider||null};
 }
-function _persistSessionModelCorrection(model, provider){
+function _persistSessionModelCorrection(model, provider, opts){
   if(!S.session) return;
-  fetch(new URL('api/session/update',document.baseURI||location.href).href,{
+  const request=fetch(new URL('api/session/update',document.baseURI||location.href).href,{
     method:'POST',credentials:'include',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:model,model_provider:provider||null})
-  }).catch(()=>{});
+  });
+  return opts&&opts.propagateErrors ? request : request.catch(()=>{});
 }
 function _applySessionModelFallback(sel){
   if(!sel) return null;
@@ -910,6 +1001,9 @@ async function populateModelDropdown(){
     // Per-page-load — not synced across browser tabs.
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
+    // Keep the g.extra_models label hydration path below in this function; tests
+    // assert populateModelDropdown preserves that full-catalog label contract.
+    window._modelEndpointErrors={};
 
     const _synthGroupsFromConfigured=()=>{
       const badgeMap=window._configuredModelBadges||{};
@@ -959,6 +1053,11 @@ async function populateModelDropdown(){
       const og=document.createElement('optgroup');
       og.label=g.provider;
       if(g.provider_id) og.dataset.provider=g.provider_id;
+      if(g.models_endpoint_error){
+        const errorKey=g.provider_id||g.provider||'';
+        og.dataset.modelsEndpointError=JSON.stringify(g.models_endpoint_error);
+        if(errorKey) window._modelEndpointErrors[errorKey]=g.models_endpoint_error;
+      }
       for(const m of (Array.isArray(g.models)?g.models:[])){
         const opt=document.createElement('option');
         opt.value=m.id;
@@ -979,8 +1078,10 @@ async function populateModelDropdown(){
       }
       sel.appendChild(og);
     }
-    // Set default model from server if no localStorage preference
-    if(data.default_model && !(typeof _readPersistedModelState==='function'&&_readPersistedModelState()) && !localStorage.getItem('hermes-webui-model')){
+    // Set default model from server on fresh/blank boot. Loaded sessions keep
+    // their own persisted model and apply it via loadSession(). Do not let stale
+    // browser localStorage suppress the profile default.
+    if(data.default_model && !(S.session&&S.session.model)){
       _applyModelToDropdown(data.default_model, sel, data.active_provider||null);
     }
     if(typeof syncModelChip==='function') syncModelChip();
@@ -1213,12 +1314,19 @@ function renderModelDropdown(){
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
       const providerId=child.dataset&&child.dataset.provider?child.dataset.provider:'';
+      let modelsEndpointError=null;
+      if(child.dataset&&child.dataset.modelsEndpointError){
+        try{ modelsEndpointError=JSON.parse(child.dataset.modelsEndpointError); }catch(_e){ modelsEndpointError=null; }
+      }
       for(const opt of Array.from(child.children)){
         const rawValue=String(opt.value||'');
         const displayName=rawValue.startsWith('@custom:')
           ? getModelLabel(rawValue)
           : (opt.textContent||getModelLabel(rawValue));
-        _modelData.push({value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
+        _modelData.push({value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
+      }
+      if(modelsEndpointError && !child.children.length){
+        _modelData.push({value:`__models_endpoint_error__:${providerId||child.label||''}`,name:'',id:'',group:child.label||'',providerId,modelsEndpointError,endpointErrorOnly:true});
       }
     }
     if(child.tagName==='OPTION'){
@@ -1357,8 +1465,17 @@ function renderModelDropdown(){
     const _groupCounts={};
     for(const m of _modelData){
       if(configuredIds.has(m.value)) continue;
-      if(m.group) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
+      if(m.group&&!m.endpointErrorOnly) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
     }
+    const _renderProviderEndpointHint=(groupName)=>{
+      if(!groupName) return;
+      const entry=_modelData.find(m=>m.group===groupName&&m.modelsEndpointError);
+      if(!entry||!entry.modelsEndpointError) return;
+      const hint=document.createElement('div');
+      hint.className='model-provider-hint';
+      hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
+      dd.appendChild(hint);
+    };
     for(const m of _modelData){
       if(configuredIds.has(m.value)||!matches(m)) continue;
       if(m.group&&m.group!==_lastGroup){
@@ -1367,8 +1484,10 @@ function renderModelDropdown(){
         const count=_groupCounts[m.group]||0;
         heading.textContent=count>1?`${m.group} (${count})`:m.group;
         dd.appendChild(heading);
+        _renderProviderEndpointHint(m.group);
         _lastGroup=m.group;
       }
+      if(m.endpointErrorOnly) continue;
       const row=document.createElement('div');
       row.className='model-opt'+(m.value===sel.value?' active':'');
       const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
@@ -1445,9 +1564,9 @@ async function toggleModelDropdown(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
-  const ready=window._modelDropdownReady;
-  if(ready&&typeof ready.then==='function'){
-    try{await ready;}catch(_){}
+  if(typeof window._ensureModelDropdownReady==='function'){
+    const ready=window._ensureModelDropdownReady();
+    if(ready&&typeof ready.catch==='function') ready.catch(()=>{});
   }
   if(dd.classList.contains('open')) return;
   renderModelDropdown();
@@ -1980,7 +2099,14 @@ if(typeof window!=='undefined') window._resetScrollDirectionTracker=_resetScroll
     if(progress>0.3) e.preventDefault();
   },{passive:false});
   el.addEventListener('touchend',function(){
-    if(_ptrState===2){ window.location.reload(); return; }
+    if(_ptrState===2){
+      if(typeof window.refreshSessionList==='function'){
+        Promise.resolve(window.refreshSessionList('pull', {force:true, refreshActive:true})).catch(()=>{}).finally(_ptrReset);
+      }else{
+        window.location.reload();
+      }
+      return;
+    }
     _ptrReset();
   },{passive:true});
   el.addEventListener('touchcancel',_ptrReset,{passive:true});
@@ -4256,6 +4382,11 @@ function _formatUpdateTargetStatus(label,info){
   const noun=info.release_based?'release':'update';
   return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
 }
+function _formatUpdateCheckError(label,info){
+  if(!info||!info.error) return null;
+  const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
+  return detail ? `${label}: ${detail}` : label;
+}
 function _isSafeUpdateCompareUrl(url){
   if(!url||!/^https?:\/\//i.test(url)) return false;
   try{
@@ -4767,8 +4898,9 @@ function syncTopbar(){
       }
     } else {
       const applied=_applyModelToDropdown(currentModel,modelSel,S.session.model_provider||null);
-      // If the model isn't in the current provider list, reset to the configured
-      // default rather than silently retaining the previous chat's selection (#1771).
+      // If the session model is missing from the current provider list, inject
+      // a session-scoped option instead of displaying the previous/static
+      // selection. Only fall back if that repair path is unavailable.
       if(!applied){
         const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
         const missingModelIsRoutable=_providerDefersMissingModelFallback(S.session.model_provider||window._activeProvider||null);
@@ -4781,14 +4913,25 @@ function syncTopbar(){
           // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
           // Named custom providers/OpenRouter can also route vendor-prefixed IDs
           // outside the static catalog, so preserve the user's explicit choice.
+          if(typeof _ensureModelOptionInDropdown==='function'){
+            const sessionOption=_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null);
+            if(sessionOption) currentModel=sessionOption;
+          }
         } else {
-          const fallback=_applySessionModelFallback(modelSel);
-          if(fallback&&!deferModelCorrection){
-            S.session.model=fallback.model;
-            S.session.model_provider=fallback.model_provider||null;
-            currentModel=fallback.model;
-            // Persist the correction so the session doesn't re-inject on next load.
-            _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
+          const sessionOption=(typeof _ensureModelOptionInDropdown==='function')
+            ? _ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null)
+            : null;
+          if(sessionOption){
+            currentModel=sessionOption;
+          } else {
+            const fallback=_applySessionModelFallback(modelSel);
+            if(fallback&&!deferModelCorrection){
+              S.session.model=fallback.model;
+              S.session.model_provider=fallback.model_provider||null;
+              currentModel=fallback.model;
+              // Persist the correction so the session doesn't re-inject on next load.
+              _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
+            }
           }
         }
       }
@@ -5498,19 +5641,63 @@ function renderCompressionUi(){
   el.style.display='none';
 }
 // Session render cache: avoids full markdown+DOM rebuild when switching back
-// to a session that was already rendered with the same message count.
+// to a session whose rendered transcript inputs are unchanged.
 // Keyed by session_id. Only used on cross-session navigation, never for
 // in-session updates (new messages, edits, stream events).
-//
-// Known limitation: cache key is session_id + message count. Edits and retries
-// that mutate message content without changing the count will serve stale HTML
-// on back-navigation until the user triggers an in-session update. Acceptable
-// for the common read-only back-navigation case; not suitable as a general cache.
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
 function clearMessageRenderCache(){
   _sessionHtmlCache.clear();
   _sessionHtmlCacheSid=null;
+}
+
+function _messageRenderCacheSignature(){
+  let hash=2166136261;
+  function add(value){
+    const s=String(value==null?'':value);
+    for(let i=0;i<s.length;i++){
+      hash^=s.charCodeAt(i);
+      hash=Math.imul(hash,16777619)>>>0;
+    }
+    hash^=31;
+    hash=Math.imul(hash,16777619)>>>0;
+  }
+  const messages=Array.isArray(S.messages)?S.messages:[];
+  add(messages.length);
+  for(const m of messages){
+    if(!m||typeof m!=='object'){ add('missing'); continue; }
+    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
+    add(msgContent(m));
+    if(Array.isArray(m.content)){
+      add('content-array');
+      m.content.forEach(part=>{
+        if(!part||typeof part!=='object'){ add(part); return; }
+        add(part.type);add(part.id);add(part.name);add(part.text);add(part.content);
+      });
+    }
+    if(Array.isArray(m.tool_calls)){
+      add('message-tool-calls');add(m.tool_calls.length);
+      m.tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.type);add(JSON.stringify(tc&&tc.function||{}));});
+    }
+    if(Array.isArray(m._partial_tool_calls)){
+      add('partial-tool-calls');add(m._partial_tool_calls.length);
+      m._partial_tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.snippet);});
+    }
+    if(_messageHasReasoningPayload(m)) add(m.reasoning||m.thinking||m._reasoning||'reasoning');
+    if(Array.isArray(m.attachments)) m.attachments.forEach(a=>add(a&&typeof a==='object'?JSON.stringify(a):a));
+  }
+  const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
+  add('settled-tool-calls');add(toolCalls.length);
+  toolCalls.forEach(tc=>{
+    if(!tc||typeof tc!=='object'){ add(tc); return; }
+    add(tc.tid);add(tc.id);add(tc.name);add(tc.done);add(tc.is_diff);add(tc.assistant_msg_idx);add(tc.snippet);add(JSON.stringify(tc.args||{}));
+  });
+  if(S.session){
+    add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
+    add(JSON.stringify(S.session.compression_anchor_message_key||null));
+    add(S.session.compression_anchor_summary||'');
+  }
+  return `${messages.length}:${toolCalls.length}:${hash.toString(16)}`;
 }
 
 function _clipCliToolSnippet(text, maxLen=20000){
@@ -5659,6 +5846,7 @@ function renderMessages(options){
   const msgCount=S.messages.length;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   const renderWindowSize=_currentMessageRenderWindowSize();
+  const renderSignature=_messageRenderCacheSignature();
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
     (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
@@ -5674,7 +5862,7 @@ function renderMessages(options){
   // before those cards can be inserted.
   if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
     const cached=_sessionHtmlCache.get(sid);
-    if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize){
+    if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       _wireMessageWindowLoadEarlierButton();
@@ -6140,17 +6328,15 @@ function renderMessages(options){
         if(!anchorRow) continue;
         const anchorParent=anchorRow.parentElement;
         let insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-        const thinkingText=assistantThinking.get(aIdx);
-        if(thinkingText){
-          const thinkingNode=_thinkingActivityNode(thinkingText, false);
-          anchorParent.insertBefore(thinkingNode, anchorRow);
-        }
-        if(!cards.length) continue;
         const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode,activityKey:`assistant:${aIdx}`});
         const sourceMsg=S.messages[aIdx]||{};
         if(sourceMsg._turnDuration!==undefined) group.setAttribute('data-turn-duration', String(sourceMsg._turnDuration));
         const body=group&&group.querySelector('.tool-call-group-body');
         if(!body) continue;
+        const thinkingText=assistantThinking.get(aIdx);
+        if(thinkingText){
+          body.appendChild(_thinkingActivityNode(thinkingText, false));
+        }
         for(const tc of cards){
           body.appendChild(buildToolCard(tc));
         }
@@ -6287,7 +6473,7 @@ function renderMessages(options){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
-      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize});
+      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize,signature:renderSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
@@ -7146,7 +7332,10 @@ let _katexReady=false;
 
 function renderKatexBlocks(container){
   const root=container||document;
-  const blocks=root.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])');
+  const blocks=root.querySelectorAll(
+    '.katex-block:not([data-rendered]),.katex-inline:not([data-rendered]),'+
+    'equation-block:not([data-rendered]),equation-inline:not([data-rendered])'
+  );
   if(!blocks.length) return;
   if(!_katexReady){
     if(!_katexLoading){
@@ -7168,7 +7357,8 @@ function renderKatexBlocks(container){
   blocks.forEach(el=>{
     el.dataset.rendered='true';
     const src=el.textContent||'';
-    const displayMode=el.dataset.katex==='display';
+    const tagName=(el.tagName||'').toLowerCase();
+    const displayMode=el.dataset.katex==='display'||tagName==='equation-block';
     try{
       katex.render(src,el,{
         displayMode,
@@ -7299,25 +7489,28 @@ function appendThinking(text='', options){
     return;
   }
   const thinkingText=String(text||'').trim()||'Thinking…';
-  let row=blocks.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
+  const allChildren=Array.from(blocks.children);
+  const anchor=allChildren.filter(el=>
+    el.id!=='toolRunningRow' &&
+    el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row')
+  ).pop();
+  const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
+  const body=group&&group.querySelector('.tool-call-group-body');
+  if(!body) return;
+  let row=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
   if(!row){
-    const thinkingCards=Array.from(blocks.querySelectorAll('.agent-activity-thinking'));
-    row=thinkingCards.filter(el=>el.closest('.assistant-turn-blocks')===blocks).pop()||null;
+    const thinkingCards=Array.from(body.querySelectorAll('.agent-activity-thinking'));
+    row=thinkingCards.pop()||null;
     if(row) row.setAttribute('data-thinking-active','1');
   }
   if(!row){
     row=_thinkingActivityNode(thinkingText, false);
     row.setAttribute('data-thinking-active','1');
-    const allChildren=Array.from(blocks.children);
-    const anchor=allChildren.filter(el=>
-      el.id!=='toolRunningRow' &&
-      el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')
-    ).pop();
-    if(anchor) anchor.insertAdjacentElement('afterend', row);
-    else blocks.appendChild(row);
+    body.appendChild(row);
   }else{
     _renderThinkingInto(row,thinkingText);
   }
+  _syncToolCallGroupSummary(group);
   scrollIfPinned();
   if(_scrollPinned){
     const body=row&&row.querySelector('.thinking-card-body');

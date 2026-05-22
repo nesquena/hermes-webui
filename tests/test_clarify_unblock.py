@@ -137,14 +137,16 @@ class TestClarifyModuleExports:
 class TestClarifyHTTPEndpoints:
     """Regression tests for /api/clarify/respond against the live test server."""
 
-    def test_respond_returns_ok_no_pending(self):
+    def test_respond_returns_stale_when_no_pending(self):
+        """When no clarify prompt is pending, respond returns 409 (issue #2639)."""
         sid = f"http-no-pending-{uuid.uuid4().hex[:8]}"
         result, status = post("/api/clarify/respond", {
             "session_id": sid,
             "response": "Use option A",
         })
-        assert status == 200
-        assert result["ok"] is True
+        assert status == 409
+        assert result["ok"] is False
+        assert result.get("stale") is True
 
     def test_respond_requires_session_id(self):
         result, status = post("/api/clarify/respond", {"response": "Hello"})

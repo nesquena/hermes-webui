@@ -59,3 +59,12 @@ def test_dashboard_settings_controls_live_in_system_panel():
     assert 'id="settingsDashboardUrl"' in INDEX_HTML
     assert "function saveDashboardSettings" in UI_JS
     assert "api('/api/dashboard/config'" in UI_JS
+
+
+def test_dashboard_frontend_uses_browser_url_without_requiring_probe_port():
+    match = re.search(r"function _dashboardBrowserUrl\(status\).*?\n}\nfunction _applyDashboardStatus", UI_JS, re.DOTALL)
+    assert match is not None
+    helper = match.group(0)
+    assert "status.browser_url||status.url" in helper
+    assert "!status.port" in helper
+    assert helper.index("status.browser_url||status.url") < helper.index("!status.port")

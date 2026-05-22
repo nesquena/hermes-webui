@@ -188,7 +188,7 @@ const LOCALES = {
     cmd_terminal: 'Open the workspace terminal',
     cmd_new: 'Start a new chat session',
     cmd_usage: 'Toggle token usage display on/off',
-    cmd_theme: 'Switch appearance (theme: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous)',
+    cmd_theme: 'Switch appearance (theme: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast)',
     cmd_personality: 'Switch agent personality',
     cmd_skills: 'List available Hermes skills',
     available_commands: 'Available commands:',
@@ -511,6 +511,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Load older messages while scrolling up',
 
     settings_desc_session_endless_scroll: 'When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.',
+
+    settings_label_tab_visibility: 'Sidebar tabs',
+    settings_desc_tab_visibility: 'Choose which tabs appear in the sidebar and rail. Chat and Settings are always visible.',
     open_in_browser: 'Open in browser',
     settings_dropdown_conversation: 'Conversation',
     settings_dropdown_appearance: 'Appearance',
@@ -530,6 +533,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',
     plugins_enabled: 'Enabled',
     plugins_disabled: 'Disabled',
+    plugins_active_provider: 'Active (provider)',
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',
     plugins_load_failed: 'Failed to load plugins: ',
     settings_tab_system: 'System',
     settings_title: 'Settings',
@@ -551,6 +556,8 @@ const LOCALES = {
     settings_label_language: 'Language',
     settings_label_quota_chip: 'Show provider quota chip in composer',
     settings_desc_quota_chip: 'Displays an ambient remaining-quota indicator (e.g. OpenRouter credit balance) in the composer footer. Default off. Only visible on wide displays (≥1400px) when enabled, to keep the composer uncluttered on laptop and standard desktop widths.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Show token usage',
     settings_label_sidebar_density: 'Sidebar density',
     cmd_reasoning: 'Toggle thinking visibility (show/hide), set effort level, or check current status',
@@ -1412,7 +1419,7 @@ const LOCALES = {
     cmd_terminal: 'Apri il terminale del workspace',
     cmd_new: 'Avvia una nuova sessione di chat',
     cmd_usage: 'Attiva/disattiva visualizzazione uso token',
-    cmd_theme: 'Cambia aspetto (tema: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous)',
+    cmd_theme: 'Cambia aspetto (tema: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast)',
     cmd_personality: "Cambia personalità dell'agente",
     cmd_skills: 'Elenca le skill Hermes disponibili',
     available_commands: 'Comandi disponibili:',
@@ -1735,6 +1742,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Carica messaggi precedenti scorrendo in alto',
 
     settings_desc_session_endless_scroll: 'Se abilitato, i messaggi precedenti si caricano automaticamente scorrendo in alto. Se disabilitato, usa il pulsante messaggi precedenti.',
+
+    settings_label_tab_visibility: 'Schede della barra laterale',
+    settings_desc_tab_visibility: 'Scegli quali schede mostrare nella barra laterale e nel rail. Chat e Impostazioni sono sempre visibili.',
     open_in_browser: 'Apri nel browser',
     settings_dropdown_conversation: 'Conversazione',
     settings_dropdown_appearance: 'Aspetto',
@@ -1754,6 +1764,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'Sistema',
     settings_title: 'Impostazioni',
@@ -1775,6 +1787,8 @@ const LOCALES = {
     settings_label_language: 'Lingua',
     settings_label_quota_chip: 'Mostra il chip della quota del provider nel compositore',
     settings_desc_quota_chip: "Mostra un indicatore di quota residua (es. saldo crediti OpenRouter) nel piè di pagina del compositore. Predefinito disattivato. Visibile solo su schermi larghi (≥1400px) quando attivato, per mantenere il compositore non affollato su laptop e desktop standard.",
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Mostra uso token',
     settings_label_sidebar_density: 'Densità sidebar',
     cmd_reasoning: 'Mostra/nascondi ragionamento, imposta livello sforzo o controlla stato attuale',
@@ -2628,7 +2642,7 @@ const LOCALES = {
     cmd_terminal: 'ワークスペースのターミナルを開く',
     cmd_new: '新しいチャットセッションを開始',
     cmd_usage: 'トークン使用量表示の ON/OFF を切り替え',
-    cmd_theme: '外観を切り替え (theme: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous)',
+    cmd_theme: '外観を切り替え (theme: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast)',
     cmd_personality: 'エージェントのパーソナリティを切り替え',
     cmd_skills: '利用可能な Hermes スキルを一覧表示',
     available_commands: '利用可能なコマンド:',
@@ -2951,6 +2965,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: '上スクロールで古いメッセージを読み込む',
 
     settings_desc_session_endless_scroll: '有効にすると、上にスクロールしたとき古いメッセージを自動で読み込みます。無効の場合は古いメッセージボタンを使います。',
+
+    settings_label_tab_visibility: 'サイドバータブ',
+    settings_desc_tab_visibility: 'サイドバーとレールに表示するタブを選択します。チャットと設定は常に表示されます。',
     open_in_browser: 'ブラウザで開く',
     settings_dropdown_conversation: '会話',
     settings_dropdown_appearance: '外観',
@@ -2970,6 +2987,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'システム',
     settings_title: '設定',
@@ -2991,6 +3010,8 @@ const LOCALES = {
     settings_label_language: '言語',
     settings_label_quota_chip: 'コンポーザーにプロバイダーのクォータチップを表示',
     settings_desc_quota_chip: 'コンポーザーのフッターに残りクォータインジケーター（例: OpenRouter のクレジット残高）を表示します。デフォルトはオフ。有効にした場合、ラップトップや標準デスクトップの幅でコンポーザーが混雑しないよう、ワイドディスプレイ（≥1400px）でのみ表示されます。',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'トークン使用量を表示',
     settings_label_sidebar_density: 'サイドバー密度',
     cmd_reasoning: '思考表示の切り替え (表示/非表示)、努力レベル設定、現在状態の確認',
@@ -3813,7 +3834,7 @@ const LOCALES = {
     cmd_terminal: 'Открыть терминал рабочей области',
     cmd_new: 'Начать новую сессию чата',
     cmd_usage: 'Показать или скрыть использование токенов',
-    cmd_theme: 'Переключить внешний вид (тема: system/dark/light, скин: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous)',
+    cmd_theme: 'Переключить внешний вид (тема: system/dark/light, скин: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast)',
     cmd_personality: 'Переключить личность агента',
     cmd_skills: 'Показать доступные навыки Hermes',
     available_commands: 'Доступные команды:',
@@ -4018,6 +4039,8 @@ const LOCALES = {
     settings_label_language: 'Язык',
     settings_label_quota_chip: 'Показывать чип квоты провайдера в композиторе',
     settings_desc_quota_chip: 'Отображает фоновый индикатор остатка квоты (например, баланс кредитов OpenRouter) в подвале композитора. По умолчанию отключено. Виден только на широких экранах (≥1400px) при включении, чтобы не загромождать композитор на ноутбуках и стандартных мониторах.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Показывать использование токенов',
     settings_label_sidebar_density: 'Плотность боковой панели',
     cmd_reasoning: 'Toggle thinking visibility (show/hide), set effort level, or check current status',
@@ -4688,6 +4711,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Загружать старые сообщения при прокрутке вверх',
 
     settings_desc_session_endless_scroll: 'Если включено, старые сообщения загружаются автоматически при прокрутке вверх. Если выключено, используйте кнопку загрузки старых сообщений.',
+
+    settings_label_tab_visibility: 'Вкладки боковой панели',
+    settings_desc_tab_visibility: 'Выберите, какие вкладки отображаются на боковой панели и в рейле. Чат и настройки всегда видны.',
     open_in_browser: 'Открыть в браузере',
     settings_section_system_title: 'System',
     settings_tab_appearance: 'Appearance',
@@ -4703,6 +4729,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'System',
     status_updated: 'Updated',
@@ -4996,7 +5024,7 @@ const LOCALES = {
     cmd_terminal: 'Abrir terminal del espacio de trabajo',
     cmd_new: 'Iniciar una nueva sesión de chat',
     cmd_usage: 'Activar o desactivar el uso de tokens',
-    cmd_theme: 'Cambiar apariencia (tema: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous)',
+    cmd_theme: 'Cambiar apariencia (tema: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast)',
     cmd_personality: 'Cambiar la personalidad del agente',
     cmd_skills: 'Listar las skills de Hermes disponibles',
     available_commands: 'Comandos disponibles:',
@@ -5163,6 +5191,8 @@ const LOCALES = {
     settings_label_language: 'Idioma',
     settings_label_quota_chip: 'Mostrar el chip de cuota del proveedor en el compositor',
     settings_desc_quota_chip: 'Muestra un indicador ambiental de cuota restante (por ejemplo, saldo de crédito de OpenRouter) en el pie del compositor. Predeterminado: desactivado. Solo visible en pantallas anchas (≥1400px) cuando se activa, para mantener el compositor despejado en portátiles y monitores estándar.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Mostrar uso de tokens',
     settings_label_sidebar_density: 'Densidad de la barra lateral',
     cmd_reasoning: 'Toggle thinking visibility (show/hide), set effort level, or check current status',
@@ -5831,6 +5861,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Cargar mensajes antiguos al desplazarse hacia arriba',
 
     settings_desc_session_endless_scroll: 'Si está activado, los mensajes antiguos se cargan automáticamente al desplazarte hacia arriba. Si está desactivado, usa el botón de mensajes antiguos.',
+
+    settings_label_tab_visibility: 'Pestañas de la barra lateral',
+    settings_desc_tab_visibility: 'Elige qué pestañas aparecen en la barra lateral y el rail. Chat y Configuración siempre están visibles.',
     open_in_browser: 'Abrir en el navegador',
     settings_section_system_title: 'System',
     settings_tab_appearance: 'Appearance',
@@ -5846,6 +5879,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'System',
     status_updated: 'Updated',
@@ -6125,7 +6160,7 @@ const LOCALES = {
     cmd_terminal: 'Workspace-Terminal öffnen',
     cmd_new: 'Neue Chat-Sitzung starten',
     cmd_usage: 'Token-Verbrauchsanzeige umschalten',
-    cmd_theme: 'Darstellung wechseln (Theme: system/dark/light, Skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous)',
+    cmd_theme: 'Darstellung wechseln (Theme: system/dark/light, Skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast)',
     cmd_personality: 'Agenten-Persönlichkeit wechseln',
     cmd_skills: 'Verfügbare Hermes-Skills auflisten',
     available_commands: 'Verfügbare Befehle:',
@@ -6301,6 +6336,8 @@ const LOCALES = {
     settings_label_language: 'Sprache',
     settings_label_quota_chip: 'Anbieter-Kontingent-Chip im Editor anzeigen',
     settings_desc_quota_chip: 'Zeigt einen Hintergrund-Indikator des verbleibenden Kontingents (z. B. OpenRouter-Guthaben) in der Editor-Fußzeile an. Standardmäßig deaktiviert. Bei Aktivierung nur auf breiten Bildschirmen (≥1400px) sichtbar, damit der Editor auf Laptops und Standard-Desktops übersichtlich bleibt.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Token-Verbrauch anzeigen',
     settings_label_sidebar_density: 'Seitenleistendichte',
     cmd_reasoning: 'Toggle thinking visibility (show/hide), set effort level, or check current status',
@@ -6706,6 +6743,9 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'Wenn aktiviert, werden ältere Nachrichten beim Hochscrollen automatisch geladen. Wenn deaktiviert, nutzt du den Button für ältere Nachrichten.',
 
+    settings_label_tab_visibility: 'Seitenleiste-Tabs',
+    settings_desc_tab_visibility: 'Wähle, welche Tabs in der Seitenleiste und im Rail angezeigt werden. Chat und Einstellungen sind immer sichtbar.',
+
     workspace_drag_hint: 'Ziehen zum Neuordnen',
     workspace_reorder_failed: 'Neuordnen fehlgeschlagen',
     open_in_browser: 'Im Browser öffnen',
@@ -6723,6 +6763,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'System',
     status_updated: 'Updated',
@@ -7305,7 +7347,7 @@ const LOCALES = {
     cmd_terminal: '打开工作区 Terminal',
     cmd_new: '新建聊天会话',
     cmd_usage: '切换 token 用量显示',
-    cmd_theme: '切换外观（主题：system/dark/light，皮肤：default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous）',
+    cmd_theme: '切换外观（主题：system/dark/light，皮肤：default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast）',
     cmd_personality: '切换 Agent 人设',
     cmd_skills: '列出可用的 Hermes 技能',
     available_commands: '可用命令：',
@@ -7386,6 +7428,8 @@ const LOCALES = {
     plugins_registered_hooks: '已注册的挂钩',
     plugins_enabled: '已启用',
     plugins_disabled: '已禁用',
+    plugins_active_provider: '激活（提供方）',
+    plugins_provider_no_hooks: '提供方插件 — 无代理可见挂钩',
     plugins_load_failed: '加载插件失败：',
     workspace_empty_no_path: '未选择工作区。请在 设置 → 工作区 中设置工作区以浏览文件。',
     workspace_empty_dir: '此工作区为空。',
@@ -7489,6 +7533,8 @@ const LOCALES = {
     settings_label_language: '语言',
     settings_label_quota_chip: '在编辑器中显示供应商配额标签',
     settings_desc_quota_chip: '在编辑器底部显示剩余配额指示器（如 OpenRouter 信用余额）。默认关闭。启用时仅在宽屏（≥1400px）显示，以保持笔记本和标准桌面屏幕上编辑器的整洁。',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: '显示 token 用量',
     settings_label_sidebar_density: '侧边栏密度',
     cmd_reasoning: '切换思维可见性（显示/隐藏）、设置工作强度或查看当前状态',
@@ -7882,7 +7928,7 @@ const LOCALES = {
     cron_status_off: '关闭',
     cron_status_paused: '暂停',
     cron_status_error: '错误',
-    cron_status_active: '运行中',
+    cron_status_active: '已启用',
     cron_status_running: '执行中\u2026',
     cron_status_needs_attention: '需要处理',
     cron_attention_desc: '这个重复定时任务没有下次运行时间。调度器可能没能计算出下一次运行。',
@@ -8147,6 +8193,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: '向上滚动时加载更早的消息',
 
     settings_desc_session_endless_scroll: '启用后，向上滚动时会自动加载更早的消息。禁用时请使用加载更早消息按钮。',
+
+    settings_label_tab_visibility: '侧边栏标签',
+    settings_desc_tab_visibility: '选择在侧边栏和导航栏中显示哪些标签。聊天和设置始终可见。',
     open_in_browser: '在浏览器中打开',
     settings_section_system_title: '系统',
     settings_tab_appearance: '外观',
@@ -8422,7 +8471,7 @@ const LOCALES = {
     cmd_terminal: '\u6253\u958b\u5de5\u4f5c\u5340 Terminal',
     cmd_new: '\u65b0\u5efa\u804a\u5929\u6703\u8a71',
     cmd_usage: '\u5207\u63db token \u7528\u91cf\u986f\u793a',
-    cmd_theme: '\u5207\u63db\u5916\u89c0\uff08\u4e3b\u984c\uff1asystem/dark/light\uff0c\u76ae\u819a\uff1adefault/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous\uff09',
+    cmd_theme: '\u5207\u63db\u5916\u89c0\uff08\u4e3b\u984c\uff1asystem/dark/light\uff0c\u76ae\u819a\uff1adefault/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast\uff09',
     cmd_personality: '\u5207\u63db Agent \u4eba\u8a2d',
     cmd_skills: '\u5217\u51fa\u53ef\u7528\u7684 Hermes \u6280\u80fd',
     available_commands: '\u53ef\u7528\u547d\u4ee4\uff1a',
@@ -8613,6 +8662,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: '向上捲動時載入較早訊息',
 
     settings_desc_session_endless_scroll: '啟用後，向上捲動時會自動載入較早訊息。停用時請使用載入較早訊息按鈕。',
+
+    settings_label_tab_visibility: '側邊欄標籤',
+    settings_desc_tab_visibility: '選擇在側邊欄和導航列中顯示哪些標籤。聊天和設定始終可見。',
     open_in_browser: '在瀏覽器中開啓',
     settings_dropdown_conversation: '對話',
     settings_dropdown_appearance: '外觀',
@@ -8632,6 +8684,8 @@ const LOCALES = {
     plugins_registered_hooks: '已註冊的鉤子',
     plugins_enabled: '已啟用',
     plugins_disabled: '已停用',
+    plugins_active_provider: '啟用中（提供者）',
+    plugins_provider_no_hooks: '提供者外掛 — 無代理可見鉤子',
     plugins_load_failed: '載入外掛失敗：',
     settings_tab_system: '系統',
     settings_title: '\u8a2d\u5b9a',
@@ -8653,6 +8707,8 @@ const LOCALES = {
     settings_label_language: '\u8a9e\u8a00',
     settings_label_quota_chip: '在編輯器中顯示供應商配額標籤',
     settings_desc_quota_chip: '在編輯器底部顯示剩餘配額指示器（如 OpenRouter 點數餘額）。預設關閉。啟用時僅在寬螢幕（≥1400px）顯示，以保持筆記型電腦和標準桌面螢幕上編輯器的整潔。',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: '\u986f\u793a token \u7528\u91cf',
     settings_label_sidebar_density: '側邊欄密度',
     cmd_reasoning: '切換思考區塊可見性（顯示/隱藏）或設定努力等級',
@@ -9234,7 +9290,7 @@ const LOCALES = {
     cron_schedule_placeholder: '\u6392\u7a0b',
     cron_schedule_required: '\u9700\u8981\u6392\u7a0b',
     cron_schedule_required_example: '\u9700\u8981\u6392\u7a0b\uff08\u4f8b\u5982 "0 9 * * *" \u6216 "every 1h"\uff09',
-    cron_status_active: '\u6d3b\u8e8d\u4e2d',
+    cron_status_active: '已啟用',
     cron_status_running: '\u57f7\u884c\u4e2d\u2026',
     cron_status_error: '\u932f\u8aa4',
     cron_status_off: '\u672a\u555f\u7528',
@@ -9628,7 +9684,7 @@ const LOCALES = {
     cmd_workspace: 'Trocar workspace por nome',
     cmd_new: 'Iniciar nova sessão de chat',
     cmd_usage: 'Alternar exibição de uso de tokens',
-    cmd_theme: 'Trocar aparência (tema: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous)',
+    cmd_theme: 'Trocar aparência (tema: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast)',
     cmd_personality: 'Trocar personalidade do agente',
     cmd_skills: 'Listar skills disponíveis do Hermes',
     available_commands: 'Comandos disponíveis:',
@@ -9915,6 +9971,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Carregar mensagens antigas ao rolar para cima',
 
     settings_desc_session_endless_scroll: 'Quando ativado, mensagens antigas carregam automaticamente ao rolar para cima. Quando desativado, use o botão de mensagens antigas.',
+
+    settings_label_tab_visibility: 'Abas da barra lateral',
+    settings_desc_tab_visibility: 'Escolha quais abas aparecem na barra lateral e no rail. Chat e Configurações estão sempre visíveis.',
     open_in_browser: 'Abrir no navegador',
     settings_dropdown_conversation: 'Conversa',
     settings_dropdown_appearance: 'Aparência',
@@ -9934,6 +9993,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'Sistema',
     settings_title: 'Configurações',
@@ -9955,6 +10016,8 @@ const LOCALES = {
     settings_label_language: 'Idioma',
     settings_label_quota_chip: 'Mostrar o chip de cota do provedor no compositor',
     settings_desc_quota_chip: 'Exibe um indicador ambiente de cota restante (por exemplo, saldo de crédito do OpenRouter) no rodapé do compositor. Desativado por padrão. Visível apenas em telas largas (≥1400px) quando ativado, para manter o compositor livre em laptops e monitores padrão.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Mostrar uso de tokens',
     settings_label_sidebar_density: 'Densidade da sidebar',
     cmd_reasoning: 'Alternar visibilidade do pensamento (mostrar/ocultar)',
@@ -10730,7 +10793,7 @@ const LOCALES = {
     cmd_terminal: '워크스페이스 터미널 열기',
     cmd_new: '새 채팅 세션 시작',
     cmd_usage: '토큰 사용량 표시 켜기/끄기',
-    cmd_theme: 'Switch appearance (theme: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous)',
+    cmd_theme: 'Switch appearance (theme: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast)',
     cmd_personality: 'Switch agent personality',
     cmd_skills: 'List available Hermes skills',
     available_commands: '사용 가능한 명령:',
@@ -11034,6 +11097,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: '위로 스크롤할 때 이전 메시지 불러오기',
 
     settings_desc_session_endless_scroll: '활성화하면 위로 스크롤할 때 이전 메시지를 자동으로 불러옵니다. 비활성화하면 이전 메시지 버튼을 사용합니다.',
+
+    settings_label_tab_visibility: '사이드바 탭',
+    settings_desc_tab_visibility: '사이드바와 레일에 표시할 탭을 선택하세요. 채팅과 설정은 항상 표시됩니다.',
     open_in_browser: '브라우저에서 열기',
     settings_dropdown_conversation: '대화',
     settings_dropdown_appearance: '외형',
@@ -11053,6 +11119,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: '시스템',
     settings_title: '설정',
@@ -11074,6 +11142,8 @@ const LOCALES = {
     settings_label_language: '언어',
     settings_label_quota_chip: '작성기에 공급자 할당량 칩 표시',
     settings_desc_quota_chip: '작성기 푸터에 남은 할당량 표시기(예: OpenRouter 크레딧 잔액)를 표시합니다. 기본값은 끔. 활성화 시 노트북과 표준 데스크톱에서 작성기가 복잡해지지 않도록 와이드 디스플레이(≥1400px)에서만 표시됩니다.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: '토큰 사용량 표시',
     settings_label_sidebar_density: '사이드바 밀도',
     cmd_reasoning: 'Toggle thinking visibility (show/hide), set effort level, or check current status',
@@ -11938,7 +12008,7 @@ const LOCALES = {
     cmd_terminal: 'Ouvrez le terminal de l\'espace de travail',
     cmd_new: 'Démarrer une nouvelle session de discussion',
     cmd_usage: 'Activer/désactiver l\'affichage de l\'utilisation du jeton',
-    cmd_theme: 'Changer d\'apparence (thème : system/dark/light, skin : default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous)',
+    cmd_theme: 'Changer d\'apparence (thème : system/dark/light, skin : default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast)',
     cmd_personality: 'Personnalité de l\'agent de commutation',
     cmd_skills: 'Lister les compétences Hermès disponibles',
     available_commands: 'Commandes disponibles :',
@@ -12168,6 +12238,9 @@ const LOCALES = {
     settings_desc_session_jump_buttons: 'Affichez les boutons flottants de début et de fin lors de la lecture de longs historiques de session.',
     settings_label_session_endless_scroll: 'Charger les anciens messages en faisant défiler vers le haut',
     settings_desc_session_endless_scroll: 'Lorsqu\'ils sont activés, les anciens messages se chargent automatiquement lorsque vous faites défiler vers le haut. Lorsqu\'il est désactivé, utilisez le bouton des messages plus anciens.',
+
+    settings_label_tab_visibility: 'Onglets de la barre latérale',
+    settings_desc_tab_visibility: 'Choisissez quels onglets apparaissent dans la barre latérale et le rail. Chat et Paramètres sont toujours visibles.',
     open_in_browser: 'Ouvrir dans le navigateur',
     settings_dropdown_conversation: 'Conversation',
     settings_dropdown_appearance: 'Apparence',
@@ -12187,6 +12260,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'Système',
     settings_title: 'Paramètres',
@@ -12208,6 +12283,8 @@ const LOCALES = {
     settings_label_language: 'Langue',
     settings_label_quota_chip: 'Afficher la pastille de quota du fournisseur dans le compositeur',
     settings_desc_quota_chip: "Affiche un indicateur ambiant de quota restant (par ex. solde de crédit OpenRouter) dans le pied du compositeur. Désactivé par défaut. Visible uniquement sur les écrans larges (≥1400px) lorsqu'activé, pour garder le compositeur dégagé sur les ordinateurs portables et les bureaux standard.",
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Afficher l\'utilisation du jeton',
     settings_label_sidebar_density: 'Densité de la barre latérale',
     cmd_reasoning: 'Basculez la visibilité de la réflexion (afficher/masquer), définir le niveau d\'effort ou vérifier l\'état actuel',
@@ -12816,6 +12893,101 @@ const LOCALES = {
     checkpoint_restored: 'Point de contrôle restauré',
     checkpoint_diff_title: 'Changements au point de contrôle',
     checkpoint_diff_no_changes: 'Aucune différence trouvée entre ce point de contrôle et l\'espace de travail actuel.',
+
+    // === Missing keys (FR translation completion) ===
+    bg_complete: 'Tâche en arrière-plan terminée',
+    bg_failed: 'Échec de la tâche en arrière-plan : ',
+    bg_label: 'Résultat en arrière-plan :',
+    bg_no_answer: '(aucune réponse)',
+    bg_running: 'Exécution en arrière-plan…',
+    branch_failed: 'Échec du fork : ',
+    branch_forked: 'Conversation forkée dans une nouvelle session',
+    btw_asking: 'Question annexe en cours…',
+    btw_done: 'Question annexe répondue',
+    btw_failed: 'Échec de la question annexe : ',
+    btw_label: 'Question annexe — hors historique',
+    btw_no_answer: 'Aucune réponse reçue.',
+    cancel_unavailable: 'Annulation indisponible.',
+    cmd_background: 'Exécuter une commande en arrière-plan',
+    cmd_background_usage: '/background <prompt> — exécute en parallèle sans bloquer',
+    cmd_branch: 'Forker cette conversation dans une nouvelle session',
+    cmd_branch_usage: '/branch [nom] — forke la conversation (avec un nom optionnel)',
+    cmd_btw: 'Poser une question annexe (éphémère)',
+    cmd_btw_usage: '/btw <question> — pose une question annexe en utilisant le contexte de la session',
+    cmd_retry: 'Renvoyer le dernier message',
+    cmd_status: 'Afficher les infos de la session',
+    cmd_stop: 'Arrêter la réponse en cours',
+    cmd_title: 'Obtenir ou définir le titre de la session',
+    cmd_undo: 'Supprimer le dernier échange',
+    cmd_voice: 'Activer/désactiver le micro',
+    cmd_voice_use_mic: 'Cliquez sur le bouton micro dans le composeur.',
+    cmd_webui_only_session: 'Cette commande n\'est pas disponible pour les sessions importées en CLI.',
+    folder_add_as_space_btn: 'Ajouter comme espace',
+    folder_add_as_space_msg: 'Ajouter ce dossier comme nouvel espace dans votre liste ?',
+    folder_add_as_space_title: 'Ajouter comme espace ?',
+    fork_from_here: 'Forker à partir d\'ici',
+    forked_from: 'Forké depuis',
+    kanban_archive_board: 'Archiver le tableau courant…',
+    kanban_archive_board_confirm: 'Archiver le tableau « {name} » ? Les tâches restent sur disque et le tableau peut être restauré depuis kanban/boards/_archived/.',
+    kanban_back_to_board: 'Retour au tableau',
+    kanban_block: 'Bloquer',
+    kanban_board_archived: 'Tableau archivé',
+    kanban_board_color: 'Couleur (optionnel)',
+    kanban_board_description: 'Description (optionnel)',
+    kanban_board_icon: 'Icône (emoji, optionnel)',
+    kanban_board_name: 'Nom',
+    kanban_board_name_required: 'Le nom est requis',
+    kanban_board_slug: 'Slug (minuscules, tirets)',
+    kanban_board_slug_required: 'Le slug est requis',
+    kanban_bulk_action: 'Action groupée',
+    kanban_card_archive: 'archiver',
+    kanban_card_complete: 'terminer',
+    kanban_lanes_by_profile: 'Colonnes par profil',
+    kanban_new_board: 'Nouveau tableau…',
+    kanban_nudge_dispatcher: 'Aperçu du dispatcher',
+    kanban_only_mine: 'Seulement les miennes',
+    kanban_rename_board: 'Renommer le tableau courant…',
+    kanban_stats: 'Statistiques',
+    kanban_unassigned: 'non assigné',
+    kanban_unblock: 'Débloquer',
+    kanban_worker_log: 'Journal du worker',
+    no_active_task: 'Aucune tâche active à arrêter.',
+    retrieval_context_label: 'Contexte indexé',
+    retrieval_context_preview: 'Les messages plus anciens sont stockés et récupérables via les outils de contexte',
+    retry_failed: 'Échec de la nouvelle tentative : ',
+    slash_skill_badge: 'Skill',
+    slash_skill_desc: 'Invoquer cette skill',
+    status_agent_running: 'Agent en cours d\'exécution',
+    status_heading: 'État de la session',
+    status_load_failed: 'Échec du chargement de l\'état : ',
+    status_messages: 'Messages',
+    status_model: 'Modèle',
+    status_no: 'Non',
+    status_personality: 'Personnalité',
+    status_provider: 'Fournisseur',
+    status_session_id: 'ID de session',
+    status_title: 'Titre',
+    status_workspace: 'Espace de travail',
+    status_yes: 'Oui',
+    stream_stopped: 'Réponse arrêtée.',
+    subagent_children: 'Sous-sessions de sous-agents',
+    title_change_hint: 'Utilisez `/title <nouveau nom>` pour renommer.',
+    title_current: 'Titre actuel',
+    title_set: 'Titre défini sur',
+    undid_messages_suffix: 'message(s).',
+    undid_n_messages: 'Supprimé',
+    undo_exchange: 'Annuler le dernier échange',
+    undo_failed: 'Échec de l\'annulation : ',
+    usage_default_model: 'par défaut',
+    usage_estimated_cost: 'Coût estimé',
+    usage_heading: 'Consommation de tokens',
+    usage_input_tokens: 'Tokens d\'entrée',
+    usage_load_failed: 'Échec du chargement de la consommation : ',
+    usage_output_tokens: 'Tokens de sortie',
+    usage_settings_tip: 'Note : les estimations de coût sont approximatives.',
+    usage_total: 'Total de tokens',
+    usage_unknown: 'inconnu',
+    workspace_auto_create_folder: 'Créer le dossier s\'il n\'existe pas',
   }
 };
 

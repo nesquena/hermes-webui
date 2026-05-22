@@ -10,7 +10,7 @@ def read(path: str) -> str:
 
 
 class _FakeManifest:
-    def __init__(self, *, name, key, version="", description="", provides_hooks=None, path=None):
+    def __init__(self, *, name, key, version="", description="", provides_hooks=None, path=None, kind="standalone"):
         self.name = name
         self.key = key
         self.version = version
@@ -18,7 +18,7 @@ class _FakeManifest:
         self.provides_hooks = provides_hooks or []
         self.path = path
         self.source = "user"
-        self.kind = "standalone"
+        self.kind = kind
 
 
 class _FakeLoadedPlugin:
@@ -86,6 +86,8 @@ class TestPluginsApi:
             "version": "1.2.3",
             "description": "Blocks unsafe tool calls",
             "enabled": True,
+            "kind": "standalone",
+            "activation": "enabled",
             "hooks": ["pre_tool_call", "post_tool_call"],
         }]
         serialized = repr(payload)
@@ -128,8 +130,69 @@ class TestPluginsApi:
         plugin = payload["plugins"][0]
         assert plugin["hooks"] == ["pre_llm_call", "post_llm_call"]
         assert plugin["enabled"] is False
+        assert plugin["kind"] == "standalone"
+        assert plugin["activation"] == "disabled"
         assert "/tmp/not-a-hook" not in repr(payload)
         assert "/secret" not in repr(payload)
+
+    def test_api_plugins_marks_exclusive_plugins_as_active_provider(self):
+        # Exclusive plugins (e.g. memory.provider: noema) leave loaded.enabled
+        # False by design — the bundled discovery scanner records the manifest
+        # but defers loading to the category's own activation path. Without
+        # the `activation`/`kind` fields, the panel rendered them as
+        # "Disabled + no hooks" indistinguishable from broken plugins (#2659).
+        manager = _FakePluginManager({
+            "noema": _FakeLoadedPlugin(
+                _FakeManifest(
+                    name="noema",
+                    key="noema",
+                    version="0.1.0",
+                    description="Structured memory backed by a Noema Cortex",
+                    kind="exclusive",
+                ),
+                enabled=False,
+                hooks_registered=[],
+                error="exclusive plugin — activate via <category>.provider config",
+            )
+        })
+
+        payload = self._capture_plugins_response(manager)
+
+        plugin = payload["plugins"][0]
+        assert plugin["kind"] == "exclusive"
+        assert plugin["activation"] == "exclusive"
+        # `enabled` stays False for back-compat with older WebUI clients that
+        # key off it directly; new clients must read `activation`.
+        assert plugin["enabled"] is False
+        assert plugin["hooks"] == []
+        # The raw error string is intentionally NOT surfaced — it can contain
+        # filesystem paths or other internals on other plugin kinds.
+        assert "exclusive plugin" not in repr(payload)
+
+    def test_api_plugins_marks_active_model_provider(self):
+        # model-provider plugins that loaded successfully (loaded.enabled True)
+        # get the "provider" activation badge so the panel can distinguish
+        # them from standalone hook plugins.
+        manager = _FakePluginManager({
+            "openrouter": _FakeLoadedPlugin(
+                _FakeManifest(
+                    name="openrouter",
+                    key="openrouter",
+                    version="1.0.0",
+                    description="OpenRouter model provider",
+                    kind="model-provider",
+                ),
+                enabled=True,
+                hooks_registered=[],
+            )
+        })
+
+        payload = self._capture_plugins_response(manager)
+
+        plugin = payload["plugins"][0]
+        assert plugin["kind"] == "model-provider"
+        assert plugin["activation"] == "provider"
+        assert plugin["enabled"] is True
 
 
 class TestPluginsSettingsUi:
@@ -159,3 +222,25 @@ class TestPluginsSettingsUi:
         segment = js[js.find("function _buildPluginCard"):js.find("// ── Providers panel")]
         assert ".path" not in segment
         assert ".callback" not in segment
+
+    def test_plugins_panel_renders_active_provider_badge(self):
+        # The card must distinguish exclusive/provider activation from a plain
+        # "Enabled" state and use the dedicated empty-hooks message for
+        # provider plugins instead of "No registered lifecycle hooks" (#2659).
+        js = read("static/panels.js")
+        segment = js[js.find("function _buildPluginCard"):js.find("// ── Providers panel")]
+
+        assert "plugin.activation" in segment
+        assert "'exclusive'" in segment
+        assert "'provider'" in segment
+        assert "plugins_active_provider" in segment
+        assert "plugins_provider_no_hooks" in segment
+        # Graceful fallback when the older payload shape (no `activation` field)
+        # is returned — the card should still resolve a badge from `enabled`.
+        assert "plugin.enabled===false" in segment
+
+    def test_plugins_panel_i18n_strings_present(self):
+        i18n = read("static/i18n.js")
+
+        assert "plugins_active_provider:" in i18n
+        assert "plugins_provider_no_hooks:" in i18n

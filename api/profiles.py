@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+from api.session_events import publish_session_list_changed
+
 logger = logging.getLogger(__name__)
 
 # ── Constants (match hermes_cli.profiles upstream) ─────────────────────────
@@ -411,8 +413,11 @@ def install_cron_scheduler_profile_isolation() -> None:
         # the explicitly selected manual execution profile.
         if _cron_profile_context_depth() > 0:
             return original(job, *args, **kwargs)
-        with cron_profile_context_for_home(_home_for_scheduled_cron_job(job)):
-            return original(job, *args, **kwargs)
+        try:
+            with cron_profile_context_for_home(_home_for_scheduled_cron_job(job)):
+                return original(job, *args, **kwargs)
+        finally:
+            publish_session_list_changed("cron_complete")
 
     _webui_profile_isolated_run_job._webui_profile_isolated = True
     _webui_profile_isolated_run_job._webui_original_run_job = original
@@ -914,10 +919,12 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
             cfg = {}
     model_cfg = cfg.get('model', {})
     default_model = None
+    default_model_provider = None
     if isinstance(model_cfg, str):
         default_model = model_cfg
     elif isinstance(model_cfg, dict):
         default_model = model_cfg.get('default')
+        default_model_provider = model_cfg.get('provider')
 
     # Read the target profile's workspace directly from *home* rather than via
     # get_last_workspace() which routes through the thread-local/process-global active
@@ -969,6 +976,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         'profiles': list_profiles_api(),
         'active': name,
         'default_model': default_model,
+        'default_model_provider': default_model_provider,
         'default_workspace': default_workspace,
     }
 

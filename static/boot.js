@@ -283,6 +283,26 @@ function expandSidebar(){
   }catch(_){}
   _syncSidebarAria();
 })();
+// ── Boot-time tab visibility ────────────────────────────────────────────────
+// Apply hidden tabs from localStorage. The primary flash-prevention is an
+// inline <script> in index.html (after sidebar-nav) that runs synchronously
+// before first paint. This IIFE is a secondary fallback: it ensures consistency
+// after panels.js is loaded and handles the active-tab switch. No-op if
+// panels.js hasn't loaded yet (typeof guard).
+(function _restoreTabVisibility(){
+  try{
+    if(typeof _applyTabVisibility==='function'&&typeof _getHiddenTabs==='function'){
+      _applyTabVisibility(_getHiddenTabs());
+    }
+    var active=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]')
+               ||document.querySelector('.sidebar-nav .nav-tab.active[data-panel]');
+    if(active&&active.classList.contains('nav-tab-hidden')){
+      var chatBtn=document.querySelector('.rail .rail-btn.nav-tab[data-panel="chat"]');
+      if(chatBtn)chatBtn.classList.add('active');
+      if(active)active.classList.remove('active');
+    }
+  }catch(_){}
+})();
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
@@ -935,6 +955,11 @@ $('modelSelect').onchange=async()=>{
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
+  if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
+  S.session.model=modelState.model;
+  S.session.model_provider=modelState.model_provider||null;
+  if(typeof syncModelChip==='function') syncModelChip();
+  syncTopbar();
   // Clarify scope: composer model changes are session-local, not the global default.
   if(typeof showToast==='function'){
     showToast(t('model_scope_toast')||'Applies to this conversation from your next message.', 3000);
@@ -945,10 +970,12 @@ $('modelSelect').onchange=async()=>{
     model:modelState.model,
     model_provider:modelState.model_provider||null,
   })});
-  S.session.model=modelState.model;
-  S.session.model_provider=modelState.model_provider||null;
-  if(typeof syncModelChip==='function') syncModelChip();
-  syncTopbar();
+  if(typeof _readPendingSessionModel==='function'&&typeof _clearPendingSessionModel==='function'){
+    const pending=_readPendingSessionModel(S.session.session_id);
+    if(!pending||(pending.model===modelState.model&&String(pending.model_provider||'')===String(modelState.model_provider||''))){
+      _clearPendingSessionModel(S.session.session_id);
+    }
+  }
   _applySessionContextMetadataUpdate(data);
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
@@ -1002,6 +1029,11 @@ let _imeComposing=false;
 })();
 function _isImeEnter(e){return e.isComposing||e.keyCode===229||_imeComposing;}
 window._isImeEnter=_isImeEnter;
+function _isVirtualKeyboardLikelyOpen(){
+  const vv=window.visualViewport;
+  if(!vv||!window.innerHeight)return true;
+  return window.innerHeight-vv.height>120;
+}
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -1019,13 +1051,14 @@ $('msg').addEventListener('keydown',e=>{
     }
   }
   // Send key: respect user preference.
-  // On touch-primary devices (software keyboard), default to Enter = newline
-  // since there's no physical Shift key. Users send via the Send button.
+  // On touch-primary devices with the software keyboard open, default to
+  // Enter = newline since there's no physical Shift key. Hardware keyboards on
+  // tablets keep desktop behavior when the viewport is not keyboard-shrunk.
   // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
     if(_isImeEnter(e)){return;}
-    const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter';
+    const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter'&&_isVirtualKeyboardLikelyOpen();
     if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
@@ -1126,6 +1159,11 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
 });
 
+function applyEmptyStateSuggestionPref(){
+  if(!$('emptyState')) return;
+  $('emptyState').classList.toggle('no-suggestions',window._hideEmptyStateSuggestions===true);
+}
+
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
@@ -1201,9 +1239,10 @@ const _SKINS=[
   {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},
   {name:'Catppuccin',colors:['#CBA6F7','#B4BEFE','#8839EF']},
   {name:'Nous',     colors:['#4682B4','#3A6E9A','#2C5F88']},
+  {name:'Geist Contrast', value:'geist-contrast', colors:['#000000','#ffffff','#FFF175']},
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
-const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
+const _VALID_SKINS=new Set((_SKINS||[]).map(s=>(s.value||s.name).toLowerCase()));
 const _LEGACY_THEME_MAP={
   slate:{theme:'dark',skin:'slate'},
   solarized:{theme:'dark',skin:'poseidon'},
@@ -1365,15 +1404,16 @@ function _buildSkinPicker(activeSkin){
   if(!grid) return;
   grid.innerHTML='';
   for(const skin of _SKINS){
-    const key=skin.name.toLowerCase();
+    const key=(skin.value||skin.name).toLowerCase();
     const btn=document.createElement('button');
     btn.type='button';
     btn.className='skin-pick-btn';
     btn.dataset.skinVal=key;
     btn.style.cssText='border:1px solid var(--border2);border-radius:8px;padding:8px 4px;text-align:center;cursor:pointer;background:none;transition:all .15s';
-    btn.onclick=()=>_pickSkin(skin.name);
+    btn.onclick=()=>_pickSkin(key);
     const dots=skin.colors.map(c=>`<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c}"></span>`).join('');
-    btn.innerHTML=`<div style="display:flex;gap:3px;justify-content:center;margin-bottom:4px">${dots}</div><span style="font-size:11px;color:var(--text)">${skin.name}</span>`;
+    const label=skin.label||skin.name;
+    btn.innerHTML=`<div style="display:flex;gap:3px;justify-content:center;margin-bottom:4px">${dots}</div><span style="font-size:11px;color:var(--text)">${label}</span>`;
     grid.appendChild(btn);
   }
   _syncSkinPicker((activeSkin||'default').toLowerCase());
@@ -1403,6 +1443,8 @@ function applyBotName(){
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
     window._showQuotaChip=s.show_quota_chip===true;
+    window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
+    applyEmptyStateSuggestionPref();
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=!!s.show_cli_sessions;
@@ -1416,10 +1458,39 @@ function applyBotName(){
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
+    window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
-    if(s.default_model) window._defaultModel=s.default_model;
+    if(s.default_model_provider) window._activeProvider=s.default_model_provider;
+    if(s.default_model){
+      window._defaultModel=s.default_model;
+      const sel=$('modelSelect');
+      if(sel&&typeof _applyModelToDropdown==='function'){
+        // Fresh page boot must prefer the profile/server default over stale
+        // browser-persisted model state. A restored session can still apply its
+        // own persisted model later through loadSession().
+        if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
+        else {
+          localStorage.removeItem('hermes-webui-model');
+          localStorage.removeItem('hermes-webui-model-state');
+        }
+        const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);
+        if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
+          existingDefaultOpt.dataset.provider=window._activeProvider;
+        }
+        if(!existingDefaultOpt){
+          const opt=document.createElement('option');
+          opt.value=s.default_model;
+          opt.textContent=typeof getModelLabel==='function'?getModelLabel(s.default_model):s.default_model;
+          opt.dataset.custom='1';
+          opt.dataset.provider=window._activeProvider||'';
+          sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
+          sel.appendChild(opt);
+        }
+        _applyModelToDropdown(s.default_model,sel,window._activeProvider||null);
+      }
+    }
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
     // Reconcile appearance: prefer localStorage (what the user last saw) over
     // the server.  If they diverge (e.g. a previous autosave POST failed),
@@ -1469,6 +1540,8 @@ function applyBotName(){
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showQuotaChip=false;
+    window._hideEmptyStateSuggestions=false;
+    applyEmptyStateSuggestionPref();
     window._showTps=false;
     window._fadeTextEffect=false;
     window._showCliSessions=false;
@@ -1479,6 +1552,7 @@ function applyBotName(){
     window._simplifiedToolCalling=true;
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
+    window._pinnedSessionsLimit=3;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';
@@ -1508,32 +1582,60 @@ function applyBotName(){
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
-  const _modelDropdownReady=populateModelDropdown().then(()=>{
+  const _hydrateBootModelDropdown=()=>populateModelDropdown().then(()=>{
+    const sessionModelState=S.session&&S.session.model
+      ? {model:S.session.model,model_provider:S.session.model_provider||null}
+      : null;
     const savedState=(typeof _readPersistedModelState==='function')
       ? _readPersistedModelState()
       : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
-    const savedModel=savedState&&savedState.model;
+    // Active sessions are authoritative. On fresh boot without a restored
+    // session, keep the profile/server default ahead of stale browser model
+    // state when a default exists.
+    const stateToApply=sessionModelState||(!window._defaultModel?savedState:null);
+    const savedModel=stateToApply&&stateToApply.model;
     if(savedModel && $('modelSelect')){
       const applied=(typeof _applyModelToDropdown==='function')
-        ? _applyModelToDropdown(savedModel,$('modelSelect'),savedState.model_provider||null)
+        ? (sessionModelState
+          ? _applyModelToDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null)
+          : _applyModelToDropdown(savedState.model,$('modelSelect'),savedState.model_provider||null))
         : null;
-      if(!applied) $('modelSelect').value=savedModel;
-      // If the value didn't take (model not in list), clear the bad pref
-      if(!applied&&$('modelSelect').value!==savedModel){
+      if(!applied) $('modelSelect').value=stateToApply.model;
+      // If the value didn't take (model not in list), clear the bad pref only
+      // for persisted browser preferences. Active sessions remain authoritative.
+      if(!applied&&sessionModelState&&typeof _ensureModelOptionInDropdown==='function'){
+        _ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null);
+      }
+      else if(!applied&&!sessionModelState&&$('modelSelect').value!==stateToApply.model){
         if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-        else localStorage.removeItem('hermes-webui-model');
+        else {
+          localStorage.removeItem('hermes-webui-model');
+          localStorage.removeItem('hermes-webui-model-state');
+        }
       }
       else if(typeof syncModelChip==='function') syncModelChip();
     }
     if(S.session) syncTopbar();
   }).catch(()=>{});
-  window._modelDropdownReady=_modelDropdownReady;
-  // Pre-load workspace list so sidebar name is correct from first render.
+  const _startBootModelDropdown=()=>{
+    const ready=window._modelDropdownReady;
+    if(ready&&typeof ready.then==='function') return ready;
+    const next=_hydrateBootModelDropdown();
+    window._modelDropdownReady=next;
+    return next;
+  };
+  window._modelDropdownReady=null;
+  window._ensureModelDropdownReady=_startBootModelDropdown;
+  // Start independent boot fetches without holding the conversation list behind
+  // them. The sidebar can render from /api/sessions while workspace/onboarding
+  // metadata settles in parallel.
+  const _workspaceListReady=loadWorkspaceList();
+  const _onboardingReady=_bootSettings.onboarding_completed?Promise.resolve(false):loadOnboardingWizard();
   // Render the session list before restoring the saved conversation so a stale
   // saved-session/client-side boot error cannot leave the sidebar empty forever.
-  await loadWorkspaceList();
-  await loadOnboardingWizard();
   await renderSessionList();
+  await _workspaceListReady;
+  await _onboardingReady;
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
@@ -1559,6 +1661,12 @@ function applyBotName(){
         return;
       }
       await loadSession(saved);
+      // Hard refresh starts from the static HTML model list. Hydrate the live
+      // catalog after the saved session is known, then re-apply that session's
+      // model before S._bootReady lets syncModelChip reveal the composer label.
+      // Otherwise the chip can display the static default (e.g. GPT-5.4 Mini)
+      // even though S.session already points at the Codex/current model.
+      if(S.session) await _startBootModelDropdown();
       // If the restored session has no messages it is an ephemeral scratch pad —
       // treat the page as a fresh start rather than resuming a blank conversation.
       // loadSession() already ran, so loadDir() has populated the workspace file tree.
