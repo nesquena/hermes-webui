@@ -220,6 +220,9 @@ class Handler(BaseHTTPRequestHandler):
         return cls._CSP_REPORT_ONLY
 
     def end_headers(self) -> None:
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy())
         self.send_header("Report-To", self._CSP_REPORT_TO)
         super().end_headers()
@@ -288,6 +291,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PATCH(self) -> None:
         self._handle_write(handle_patch)
+
+    def do_OPTIONS(self) -> None:
+        """Handle CORS preflight requests — return 200 with CORS headers."""
+        self._req_t0 = time.time()
+        self.send_response(200)
+        self.end_headers()
 
     def do_DELETE(self) -> None:
         self._handle_write(handle_delete)
@@ -434,7 +443,14 @@ def main() -> None:
     print('', flush=True)
     try:
         httpd.serve_forever()
+    except KeyboardInterrupt:
+        print('[webui] Shutdown: KeyboardInterrupt (Ctrl+C)', flush=True)
+        raise
+    except Exception:
+        print(f'[webui] Shutdown: unhandled exception in serve_forever\n{traceback.format_exc()}', flush=True)
+        raise
     finally:
+        print('[webui] Shutdown: serve_forever returned — process exiting', flush=True)
         # Stop the gateway watcher on shutdown
         try:
             from api.gateway_watcher import stop_watcher
