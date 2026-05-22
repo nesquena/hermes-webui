@@ -1,6 +1,10 @@
-from api.models import Session, reconciled_state_db_messages_for_session
 import contextlib
+import io
+import json
+import sys
 from types import SimpleNamespace
+
+from api.models import Session, reconciled_state_db_messages_for_session
 
 from api.streaming import (
     _assistant_reply_added_after_current_turn,
@@ -426,6 +430,31 @@ def test_prefer_context_reconcile_keeps_state_delta_when_no_mirrored_prefix():
     assert reconciled == sidecar_context + state_messages
 
 
+def test_prefer_context_reconcile_strips_small_mirrored_context_prefix():
+    sidecar_context = [
+        {"role": "user", "content": "[Session Arc Summary] compacted"},
+        {"role": "assistant", "content": "last compacted answer"},
+    ]
+    state_messages = [
+        {"role": "user", "content": "[Session Arc Summary] compacted", "timestamp": 100.0},
+        {"role": "assistant", "content": "last compacted answer", "timestamp": 101.0},
+        {"role": "user", "content": "fresh follow-up", "timestamp": 200.0},
+    ]
+    session = SimpleNamespace(
+        session_id="small-context-prefix",
+        context_messages=sidecar_context,
+        messages=[],
+    )
+
+    reconciled = reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state_messages
+    )
+
+    assert reconciled == sidecar_context + [
+        {"role": "user", "content": "fresh follow-up", "timestamp": 200.0},
+    ]
+
+
 def test_prefer_context_reconcile_strips_mirrored_rows_without_sidecar_timestamps():
     sidecar_context = [
         {"role": "assistant", "content": "cron banner"},
@@ -501,6 +530,96 @@ def test_non_streaming_chat_writeback_dedupes_full_context_replay():
         {"role": "user", "content": "simple follow-up"},
         {"role": "assistant", "content": "short answer"},
     ]
+
+class _FakePostHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.body = bytearray()
+        self.wfile = self
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.headers[name] = value
+
+    def end_headers(self):
+        pass
+
+    def write(self, data):
+        self.body.extend(data)
+
+    def json_body(self):
+        return json.loads(bytes(self.body).decode("utf-8"))
+
+
+def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkeypatch):
+    import api.config as config
+    import api.models as models
+    import api.routes as routes
+
+    state_dir = tmp_path / "state"
+    session_dir = state_dir / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+    monkeypatch.setattr(routes, "get_session", models.get_session)
+    monkeypatch.setattr(routes, "title_from", models.title_from)
+    monkeypatch.setattr(config, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
+    monkeypatch.setattr(routes, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
+    monkeypatch.setattr(routes, "load_settings", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
+
+    previous_context = [
+        {"role": "assistant", "content": "cron banner"},
+        {"role": "user", "content": "[Session Arc Summary (d1, node 39)]\n" + "old context\n" * 400},
+        {"role": "assistant", "content": "previous answer"},
+    ]
+    session = Session(
+        session_id="sync_chat_replay",
+        workspace=str(tmp_path),
+        messages=list(previous_context),
+        context_messages=list(previous_context),
+        model="test-model",
+        model_provider="test-provider",
+    )
+    session.save(touch_updated_at=False)
+
+    replayed_result = previous_context + previous_context + [
+        {"role": "user", "content": "simple follow-up"},
+        {"role": "assistant", "content": "short answer"},
+    ]
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_conversation(self, **_kwargs):
+            return {
+                "messages": replayed_result,
+                "final_response": "short answer",
+                "completed": True,
+            }
+
+    monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=FakeAgent))
+
+    handler = _FakePostHandler()
+    routes._handle_chat_sync(
+        handler,
+        {"session_id": session.session_id, "message": "simple follow-up", "workspace": str(tmp_path)},
+    )
+
+    assert handler.status == 200
+    reloaded = Session.load(session.session_id)
+    assert reloaded.context_messages == previous_context + [
+        {"role": "user", "content": "simple follow-up"},
+        {"role": "assistant", "content": "short answer"},
+    ]
+    assert reloaded.context_messages.count(previous_context[0]) == 1
+
 
 def test_session_context_falls_back_to_display_messages_for_legacy_sessions(tmp_path):
     messages = [

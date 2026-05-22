@@ -2356,7 +2356,8 @@ def _dedupe_replayed_context_messages(previous_context, result_messages):
         return result_messages
     candidates = result_messages[len(previous_context):]
     candidates = _strip_replayed_prefix(previous_context, candidates)
-    candidates = _strip_replayed_context_items(previous_context, candidates)
+    if candidates:
+        candidates = _strip_replayed_context_items(previous_context, candidates)
     return previous_context + candidates
 
 
