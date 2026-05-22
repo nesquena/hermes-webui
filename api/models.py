@@ -110,19 +110,30 @@ def _write_session_index(updates=None):
         # Lazy full-rebuild path — used when index doesn't exist yet.
         if updates is None or not SESSION_INDEX_FILE.exists():
             _cleanup_stale_tmp_files()  # best-effort sweep on startup / first call
-            entries = []
+            entry_map: dict[str, dict] = {}
             for p in SESSION_DIR.glob('*.json'):
                 if p.name.startswith('_'):
                     continue
                 try:
-                    s = Session.load(p.stem)
+                    s = Session.load(p.stem, skip_auto_save=True)
                     if s:
-                        entries.append(s.compact())
+                        c = s.compact()
+                        sid = c.get('session_id')
+                        if sid:
+                            # Dedup by session_id: prefer entry with more messages
+                            # (handles old-format session_xxx.json files alongside
+                            #  WebUI-format xxx.json with the same session_id)
+                            existing = entry_map.get(sid)
+                            if existing is None or (
+                                c.get('message_count', 0) > existing.get('message_count', 0)
+                            ):
+                                entry_map[sid] = c
                 except Exception:
                     logger.debug("Failed to load session from %s", p)
+            entries = list(entry_map.values())
 
             with LOCK:
-                existing_ids = {e.get('session_id') for e in entries}
+                existing_ids = set(entry_map.keys())
                 for s in SESSIONS.values():
                     if s.session_id not in existing_ids:
                         entries.append(s.compact())
@@ -595,7 +606,7 @@ class Session:
             _write_session_index(updates=[self])
 
     @classmethod
-    def load(cls, sid):
+    def load(cls, sid, skip_auto_save=False):
         # Validate session ID format to prevent path traversal
         if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
             return None
@@ -604,8 +615,16 @@ class Session:
             return None
         data = json.loads(p.read_text(encoding='utf-8'))
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        # Permanently strip orphaned _partial markers — they are redundant
+        # streaming artifacts. The final complete message (non-partial)
+        # already carries all content. Accumulated partials bloat the session
+        # and cause the WebUI to show empty assistant bubbles when
+        # msg_limit clips to the tail of the array.
+        _orig_msg_count = len(data.get('messages') or [])
+        data['messages'] = [m for m in (data.get('messages') or []) if not m.get('_partial')]
+        _stripped_partials = _orig_msg_count - len(data['messages'])
         session = cls(**data)
-        if _collapsed_partials:
+        if (_collapsed_partials or _stripped_partials > 0) and not skip_auto_save:
             try:
                 # Self-heal bloated sessions on first full load without touching
                 # recency/index ordering; save() creates a .bak because this
