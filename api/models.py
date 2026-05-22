@@ -3023,24 +3023,28 @@ def _session_message_visible_key(msg: dict):
     )
 
 
-def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool:
+def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]):
     if visible_key in visible_keys:
-        return True
+        return visible_key
     role, content = visible_key
     if not content:
-        return False
+        return None
     for existing_role, existing_content in visible_keys:
         if role != existing_role or not existing_content:
             continue
         if content in existing_content or existing_content in content:
-            return True
+            return (existing_role, existing_content)
         loose_content = _loose_session_message_content(content)
         loose_existing = _loose_session_message_content(existing_content)
         if loose_content and loose_existing and (
             loose_content in loose_existing or loose_existing in loose_content
         ):
-            return True
-    return False
+            return (existing_role, existing_content)
+    return None
+
+
+def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool:
+    return _matching_visible_duplicate(visible_key, visible_keys) is not None
 
 
 def merge_session_messages_append_only(sidecar_messages: list, state_messages: list) -> list:
@@ -3057,6 +3061,8 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
     seen_content_keys = set()
     seen_visible_keys = set()
     sidecar_visible_sequence = []
+    sidecar_visible_keys = set()
+    sidecar_visible_counts = {}
     max_sidecar_timestamp = None
     for msg in sidecar_messages:
         timestamp = _message_timestamp_as_float(msg)
@@ -3067,9 +3073,12 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
         seen_content_keys.add(_session_message_content_key(msg))
         visible_key = _session_message_visible_key(msg)
         seen_visible_keys.add(visible_key)
+        sidecar_visible_keys.add(visible_key)
+        sidecar_visible_counts[visible_key] = sidecar_visible_counts.get(visible_key, 0) + 1
         sidecar_visible_sequence.append(visible_key)
         merged_messages.append(msg)
     state_replay_idx = 0
+    skipped_state_visible_counts = {}
     for msg in state_messages:
         timestamp = _message_timestamp_as_float(msg)
         key = _session_message_merge_key(msg)
@@ -3082,7 +3091,12 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
             ):
                 replays_sidecar_prefix = True
                 state_replay_idx += 1
-        if replays_sidecar_prefix and state_replay_idx < len(sidecar_visible_sequence):
+        if replays_sidecar_prefix:
+            matched_visible_key = _matching_visible_duplicate(visible_key, sidecar_visible_keys)
+            if matched_visible_key is not None:
+                skipped_state_visible_counts[matched_visible_key] = (
+                    skipped_state_visible_counts.get(matched_visible_key, 0) + 1
+                )
             continue
         if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
             if key in seen_message_keys:
@@ -3091,6 +3105,13 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
                 continue
         if key in seen_message_keys:
             continue
+        matched_visible_key = _matching_visible_duplicate(visible_key, sidecar_visible_keys)
+        if matched_visible_key is not None:
+            skipped_count = skipped_state_visible_counts.get(matched_visible_key, 0)
+            sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)
+            if skipped_count < sidecar_count:
+                skipped_state_visible_counts[matched_visible_key] = skipped_count + 1
+                continue
         # State rows at or before the newest sidecar timestamp are normally
         # assumed to have already been observed by the sidecar. The <= gate
         # preserves sidecar-only ordering/metadata for equal timestamps and

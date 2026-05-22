@@ -195,6 +195,62 @@ def test_state_db_prefix_with_float_timestamps_does_not_hide_sidecar_tail():
     assert "Sammel-PR" in merged[-1]["content"]
 
 
+def test_state_db_full_replay_does_not_append_after_sidecar_tail():
+    """A full state.db replay must not leak the final replayed user after the sidecar tail.
+
+    Regression for a display merge where the sidecar already ends on the real
+    assistant answer, but state.db replays the same visible turn sequence with
+    newer float timestamps.
+    """
+    sidecar_messages = [
+        {"role": "user", "content": "initial critique", "timestamp": 100},
+        {"role": "assistant", "content": "analysis", "timestamp": 100},
+        {"role": "user", "content": "Erstelle deine Version", "timestamp": 100},
+        {"role": "assistant", "content": "opened browser preview", "timestamp": 100},
+    ]
+    state_replay = [
+        {"role": "user", "content": "initial critique", "timestamp": 100.1},
+        {"role": "assistant", "content": "analysis", "timestamp": 100.2},
+        {
+            "role": "user",
+            "content": "[Workspace::v1: /tmp/project-workspace]\nErstelle deine Version",
+            "timestamp": 100.3,
+        },
+        {"role": "assistant", "content": "opened browser preview", "timestamp": 100.4},
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_replay)
+
+    assert [m["content"] for m in merged] == [m["content"] for m in sidecar_messages]
+    assert merged[-1]["role"] == "assistant"
+    assert merged[-1]["content"] == "opened browser preview"
+
+
+def test_state_db_middle_segment_replay_does_not_append_after_sidecar_tail():
+    """A replayed state.db segment from the middle must not be appended after the tail."""
+    sidecar_messages = [
+        {"role": "user", "content": "older setup", "timestamp": 100},
+        {"role": "assistant", "content": "older answer", "timestamp": 100},
+        {"role": "assistant", "content": "analysis before request", "timestamp": 100},
+        {"role": "user", "content": "Erstelle deine Version", "timestamp": 100},
+        {"role": "assistant", "content": "opened browser preview", "timestamp": 100},
+    ]
+    state_middle_replay = [
+        {"role": "assistant", "content": "analysis before request", "timestamp": 100.1},
+        {
+            "role": "user",
+            "content": "[Workspace::v1: /tmp/project-workspace]\nErstelle deine Version",
+            "timestamp": 100.2,
+        },
+    ]
+
+    merged = merge_session_messages_append_only(sidecar_messages, state_middle_replay)
+
+    assert [m["content"] for m in merged] == [m["content"] for m in sidecar_messages]
+    assert merged[-1]["role"] == "assistant"
+    assert merged[-1]["content"] == "opened browser preview"
+
+
 def test_lost_response_recovered_on_second_read(hermes_home):
     sid = "9f14583f0e4e4444aaaa111122223333"
     stream_id = "7c8b4108d52b4aba9af362d3a54f47ac"
