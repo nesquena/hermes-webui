@@ -5373,8 +5373,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         widget_id = validate_widget_id(_space_tool_widget_id(data))
         raw_patch = data.get("patch")
         patch_payload: dict[str, Any] = raw_patch if isinstance(raw_patch, dict) else data
-        result = patch_widget(space_id, widget_id, _space_tool_widget_patch_payload(patch_payload))
-        response = {"ok": True, "action": name, **result, "widget": read_widget_detail(space_id, widget_id)}
+        safe_patch = _space_tool_widget_patch_payload(patch_payload)
+        prompt_preflight = _space_widget_patch_prompt_preflight_receipt(safe_patch)
+        if prompt_preflight.get("status") != "pass":
+            raise ValueError("Widget patch prompt preflight blocked")
+        result = patch_widget(space_id, widget_id, safe_patch)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.patch")
+        response = {
+            "ok": True,
+            "action": name,
+            **result,
+            "widget": read_widget_detail(space_id, widget_id),
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_widget_mutation_action_policy_receipt(name, prompt_preflight),
+            "progress_event": progress_event,
+        }
         if name.startswith("space.current."):
             response["active_space_id"] = space_id
         return response

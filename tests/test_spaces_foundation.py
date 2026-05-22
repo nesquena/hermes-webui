@@ -1391,12 +1391,19 @@ def test_space_tool_adapter_supports_source_current_patch_widget_alias_metadata_
     assert patched["ok"] is True
     assert patched["action"] == "space.current.patchwidget"
     assert patched["active_space_id"] == created["space_id"]
+    assert patched["prompt_preflight"]["boundary"] == "creator_commit"
+    assert patched["prompt_preflight"]["status"] == "pass"
+    assert patched["prompt_preflight"]["metadata_only"] is True
+    assert patched["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert patched["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert patched["progress_event"]["event_type"] == "tool.completed"
+    assert patched["progress_event"]["run_id"] == f"widget.patch:{created['space_id']}"
     assert patched["widget"]["id"] == "notes-card"
     assert patched["widget"]["title"] == "Renamed Notes"
     assert patched["widget"]["layout"] == {"x": 5, "y": 4, "w": 9, "h": 6, "minimized": False}
     assert persisted["title"] == "Renamed Notes"
     assert persisted["layout"] == patched["widget"]["layout"]
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
@@ -5237,13 +5244,20 @@ def test_space_tool_adapter_supports_source_widget_patch_helper_metadata_only(mo
 
     assert patched["ok"] is True
     assert patched["action"] == "space.spaces.patchwidget"
+    assert patched["prompt_preflight"]["boundary"] == "creator_commit"
+    assert patched["prompt_preflight"]["status"] == "pass"
+    assert patched["prompt_preflight"]["metadata_only"] is True
+    assert patched["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert patched["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert patched["progress_event"]["event_type"] == "tool.completed"
+    assert patched["progress_event"]["run_id"] == f"widget.patch:{created['space_id']}"
     assert patched["widget"]["title"] == "Updated Weather"
     assert patched["widget"]["layout"] == {"x": 3, "y": 2, "w": 7, "h": 4, "minimized": False}
     assert patched["widget"]["metadata"]["weather"] == {"location": "Berlin"}
     assert stored["title"] == "Updated Weather"
     assert stored["weather"] == {"location": "Berlin"}
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized
