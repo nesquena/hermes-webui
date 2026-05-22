@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -109,19 +110,30 @@ def _write_session_index(updates=None):
         # Lazy full-rebuild path — used when index doesn't exist yet.
         if updates is None or not SESSION_INDEX_FILE.exists():
             _cleanup_stale_tmp_files()  # best-effort sweep on startup / first call
-            entries = []
+            entry_map: dict[str, dict] = {}
             for p in SESSION_DIR.glob('*.json'):
                 if p.name.startswith('_'):
                     continue
                 try:
                     s = Session.load(p.stem)
                     if s:
-                        entries.append(s.compact())
+                        c = s.compact()
+                        sid = c.get('session_id')
+                        if sid:
+                            # Dedup by session_id: prefer entry with more messages
+                            # (handles old-format session_xxx.json files alongside
+                            #  WebUI-format xxx.json with the same session_id)
+                            existing = entry_map.get(sid)
+                            if existing is None or (
+                                c.get('message_count', 0) > existing.get('message_count', 0)
+                            ):
+                                entry_map[sid] = c
                 except Exception:
                     logger.debug("Failed to load session from %s", p)
+            entries = list(entry_map.values())
 
             with LOCK:
-                existing_ids = {e.get('session_id') for e in entries}
+                existing_ids = set(entry_map.keys())
                 for s in SESSIONS.values():
                     if s.session_id not in existing_ids:
                         entries.append(s.compact())
@@ -201,7 +213,16 @@ def _write_session_index(updates=None):
 
 def _active_stream_ids():
     with STREAMS_LOCK:
-        return set(STREAMS.keys())
+        active_ids = set(STREAMS.keys())
+    # STREAMS tracks the browser/SSE observation path. A worker can still be
+    # running after the SSE stream entry disappears (for example while a request
+    # is blocked in the provider, unwinding after cancel, or otherwise detached
+    # from the client). Treat ACTIVE_RUNS as authoritative for worker liveness so
+    # stale-pending repair does not append a misleading restart/interrupted
+    # marker while the agent turn is still in flight.
+    with _cfg.ACTIVE_RUNS_LOCK:
+        active_ids.update(_cfg.ACTIVE_RUNS.keys())
+    return active_ids
 
 
 def _append_recovered_turn_to_context(session, recovered: dict) -> None:
@@ -2983,6 +3004,56 @@ def _session_message_merge_key(msg: dict):
     )
 
 
+def _normalized_session_message_content(msg: dict) -> str:
+    if not isinstance(msg, dict):
+        return repr(msg)
+    return " ".join(str(msg.get("content") or "").split())
+
+
+def _loose_session_message_content(value: str) -> str:
+    return " ".join(re.findall(r"\w+", str(value or "").casefold()))
+
+
+def _session_message_content_key(msg: dict):
+    if not isinstance(msg, dict):
+        return ("non_dict", repr(msg))
+    return (
+        str(msg.get("role") or ""),
+        _normalized_session_message_content(msg),
+        str(msg.get("tool_call_id") or ""),
+        str(msg.get("tool_name") or msg.get("name") or ""),
+    )
+
+
+def _session_message_visible_key(msg: dict):
+    if not isinstance(msg, dict):
+        return ("non_dict", repr(msg))
+    return (
+        str(msg.get("role") or ""),
+        _normalized_session_message_content(msg),
+    )
+
+
+def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool:
+    if visible_key in visible_keys:
+        return True
+    role, content = visible_key
+    if not content:
+        return False
+    for existing_role, existing_content in visible_keys:
+        if role != existing_role or not existing_content:
+            continue
+        if content in existing_content or existing_content in content:
+            return True
+        loose_content = _loose_session_message_content(content)
+        loose_existing = _loose_session_message_content(existing_content)
+        if loose_content and loose_existing and (
+            loose_content in loose_existing or loose_existing in loose_content
+        ):
+            return True
+    return False
+
+
 def merge_session_messages_append_only(sidecar_messages: list, state_messages: list) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows."""
     sidecar_messages = list(sidecar_messages or [])
@@ -2994,6 +3065,9 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
 
     merged_messages = []
     seen_message_keys = set()
+    seen_content_keys = set()
+    seen_visible_keys = set()
+    sidecar_visible_sequence = []
     max_sidecar_timestamp = None
     for msg in sidecar_messages:
         timestamp = _message_timestamp_as_float(msg)
@@ -3001,10 +3075,26 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
             max_sidecar_timestamp = timestamp if max_sidecar_timestamp is None else max(max_sidecar_timestamp, timestamp)
         key = _session_message_merge_key(msg)
         seen_message_keys.add(key)
+        seen_content_keys.add(_session_message_content_key(msg))
+        visible_key = _session_message_visible_key(msg)
+        seen_visible_keys.add(visible_key)
+        sidecar_visible_sequence.append(visible_key)
         merged_messages.append(msg)
+    state_replay_idx = 0
     for msg in state_messages:
         timestamp = _message_timestamp_as_float(msg)
         key = _session_message_merge_key(msg)
+        visible_key = _session_message_visible_key(msg)
+        replays_sidecar_prefix = False
+        if state_replay_idx < len(sidecar_visible_sequence):
+            expected_visible_key = sidecar_visible_sequence[state_replay_idx]
+            if visible_key == expected_visible_key or _has_visible_duplicate(
+                visible_key, {expected_visible_key}
+            ):
+                replays_sidecar_prefix = True
+                state_replay_idx += 1
+        if replays_sidecar_prefix and state_replay_idx < len(sidecar_visible_sequence):
+            continue
         if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
             if key in seen_message_keys:
                 continue
@@ -3016,8 +3106,12 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
         # assumed to have already been observed by the sidecar. The <= gate
         # preserves sidecar-only ordering/metadata for equal timestamps and
         # prevents duplicate legacy rows when timestamp precision differs
-        # between stores. Explicit message ids are authoritative, though: two
-        # equal-timestamp messages with different ids are distinct retries.
+        # between stores. State rows whose visible content already exists in
+        # the sidecar are also skipped even if state.db restamped them later
+        # during compaction/recovery; otherwise old prompts can be appended
+        # after the assistant tail and make /api/session look like the answer
+        # vanished. Explicit message ids are authoritative for distinct rows
+        # only when their visible content is not already present.
         if (
             key[0] != "message_id"
             and max_sidecar_timestamp is not None
@@ -3027,6 +3121,8 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
             continue
         if key[0] == "message_id":
             seen_message_keys.add(key)
+        seen_content_keys.add(_session_message_content_key(msg))
+        seen_visible_keys.add(visible_key)
         merged_messages.append(msg)
     return merged_messages
 
@@ -3095,7 +3191,7 @@ def count_conversation_rounds(sid: str, since: float | None = None) -> int:
         return 0
 
     try:
-        with sqlite3.connect(str(db_path)) as conn:
+        with closing(sqlite3.connect(str(db_path))) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute(

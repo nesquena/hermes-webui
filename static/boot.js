@@ -1022,6 +1022,11 @@ let _imeComposing=false;
 })();
 function _isImeEnter(e){return e.isComposing||e.keyCode===229||_imeComposing;}
 window._isImeEnter=_isImeEnter;
+function _isVirtualKeyboardLikelyOpen(){
+  const vv=window.visualViewport;
+  if(!vv||!window.innerHeight)return true;
+  return window.innerHeight-vv.height>120;
+}
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -1039,13 +1044,14 @@ $('msg').addEventListener('keydown',e=>{
     }
   }
   // Send key: respect user preference.
-  // On touch-primary devices (software keyboard), default to Enter = newline
-  // since there's no physical Shift key. Users send via the Send button.
+  // On touch-primary devices with the software keyboard open, default to
+  // Enter = newline since there's no physical Shift key. Hardware keyboards on
+  // tablets keep desktop behavior when the viewport is not keyboard-shrunk.
   // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
     if(_isImeEnter(e)){return;}
-    const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter';
+    const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter'&&_isVirtualKeyboardLikelyOpen();
     if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
@@ -1145,6 +1151,11 @@ $('msg').addEventListener('paste',e=>{
 document.querySelectorAll('.suggestion').forEach(btn=>{
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
 });
+
+function applyEmptyStateSuggestionPref(){
+  if(!$('emptyState')) return;
+  $('emptyState').classList.toggle('no-suggestions',window._hideEmptyStateSuggestions===true);
+}
 
 window.addEventListener('resize',()=>{
   _syncWorkspacePanelInlineWidth();
@@ -1425,6 +1436,8 @@ function applyBotName(){
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
     window._showQuotaChip=s.show_quota_chip===true;
+    window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
+    applyEmptyStateSuggestionPref();
     window._showTps=!!s.show_tps;
     window._fadeTextEffect=!!s.fade_text_effect;
     window._showCliSessions=!!s.show_cli_sessions;
@@ -1438,6 +1451,7 @@ function applyBotName(){
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
+    window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
@@ -1445,10 +1459,15 @@ function applyBotName(){
     if(s.default_model){
       window._defaultModel=s.default_model;
       const sel=$('modelSelect');
-      const savedState=(typeof _readPersistedModelState==='function')
-        ? _readPersistedModelState()
-        : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
-      if(sel&&!savedState&&typeof _applyModelToDropdown==='function'){
+      if(sel&&typeof _applyModelToDropdown==='function'){
+        // Fresh page boot must prefer the profile/server default over stale
+        // browser-persisted model state. A restored session can still apply its
+        // own persisted model later through loadSession().
+        if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
+        else {
+          localStorage.removeItem('hermes-webui-model');
+          localStorage.removeItem('hermes-webui-model-state');
+        }
         const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);
         if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
           existingDefaultOpt.dataset.provider=window._activeProvider;
@@ -1514,6 +1533,8 @@ function applyBotName(){
     window._sendKey='enter';
     window._showTokenUsage=false;
     window._showQuotaChip=false;
+    window._hideEmptyStateSuggestions=false;
+    applyEmptyStateSuggestionPref();
     window._showTps=false;
     window._fadeTextEffect=false;
     window._showCliSessions=false;
@@ -1524,6 +1545,7 @@ function applyBotName(){
     window._simplifiedToolCalling=true;
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
+    window._pinnedSessionsLimit=3;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';
@@ -1558,7 +1580,10 @@ function applyBotName(){
       ? _readPersistedModelState()
       : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
     const savedModel=savedState&&savedState.model;
-    if(savedModel && $('modelSelect')){
+    // Guardrail: prefer profile/server default on boot when available.
+    // Persisted browser model state should not override a valid default model.
+    const allowBootSavedModelOverride=!window._defaultModel;
+    if(savedModel && $('modelSelect') && allowBootSavedModelOverride){
       const applied=(typeof _applyModelToDropdown==='function')
         ? _applyModelToDropdown(savedModel,$('modelSelect'),savedState.model_provider||null)
         : null;
@@ -1566,7 +1591,10 @@ function applyBotName(){
       // If the value didn't take (model not in list), clear the bad pref
       if(!applied&&$('modelSelect').value!==savedModel){
         if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-        else localStorage.removeItem('hermes-webui-model');
+        else {
+          localStorage.removeItem('hermes-webui-model');
+          localStorage.removeItem('hermes-webui-model-state');
+        }
       }
       else if(typeof syncModelChip==='function') syncModelChip();
     }
