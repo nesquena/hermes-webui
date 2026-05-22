@@ -69,6 +69,13 @@ def test_boot_does_not_block_session_restore_on_model_catalog():
 
 
 def test_boot_primes_model_catalog_without_awaiting_it():
+    """The boot-time prime must NOT await the model-catalog hydration before
+    rendering the session list. A later awaited hydration inside the saved-
+    session restore path at ``if(S.session) await _startBootModelDropdown();``
+    is intentional — that one re-applies the saved session's model after the
+    live catalog hydrates so the chip never shows a stale static default
+    (see comment in static/boot.js next to the saved-session restore).
+    """
     src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 
     ensure_pos = src.index("window._ensureModelDropdownReady=_startBootModelDropdown;")
@@ -76,7 +83,15 @@ def test_boot_primes_model_catalog_without_awaiting_it():
     session_restore_pos = src.index("await renderSessionList();", prime_pos)
 
     assert ensure_pos < prime_pos < session_restore_pos
-    assert "await _startBootModelDropdown()" not in src
+
+    # No await on the boot-prime path itself: between ensure_pos and the first
+    # session_restore await, the dropdown is fired-and-forgotten.
+    boot_prelude = src[ensure_pos:session_restore_pos]
+    assert "await _startBootModelDropdown()" not in boot_prelude, (
+        "Boot prelude must not await _startBootModelDropdown — the prime is "
+        "fire-and-forget so the sidebar can render before /api/models returns."
+    )
+    assert "await populateModelDropdown()" not in boot_prelude
 
 
 def test_failed_boot_model_catalog_prime_is_retryable():

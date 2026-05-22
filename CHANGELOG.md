@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **PR #2716** by @dobby-d-elf — Performance + correctness sweep across chat/session switching, transcript rendering, and the model picker boot path. **Behavioral change worth noting:** the metadata-only branch of `/api/session` (called on every sidebar refresh + on session switch when `messages=0`) now runs the full `merge_session_messages_append_only()` reconciliation instead of the previous raw state.db `COUNT/MAX(timestamp)` summary. This is a **correctness fix** (the prior fast path could count stale state.db rows that the merge intentionally filtered, making sidebar polling falsely report transcripts as "newer than the loaded conversation" — same class of bug as #2705 / #2686), but per-call latency goes from ~5ms to ~50–100ms for a 1000-message session. If you observe CPU/IO regressions on busy installs with high sidebar polling rates, this PR is the culprit. Other changes in the same PR are pure perf wins: (1) batched persisted-session checks in sidebar indexing (one `SESSION_DIR.glob('*.json')` snapshot replaces per-row `_index_entry_exists()` filesystem lookups); (2) lazy transcript render-cache signature (only computed at cache lookup / store); (3) hoisted assistant-tool-activity index so footer rendering does O(1) Set lookups instead of `S.toolCalls.some(...)` per message; (4) stale-session guards on `loadDir()` and `_refreshGitBadge()` so a late workspace response can't paint the wrong session's file tree after a fast switch; (5) background-primed model catalog with retryable hydration (`window._modelDropdownReady` is nulled before re-raise so the next caller refetches). Provider add/remove now routes through the shared model-ready promise instead of starting an untracked direct refresh.
+
 ## [v0.51.117] — 2026-05-22 — Release CO (stage-pr2766 — 1-PR — in-flight recovery storage quota-safe)
 
 ### Fixed
