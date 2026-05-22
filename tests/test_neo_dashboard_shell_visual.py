@@ -69,6 +69,7 @@ def test_neo_sidebar_matches_required_navigation_order_and_targets():
         ("chat", "chat", "tab_conversations"),
         ("projects", "projects", "tab_projects"),
         ("profiles", "profiles", "tab_profiles"),
+        ("meetings", "meetings", "tab_meetings"),
         ("agents", "agents", "tab_agents"),
         ("skills", "skills", "tab_skills"),
         ("tasks", "tasks", "tab_automation"),

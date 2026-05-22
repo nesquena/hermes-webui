@@ -17,7 +17,7 @@ def test_dashboard_quick_actions_grid_present():
     for action in [
         "new_project",
         "new_document",
-        "new_component",
+        "new_meeting",
         "open_terminal",
         "generate_report",
         "deploy_project",

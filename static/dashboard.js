@@ -15,7 +15,7 @@ const DASHBOARD_FALLBACK_KPIS = [
 const DASHBOARD_QUICK_ACTION_PROMPTS = {
   new_project: 'Quero criar um novo projeto. Me ajude a definir nome, objetivo, tarefas iniciais e próximos passos.',
   new_document: 'Quero criar um novo documento. Me ajude a estruturar o conteúdo e os tópicos principais.',
-  new_component: 'Quero criar um novo componente. Me ajude a definir escopo, estados e comportamento esperado.',
+  new_meeting: null,
   generate_report: 'Quero gerar um relatório do projeto. Me ajude a resumir status, progresso, riscos e próximos passos.',
   deploy_project: 'Quero preparar o deploy do projeto. Me ajude a montar um checklist seguro de publicação.',
 };
@@ -345,6 +345,10 @@ async function focusDashboardComposer() {
 }
 
 function handleDashboardQuickAction(action) {
+  if (action === 'new_meeting') {
+    switchPanel('meetings');
+    return;
+  }
   if (action === 'open_terminal') {
     focusDashboardComposer();
     setTimeout(() => {
