@@ -1412,12 +1412,44 @@ def _space_layout_action_policy_receipt(action: str) -> dict[str, Any]:
 
 
 
+def _space_widget_mutation_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
+    return action_policy_receipt(
+        action,
+        approval_gates=["creator_commit"],
+        prompt_preflight_status=status,
+        model_route_hint="hint:fast",
+    )
+
+
+
 def _space_layout_prompt_preflight_receipt(layout: dict[str, Any]) -> dict[str, Any]:
     """Return metadata-only preflight evidence for sanitized layout metadata."""
     from api.capy_policy import prompt_preflight
 
     preflight_text = json.dumps(
         _payload_summary(layout),
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    receipt = prompt_preflight(preflight_text, boundary="creator_commit")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+
+def _space_widget_patch_prompt_preflight_receipt(patch: Any) -> dict[str, Any]:
+    """Preflight sanitized widget patch metadata before tool-route mutation."""
+    from api.capy_policy import prompt_preflight
+
+    safe_patch = _widget_patch_payload_summary(patch if isinstance(patch, dict) else {})
+    preflight_text = json.dumps(
+        {"widget_patch": safe_patch},
         ensure_ascii=True,
         sort_keys=True,
         default=str,
@@ -1847,6 +1879,36 @@ def _payload_summary(value: Any, depth: int = 0) -> Any:
         return summary
     if isinstance(value, list):
         return [_payload_summary(child, depth + 1) for child in value[:20]]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return _payload_text_summary(value, 500)
+    return _payload_text_summary(type(value).__name__, 80)
+
+
+def _widget_patch_payload_key_is_safe(key: str) -> bool:
+    safe_key = _context_value(key, 80)
+    if not _payload_key_is_safe(safe_key):
+        return False
+    marker = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", safe_key)
+    normalized = re.sub(r"[^a-z0-9]+", "", marker.lower())
+    return "body" not in normalized
+
+
+def _widget_patch_payload_summary(value: Any, depth: int = 0) -> Any:
+    """Summarize widget.patch metadata without generated/raw body fields."""
+    if depth > 3:
+        return "[omitted]"
+    if isinstance(value, dict):
+        summary: dict[str, Any] = {}
+        for index, (key, child) in enumerate(value.items()):
+            if index >= 50:
+                break
+            safe_key = _context_value(key, 80)
+            if not _widget_patch_payload_key_is_safe(safe_key):
+                continue
+            summary[safe_key] = _widget_patch_payload_summary(child, depth + 1)
+        return summary
+    if isinstance(value, list):
+        return [_widget_patch_payload_summary(child, depth + 1) for child in value[:20]]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return _payload_text_summary(value, 500)
     return _payload_text_summary(type(value).__name__, 80)
@@ -5309,7 +5371,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
-        patch_payload = data.get("patch") if isinstance(data.get("patch"), dict) else data
+        raw_patch = data.get("patch")
+        patch_payload: dict[str, Any] = raw_patch if isinstance(raw_patch, dict) else data
         result = patch_widget(space_id, widget_id, _space_tool_widget_patch_payload(patch_payload))
         response = {"ok": True, "action": name, **result, "widget": read_widget_detail(space_id, widget_id)}
         if name.startswith("space.current."):
@@ -5790,8 +5853,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             _space_tool_current_id(data) if is_current_widget_patch else _space_tool_space_id_alias(data)
         )
         widget_id = validate_widget_id(_space_tool_widget_id_alias(data))
-        result = patch_widget(space_id, widget_id, data.get("patch") if isinstance(data.get("patch"), dict) else {})
-        return {"ok": True, "action": name, **result}
+        raw_patch = data.get("patch")
+        patch_payload: dict[str, Any] = raw_patch if isinstance(raw_patch, dict) else {}
+        prompt_preflight = _space_widget_patch_prompt_preflight_receipt(patch_payload)
+        if prompt_preflight.get("status") != "pass":
+            raise ValueError("Widget patch prompt preflight blocked")
+        result = patch_widget(space_id, widget_id, patch_payload)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.patch")
+        return {
+            "ok": True,
+            "action": name,
+            **result,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_widget_mutation_action_policy_receipt(name, prompt_preflight),
+            "progress_event": progress_event,
+        }
     if name in {
         "widget.reload",
         "widget.refresh",
@@ -7071,9 +7147,9 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
             widget["layout"] = _normalize_widget_layout(value)
         elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "refresh", "prompt", "interaction", "audio_policy", "status", "weather", "market_data", "watchlist", "chart", "table", "notes", "attachments", "browser", "kanban", "markdown", "export"}:
             if isinstance(value, dict):
-                widget[safe_key] = _payload_summary(value)
+                widget[safe_key] = _widget_patch_payload_summary(value)
             else:
-                widget[safe_key] = _payload_summary(value)
+                widget[safe_key] = _widget_patch_payload_summary(value)
         else:
             widget[safe_key] = _context_value(value, 500)
         changed_fields.append(safe_key)
@@ -8740,6 +8816,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "save-layout",
         "shared-slot.set",
         "shared-slot.delete",
+        "widget.patch",
         "widget.upsert",
     }:
         safe_prefix = "tool"

@@ -15520,6 +15520,16 @@ def test_space_tool_route_patches_widget_metadata_without_leaking_sources(monkey
             "widgetId": "unsafe-widget",
             "patch": {
                 "title": "Patched safely",
+                "notes": {
+                    "summary": "safe notes survive",
+                    "source": "SOURCE_VALUE_SHOULD_NOT_LEAK",
+                    "html": "<section>HTML_VALUE_SHOULD_NOT_LEAK</section>",
+                    "script": "SCRIPT_VALUE_SHOULD_NOT_LEAK",
+                    "token": "TOKEN_VALUE_SHOULD_NOT_LEAK",
+                    "raw_prompt": "RAW_PROMPT_SHOULD_NOT_LEAK",
+                    "generated_body": "GENERATED_BODY_SHOULD_NOT_LEAK",
+                    "body": "PUBLIC_BODY_SHOULD_NOT_LEAK",
+                },
                 "renderer": "<script>newLeak()</script>",
                 "api_key": "SECRET_VALUE_DO_NOT_LEAK",
             },
@@ -15531,14 +15541,35 @@ def test_space_tool_route_patches_widget_metadata_without_leaking_sources(monkey
     assert body["ok"] is True
     assert body["action"] == "widget.patch"
     assert body["widget"]["title"] == "Patched safely"
+    assert body["prompt_preflight"]["boundary"] == "creator_commit"
+    assert body["prompt_preflight"]["status"] == "pass"
+    assert body["prompt_preflight"]["metadata_only"] is True
+    assert body["prompt_preflight"]["raw_prompt_stored"] is False
+    assert body["autonomy_policy"]["action"] == "widget.patch"
+    assert body["autonomy_policy"]["approval_required"] is True
+    assert body["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert body["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert body["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert body["autonomy_policy"]["metadata_only"] is True
+    assert body["progress_event"]["event_type"] == "tool.completed"
+    assert body["progress_event"]["run_id"] == f"widget.patch:{created['space_id']}"
     stored = spaces.read_widget(created["space_id"], "unsafe-widget")
     assert stored["renderer"] == "<script>persistButDoNotReturn()</script>"
-    serialized = json.dumps(body).lower()
+    assert stored["notes"] == {"summary": "safe notes survive"}
+    detail = spaces.read_widget_detail(created["space_id"], "unsafe-widget")
+    serialized = json.dumps({"body": body, "detail": detail}).lower()
     assert "persistbutdonotreturn" not in serialized
     assert "newleak" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "api_key" not in serialized
+    assert "source_value_should_not_leak" not in serialized
+    assert "html_value_should_not_leak" not in serialized
+    assert "script_value_should_not_leak" not in serialized
+    assert "token_value_should_not_leak" not in serialized
+    assert "raw_prompt_should_not_leak" not in serialized
+    assert "generated_body_should_not_leak" not in serialized
+    assert "public_body_should_not_leak" not in serialized
     assert "secret_value_do_not_leak" not in serialized
 
 
