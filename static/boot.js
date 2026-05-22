@@ -1576,20 +1576,30 @@ function applyBotName(){
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
   const _hydrateBootModelDropdown=()=>populateModelDropdown().then(()=>{
+    const sessionModelState=S.session&&S.session.model
+      ? {model:S.session.model,model_provider:S.session.model_provider||null}
+      : null;
     const savedState=(typeof _readPersistedModelState==='function')
       ? _readPersistedModelState()
       : (localStorage.getItem('hermes-webui-model')?{model:localStorage.getItem('hermes-webui-model'),model_provider:null}:null);
-    const savedModel=savedState&&savedState.model;
-    // Guardrail: prefer profile/server default on boot when available.
-    // Persisted browser model state should not override a valid default model.
-    const allowBootSavedModelOverride=!window._defaultModel;
-    if(savedModel && $('modelSelect') && allowBootSavedModelOverride){
+    // Active sessions are authoritative. On fresh boot without a restored
+    // session, keep the profile/server default ahead of stale browser model
+    // state when a default exists.
+    const stateToApply=sessionModelState||(!window._defaultModel?savedState:null);
+    const savedModel=stateToApply&&stateToApply.model;
+    if(savedModel && $('modelSelect')){
       const applied=(typeof _applyModelToDropdown==='function')
-        ? _applyModelToDropdown(savedModel,$('modelSelect'),savedState.model_provider||null)
+        ? (sessionModelState
+          ? _applyModelToDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null)
+          : _applyModelToDropdown(savedState.model,$('modelSelect'),savedState.model_provider||null))
         : null;
-      if(!applied) $('modelSelect').value=savedModel;
-      // If the value didn't take (model not in list), clear the bad pref
-      if(!applied&&$('modelSelect').value!==savedModel){
+      if(!applied) $('modelSelect').value=stateToApply.model;
+      // If the value didn't take (model not in list), clear the bad pref only
+      // for persisted browser preferences. Active sessions remain authoritative.
+      if(!applied&&sessionModelState&&typeof _ensureModelOptionInDropdown==='function'){
+        _ensureModelOptionInDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null);
+      }
+      else if(!applied&&!sessionModelState&&$('modelSelect').value!==stateToApply.model){
         if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
         else {
           localStorage.removeItem('hermes-webui-model');

@@ -490,8 +490,17 @@ async function newSession(flash, options={}){
       const sessionProvider=S.session.model_provider||null;
       const currentProvider=currentModelState.model_provider||null;
       if(S.session.model!==modelSel.value || sessionProvider !== currentProvider){
-        _applyModelToDropdown(S.session.model,modelSel,sessionProvider);
-        if(typeof syncModelChip==='function') syncModelChip();
+        let sessionModelApplied=_applyModelToDropdown(S.session.model,modelSel,sessionProvider);
+        if(!sessionModelApplied){
+          const opt=document.createElement('option');
+          opt.value=S.session.model;
+          opt.textContent=typeof getModelLabel==='function'?getModelLabel(S.session.model):S.session.model;
+          opt.dataset.custom='1';
+          opt.dataset.provider=sessionProvider||'';
+          modelSel.appendChild(opt);
+          sessionModelApplied=_applyModelToDropdown(S.session.model,modelSel,sessionProvider);
+        }
+        if(sessionModelApplied&&typeof syncModelChip==='function') syncModelChip();
       }
     }
     // Reset per-session visual state: a fresh chat is idle even if another

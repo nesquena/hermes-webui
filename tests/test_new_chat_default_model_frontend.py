@@ -35,6 +35,27 @@ def test_new_chat_syncs_model_picker_when_default_provider_changes_but_model_id_
     assert "_applyModelToDropdown(S.session.model,modelSel,sessionProvider)" in fn
 
 
+def test_new_chat_inserts_session_model_when_static_picker_lacks_default():
+    fn = _new_session_function()
+    assert "sessionModelApplied" in fn
+    assert "document.createElement('option')" in fn
+    assert "opt.value=S.session.model" in fn
+    assert "opt.dataset.provider=sessionProvider||''" in fn
+    assert "modelSel.appendChild(opt)" in fn
+
+
+def test_boot_model_hydration_prefers_active_session_over_persisted_model():
+    boot_js = Path("static/boot.js").read_text(encoding="utf-8")
+    marker = "const sessionModelState=S.session&&S.session.model"
+    assert marker in boot_js
+    session_branch = boot_js[boot_js.index(marker) : boot_js.index("if(S.session) syncTopbar();", boot_js.index(marker))]
+    assert "_applyModelToDropdown(sessionModelState.model,$('modelSelect'),sessionModelState.model_provider||null)" in session_branch
+    assert "savedState" in session_branch
+    assert session_branch.index("sessionModelState") < session_branch.index("savedState"), (
+        "active session model must be considered before localStorage so stale saved model preferences cannot override new chats"
+    )
+
+
 def test_new_chat_does_not_send_stale_dropdown_model_when_session_has_default_model():
     assert "model:S.session.model||$('modelSelect').value" in MESSAGES_JS
     assert "model_provider:S.session.model_provider||null" in MESSAGES_JS
