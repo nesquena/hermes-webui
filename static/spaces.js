@@ -3770,8 +3770,9 @@
     if (action === 'disableRecoverySpace') {
       const ok = await showConfirmDialog({title: 'Disable space?', message: 'Disable Space "'+spaceId+'" from safe recovery? The manifest and widgets are preserved for repair/rollback.', confirmLabel: 'Disable space', danger: true, focusCancel: true});
       if (!ok) return;
-      await postSpacesJson('api/spaces/recovery/disable-space', {space_id: spaceId, reason: 'disabled from recovery panel'});
+      const disableResult = await postSpacesJson('api/spaces/recovery/disable-space', {space_id: spaceId, reason: 'disabled from recovery panel'});
       await loadCapySpacesRecovery();
+      prependRecoveryActionReceipt(disableResult || {});
       return;
     }
     if (action === 'enableRecoverySpace') {

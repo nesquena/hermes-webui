@@ -37,6 +37,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): show recovery disable receipts`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving confirmed Safe Recovery whole-Space disable actions prepend the returned metadata-only `Recovery action receipt` after the recovery panel refreshes.
+  - Reused the shared recovery receipt renderer so disable-space results expose supervised Action policy and structured Recovery progress evidence without rendering raw prompts, generated widget bodies, renderer/source/API-auth fields, scripts, or secret-looking values.
+  - Validation at completion: focused RED failed before implementation (`Recovery action receipt` missing), focused GREEN passed, related recovery UI tests passed (`5 passed, 196 deselected`), full Spaces UI JS behavior suite passed (`201 passed`), full demo parity suite passed (`12 passed`), full Spaces foundation suite passed (`515 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, `git diff --check`, spec/quality reviews, and `/tmp` headless real-static Visual/UI QA passed with no rendered DOM leaks. Screenshot artifact: `/tmp/capy-spaces-progress/screens/recovery-disable-space-receipt.png`.
+
 - `feat(spaces): show recovery restore receipts`
   - Added RED/GREEN real-`static/spaces.js` coverage proving confirmed Safe Recovery full-Space and widget revision restores prepend a metadata-only `Recovery action receipt` with Action policy and structured Recovery progress evidence after the recovery panel refreshes.
   - Reused the existing action-policy and progress receipt renderers with a recovery-specific heading so restore receipts expose supervised mode, approval gates, prompt-preflight status, model-route hint, safe run id, and metadata-only progress status without rendering or echoing raw prompts, generated widget bodies, renderer/source/API-auth fields, scripts, or secret-looking values.
