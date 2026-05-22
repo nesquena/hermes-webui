@@ -2392,6 +2392,13 @@ def test_space_tool_adapter_supports_source_rearrange_widgets_metadata_only(monk
     assert rearranged["widget_count"] == 2
     assert rearranged["widgets"][0]["layout"] == {"x": 3, "y": 2, "w": 8, "h": 5, "minimized": False}
     assert rearranged["widgets"][1]["layout"] == {"x": 7, "y": 6, "w": 5, "h": 4, "minimized": True}
+    assert rearranged["autonomy_policy"]["action"] == "space.spaces.rearrangewidgets"
+    assert rearranged["autonomy_policy"]["approval_required"] is True
+    assert rearranged["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert rearranged["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert rearranged["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert rearranged["autonomy_policy"]["metadata_only"] is True
+    assert rearranged["autonomy_policy"]["local_only"] is True
     assert persisted_widgets["weather-card"]["layout"] == {"x": 3, "y": 2, "w": 8, "h": 5, "minimized": False}
     assert persisted_widgets["notes-card"]["layout"] == {"x": 7, "y": 6, "w": 5, "h": 4, "minimized": True}
     assert "steal" not in serialized
@@ -2766,6 +2773,13 @@ def test_space_tool_adapter_supports_source_toggle_widgets_metadata_only(monkeyp
     assert toggled["widget_count"] == 2
     assert toggled["widgets"][0]["layout"] == {"x": 0, "y": 0, "w": 4, "h": 3, "minimized": True}
     assert toggled["widgets"][1]["layout"] == {"x": 4, "y": 0, "w": 4, "h": 3, "minimized": False}
+    assert toggled["autonomy_policy"]["action"] == "space.spaces.togglewidgets"
+    assert toggled["autonomy_policy"]["approval_required"] is True
+    assert toggled["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert toggled["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert toggled["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert toggled["autonomy_policy"]["metadata_only"] is True
+    assert toggled["autonomy_policy"]["local_only"] is True
     assert persisted_widgets["weather-card"]["layout"]["minimized"] is True
     assert persisted_widgets["notes-card"]["layout"]["minimized"] is False
     assert "steal" not in serialized

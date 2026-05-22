@@ -5195,6 +5195,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widgets": saved_widgets,
             "widget_count": len(saved_widgets),
             "revision_event_ids": revision_event_ids,
+            "autonomy_policy": _space_layout_action_policy_receipt(name),
         }
     if name in {"space.spaces.removespace", "space.spaces.deletespace"}:
         _space_tool_reject_ambient_current_selectors(data)
@@ -5325,6 +5326,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widgets": toggled_widgets,
             "widget_count": len(toggled_widgets),
             "revision_event_ids": revision_event_ids,
+            "autonomy_policy": _space_layout_action_policy_receipt(name),
         }
     if name in {"space.spaces.deletewidget", "space.spaces.removewidget", "space.current.deletewidget", "space.current.removewidget"}:
         if not name.startswith("space.current."):
