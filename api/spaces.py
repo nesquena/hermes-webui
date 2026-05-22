@@ -1253,14 +1253,18 @@ def _widget_recovery_summary(widget: dict[str, Any]) -> dict[str, Any]:
 
 
 def _data_slot_summary(slot: dict[str, Any]) -> dict[str, Any] | None:
-    try:
-        key = validate_data_key(slot.get("key"))
-    except ValueError:
-        return None
-    value_summary = _payload_summary(slot.get("value_summary") if "value_summary" in slot else slot.get("value"))
-    metadata_summary = _data_slot_metadata_summary(
+    raw_key = slot.get("key")
+    if raw_key == "[REDACTED]":
+        key = "[REDACTED]"
+    else:
+        try:
+            key = _shared_data_slot_key_summary(validate_data_key(str(raw_key or "")))
+        except ValueError:
+            return None
+    value_summary = _shared_data_preflight_summary(_payload_summary(slot.get("value_summary") if "value_summary" in slot else slot.get("value")))
+    metadata_summary = _shared_data_preflight_summary(_data_slot_metadata_summary(
         slot.get("metadata_summary") if "metadata_summary" in slot else slot.get("metadata")
-    )
+    ))
     return {
         "key": key,
         "value_summary": value_summary,
@@ -1291,6 +1295,97 @@ def _data_slot_summaries(space: dict[str, Any]) -> list[dict[str, Any]]:
         if summary is not None:
             items.append(summary)
     return items
+
+
+def _shared_data_slot_key_summary(key: str) -> str:
+    candidate = _active_context_value(validate_data_key(key), 80)
+    compact = re.sub(r"[^a-z0-9]+", "", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", candidate).lower())
+    if candidate and candidate != "[REDACTED]" and ("prompt" in compact or "instruction" in compact):
+        return "[REDACTED]"
+    return candidate or "[REDACTED]"
+
+
+def _shared_data_storage_key(key: str) -> str:
+    data_key = validate_data_key(key)
+    if _shared_data_slot_key_summary(data_key) == "[REDACTED]":
+        digest = hashlib.sha256(data_key.encode("utf-8")).hexdigest()[:16]
+        return f"__capy-redacted-{digest}"
+    return data_key
+
+
+_SHARED_DATA_PREFLIGHT_SECRET_SHAPE_RE = re.compile(
+    r"(sk-[a-z0-9_.-]{6,}|gh[pousr]_[a-z0-9_.-]{6,}|github_pat_[a-z0-9_.-]{6,}|github\.\.\.[a-z0-9_.-]{3,}|hf_[a-z0-9_.-]{6,}|akia[0-9a-z_.-]{8,}|xox[abprs]-[a-z0-9_.-]{6,}|AIza[0-9A-Za-z_.-]{6,})",
+    re.IGNORECASE,
+)
+_SHARED_DATA_PREFLIGHT_HTML_RE = re.compile(r"<\s*/?\s*[a-z][^>]*>", re.IGNORECASE)
+
+
+def _shared_data_summary_key(key: Any) -> str:
+    text = _context_value(key, 80)
+    compact = re.sub(r"[^a-z0-9]+", "", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", text).lower())
+    if not text or "prompt" in compact or "instruction" in compact:
+        return "[REDACTED]"
+    return text
+
+
+def _shared_data_preflight_summary(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            safe_key = _shared_data_summary_key(key)
+            sanitized[safe_key] = "[REDACTED]" if safe_key == "[REDACTED]" else _shared_data_preflight_summary(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_shared_data_preflight_summary(item) for item in value]
+    if isinstance(value, tuple):
+        return [_shared_data_preflight_summary(item) for item in value]
+    if isinstance(value, str):
+        text = _payload_text_summary(value)
+        if text != "[REDACTED]" and (_SHARED_DATA_PREFLIGHT_HTML_RE.search(text) or _SHARED_DATA_PREFLIGHT_SECRET_SHAPE_RE.search(text)):
+            return "[REDACTED]"
+        return text
+    return value
+
+
+def _shared_data_slot_prompt_preflight_receipt(key: str, item: dict[str, Any]) -> dict[str, Any]:
+    """Preflight sanitized shared-data summaries before persistence.
+
+    Shared data can become agent-visible advisory context later, so only the
+    already metadata-only slot summary crosses this boundary. Raw values,
+    renderer/source/auth fields, prompts, and secret-looking values are never
+    sent to the receipt or returned to callers.
+    """
+
+    from api.capy_policy import prompt_preflight
+
+    preflight_text = json.dumps(
+        {
+            "key": _shared_data_slot_key_summary(key),
+            "value_summary": _shared_data_preflight_summary(item.get("value_summary")),
+            "metadata_summary": _shared_data_preflight_summary(item.get("metadata_summary")),
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    receipt = prompt_preflight(preflight_text, boundary="shared_data_slot")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+def _shared_data_slot_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
+    safe_action = "space.shared_slot.set" if str(action).endswith("data.set") else "space.shared_slot.mutate"
+    return action_policy_receipt(
+        safe_action,
+        approval_gates=["creator_commit"],
+        prompt_preflight_status=status,
+        model_route_hint="hint:summarize",
+    )
 
 
 def _context_value(value: Any, limit: int = 500) -> str:
@@ -2335,17 +2430,27 @@ def set_shared_data_slot(space_id: str, key: str, value: Any, metadata: Any | No
         raise RuntimeError("Capy Spaces is disabled")
     sid = validate_space_id(space_id)
     data_key = validate_data_key(key)
+    storage_key = _shared_data_storage_key(data_key)
     space = read_space(sid)
-    shared_data = space.get("shared_data") if isinstance(space.get("shared_data"), dict) else {}
+    raw_shared_data = space.get("shared_data")
+    shared_data: dict[str, Any] = raw_shared_data if isinstance(raw_shared_data, dict) else {}
+    public_key = _shared_data_slot_key_summary(data_key)
     item = {
-        "key": data_key,
-        "value_summary": _payload_summary(value),
-        "metadata_summary": _data_slot_metadata_summary(metadata if isinstance(metadata, dict) else {}),
+        "key": public_key,
+        "value_summary": _shared_data_preflight_summary(_payload_summary(value)),
+        "metadata_summary": _shared_data_preflight_summary(_data_slot_metadata_summary(metadata if isinstance(metadata, dict) else {})),
     }
-    shared_data[data_key] = dict(item)
+    prompt_preflight = _shared_data_slot_prompt_preflight_receipt(data_key, item)
+    if prompt_preflight.get("status") != "pass":
+        raise ValueError("Shared data slot prompt preflight blocked")
+    shared_data[storage_key] = dict(item)
     space["shared_data"] = shared_data
-    saved = _write_manifest(space, "space.data.set", {"key": data_key})
-    return {"space_id": sid, "item": read_shared_data_slot(saved["space_id"], data_key)}
+    saved = _write_manifest(space, "space.data.set", {"key": public_key})
+    return {
+        "space_id": sid,
+        "item": read_shared_data_slot(saved["space_id"], data_key),
+        "prompt_preflight": prompt_preflight,
+    }
 
 
 def list_shared_data_slots(space_id: str) -> list[dict[str, Any]]:
@@ -2360,9 +2465,15 @@ def read_shared_data_slot(space_id: str, key: str) -> dict[str, Any]:
         raise RuntimeError("Capy Spaces is disabled")
     sid = validate_space_id(space_id)
     data_key = validate_data_key(key)
-    for item in _data_slot_summaries(read_space(sid)):
-        if item["key"] == data_key:
-            return item
+    storage_key = _shared_data_storage_key(data_key)
+    space = read_space(sid)
+    raw_shared_data = space.get("shared_data")
+    shared_data: dict[str, Any] = raw_shared_data if isinstance(raw_shared_data, dict) else {}
+    raw_item = shared_data.get(storage_key) or shared_data.get(data_key)
+    if isinstance(raw_item, dict):
+        summary = _data_slot_summary({"key": _shared_data_slot_key_summary(data_key), **raw_item})
+        if summary is not None:
+            return summary
     raise FileNotFoundError("Data slot not found")
 
 
@@ -2371,16 +2482,20 @@ def delete_shared_data_slot(space_id: str, key: str) -> dict[str, Any]:
         raise RuntimeError("Capy Spaces is disabled")
     sid = validate_space_id(space_id)
     data_key = validate_data_key(key)
+    storage_key = _shared_data_storage_key(data_key)
+    public_key = _shared_data_slot_key_summary(data_key)
     space = read_space(sid)
-    shared_data = space.get("shared_data") if isinstance(space.get("shared_data"), dict) else {}
-    if data_key not in shared_data:
+    raw_shared_data = space.get("shared_data")
+    shared_data: dict[str, Any] = raw_shared_data if isinstance(raw_shared_data, dict) else {}
+    delete_key = storage_key if storage_key in shared_data else data_key
+    if delete_key not in shared_data:
         raise FileNotFoundError("Data slot not found")
-    shared_data.pop(data_key, None)
+    shared_data.pop(delete_key, None)
     space["shared_data"] = shared_data
-    saved = _write_manifest(space, "space.data.delete", {"key": data_key})
+    saved = _write_manifest(space, "space.data.delete", {"key": public_key})
     return {
         "space_id": sid,
-        "key": data_key,
+        "key": public_key,
         "deleted": True,
         "revision_event_id": saved.get("revision_event_id"),
     }
@@ -5232,7 +5347,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         result = set_shared_data_slot(space_id, data.get("key"), data.get("value"), data.get("metadata"))
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="shared-slot.set")
-        return {"ok": True, "action": name, **result, "progress_event": progress_event}
+        response = {"ok": True, "action": name, **result, "progress_event": progress_event}
+        response["autonomy_policy"] = _shared_data_slot_action_policy_receipt(name, result.get("prompt_preflight"))
+        return response
     if name in {"space.data.list", "space.current.data.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "space_id": space_id, "items": list_shared_data_slots(space_id)}

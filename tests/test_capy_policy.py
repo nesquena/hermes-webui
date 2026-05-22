@@ -32,6 +32,7 @@ def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
                 "auto_fetched_source",
                 "memory_context",
                 "active_space_instructions",
+                "shared_data_slot",
             ],
         },
         "model_routing": {

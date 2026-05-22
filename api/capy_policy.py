@@ -54,6 +54,7 @@ _PROTECTED_BOUNDARIES = [
     "auto_fetched_source",
     "memory_context",
     "active_space_instructions",
+    "shared_data_slot",
 ]
 
 _MODEL_HINT_ORDER = [
