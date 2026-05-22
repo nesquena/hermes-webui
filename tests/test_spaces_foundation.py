@@ -1718,6 +1718,102 @@ def test_space_tool_adapter_supports_source_current_space_meta_and_layout_helper
     assert '"source":' not in serialized
 
 
+
+def test_space_tool_save_layout_returns_metadata_only_action_policy_receipt(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "layout-policy-lab", "name": "Layout Policy Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "status-card",
+            "kind": "status",
+            "title": "Status Card",
+            "renderer": "<script>stored()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    saved_layout = spaces.run_space_tool(
+        "space.spaces.saveSpaceLayout",
+        {
+            "spaceId": created["space_id"],
+            "widgetIds": ["status-card"],
+            "widgetPositions": {"status-card": {"x": 3, "y": 2, "renderer": "<script>steal()</script>"}},
+            "widgetSizes": {"status-card": {"w": 6, "h": 4, "api_key": "SECRET_VALUE_DO_NOT_LEAK"}},
+            "source": "SECRET_SOURCE",
+        },
+    )
+    serialized = json.dumps(saved_layout, sort_keys=True).lower()
+
+    assert saved_layout["autonomy_policy"]["action"] == "space.spaces.savespacelayout"
+    assert saved_layout["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert saved_layout["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert saved_layout["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert saved_layout["autonomy_policy"]["metadata_only"] is True
+    assert saved_layout["prompt_preflight"]["boundary"] == "creator_commit"
+    assert saved_layout["prompt_preflight"]["status"] == "pass"
+    assert saved_layout["prompt_preflight"]["metadata_only"] is True
+    assert saved_layout["progress_event"]["stored"] is True
+    assert saved_layout["progress_event"]["queued"] is True
+    assert saved_layout["progress_event"]["event_type"] == "tool.completed"
+    assert saved_layout["progress_event"]["family"] == "tool"
+    assert saved_layout["progress_event"]["run_id"] == "save-layout:layout-policy-lab"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert '"source":' not in serialized
+
+
+
+def test_space_tool_current_save_layout_returns_metadata_only_action_policy_receipt(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "current-layout-policy-lab", "name": "Current Layout Policy Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "status-card",
+            "kind": "status",
+            "title": "Status Card",
+            "renderer": "<script>stored()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    saved_layout = spaces.run_space_tool(
+        "space.current.saveLayout",
+        {
+            "currentSpaceId": created["space_id"],
+            "widgetIds": ["status-card"],
+            "widgetPositions": {"status-card": {"x": 1, "y": 3, "renderer": "<script>steal()</script>"}},
+            "widgetSizes": {"status-card": {"w": 5, "h": 2, "api_key": "SECRET_VALUE_DO_NOT_LEAK"}},
+            "source": "SECRET_SOURCE",
+        },
+    )
+    serialized = json.dumps(saved_layout, sort_keys=True).lower()
+
+    assert saved_layout["active_space_id"] == created["space_id"]
+    assert saved_layout["autonomy_policy"]["action"] == "space.current.savelayout"
+    assert saved_layout["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert saved_layout["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert saved_layout["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert saved_layout["autonomy_policy"]["metadata_only"] is True
+    assert saved_layout["prompt_preflight"]["boundary"] == "creator_commit"
+    assert saved_layout["prompt_preflight"]["status"] == "pass"
+    assert saved_layout["prompt_preflight"]["metadata_only"] is True
+    assert saved_layout["progress_event"]["stored"] is True
+    assert saved_layout["progress_event"]["queued"] is True
+    assert saved_layout["progress_event"]["event_type"] == "tool.completed"
+    assert saved_layout["progress_event"]["family"] == "tool"
+    assert saved_layout["progress_event"]["run_id"] == "save-layout:current-layout-policy-lab"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_save_meta_preflights_empty_instruction_clear(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(

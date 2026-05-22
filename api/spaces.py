@@ -1388,6 +1388,35 @@ def _shared_data_slot_action_policy_receipt(action: str, preflight_receipt: dict
     )
 
 
+
+def _space_layout_action_policy_receipt(action: str) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        action,
+        approval_gates=["creator_commit"],
+        prompt_preflight_status="required",
+        model_route_hint="hint:fast",
+    )
+
+
+
+def _space_layout_prompt_preflight_receipt(layout: dict[str, Any]) -> dict[str, Any]:
+    """Return metadata-only preflight evidence for sanitized layout metadata."""
+    from api.capy_policy import prompt_preflight
+
+    preflight_text = json.dumps(
+        _payload_summary(layout),
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    receipt = prompt_preflight(preflight_text, boundary="creator_commit")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+
 def _context_value(value: Any, limit: int = 500) -> str:
     """Return a single-line value safe for compact agent context."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -4707,10 +4736,16 @@ def save_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
     space_id = validate_space_id(_space_tool_space_id(payload))
     space = read_space(space_id)
     layout = _space_tool_layout_payload(payload)
+    prompt_preflight = _space_layout_prompt_preflight_receipt(layout)
     space["layout"] = layout
     _space_tool_sanitize_widgets(space)
     saved = _write_manifest(space, "space.layout.updated", {"layout": _payload_summary(layout)})
-    return {"space_id": saved["space_id"], "revision_event_id": saved["revision_event_id"], "space": read_space_detail(saved["space_id"])}
+    return {
+        "space_id": saved["space_id"],
+        "revision_event_id": saved["revision_event_id"],
+        "space": read_space_detail(saved["space_id"]),
+        "prompt_preflight": prompt_preflight,
+    }
 
 
 
@@ -5114,7 +5149,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             _space_tool_reject_ambient_current_selectors(data)
         result = save_space_layout_from_tool(data)
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="save-layout")
-        response = {"ok": True, "action": name, **result, "progress_event": progress_event}
+        response = {
+            "ok": True,
+            "action": name,
+            **result,
+            "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "progress_event": progress_event,
+        }
         if name.startswith("space.current."):
             response["active_space_id"] = result["space_id"]
         return response
