@@ -548,6 +548,13 @@ async function loadSession(sid){
     S.toolCalls = [];
     _messagesTruncated = false;
     _oldestIdx = 0;
+    // Close live SSE streams from the session we're leaving so they stop
+    // pumping token/reasoning events on the main thread. The stream for
+    // the session we're switching TO is reconnected later via
+    // attachLiveStream({reconnecting:true}) when it has an activeStreamId.
+    if (currentSid && currentSid !== sid && typeof closeOtherLiveStreams === 'function') {
+      closeOtherLiveStreams(sid);
+    }
     _loadingOlder = false;
     const _msgInner = $('msgInner');
     if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
