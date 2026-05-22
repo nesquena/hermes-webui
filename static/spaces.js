@@ -1140,6 +1140,26 @@
       '</div>';
   }
 
+  function renderPackageProgressEvidence(event){
+    const data = event && typeof event === 'object' && !Array.isArray(event) ? event : null;
+    if (!data) return '';
+    const eventId = safeProgressPublicId(data.event_id);
+    const eventType = safeProgressEventType(data.event_type);
+    const family = safeProgressFamily(data.family);
+    const runId = safeProgressPublicId(data.run_id);
+    const redaction = safeProgressRedactionStatus(data.redaction_status);
+    if (!eventId && !eventType && !family && !runId) return '';
+    const details = [];
+    if (eventType) details.push(eventType);
+    if (family) details.push(family);
+    if (runId) details.push('run '+runId);
+    details.push(redaction+' progress receipt');
+    return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Package progress</strong>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(details.join(' · '))+'</div>' +
+      '<div class="capy-spaces-muted">Structured event metadata only; raw prompts, tool bodies, and package contents are omitted.</div>' +
+      '</div></div></div>';
+  }
+
   function renderCreatorPreviewResult(data){
     const previewId = safeCreatorIdText(data && data.preview_id || '');
     const stage = safeCreatorSummaryText(data && data.stage || 'sandbox-preview-required') || 'sandbox-preview-required';
@@ -1445,7 +1465,8 @@
     return '<div class="capy-spaces-card"><h3>Space Agent export ready</h3>' +
       '<div class="capy-spaces-muted">Safe metadata package generated. Package contents are intentionally not displayed in this UI.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(filename)+'</strong>' +
-      '<div class="capy-spaces-muted">Format: '+escapeHtml(format)+' · Space ID: '+escapeHtml(safeSpaceId)+' · Widgets: '+widgetCount+'</div></div></div></div></div>';
+      '<div class="capy-spaces-muted">Format: '+escapeHtml(format)+' · Space ID: '+escapeHtml(safeSpaceId)+' · Widgets: '+widgetCount+'</div></div></div></div>' +
+      renderPackageProgressEvidence(data && data.progress_event) + '</div>';
   }
 
   function safeImportMetadataText(value, fallback){
@@ -1480,7 +1501,8 @@
     return '<div class="capy-spaces-card"><h3>Space Agent import ready</h3>' +
       '<div class="capy-spaces-muted">Imported package metadata only. Generated widget bodies remain quarantined/disabled for review by the backend.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(name)+'</strong>' +
-      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId || 'redacted-import')+' · '+count+' widget'+(count === 1 ? '' : 's')+'</div></div></div>'+widgetRows+'</div></div>' + warningRows;
+      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId || 'redacted-import')+' · '+count+' widget'+(count === 1 ? '' : 's')+'</div></div></div>'+widgetRows+'</div>' +
+      renderPromptPreflightEvidence(data && data.prompt_preflight) + renderActionPolicyEvidence(data && data.autonomy_policy) + renderPackageProgressEvidence(data && data.progress_event) + '</div>' + warningRows;
   }
 
   function renderSpaceImportError(message){
