@@ -5768,7 +5768,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, **result}
     if name in {"space.camera.add_stream", "camera.add_stream"}:
         space_id = validate_space_id(data.get("space_id"))
-        result = add_camera_stream(space_id, data)
+        result = add_camera_stream(space_id, data, action=name)
         return {"ok": True, "action": name, **result}
     raise ValueError("Unsupported Capy Spaces tool action")
 
@@ -6732,7 +6732,18 @@ def _camera_stream_url_metadata(raw_url: Any) -> dict[str, Any]:
     }
 
 
-def add_camera_stream(space_id: str, stream: dict[str, Any]) -> dict[str, Any]:
+def _camera_stream_action_policy_receipt(action: str) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        action,
+        approval_gates=["destructive_external_action"],
+        prompt_preflight_status="required",
+        model_route_hint="hint:vision",
+    )
+
+
+def add_camera_stream(space_id: str, stream: dict[str, Any], *, action: str = "space.camera.add_stream") -> dict[str, Any]:
     """Append an approved camera-stream reference as metadata only.
 
     Raw camera URLs can contain private hosts, credentials, and connection
@@ -6783,6 +6794,7 @@ def add_camera_stream(space_id: str, stream: dict[str, Any]) -> dict[str, Any]:
         "stream": safe_stream,
         "widget": _widget_summary(widgets[idx]),
         "revision_event_id": saved["revision_event_id"],
+        "autonomy_policy": _camera_stream_action_policy_receipt(action),
     }
 
 

@@ -13913,6 +13913,11 @@ def test_camera_stream_tool_records_approved_private_stream_as_metadata_only(mon
 
     assert result["ok"] is True
     assert result["action"] == "space.camera.add_stream"
+    assert result["autonomy_policy"]["action"] == "space.camera.add_stream"
+    assert result["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert result["autonomy_policy"]["model_route_hint"] == "hint:vision"
+    assert result["autonomy_policy"]["metadata_only"] is True
     assert result["stream"]["title"] == "Garage ignored"
     assert result["stream"]["host_class"] == "private"
     assert result["stream"]["approved"] is True

@@ -37,6 +37,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): add camera stream policy receipts`
+  - Added RED/GREEN backend coverage proving `space.camera.add_stream` returns a metadata-only `autonomy_policy` receipt with action name, `destructive_external_action` approval gate, required prompt-preflight status, `hint:vision` model-route hint, and `metadata_only: true` after explicit approval.
+  - Passed the invoked alias through the camera-stream tool path so receipts stay scoped to the actual action while raw private camera URLs, ports, bearer/token-like query data, renderer/script fields, API-auth fields, and secret-looking fixture markers remain absent from returned/stored metadata.
+  - Validation at completion: focused RED failed before implementation (`autonomy_policy` missing), focused GREEN passed, targeted camera-stream regressions passed (`4 passed`), full Spaces foundation suite passed (`509 passed`), `py_compile`/`git diff --check` passed, and spec/quality reviews approved the slice.
+
 - `feat(spaces): preflight save-meta instructions`
   - Added RED/GREEN backend coverage proving `space.spaces.saveSpaceMeta` / `space.current.saveMeta` run the `active_space_instructions` prompt-preflight boundary before persisting `agentInstructions` / `specialInstructions`.
   - Hostile instruction writes now fail closed without creating a new revision or replacing the prior safe instructions, while passing instruction writes return metadata-only prompt-preflight and action-policy receipts.
