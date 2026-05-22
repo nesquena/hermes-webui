@@ -1398,7 +1398,39 @@ global.fetch = async function(path, opts = {}) {
     return response({ queued: true, space_id: eventBody.space_id || 'lab', widget_id: eventBody.widget_id || 'weather', event_name: eventBody.event_name || 'agent.prompt', event_id: 'evt1', autonomy_policy: { available: true, action: 'space.widget.event', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['generated_widget_execution'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' });
   }
   if (path === 'api/spaces/recovery/disable-widget') {
-    return response({ disabled: true, space_id: 'broken', widget_id: 'bad-widget', revision_event_id: 'rev-disable' });
+    return response({
+      disabled: true,
+      space_id: 'broken',
+      widget_id: 'bad-widget',
+      revision_event_id: 'rev-disable',
+      autonomy_policy: {
+        available: true,
+        action: 'space.widget.recovery.disable',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['generated_widget_execution'],
+        prompt_preflight_status: 'required',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-disable-widget',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'recovery.widget.disable:broken',
+        redaction_status: 'metadata-only',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET',
+    });
   }
   if (path === 'api/spaces/recovery/enable-widget') {
     return response({
@@ -6176,6 +6208,27 @@ def test_spaces_ui_recovery_disable_space_uses_shared_confirm_and_refreshes(driv
     assert out["calls"][-1]["path"] == "api/spaces/recovery"
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_disable_widget_renders_metadata_only_action_receipt(driver_path):
+    out = _run_spaces_scenario(driver_path, "disableRecoveryWidget")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/recovery/disable-widget")
+
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "broken", "widget_id": "bad-widget", "reason": "disabled from recovery panel"}
+    assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "Recovery action receipt" in out["recoveryHtml"]
+    assert "Action policy" in out["recoveryHtml"]
+    assert "Action: space.widget.recovery.disable" in out["recoveryHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: required" in out["recoveryHtml"]
+    assert "Gates: Generated widget execution approval" in out["recoveryHtml"]
+    assert "Recovery progress" in out["recoveryHtml"]
+    assert "tool.completed · tool · run recovery.widget.disable:broken · metadata-only progress receipt" in out["recoveryHtml"]
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+    assert "raw_prompt" not in out["recoveryHtml"]
 
 
 def test_spaces_ui_recovery_disable_space_renders_metadata_only_action_receipt(driver_path):
