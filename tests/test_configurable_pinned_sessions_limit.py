@@ -52,8 +52,9 @@ def test_pin_limit_setting_is_exposed_and_wired_through_ui():
     assert 'payload.pinned_sessions_limit=parseInt(pinnedLimitField.value,10)' in PANELS_JS
     assert "settings.pinned_sessions_limit" in PANELS_JS
     assert "window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3" in BOOT_JS
-    assert "function _pinnedSessionsLimit()" in SESSIONS_JS
-    assert "_pinnedSessionCount()>=_pinnedSessionsLimit()" in SESSIONS_JS
+    assert "function _getPinnedSessionsLimit()" in SESSIONS_JS
+    assert "const limit=parseInt(window._pinnedSessionsLimit||3,10);" in SESSIONS_JS
+    assert "_pinnedSessionCount()>=_getPinnedSessionsLimit()" in SESSIONS_JS
 
 
 def test_settings_api_persists_integer_pin_limit_and_rejects_invalid_values():

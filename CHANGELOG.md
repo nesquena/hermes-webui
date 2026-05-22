@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **PR #2727** by @Michaelyklam (closes #2715) — Restore the sidebar chat-row action menu after v0.51.106's configurable pinned-session limit setting. The frontend helper that reads `window._pinnedSessionsLimit` no longer shares the same global name as the setting value, so clicking the three-dot menu no longer throws `_pinnedSessionsLimit is not a function` and delete/archive/rename actions are reachable again.
 
 ## [v0.51.106] — 2026-05-21 — Release CD (stage-399 — 3-PR batch — restamped state.db replay dedupe + context_messages dedupe so agent doesn't see duplicates + empty _partial bloat fix)
 

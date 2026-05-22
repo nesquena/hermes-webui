@@ -75,10 +75,18 @@ def test_session_pin_cap_has_backend_and_frontend_guards():
     assert 'Up to {pinned_sessions_limit} sessions can be pinned' in ROUTES_PY
 
     assert 'function _pinnedSessionCount()' in SESSIONS_JS
-    assert 'function _pinnedSessionsLimit()' in SESSIONS_JS
-    assert 'const pinLimitReached=!session.pinned&&_pinnedSessionCount()>=_pinnedSessionsLimit();' in SESSIONS_JS
+    assert 'function _getPinnedSessionsLimit()' in SESSIONS_JS
+    assert 'const limit=parseInt(window._pinnedSessionsLimit||3,10);' in SESSIONS_JS
+    assert 'const pinLimitReached=!session.pinned&&_pinnedSessionCount()>=_getPinnedSessionsLimit();' in SESSIONS_JS
     assert 'Only ${limit} conversations can be pinned' in SESSIONS_JS
     assert ".session-action-opt.is-disabled{opacity:.55;cursor:not-allowed;}" in STYLE_CSS
+
+
+def test_session_pin_limit_helper_does_not_collide_with_window_setting():
+    assert 'function _pinnedSessionsLimit()' not in SESSIONS_JS
+    assert 'window._pinnedSessionsLimit=parseInt' not in SESSIONS_JS
+    assert 'function _getPinnedSessionsLimit()' in SESSIONS_JS
+    assert '_getPinnedSessionsLimit();' in SESSIONS_JS
 
 
 def test_session_rows_open_action_menu_from_right_click():
