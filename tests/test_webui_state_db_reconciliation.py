@@ -161,6 +161,31 @@ def test_metadata_poll_uses_sidecar_message_count_for_external_updates(monkeypat
     assert session["last_message_at"] == 1001.0
 
 
+def test_metadata_poll_prefers_sidecar_count_when_index_is_stale(monkeypatch, tmp_path):
+    """A stale sidebar index must not hide externally appended sidecar turns."""
+    import api.config as config
+    import api.routes as routes
+
+    sid = "webui_reconcile_metadata_stale_index"
+    sidecar_messages = [
+        {"role": "user", "content": "before stale index", "timestamp": 1000.0},
+        {"role": "assistant", "content": "new sidecar turn", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    config.SESSION_INDEX_FILE.write_text(
+        json.dumps([{"session_id": sid, "message_count": 1}]),
+        encoding="utf-8",
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    assert session["message_count"] == 2
+    assert session["last_message_at"] == 1001.0
+
+
 def test_state_db_reconciliation_preserves_sidecar_only_messages(monkeypatch, tmp_path):
     import api.routes as routes
 
@@ -279,6 +304,68 @@ def test_state_db_reconciliation_dedupes_numeric_equivalent_timestamps(monkeypat
     messages = handler.response_json["session"]["messages"]
     assert [m["content"] for m in messages] == ["same timestamp"]
     assert handler.response_json["session"]["message_count"] == 1
+
+
+def test_state_db_reconciliation_dedupes_same_second_state_rows(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_fractional_state_timestamp"
+    _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        [
+            {"role": "user", "content": "hi", "timestamp": 1779300509},
+            {"role": "assistant", "content": "Hi there", "timestamp": 1779300509},
+        ],
+    )
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {"role": "user", "content": "hi", "timestamp": 1779300509.52663},
+            {"role": "assistant", "content": "Hi there", "timestamp": 1779300509.52718},
+        ],
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    assert [m["role"] for m in session["messages"]] == ["user", "assistant"]
+    assert [m["content"] for m in session["messages"]] == ["hi", "Hi there"]
+    assert session["message_count"] == 2
+
+
+def test_state_db_reconciliation_preserves_same_second_state_repeats(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_fractional_state_repeats"
+    _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        [{"role": "user", "content": "start", "timestamp": 1779300508}],
+    )
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {"role": "assistant", "content": "Still working", "timestamp": 1779300509.12663},
+            {"role": "assistant", "content": "Still working", "timestamp": 1779300509.82718},
+        ],
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    assert [m["content"] for m in session["messages"]] == [
+        "start",
+        "Still working",
+        "Still working",
+    ]
+    assert session["message_count"] == 3
 
 
 def test_state_db_reconciliation_preserves_repeated_sidecar_rows(monkeypatch, tmp_path):

@@ -1984,8 +1984,10 @@ def get_providers() -> dict[str, Any]:
                 "display_name": cp_name,
                 "has_key": cp_has_key,
                 "configurable": False,  # custom providers managed via config.yaml
+                "is_custom": True,
                 "key_source": "config_yaml" if cp_has_key else "none",
                 "models": cp_models,
+                "models_total": len(cp_models),
             })
 
     # Determine active provider

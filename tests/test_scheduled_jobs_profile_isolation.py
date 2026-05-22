@@ -234,6 +234,7 @@ def test_webui_installs_profile_context_on_in_process_scheduler_run_job(tmp_path
     monkeypatch.setitem(sys.modules, "cron.scheduler", cron_scheduler)
     monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", default_home)
     monkeypatch.setattr(p, "cron_profile_context_for_home", Ctx)
+    monkeypatch.setattr(p, "publish_session_list_changed", lambda reason: events.append(("publish", reason)))
 
     p.install_cron_scheduler_profile_isolation()
 
@@ -242,6 +243,7 @@ def test_webui_installs_profile_context_on_in_process_scheduler_run_job(tmp_path
         ("enter", str(research_home)),
         ("run", "job1575"),
         ("exit", str(research_home)),
+        ("publish", "cron_complete"),
     ]
 
 
@@ -279,6 +281,7 @@ def test_scheduler_run_job_wrapper_does_not_reenter_manual_cron_context(tmp_path
     monkeypatch.setitem(sys.modules, "cron.scheduler", cron_scheduler)
     monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", tmp_path / "home")
     monkeypatch.setattr(p, "cron_profile_context_for_home", Ctx)
+    monkeypatch.setattr(p, "publish_session_list_changed", lambda reason: events.append(("unexpected-publish", reason)))
     monkeypatch.setattr(p._tls, "cron_profile_depth", 1, raising=False)
 
     p.install_cron_scheduler_profile_isolation()

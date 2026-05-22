@@ -68,7 +68,7 @@ What makes it different from other agentic tools:
   the results back into its own memory
 - **Self-hosted** — your conversations, your memory, your hardware
 
-**vs. the field** *(landscape is actively shifting — see [HERMES.md](HERMES.md) for the full breakdown)*:
+**vs. the field** *(landscape is actively shifting — see [docs/why-hermes.md](docs/why-hermes.md) for the full breakdown)*:
 
 | | OpenClaw | Claude Code | Codex CLI | OpenCode | Hermes |
 |---|---|---|---|---|---|
@@ -89,7 +89,7 @@ with memory, cron, and messaging. The key differences: Hermes writes and saves i
 automatically as a core behavior (OpenClaw's skill system centers on a community marketplace);
 Hermes is more stable across updates (OpenClaw has documented release regressions and ClawHub
 has had security incidents involving malicious skills); and Hermes runs natively in the Python
-ecosystem. See [HERMES.md](HERMES.md) for the full side-by-side.
+ecosystem. See [docs/why-hermes.md](docs/why-hermes.md) for the full side-by-side.
 
 ---
 
@@ -469,7 +469,7 @@ Production data and real cron jobs are never touched. Current snapshot:
 ### Themes
 - Appearance is split into two axes: Theme (`system`, `dark`, `light`) and Skin
   (`default`, `ares`, `mono`, `slate`, `poseidon`, `sisyphus`, `charizard`,
-  `sienna`, `catppuccin`, `nous`)
+  `sienna`, `catppuccin`, `nous`, `geist-contrast` / Geist Contrast)
 - Switch via Settings -> Appearance (instant live preview) or `/theme <theme-or-skin>`
 - Persists across reloads (server-side in settings.json + localStorage for flicker-free loading)
 - Skins use `data-skin` plus CSS variables; dark mode resolves through the
@@ -552,7 +552,7 @@ State lives outside the repo at `~/.hermes/webui/` by default
 
 ## Docs
 
-- `HERMES.md` -- why Hermes, mental model, and detailed comparison to Claude Code / Codex / OpenCode / Cursor
+- `docs/why-hermes.md` -- why Hermes, mental model, and detailed comparison to Claude Code / Codex / OpenCode / Cursor
 - `ROADMAP.md` -- feature roadmap and sprint history
 - `ARCHITECTURE.md` -- system design, all API endpoints, implementation notes
 - `TESTING.md` -- manual browser test plan and automated coverage reference

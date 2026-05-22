@@ -10,10 +10,13 @@ Skips repos that are not git checkouts (e.g. Docker baked images where
 """
 import hashlib
 import json
+import os
 import re
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
@@ -142,30 +145,104 @@ def _detect_webui_version() -> str:
     return 'unknown'
 
 
+def _read_agent_source_version(agent_dir: Path) -> str | None:
+    """Read Hermes Agent's package version from a copied source tree."""
+    init_file = agent_dir / 'hermes_cli' / '__init__.py'
+    try:
+        text = init_file.read_text(encoding='utf-8')
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = re.search(r"""__version__\s*=\s*['"]([^'"]+)['"]""", text)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return None
+
+
+def _gateway_health_base_url() -> str:
+    """Return the configured/default Hermes Agent gateway base URL."""
+    raw = (
+        os.environ.get('GATEWAY_HEALTH_URL')
+        or os.environ.get('HERMES_GATEWAY_HEALTH_URL')
+        or 'http://hermes-agent:8642'
+    ).strip()
+    if raw.endswith('/health/detailed'):
+        raw = raw[: -len('/health/detailed')]
+    elif raw.endswith('/health'):
+        raw = raw[: -len('/health')]
+    return raw.rstrip('/')
+
+
+def _version_from_gateway_health_payload(payload: object) -> str | None:
+    """Extract a version string from a Hermes Agent gateway health payload."""
+    if not isinstance(payload, dict):
+        return None
+    for key in ('version', 'agent_version', 'hermes_version'):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    nested = payload.get('agent')
+    if isinstance(nested, dict):
+        value = nested.get('version')
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _detect_agent_version_from_gateway_health(timeout: float = 0.75) -> str | None:
+    """Best-effort cross-container gateway API fallback for Agent version."""
+    base = _gateway_health_base_url()
+    if not base:
+        return None
+    parsed = urlparse(base)
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return None
+    for path in ('/health', '/health/detailed'):
+        try:
+            with urllib.request.urlopen(f'{base}{path}', timeout=timeout) as resp:
+                payload = json.loads(resp.read().decode('utf-8'))
+        except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        version = _version_from_gateway_health_payload(payload)
+        if version:
+            return version
+    return None
+
+
 def _detect_agent_version() -> str:
     """Detect the running Hermes Agent version for UI display."""
-    if _AGENT_DIR is None:
-        return 'not detected'
+    agent_dir = Path(_AGENT_DIR) if _AGENT_DIR is not None else None
 
-    version_file = Path(_AGENT_DIR) / "VERSION"
-    try:
-        if version_file.exists():
-            text = version_file.read_text(encoding='utf-8').strip()
-            if text:
-                return text
-    except Exception:
-        pass
+    if agent_dir is not None:
+        version_file = agent_dir / "VERSION"
+        try:
+            if version_file.exists():
+                text = version_file.read_text(encoding='utf-8').strip()
+                if text:
+                    return text
+        except Exception:
+            pass
 
-    # Fallback: infer from git describe when the checkout exists but no VERSION
-    # file is available (common in source checkouts and developer environments).
-    if not Path(_AGENT_DIR).exists():
-        return 'not detected'
-    # Symmetric with _detect_webui_version() above — `--dirty` flags a
-    # locally-modified checkout so operators can see when their agent has
-    # uncommitted changes vs a clean tag. Per Opus advisor on stage-293.
-    out = _describe_git_version(Path(_AGENT_DIR))
-    if out:
-        return out
+        # Fallback: infer from git describe when the checkout exists but no VERSION
+        # file is available (common in source checkouts and developer environments).
+        if agent_dir.exists():
+            # Symmetric with _detect_webui_version() above — `--dirty` flags a
+            # locally-modified checkout so operators can see when their agent has
+            # uncommitted changes vs a clean tag. Per Opus advisor on stage-293.
+            out = _describe_git_version(agent_dir)
+            if out:
+                return out
+
+            # Docker two-container deployments often mount a copied agent source
+            # tree without .git metadata or a VERSION file.  The package version
+            # still lives in hermes_cli/__init__.py, so prefer that before giving
+            # up or relying on a live gateway probe.
+            source_version = _read_agent_source_version(agent_dir)
+            if source_version:
+                return source_version
+
+    gateway_version = _detect_agent_version_from_gateway_health()
+    if gateway_version:
+        return gateway_version
 
     return 'not detected'
 
@@ -250,6 +327,26 @@ def _release_gap(tags, current, latest):
     if current in tags:
         return tags.index(current)
     return 1
+
+
+def _select_apply_compare_ref(path):
+    """Return the same remote ref family that the update check reports.
+
+    The update banner prefers published release tags when they exist. Applying
+    an update must therefore advance to the latest release tag too; otherwise a
+    checkout on a local/fork tracking branch can report release updates, pull a
+    different branch that is already current, restart, and still remain behind.
+    """
+    tags = _release_tags(path)
+    if tags:
+        return tags[0]
+
+    upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
+    if ok and upstream:
+        return upstream
+
+    branch = _detect_default_branch(path)
+    return f'origin/{branch}'
 
 
 def _check_repo_release(path, name):
@@ -358,9 +455,23 @@ def _check_repo(path, name):
 
     # Fetch tags first so update prompts track published releases, not every
     # development commit that lands on master/main after the latest release.
-    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags'], path, timeout=15)
+    fetch_out, fetch_ok = _run_git(['fetch', 'origin', '--tags'], path, timeout=15)
     if not fetch_ok:
-        return {'name': name, 'behind': 0, 'error': 'fetch failed'}
+        release_info = _check_repo_release(path, name)
+        message = 'fetch failed'
+        if fetch_out:
+            message = f'{message}: {fetch_out}'
+        if release_info is not None:
+            release_info = dict(release_info)
+            release_info['error'] = message
+            release_info['stale_check'] = True
+            return release_info
+        return {
+            'name': name,
+            'behind': None,
+            'error': message,
+            'stale_check': True,
+        }
 
     release_info = _check_repo_release(path, name)
     if release_info is not None:
@@ -763,19 +874,14 @@ def apply_force_update(target: str) -> dict:
         if path is None or not (path / '.git').exists():
             return {'ok': False, 'message': 'Not a git repository'}
 
-        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags'], path, timeout=15)
         if not fetch_ok:
             return {
                 'ok': False,
                 'message': 'Could not reach the remote repository. Check your connection.',
             }
 
-        upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
-        if ok and upstream:
-            compare_ref = upstream
-        else:
-            branch = _detect_default_branch(path)
-            compare_ref = f'origin/{branch}'
+        compare_ref = _select_apply_compare_ref(path)
 
         # Discard local modifications then reset to remote HEAD
         _run_git(['checkout', '.'], path)
@@ -824,17 +930,8 @@ def _apply_update_inner(target):
     if path is None or not (path / '.git').exists():
         return {'ok': False, 'message': 'Not a git repository'}
 
-    # Use the current branch's upstream for pull, matching the behaviour
-    # of _check_repo. Falls back to default branch if no upstream is set.
-    upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
-    if ok and upstream:
-        compare_ref = upstream
-    else:
-        branch = _detect_default_branch(path)
-        compare_ref = f'origin/{branch}'
-
     # Fetch before attempting pull, so the remote ref is current.
-    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet', '--tags'], path, timeout=15)
     if not fetch_ok:
         return {
             'ok': False,
@@ -843,6 +940,8 @@ def _apply_update_inner(target):
                 'Check your internet connection and try again.'
             ),
         }
+
+    compare_ref = _select_apply_compare_ref(path)
 
     # Check for dirty working tree (ignore untracked files — git stash
     # doesn't include them, so stashing on '??' alone leaves nothing to pop)
@@ -879,7 +978,7 @@ def _apply_update_inner(target):
     if remote:
         pull_args.extend([remote, branch])
     else:
-        pull_args.append(compare_ref)
+        pull_args.extend(['origin', compare_ref])
     pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
     if not pull_ok:
         if stashed:

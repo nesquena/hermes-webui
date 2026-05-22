@@ -545,6 +545,7 @@ def test_server():
     # pytest-side block can't see.
     env["HERMES_WEBUI_TEST_NETWORK_BLOCK"] = "1"
     env.update({
+        "HERMES_WEBUI_WORKSPACE_GIT_DESTRUCTIVE": "1",
         "HERMES_WEBUI_PORT":              str(TEST_PORT),
         "HERMES_WEBUI_HOST":              "127.0.0.1",
         "HERMES_WEBUI_STATE_DIR":         str(TEST_STATE_DIR),

@@ -17,6 +17,7 @@ def test_model_picker_open_waits_for_async_model_catalog_before_rendering():
     body = _body_between(UI_JS, "async function toggleModelDropdown", "function closeModelDropdown")
 
     assert "window._modelDropdownReady" in body
+    assert "window._ensureModelDropdownReady" in body
     assert "await" in body
     assert body.index("await") < body.index("renderModelDropdown()")
 

@@ -91,6 +91,7 @@ class TestCustomProvidersInGetProviders:
             assert glmcode["configurable"] is False, (
                 "custom providers should not be configurable via WebUI"
             )
+            assert glmcode["is_custom"] is True
             assert glmcode["key_source"] == "config_yaml"
             assert glmcode["display_name"] == "glmcode"
 
@@ -99,8 +100,16 @@ class TestCustomProvidersInGetProviders:
             assert "glm-5.1" in model_ids, (
                 f"Expected glm-5.1 in models, got: {model_ids}"
             )
+            assert glmcode["models_total"] == 1
         finally:
             self._restore_cfg(old_cfg, old_mtime)
+
+    def test_providers_panel_renders_config_yaml_custom_providers(self):
+        """Settings → Providers must not filter out read-only custom providers."""
+        src = open("static/panels.js", encoding="utf-8").read()
+        assert "filter(p=>p.configurable||p.is_oauth||p.is_custom)" in src
+        assert "Custom provider loaded from config.yaml / hermes model" in src
+        assert "if(p.configurable){" in src
 
     def test_custom_provider_with_multi_models(self, monkeypatch, tmp_path):
         """Custom provider with `models` list should expose all entries."""

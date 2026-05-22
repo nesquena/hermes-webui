@@ -64,8 +64,8 @@ that slice.
 
 Current appearance has a theme axis (`light`, `dark`, `system`) and a separate
 skin axis (`default`, `ares`, `mono`, `slate`, `poseidon`, `sisyphus`,
-`charizard`, `sienna`, `catppuccin`, `nous`) in `static/boot.js` and
-`static/style.css`. Do not follow stale `data-theme`-only theme guidance unless
+`charizard`, `sienna`, `catppuccin`, `nous`, `geist-contrast`) in
+`static/boot.js` and `static/style.css`. Do not follow stale `data-theme`-only theme guidance unless
 the current code and tests prove that model still applies.
 
 For UI or UX work, include before/after evidence, verify relevant responsive

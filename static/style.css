@@ -297,6 +297,179 @@
   :root.dark[data-skin="nous"] .mcp-http{color:#7EB6E0;}
   :root.dark[data-skin="nous"] .mcp-status-active{color:#7EB6E0;}
 
+  /* ── Skin: Geist Contrast (Geist-inspired neutral precision) ──
+     Dark mode uses a #FFF175 accent; solid accent controls use black
+     foreground, while selected/navigation states stay neutral and restrained. */
+  :root[data-skin="geist-contrast"]{
+    color-scheme:light;
+    --bg:#ffffff;--sidebar:#fafafa;--surface:#ffffff;--surface-subtle:#fafafa;--surface-subtle-hover:#f5f5f5;
+    --main-bg:#ffffff;--topbar-bg:rgba(255,255,255,.92);
+    --border:#eaeaea;--border2:#d4d4d4;--border-subtle:#ededed;--border-muted:#d4d4d4;
+    --text:#111111;--strong:#000000;--muted:#666666;--em:#444444;
+    --accent:#0070f3;--accent-hover:#005bd1;--accent-bg:rgba(0,112,243,.075);--accent-bg-strong:rgba(0,112,243,.16);--accent-text:#005bd1;
+    --blue:#0070f3;--gold:#111111;--focus-ring:rgba(0,112,243,.28);--focus-glow:rgba(0,112,243,.08);
+    --input-bg:#ffffff;--hover-bg:#f5f5f5;--code-bg:#fafafa;--code-inline-bg:#f5f5f5;--code-text:#111111;--pre-text:#111111;
+    --error:#e5484d;--success:#007a45;--warning:#b45309;--info:#0070f3;
+    --radius-sm:4px;--radius-md:6px;--radius-card:8px;--radius-lg:10px;
+    --font-ui:"Geist","Geist Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  }
+  :root.dark[data-skin="geist-contrast"]{
+    color-scheme:dark;
+    --bg:#000000;--sidebar:#050505;--surface:#0a0a0a;--surface-subtle:#111111;--surface-subtle-hover:#171717;
+    --main-bg:#000000;--topbar-bg:rgba(0,0,0,.88);
+    --border:#262626;--border2:#3f3f3f;--border-subtle:#171717;--border-muted:#2a2a2a;
+    --text:#ededed;--strong:#ffffff;--muted:#a1a1a1;--em:#d4d4d4;
+    --accent:#FFF175;--accent-hover:#fff7a8;--accent-bg:rgba(255,241,117,.075);--accent-bg-strong:rgba(255,241,117,.14);--accent-text:#f5e65f;
+    --blue:#FFF175;--gold:#FFF175;--focus-ring:rgba(255,241,117,.34);--focus-glow:rgba(255,241,117,.10);
+    --input-bg:#0a0a0a;--hover-bg:#111111;--code-bg:#0a0a0a;--code-inline-bg:#171717;--code-text:#f5f5f5;--pre-text:#ededed;
+    --error:#ff6369;--success:#3dd68c;--warning:#f5a524;--info:#FFF175;
+  }
+  :root[data-skin="geist-contrast"],
+  :root[data-skin="geist-contrast"] body{font-family:var(--font-ui)!important;letter-spacing:-0.011em;background:var(--bg)!important;}
+  :root[data-skin="geist-contrast"] .app-titlebar,
+  :root[data-skin="geist-contrast"] .rail,
+  :root[data-skin="geist-contrast"] .sidebar,
+  :root[data-skin="geist-contrast"] .rightpanel,
+  :root[data-skin="geist-contrast"] .topbar,
+  :root[data-skin="geist-contrast"] .composer-wrap{background:var(--sidebar)!important;border-color:var(--border)!important;box-shadow:none!important;backdrop-filter:saturate(180%) blur(12px);}
+  :root[data-skin="geist-contrast"] .main,
+  :root[data-skin="geist-contrast"] .chat,
+  :root[data-skin="geist-contrast"] .empty-state,
+  :root[data-skin="geist-contrast"] .panel-view,
+  :root[data-skin="geist-contrast"] .settings-section,
+  :root[data-skin="geist-contrast"] .settings-card,
+  :root[data-skin="geist-contrast"] .model-dropdown,
+  :root[data-skin="geist-contrast"] .profile-menu,
+  :root[data-skin="geist-contrast"] .session-actions-menu,
+  :root[data-skin="geist-contrast"] .app-dialog,
+  :root[data-skin="geist-contrast"] .kanban-modal,
+  :root[data-skin="geist-contrast"] .cron-item,
+  :root[data-skin="geist-contrast"] .tool-card,
+  :root[data-skin="geist-contrast"] .msg-body pre,
+  :root[data-skin="geist-contrast"] .preview-md pre,
+  :root[data-skin="geist-contrast"] .composer-box{background:var(--surface)!important;border:none!important;box-shadow:none!important;}
+  :root[data-skin="geist-contrast"] .session-item,
+  :root[data-skin="geist-contrast"] .nav-tab,
+  :root[data-skin="geist-contrast"] .rail-btn,
+  :root[data-skin="geist-contrast"] .icon-btn,
+  :root[data-skin="geist-contrast"] .panel-head-btn,
+  :root[data-skin="geist-contrast"] .sm-btn,
+  :root[data-skin="geist-contrast"] .btn,
+  :root[data-skin="geist-contrast"] button,
+  :root[data-skin="geist-contrast"] select,
+  :root[data-skin="geist-contrast"] input,
+  :root[data-skin="geist-contrast"] textarea,
+  :root[data-skin="geist-contrast"] .chip,
+  :root[data-skin="geist-contrast"] .project-chip,
+  :root[data-skin="geist-contrast"] .profile-chip,
+  :root[data-skin="geist-contrast"] .model-chip,
+  :root[data-skin="geist-contrast"] .reasoning-chip,
+  :root[data-skin="geist-contrast"] .app-dialog-btn{border-radius:6px!important;}
+  :root[data-skin="geist-contrast"] .session-item:hover,
+  :root[data-skin="geist-contrast"] .nav-tab:hover,
+  :root[data-skin="geist-contrast"] .rail-btn:hover,
+  :root[data-skin="geist-contrast"] .icon-btn:hover,
+  :root[data-skin="geist-contrast"] .panel-head-btn:hover,
+  :root[data-skin="geist-contrast"] .sm-btn:hover,
+  :root[data-skin="geist-contrast"] .project-chip:hover,
+  :root[data-skin="geist-contrast"] .chip:hover,
+  :root[data-skin="geist-contrast"] .profile-opt:hover,
+  :root[data-skin="geist-contrast"] .ws-opt:hover,
+  :root[data-skin="geist-contrast"] .file-item:hover,
+  :root[data-skin="geist-contrast"] .suggestion:hover{background:var(--hover-bg)!important;}
+  :root[data-skin="geist-contrast"] .session-item.active,
+  :root[data-skin="geist-contrast"] .nav-tab.active,
+  :root[data-skin="geist-contrast"] .rail-btn.active,
+  :root[data-skin="geist-contrast"] .project-chip.active,
+  :root[data-skin="geist-contrast"] .profile-opt.active,
+  :root[data-skin="geist-contrast"] .chip.model,
+  :root[data-skin="geist-contrast"] .side-menu-item.active,
+  :root[data-skin="geist-contrast"] .skin-pick-btn.active,
+  :root[data-skin="geist-contrast"] .theme-pick-btn.active,
+  :root[data-skin="geist-contrast"] .font-size-pick-btn.active{background:var(--surface-subtle)!important;border-color:var(--border2)!important;color:var(--text)!important;box-shadow:inset 0 0 0 1px var(--border)!important;font-weight:500!important;}
+  :root[data-skin="geist-contrast"] .session-item.active{position:relative;border:1px solid var(--border2)!important;}
+  :root[data-skin="geist-contrast"] .session-item.active::before{content:"";position:absolute;left:6px;top:10px;bottom:10px;width:2px;border-radius:999px;background:var(--accent);}
+  :root[data-skin="geist-contrast"] .session-item.active .session-title,
+  :root[data-skin="geist-contrast"] .session-item.active .session-meta,
+  :root[data-skin="geist-contrast"] .session-item.active .session-preview,
+  :root[data-skin="geist-contrast"] .session-item.active *{color:inherit!important;}
+  :root.dark[data-skin="geist-contrast"] .session-item.active,
+  :root.dark[data-skin="geist-contrast"] .session-item.active *{color:var(--text)!important;}
+  :root[data-skin="geist-contrast"] .nav-tab.active,
+  :root[data-skin="geist-contrast"] .rail-btn.active{color:var(--accent-text)!important;}
+  :root.dark[data-skin="geist-contrast"] .nav-tab.active svg,
+  :root.dark[data-skin="geist-contrast"] .rail-btn.active svg,
+  :root.dark[data-skin="geist-contrast"] .nav-tab.active [data-lucide],
+  :root.dark[data-skin="geist-contrast"] .rail-btn.active [data-lucide]{color:var(--accent-text)!important;stroke:var(--accent-text)!important;}
+  :root[data-skin="geist-contrast"] .profile-chip,
+  :root[data-skin="geist-contrast"] .model-chip,
+  :root[data-skin="geist-contrast"] .reasoning-chip,
+  :root[data-skin="geist-contrast"] .composer-workspace-chip,
+  :root[data-skin="geist-contrast"] .composer-profile-chip,
+  :root[data-skin="geist-contrast"] .composer-model-chip{color:var(--muted)!important;border-color:transparent!important;background:transparent!important;}
+  :root[data-skin="geist-contrast"] .profile-chip:hover,
+  :root[data-skin="geist-contrast"] .model-chip:hover,
+  :root[data-skin="geist-contrast"] .reasoning-chip:hover,
+  :root[data-skin="geist-contrast"] .composer-workspace-chip:hover,
+  :root[data-skin="geist-contrast"] .composer-profile-chip:hover,
+  :root[data-skin="geist-contrast"] .composer-model-chip:hover{color:var(--text)!important;background:var(--surface-subtle)!important;border-color:var(--border)!important;}
+  :root[data-skin="geist-contrast"] .new-chat-btn,
+  :root[data-skin="geist-contrast"] button.send-btn:not(:disabled),
+  :root[data-skin="geist-contrast"] .btn.primary,
+  :root[data-skin="geist-contrast"] .update-primary,
+  :root[data-skin="geist-contrast"] .app-dialog-btn.confirm,
+  :root[data-skin="geist-contrast"] .approval-btn.once,
+  :root[data-skin="geist-contrast"] .approval-btn.session,
+  :root[data-skin="geist-contrast"] .clarify-submit{background:var(--accent)!important;border-color:var(--accent)!important;color:#050505!important;font-weight:600!important;box-shadow:none!important;}
+  :root[data-skin="geist-contrast"]:not(.dark) .new-chat-btn,
+  :root[data-skin="geist-contrast"]:not(.dark) button.send-btn:not(:disabled),
+  :root[data-skin="geist-contrast"]:not(.dark) .btn.primary,
+  :root[data-skin="geist-contrast"]:not(.dark) .update-primary,
+  :root[data-skin="geist-contrast"]:not(.dark) .app-dialog-btn.confirm,
+  :root[data-skin="geist-contrast"]:not(.dark) .approval-btn.once,
+  :root[data-skin="geist-contrast"]:not(.dark) .approval-btn.session,
+  :root[data-skin="geist-contrast"]:not(.dark) .clarify-submit{color:#ffffff!important;}
+  :root[data-skin="geist-contrast"] .new-chat-btn:hover,
+  :root[data-skin="geist-contrast"] button.send-btn:not(:disabled):hover,
+  :root[data-skin="geist-contrast"] .btn.primary:hover,
+  :root[data-skin="geist-contrast"] .update-primary:hover,
+  :root[data-skin="geist-contrast"] .app-dialog-btn.confirm:hover,
+  :root[data-skin="geist-contrast"] .approval-btn.once:hover,
+  :root[data-skin="geist-contrast"] .approval-btn.session:hover,
+  :root[data-skin="geist-contrast"] .clarify-submit:hover{background:var(--accent-hover)!important;border-color:var(--accent-hover)!important;transform:none!important;}
+  :root[data-skin="geist-contrast"] button.send-btn:disabled{background:var(--surface-subtle)!important;border-color:var(--border)!important;color:var(--muted)!important;opacity:1!important;}
+  :root.dark[data-skin="geist-contrast"] button.send-btn:disabled svg,
+  :root.dark[data-skin="geist-contrast"] button.send-btn:disabled [data-lucide]{color:var(--muted)!important;stroke:var(--muted)!important;}
+  :root[data-skin="geist-contrast"] .composer-box:focus-within{border-color:transparent!important;box-shadow:0 0 0 3px var(--focus-ring)!important;outline:none!important;}
+  :root[data-skin="geist-contrast"] input:focus,
+  :root[data-skin="geist-contrast"] textarea:focus,
+  :root[data-skin="geist-contrast"] select:focus{border-color:var(--accent)!important;box-shadow:none!important;outline:none!important;}
+  :root[data-skin="geist-contrast"] .app-dialog-input:focus,
+  :root[data-skin="geist-contrast"] .sidebar-search input:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px var(--focus-ring)!important;outline:none!important;}
+  :root[data-skin="geist-contrast"] .logo,
+  :root[data-skin="geist-contrast"] .sidebar-header .logo{background:var(--surface-subtle)!important;color:var(--accent-text)!important;border:1px solid var(--border2)!important;border-radius:8px!important;box-shadow:none!important;font-weight:650!important;}
+  :root[data-skin="geist-contrast"] .app-titlebar-icon rect,
+  :root[data-skin="geist-contrast"] .app-titlebar-icon path,
+  :root[data-skin="geist-contrast"] .app-titlebar-icon circle{color:var(--accent-text)!important;fill:var(--accent-text)!important;}
+  :root[data-skin="geist-contrast"] .msg-row[data-role="user"] .msg-body{background:var(--surface-subtle)!important;border:1px solid var(--border)!important;border-radius:10px!important;}
+  :root[data-skin="geist-contrast"] .suggestion{background:var(--surface)!important;border-color:var(--border)!important;color:var(--muted)!important;transition:background .15s ease,border-color .15s ease,color .15s ease!important;}
+  :root[data-skin="geist-contrast"] .suggestion:hover{border-color:var(--border2)!important;color:var(--text)!important;}
+  :root[data-skin="geist-contrast"] .msg-body a,
+  :root[data-skin="geist-contrast"] .preview-md a,
+  :root[data-skin="geist-contrast"] .empty-state a,
+  :root[data-skin="geist-contrast"] .tool-arg-key,
+  :root[data-skin="geist-contrast"] .tool-card-more,
+  :root[data-skin="geist-contrast"] .session-pin-indicator,
+  :root[data-skin="geist-contrast"] .sidebar-date-header.pinned{color:var(--accent-text)!important;}
+  :root[data-skin="geist-contrast"]::-webkit-scrollbar-thumb{background:var(--border2)!important;}
+  :root[data-skin="geist-contrast"] ::selection{background:var(--accent-bg-strong);color:var(--strong);}
+  /* ── Geist Contrast: composer fixes ── */
+  /* Light mode: override white user-bubble-text so textarea text is black */
+  :root[data-skin="geist-contrast"]:not(.dark){--user-bubble-text:#111111;}
+  /* Remove scrollbar from textarea */
+  :root[data-skin="geist-contrast"] textarea#msg{scrollbar-width:none;overflow-y:auto;}
+  :root[data-skin="geist-contrast"] textarea#msg::-webkit-scrollbar{display:none;}
+
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));
@@ -488,7 +661,7 @@
      and attention indicator (26x26 at right:6px) still need 40px reserved
      when they're visible — covered by the hover / streaming / unread /
      menu-open / focus-within rule below. */
-  .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:manipulation;-webkit-tap-highlight-color:transparent;}
+  .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s,transform .36s cubic-bezier(.2,.8,.2,1);display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:manipulation;-webkit-tap-highlight-color:transparent;transform:translateY(var(--session-reflow-offset,0));}
   .session-item.streaming,.session-item.unread,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
   .session-item:hover{background:var(--hover-bg);color:var(--text);}
   /* Suppress hover highlight during drag to avoid visual noise mid-scroll */
@@ -566,13 +739,23 @@
   .session-action-copy{display:flex;flex-direction:column;gap:2px;min-width:0;}
   .session-action-meta{font-size:11px;color:var(--muted);line-height:1.3;white-space:normal;opacity:.72;}
   .session-action-opt.is-active{background:var(--accent-bg);}
+  .session-action-opt.is-disabled{opacity:.55;cursor:not-allowed;}
+  .session-action-opt.is-disabled:hover{background:transparent;}
   .session-action-opt.danger:hover{background:rgba(239,83,80,.08);}
   .session-action-opt.danger .ws-opt-icon,.session-action-opt.danger .ws-opt-name{color:var(--error);}
   /* Hide overlay during inline rename */
   .session-item:has(.session-title-input) .session-actions{display:none;}
   @keyframes newflash{0%{background:var(--accent-bg-strong);color:var(--accent);}100%{background:transparent;color:var(--muted);}}
+  @keyframes sessionListFlipIn{0%{opacity:0;transform:perspective(700px) rotateX(-8deg) translateY(10px) scale(.985);}100%{opacity:1;transform:perspective(700px) rotateX(0) translateY(0) scale(1);}}
   @keyframes spin{to{transform:rotate(360deg);}}
   .session-item.new-flash{animation:newflash 1.4s ease-out forwards;}
+  .session-item.session-reflowing{transition:background .15s,color .15s,transform .36s cubic-bezier(.2,.8,.2,1);will-change:transform;}
+  .session-item.session-list-flip-enter{animation:sessionListFlipIn .28s cubic-bezier(.2,.8,.2,1) backwards;transform-origin:center top;}
+  @media (prefers-reduced-motion: reduce){
+    .session-item,
+    .session-item.session-reflowing{transition:background .15s,color .15s;}
+    .session-item.session-list-flip-enter{animation:none;}
+  }
   /* Collapsible date group headers */
   .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 10px 4px;cursor:pointer;user-select:none;opacity:.8;transition:opacity .15s;}
   .session-date-header:hover{opacity:1;}
@@ -1100,6 +1283,7 @@
   .dot:nth-child(2){animation-delay:.22s;}.dot:nth-child(3){animation-delay:.44s;}
   @keyframes pulse{0%,80%,100%{opacity:.2;transform:scale(.8)}40%{opacity:.8;transform:scale(1)}}
   .empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:40px;color:var(--muted);}
+  .empty-state.no-suggestions .suggestion-grid{display:none}
   .empty-logo{width:64px;height:64px;border-radius:20px;background:linear-gradient(145deg,var(--accent-bg),var(--accent-bg));border:1px solid var(--accent-bg);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:700;color:var(--accent-text);margin-bottom:4px;box-shadow:0 4px 20px var(--accent-bg);}
   .empty-state h2{font-size:20px;color:var(--text);font-weight:700;letter-spacing:-.02em;}
   .empty-state p{font-size:14px;text-align:center;max-width:320px;}
@@ -1765,6 +1949,7 @@
 .model-opt-badge--primary{background:rgba(50,184,198,.16);border-color:rgba(50,184,198,.32);color:#8fe7ef;}
 .model-opt-badge--fallback{background:rgba(255,184,77,.14);border-color:rgba(255,184,77,.28);color:#ffd18a;}
 .model-opt-id{display:block;font-size:10px;color:var(--muted);line-height:1.3;opacity:.72;word-break:break-word;}
+.model-provider-hint{margin:2px 14px 6px;padding:7px 9px;border:1px solid var(--border2);border-radius:7px;background:color-mix(in srgb,var(--surface) 90%,var(--warning));color:var(--muted);font-size:11px;line-height:1.35;}
 .model-opt-provider{display:inline-flex;align-items:center;padding:1px 6px;border-radius:4px;font-size:9px;font-weight:600;letter-spacing:.03em;color:var(--muted);background:rgba(255,255,255,.05);border:1px solid var(--border2);margin-left:auto;white-space:nowrap;flex-shrink:0;}
 .model-custom-sep{padding-top:4px;border-top:1px solid var(--border);margin-top:4px;}
 .model-custom-row{display:flex;align-items:center;gap:6px;padding:6px 10px 8px;}
@@ -2595,6 +2780,17 @@ main.main.showing-logs > #mainLogs{display:flex;}
 #mainSettings .settings-field > label[style*="display:flex"]{color:var(--text);font-size:13px;font-weight:500;margin-bottom:0;}
 #mainSettings .settings-field > div[style*="color:var(--muted)"],
 #mainSettings .settings-field > div[style*="color: var(--muted)"]{font-size:12px;color:var(--muted);line-height:1.5;}
+
+/* Sidebar tab visibility — hide nav-tab and matching rail-btn when toggled off by user */
+.nav-tab-hidden{display:none!important;}
+
+/* Tab visibility chips in Settings > Appearance */
+.tab-visibility-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;}
+.tab-visibility-chip{font-size:12px;line-height:1;padding:5px 10px;border-radius:var(--radius-pill,999px);border:1px solid var(--accent,var(--link));background:var(--accent,var(--link));color:#1a1a1a;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,color .15s,opacity .15s;white-space:nowrap;user-select:none;}
+.tab-visibility-chip:hover{filter:brightness(0.92);}
+.tab-visibility-chip:focus-visible{outline:2px solid var(--link,var(--accent));outline-offset:2px;}
+.tab-visibility-chip.chip-off{background:transparent;color:var(--muted);border-color:var(--border);font-weight:400;}
+.tab-visibility-chip.chip-off:hover{border-color:var(--muted);color:var(--text);}
 
 /* Selects & text/password inputs — uniform. Uses !important to win
    over legacy inline styles that were written for the modal era. */

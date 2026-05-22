@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 SESSIONS_JS = Path("static/sessions.js").read_text(encoding="utf-8")
+UI_JS = Path("static/ui.js").read_text(encoding="utf-8")
 
 
 def test_load_session_supports_force_reload_for_external_refresh():
@@ -25,6 +26,32 @@ def test_active_session_external_refresh_has_focus_and_visibility_hooks():
     assert "visibilitychange" in SESSIONS_JS
     assert "window.addEventListener('focus'" in SESSIONS_JS
     assert "ensureActiveSessionExternalRefreshPoll();" in SESSIONS_JS
+
+
+def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
+    """New sessions should refresh the sidebar from server invalidation events."""
+    assert "async function refreshSessionList(reason='manual', opts={})" in SESSIONS_JS
+    assert "function ensureSessionEventsSSE()" in SESSIONS_JS
+    assert "new EventSource('api/sessions/events')" in SESSIONS_JS
+    assert "addEventListener('sessions_changed'" in SESSIONS_JS
+    assert "function _scheduleSessionEventsRefresh(reason)" in SESSIONS_JS
+    assert "_sessionEventsNeedsRefreshOnOpen = true" in SESSIONS_JS
+    assert "void refreshSessionList('reconnect')" in SESSIONS_JS
+    assert "renderSessionList({deferWhileInteracting:!force})" in SESSIONS_JS
+    assert "const refreshActive = !!(opts && opts.refreshActive)" in SESSIONS_JS
+    assert "if(refreshActive) await refreshActiveSessionIfExternallyUpdated(reason||'session-list')" in SESSIONS_JS
+    assert "_sessionListRefreshPendingReason = reason || 'session-list'" in SESSIONS_JS
+    assert "if(pendingReason) _scheduleSessionEventsRefresh(pendingReason)" in SESSIONS_JS
+    assert "ensureSessionEventsSSE();" in SESSIONS_JS
+    assert "document._hermesSessionEventsVisibilityHook" in SESSIONS_JS
+    ensure_fn = SESSIONS_JS[SESSIONS_JS.find("function ensureSessionEventsSSE()") :]
+    assert ensure_fn.find("document._hermesSessionEventsVisibilityHook") < ensure_fn.find("document.hidden) return")
+    assert "_sessionListExternalRefreshMs" not in SESSIONS_JS
+
+
+def test_pwa_pull_to_refresh_refreshes_session_list_not_page_when_available():
+    assert "window.refreshSessionList('pull', {force:true, refreshActive:true})" in UI_JS
+    assert "Promise.resolve(window.refreshSessionList('pull', {force:true, refreshActive:true})).catch(()=>{}).finally(_ptrReset)" in UI_JS
 
 
 def test_force_reload_clears_stale_blocking_prompts_immediately():

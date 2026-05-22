@@ -1188,6 +1188,24 @@ def test_mobile_enter_newline_uses_match_media():
         "boot.js must use matchMedia('(pointer:coarse)') for mobile detection"
 
 
+def test_mobile_enter_newline_checks_virtual_keyboard_viewport():
+    """Touch devices should only force newline while the software keyboard is likely open."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "function _isVirtualKeyboardLikelyOpen()" in boot_js, \
+        "boot.js must isolate the software-keyboard viewport heuristic"
+    assert "window.visualViewport" in boot_js and "window.innerHeight-vv.height>120" in boot_js, \
+        "software-keyboard detection must compare visualViewport height against window.innerHeight"
+    assert "&&_isVirtualKeyboardLikelyOpen()" in boot_js, \
+        "mobile Enter newline override must not apply when a hardware keyboard leaves the viewport unshrunk"
+
+
+def test_mobile_enter_newline_preserves_legacy_fallback_without_visual_viewport():
+    """Browsers without visualViewport should keep the previous touch Enter=newline behavior."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "if(!vv||!window.innerHeight)return true;" in boot_js, \
+        "missing visualViewport support must preserve the legacy touch-primary newline fallback"
+
+
 def test_mobile_enter_newline_only_overrides_enter_default():
     """Mobile newline override must only apply when _sendKey is the default 'enter'."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")

@@ -60,7 +60,44 @@ def test_deferred_model_resolution_refreshes_context_metadata():
 def test_boot_does_not_block_session_restore_on_model_catalog():
     src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 
-    assert "if(s.default_model) window._defaultModel=s.default_model;" in src
-    assert "const _modelDropdownReady=populateModelDropdown().then" in src
-    assert "window._modelDropdownReady=_modelDropdownReady" in src
+    assert "if(s.default_model){" in src
+    assert "window._defaultModel=s.default_model;" in src
+    assert "const _hydrateBootModelDropdown=()=>populateModelDropdown().then" in src
+    assert "window._modelDropdownReady=null;" in src
+    assert "window._ensureModelDropdownReady=_startBootModelDropdown;" in src
     assert "await populateModelDropdown()" not in src
+
+
+def test_boot_primes_visible_default_model_without_catalog_fetch():
+    src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+    default_block_start = src.index("if(s.default_model){")
+    default_block = src[default_block_start:src.index("window._sessionJumpButtonsEnabled", default_block_start)]
+
+    assert "if(s.default_model_provider) window._activeProvider=s.default_model_provider;" in src
+    assert "const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);" in default_block
+    assert "existingDefaultOpt.dataset.provider=window._activeProvider;" in default_block
+    assert "if(!existingDefaultOpt)" in default_block
+    assert "opt.dataset.custom='1'" in default_block
+    assert "opt.dataset.provider=window._activeProvider||''" in default_block
+    assert "_applyModelToDropdown(s.default_model,sel,window._activeProvider||null)" in default_block
+    assert "populateModelDropdown()" not in default_block
+
+
+def test_settings_exposes_default_model_provider_for_lazy_boot_catalog():
+    src = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
+
+    assert 'settings["default_model_provider"]' in src
+    assert 'model_cfg = get_config().get("model", {})' in src
+
+
+def test_boot_renders_session_list_before_workspace_and_onboarding_settle():
+    src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+    workspace_start = src.index("const _workspaceListReady=loadWorkspaceList();")
+    onboarding_start = src.index("const _onboardingReady=_bootSettings.onboarding_completed?Promise.resolve(false):loadOnboardingWizard();")
+    render_pos = src.index("await renderSessionList();", onboarding_start)
+    workspace_await = src.index("await _workspaceListReady;", render_pos)
+    onboarding_await = src.index("await _onboardingReady;", render_pos)
+
+    assert workspace_start < render_pos < workspace_await
+    assert onboarding_start < render_pos < onboarding_await
+    assert "_bootSettings.onboarding_completed" in src

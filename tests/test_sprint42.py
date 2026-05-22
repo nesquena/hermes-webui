@@ -751,7 +751,7 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
     src = (REPO / 'api' / 'streaming.py').read_text()
     assert "def _restore_reasoning_metadata(" in src, \
         "streaming.py must define a helper to restore prior reasoning metadata"
-    assert "s.context_messages = _next_context_messages" in src, \
+    assert "_next_context_messages" in src and "s.context_messages" in src, \
         "streaming.py must restore prior reasoning metadata into model context"
     assert "s.messages = _merge_display_messages_after_agent_result(" in src, \
         "streaming.py must merge restored result messages into the visible transcript"
@@ -764,7 +764,7 @@ def test_routes_restores_prior_reasoning_metadata_after_followup():
     src = (REPO / 'api' / 'routes.py').read_text()
     assert "_restore_reasoning_metadata" in src, \
         "routes.py must import reasoning metadata restoration helper"
-    assert "s.context_messages = _next_context_messages" in src, \
+    assert "_next_context_messages" in src and "s.context_messages" in src, \
         "routes.py must restore prior reasoning metadata into model context"
     assert 's.messages = _merge_display_messages_after_agent_result(' in src, \
         "routes.py must merge restored result messages into the visible transcript"

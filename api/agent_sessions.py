@@ -401,7 +401,7 @@ def read_importable_agent_session_rows(
         )
 
         where_clauses = ["s.source IS NOT NULL"]
-        params: list[str] = []
+        params: list[object] = []
         if exclude_sources:
             excluded = tuple(str(source) for source in exclude_sources if source)
             if excluded:
@@ -409,8 +409,7 @@ def read_importable_agent_session_rows(
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
 
-        cur.execute(
-            f"""
+        select_sql = f"""
             SELECT s.id, s.title, s.model, s.message_count,
                    s.started_at, s.source,
                    {session_source_expr},
@@ -428,14 +427,54 @@ def read_importable_agent_session_rows(
                    COUNT(m.id) AS actual_message_count,
                    {user_message_count_expr} AS actual_user_message_count,
                    MAX(m.timestamp) AS last_activity
-            FROM sessions s
-            LEFT JOIN messages m ON m.session_id = s.id
-            WHERE {' AND '.join(where_clauses)}
-            GROUP BY s.id
-            ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
-            """,
-            params,
-        )
+        """
+        if limit is not None:
+            result_limit = max(0, int(limit))
+            if result_limit == 0:
+                return []
+            # The sidebar only needs a small visible window. Bound the expensive
+            # messages join to a recent-activity candidate set instead of
+            # aggregating every historical Hermes state.db session before
+            # slicing in Python. The candidate ordering must include the latest
+            # message timestamp, not only ``started_at``: long-lived CLI sessions
+            # can be resumed days later and should still surface at the top.
+            # Oversampling preserves room for hidden compression segments or
+            # other rows filtered after projection.
+            candidate_limit = max(result_limit * 8, result_limit)
+            cur.execute(
+                f"""
+                WITH candidates AS (
+                    SELECT s.id
+                    FROM sessions s
+                    WHERE {' AND '.join(where_clauses)}
+                    ORDER BY COALESCE(
+                        (SELECT MAX(mx.timestamp) FROM messages mx WHERE mx.session_id = s.id),
+                        s.started_at
+                    ) DESC,
+                    s.started_at DESC
+                    LIMIT ?
+                )
+                {select_sql}
+                FROM sessions s
+                JOIN candidates c ON c.id = s.id
+                LEFT JOIN messages m ON m.session_id = s.id
+                GROUP BY s.id
+                ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
+                """,
+                [*params, candidate_limit],
+            )
+        else:
+            cur.execute(
+                f"""
+                {select_sql}
+                FROM sessions s
+                LEFT JOIN messages m ON m.session_id = s.id
+                WHERE {' AND '.join(where_clauses)}
+                GROUP BY s.id
+                ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
+                """,
+                params,
+            )
         projected = _project_agent_session_rows([dict(row) for row in cur.fetchall()])
         projected = [_with_normalized_source(row) for row in projected]
         projected = [row for row in projected if is_cli_session_row_visible(row)]

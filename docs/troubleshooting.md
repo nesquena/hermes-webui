@@ -85,6 +85,34 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 
 ---
 
+## "Response interrupted." marker keeps saying "no agent output was recovered"
+
+**Symptom.** After the WebUI process restarts mid-turn (manual restart, OOM, crash, …), the affected chat shows an `**Response interrupted.**` marker with the wording *"The user message above was preserved, but no agent output was recovered."*, even though the run-journal for that turn is present on disk and contains the partial tokens the agent had already streamed.
+
+**Why.** Sidecar repair re-checks the run-journal at restart and uses the result as a one-shot signal. On WSL2 (9p / DrvFs) and on some network-backed setups, the run-journal `.jsonl` is written by the dead worker but the WebUI process reads it through a page-cache state that has not yet seen those writes — recovery returns "empty" and the marker is baked permanently. The fix introduces a *lazy* retry path: when sidecar repair cannot read visible output but knows the stream id, it stores a `_pending_journal_recovery` flag on the marker and re-attempts recovery from `get_session()` until the journal becomes readable (or the retry budget is exhausted).
+
+**Diagnostic.**
+
+The on-disk locations below assume the default `~/.hermes/webui` state directory. If you override it via `HERMES_WEBUI_STATE_DIR`, substitute that path for `~/.hermes/webui` in every step.
+
+1. Identify the affected session id and stream id from the marker. The marker JSON lives at `~/.hermes/webui/sessions/<sid>.json`; after the fix it shows them on the `_journal_retry_stream_id` key. Pre-fix sessions only carry the legacy wording, with no retry meta.
+2. Check whether the run-journal contains real events:
+   ```bash
+   ls -la ~/.hermes/webui/sessions/_run_journal/<sid>/<stream_id>.jsonl
+   head -2 ~/.hermes/webui/sessions/_run_journal/<sid>/<stream_id>.jsonl
+   ```
+   If the file exists and contains `token` / `tool` events, the lazy-retry path will pick them up the next time the session is opened.
+
+**Fix.** Reload the session in the browser. On the next `get_session()` call the marker is re-evaluated; if the journaled events are visible on disk the marker promotes to *"The partial output above was recovered from the run journal …"* wording and the journaled assistant text + tool cards land above the marker in chronological order. No manual sidecar editing is required.
+
+**Trigger.** Sidebar metadata polling is intentionally not enough to run this self-heal. Requests such as `/api/session?messages=0&resolve_model=0` load the session with `metadata_only=True`, skip the full messages array, and therefore skip the lazy journal retry helper. Click/open the affected conversation so the message panel performs a full `messages=1` load; that full render is what re-checks the journal and can promote the marker.
+
+**Caps.** The lazy retry path gives up after 12 failed attempts or 24h of wall-clock age, at which point the marker is demoted to a neutral *"Partial output may have been lost."* wording so the "reload to retry" prompt doesn't linger forever for genuinely lost journals.
+
+**When to file a bug.** If, after the fix, you see the lazy-retry wording (*"Recovering the partial output from the run journal — reload this session to retry."*) but reloading the session never promotes it to the recovered wording even though the `.jsonl` clearly contains `token` events, capture the marker JSON and the run-journal file and file a bug.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

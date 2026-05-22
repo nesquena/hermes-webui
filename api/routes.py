@@ -30,6 +30,11 @@ from api.agent_sessions import (
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
+from api.session_events import (
+    publish_session_list_changed,
+    subscribe_session_events,
+    unsubscribe_session_events,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -827,6 +832,7 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
             logger.debug("Failed to mark manual cron run failure for %s", job_id)
     finally:
         _mark_cron_done(job_id)
+        publish_session_list_changed("cron_complete")
 
 _PROVIDER_ALIASES = {
     "claude": "anthropic",
@@ -1519,7 +1525,12 @@ def _resolve_compatible_session_model_state(
         # qualifier — qualified strings require the catalog to decide whether
         # the qualifier matches the active provider (see slow path below).
         bare_model, explicit_provider = _split_provider_qualified_model(model)
-        if not explicit_provider:
+        model_prefix = model.split("/", 1)[0].strip().lower() if "/" in model else ""
+        stale_codex_openai_slash_id = (
+            requested_provider == "openai-codex"
+            and model_prefix == "openai"
+        )
+        if not explicit_provider and not stale_codex_openai_slash_id:
             return model, requested_provider, False
 
     # Default (human chat/start) path calls get_available_models() with NO
@@ -1547,7 +1558,14 @@ def _resolve_compatible_session_model_state(
 
     bare_for_context, explicit_provider = _split_provider_qualified_model(model)
     if requested_provider and not explicit_provider:
-        return model, requested_provider, False
+        model_prefix = model.split("/", 1)[0].strip().lower() if "/" in model else ""
+        stale_codex_openai_slash_id = (
+            raw_active_provider == "openai-codex"
+            and requested_provider == "openai-codex"
+            and model_prefix == "openai"
+        )
+        if not stale_codex_openai_slash_id:
+            return model, requested_provider, False
 
     if model.startswith("@") and ":" in model:
         provider_raw = explicit_provider or ""
@@ -1657,7 +1675,7 @@ def _resolve_compatible_session_model_state(
     if (
         raw_active_provider == "openai-codex"
         and model_provider == "openai"
-        and requested_provider is None
+        and requested_provider in {None, "openai-codex"}
         and default_model
     ):
         # Persist provider_context = "openai-codex" unconditionally on this
@@ -2006,18 +2024,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
                 str(m.get("role") or ""),
                 str(m.get("content") or ""),
             )):
-                message_identity = msg.get("id") or msg.get("message_id")
-                if message_identity:
-                    key = ("message_id", str(message_identity))
-                else:
-                    key = (
-                        "legacy",
-                        str(msg.get("role") or ""),
-                        str(msg.get("content") or ""),
-                        str(msg.get("timestamp") or ""),
-                        str(msg.get("tool_call_id") or ""),
-                        str(msg.get("tool_name") or msg.get("name") or ""),
-                    )
+                key = _session_message_merge_key(msg)
                 if key in seen_message_keys:
                     continue
                 seen_message_keys.add(key)
@@ -2258,6 +2265,7 @@ from api.models import (
     get_cli_session_messages,
     get_state_db_session_messages,
     merge_session_messages_append_only,
+    _session_message_merge_key,
     ensure_cron_project,
     is_cron_session,
 )
@@ -2267,6 +2275,7 @@ from api.workspace import (
     get_last_workspace,
     set_last_workspace,
     list_dir,
+    dir_signature,
     list_workspace_suggestions,
     read_file_content,
     safe_resolve_ws,
@@ -2433,6 +2442,7 @@ try:
         submit_pending as submit_clarify_pending,
         get_pending as get_clarify_pending,
         resolve_clarify,
+        resolve_clarify_by_id,
         sse_subscribe as clarify_sse_subscribe,
         sse_unsubscribe as clarify_sse_unsubscribe,
     )
@@ -2441,6 +2451,7 @@ except ImportError:
     get_clarify_pending = lambda *a, **k: None
     clarify_sse_subscribe = None
     resolve_clarify = lambda *a, **k: 0
+    resolve_clarify_by_id = lambda *a, **k: False
 
 
 # ── Login page locale strings ─────────────────────────────────────────────────
@@ -3113,6 +3124,47 @@ def _streams_lock_health(timeout_seconds: float = 0.5) -> dict:
         STREAMS_LOCK.release()
 
 
+def _stream_runtime_diagnostics() -> dict:
+    """Return non-sensitive SSE stream diagnostics for health/deep status.
+
+    The WebUI chat path can feel slow or stuck when streams are alive but no
+    browser is attached, or when many events are buffering offline. This helper
+    exposes counts only — stream ids plus subscriber/buffer sizes — and avoids
+    event payloads, prompts, tool arguments, or paths.
+    """
+    streams = []
+    total_subscribers = 0
+    total_offline_buffered_events = 0
+    with STREAMS_LOCK:
+        items = list(STREAMS.items())
+    for stream_id, stream in items:
+        snapshot = {}
+        diagnostic_snapshot = getattr(stream, "diagnostic_snapshot", None)
+        if callable(diagnostic_snapshot):
+            try:
+                raw_snapshot = diagnostic_snapshot()
+                if isinstance(raw_snapshot, dict):
+                    snapshot = raw_snapshot
+            except Exception:
+                snapshot = {}
+        subscriber_count = int(snapshot.get("subscriber_count") or 0)
+        offline_buffered_events = int(snapshot.get("offline_buffered_events") or 0)
+        total_subscribers += subscriber_count
+        total_offline_buffered_events += offline_buffered_events
+        streams.append({
+            "stream_id": str(stream_id),
+            "subscriber_count": subscriber_count,
+            "offline_buffered_events": offline_buffered_events,
+        })
+    streams.sort(key=lambda item: item["stream_id"])
+    return {
+        "active_streams": len(streams),
+        "total_subscribers": total_subscribers,
+        "total_offline_buffered_events": total_offline_buffered_events,
+        "streams": streams,
+    }
+
+
 def _run_lifecycle_health() -> dict:
     """Return active worker-run state independent of SSE stream presence."""
     # Import the module rather than relying only on imported scalar aliases so
@@ -3161,6 +3213,10 @@ def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
     checks: dict[str, dict] = {}
 
     checks["streams_lock"] = stream_check if stream_check is not None else _streams_lock_health()
+    checks["stream_runtime"] = {
+        "status": "ok",
+        **_stream_runtime_diagnostics(),
+    }
     if checks["streams_lock"].get("status") != "ok":
         return checks, False
 
@@ -3293,6 +3349,13 @@ def _plugin_visibility_payload(manager=None) -> dict:
     four lifecycle hook names called out by the Settings visibility MVP. It
     never includes plugin source paths, callback names, callback reprs, or raw
     load errors because those can contain private filesystem details.
+
+    Exclusive plugins (e.g. memory providers) are activated through their
+    category's ``<category>.provider`` config, not through ``plugins.enabled``.
+    Their ``loaded.enabled`` stays False by design and they register hooks
+    outside the four visibility hooks below. The payload surfaces ``kind``
+    and ``activation`` so the panel can render them distinctly instead of
+    mislabeling them as "Disabled" with no hooks (issue #2659).
     """
     manager = manager or _get_plugin_manager_for_visibility()
     manager.discover_and_load(force=False)
@@ -3310,6 +3373,14 @@ def _plugin_visibility_payload(manager=None) -> dict:
         name = _clean_plugin_visibility_text(getattr(manifest, "name", "") or plugin_key, limit=120)
         version = _clean_plugin_visibility_text(getattr(manifest, "version", ""), limit=80)
         description = _clean_plugin_visibility_text(getattr(manifest, "description", ""), limit=280)
+        kind = _clean_plugin_visibility_text(getattr(manifest, "kind", "") or "standalone", limit=40)
+        enabled_flag = bool(getattr(loaded, "enabled", False))
+        if kind == "exclusive":
+            activation = "exclusive"
+        elif kind == "model-provider" and enabled_flag:
+            activation = "provider"
+        else:
+            activation = "enabled" if enabled_flag else "disabled"
         registered = []
         for hook in list(getattr(manifest, "provides_hooks", []) or []) + list(getattr(loaded, "hooks_registered", []) or []):
             hook_name = str(hook or "").strip()
@@ -3321,7 +3392,11 @@ def _plugin_visibility_payload(manager=None) -> dict:
             "key": plugin_key or name,
             "version": version,
             "description": description,
-            "enabled": bool(getattr(loaded, "enabled", False)),
+            # `enabled` is preserved for back-compat with older WebUI clients
+            # that key off it directly. New clients should prefer `activation`.
+            "enabled": enabled_flag,
+            "kind": kind,
+            "activation": activation,
             "hooks": registered,
         })
 
@@ -4141,6 +4216,15 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/list":
         return _handle_list_dir(handler, parsed)
 
+    if parsed.path == "/api/git/status":
+        return _handle_git_status(handler, parsed)
+
+    if parsed.path == "/api/git/branches":
+        return _handle_git_branches(handler, parsed)
+
+    if parsed.path == "/api/git/diff":
+        return _handle_git_diff(handler, parsed)
+
     if parsed.path == "/api/personalities":
         # Read personalities from config.yaml agent.personalities section
         # (matches hermes-agent CLI behavior, not filesystem SOUL.md approach)
@@ -4172,9 +4256,22 @@ def handle_get(handler, parsed) -> bool:
             s = get_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        from api.workspace import git_info_for_workspace
+        from api.workspace_git import GitWorkspaceError, git_status
 
-        info = git_info_for_workspace(Path(s.workspace))
+        try:
+            status = git_status(Path(s.workspace))
+        except GitWorkspaceError as e:
+            return _git_bad(handler, e)
+        totals = status.get("totals") or {}
+        info = None if not status.get("is_git") else {
+            "branch": status.get("branch"),
+            "dirty": totals.get("changed", 0),
+            "modified": (totals.get("staged", 0) or 0) + (totals.get("unstaged", 0) or 0),
+            "untracked": totals.get("untracked", 0),
+            "ahead": status.get("ahead", 0),
+            "behind": status.get("behind", 0),
+            "is_git": True,
+        }
         return j(handler, {"git": info})
 
     if parsed.path == "/api/commands":
@@ -4254,6 +4351,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == '/api/sessions/gateway/stream':
         return _handle_gateway_sse_stream(handler, parsed)
+
+    if parsed.path == '/api/sessions/events':
+        return _handle_session_events_stream(handler)
 
     if parsed.path == "/api/media":
         return _handle_media(handler, parsed)
@@ -4636,6 +4736,8 @@ def handle_post(handler, parsed) -> bool:
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
         )
+        if worktree_info:
+            publish_session_list_changed("session_new")
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
     if parsed.path == "/api/session/duplicate":
@@ -4697,6 +4799,7 @@ def handle_post(handler, parsed) -> bool:
             # Without this explicit save, the duplicate is in-memory only — if the user
             # refreshes before sending a turn, the duplicate vanishes.
             copied_session.save()
+            publish_session_list_changed("session_duplicate")
 
             return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
         except Exception as e:
@@ -4790,6 +4893,7 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(body["session_id"]):
             s.title = str(body["title"]).strip()[:80] or "Untitled"
             s.save()
+        publish_session_list_changed("session_rename")
         return j(handler, {"session": s.compact()})
 
     if parsed.path == "/api/personality/set":
@@ -5044,6 +5148,7 @@ def handle_post(handler, parsed) -> bool:
                 delete_cli_session(sid)
             except Exception:
                 logger.debug("Failed to delete CLI session %s", sid)
+        publish_session_list_changed("session_delete")
         return j(handler, {"ok": True, **worktree_retained})
 
     if parsed.path == "/api/session/clear":
@@ -5169,6 +5274,7 @@ def handle_post(handler, parsed) -> bool:
         # Persist only if there are messages (matches new_session pattern)
         if forked_messages:
             branch.save()
+            publish_session_list_changed("session_branch")
 
         return j(handler, {
             "session_id": branch.session_id,
@@ -5318,6 +5424,43 @@ def handle_post(handler, parsed) -> bool:
 
         with cron_profile_context():
             return _handle_cron_resume(handler, body)
+
+    # ── Git workspace ops (POST) ──
+    if parsed.path == "/api/git/stage":
+        return _handle_git_stage(handler, body)
+
+    if parsed.path == "/api/git/unstage":
+        return _handle_git_unstage(handler, body)
+
+    if parsed.path == "/api/git/discard":
+        return _handle_git_discard(handler, body)
+
+    if parsed.path == "/api/git/commit-message":
+        return _handle_git_commit_message(handler, body)
+
+    if parsed.path == "/api/git/commit-message-selected":
+        return _handle_git_commit_message_selected(handler, body)
+
+    if parsed.path == "/api/git/commit":
+        return _handle_git_commit(handler, body)
+
+    if parsed.path == "/api/git/commit-selected":
+        return _handle_git_commit_selected(handler, body)
+
+    if parsed.path == "/api/git/fetch":
+        return _handle_git_remote_action(handler, body, "fetch")
+
+    if parsed.path == "/api/git/pull":
+        return _handle_git_remote_action(handler, body, "pull")
+
+    if parsed.path == "/api/git/push":
+        return _handle_git_remote_action(handler, body, "push")
+
+    if parsed.path == "/api/git/checkout":
+        return _handle_git_checkout(handler, body)
+
+    if parsed.path == "/api/git/stash-checkout":
+        return _handle_git_stash_checkout(handler, body)
 
     # ── File ops (POST) ──
     if parsed.path == "/api/file/delete":
@@ -5639,9 +5782,48 @@ def handle_post(handler, parsed) -> bool:
             s = _ensure_full_session_before_mutation(body["session_id"], s)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        with _get_session_agent_lock(body["session_id"]):
-            s.pinned = bool(body.get("pinned", True))
-            s.save()
+        pin_requested = bool(body.get("pinned", True))
+        # TOCTOU guard (Opus stage-389): the count check and the pin write
+        # must happen under the same lock, otherwise two parallel pin
+        # requests can both pass `len(pinned_ids) >= 3` against the same
+        # snapshot and both succeed, leaving the user with 4 pins. The check
+        # must be careful not to nest `all_sessions()` (which acquires LOCK
+        # internally) inside a `with LOCK:` block — that's a deadlock since
+        # LOCK is a non-reentrant `threading.Lock`. We snapshot the
+        # persisted index outside the lock, then re-check the in-memory
+        # mutation set inside the lock and commit the pin atomically.
+        if pin_requested and not getattr(s, "pinned", False):
+            # Pre-snapshot from persisted index (acquires LOCK internally,
+            # so must run outside our own LOCK acquire below).
+            persisted_pinned_ids = {
+                getattr(existing, "session_id", None) for existing in all_sessions()
+                if getattr(existing, "pinned", False) and not getattr(existing, "archived", False)
+            }
+            with LOCK:
+                # Final authoritative count: merge persisted-pinned with the
+                # in-memory SESSIONS snapshot. SESSIONS may have pin mutations
+                # that haven't yet flushed to the index, so the in-memory side
+                # is the truth for in-flight contention.
+                pinned_ids = set(persisted_pinned_ids)
+                pinned_ids.update(
+                    sid for sid, existing in SESSIONS.items()
+                    if getattr(existing, "pinned", False) and not getattr(existing, "archived", False)
+                )
+                pinned_ids.discard(body["session_id"])
+                pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)
+                if len(pinned_ids) >= pinned_sessions_limit:
+                    return bad(handler, f"Up to {pinned_sessions_limit} sessions can be pinned. Unpin one before pinning another.", 400)
+                # Mark in-memory pin state under LOCK so concurrent pin
+                # requests see the increment immediately, even before
+                # save() finishes flushing to disk.
+                s.pinned = True
+            with _get_session_agent_lock(body["session_id"]):
+                s.save()
+        else:
+            with _get_session_agent_lock(body["session_id"]):
+                s.pinned = pin_requested
+                s.save()
+        publish_session_list_changed("session_pin")
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Session archive (POST) ──
@@ -5718,6 +5900,7 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
+        publish_session_list_changed("session_archive")
         return j(handler, {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)})
 
     # ── Session move to project (POST) ──
@@ -5746,6 +5929,7 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(body["session_id"]):
             s.project_id = target_pid
             s.save()
+        publish_session_list_changed("session_move")
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Project CRUD (POST) ──
@@ -6193,11 +6377,14 @@ def _handle_list_dir(handler, parsed):
         except Exception:
             return bad(handler, "Session not found", 404)
     try:
+        rel_path = qs.get("path", ["."])[0]
+        entries = list_dir(Path(workspace), rel_path)
         return j(
             handler,
             {
-                "entries": list_dir(Path(workspace), qs.get("path", ["."])[0]),
-                "path": qs.get("path", ["."])[0],
+                "entries": entries,
+                "signature": dir_signature(Path(workspace), rel_path, entries),
+                "path": rel_path,
             },
         )
     except (FileNotFoundError, ValueError) as e:
@@ -6510,6 +6697,32 @@ def _handle_gateway_sse_stream(handler, parsed):
         pass
     finally:
         watcher.unsubscribe(q)
+    return True
+
+
+def _handle_session_events_stream(handler):
+    """SSE endpoint for lightweight session-list invalidation events."""
+    handler.send_response(200)
+    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+    handler.send_header('Cache-Control', 'no-cache')
+    handler.send_header('X-Accel-Buffering', 'no')
+    handler.send_header('Connection', 'keep-alive')
+    handler.end_headers()
+
+    q = subscribe_session_events()
+    try:
+        while True:
+            try:
+                event_data = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+            except queue.Empty:
+                handler.wfile.write(b': keepalive\n\n')
+                handler.wfile.flush()
+                continue
+            _sse(handler, event_data.get('type', 'sessions_changed'), event_data)
+    except _CLIENT_DISCONNECT_ERRORS:
+        pass
+    finally:
+        unsubscribe_session_events(q)
     return True
 
 
@@ -8053,6 +8266,16 @@ def _prepare_chat_start_session_for_stream(
     s.save()
 
 
+def _is_hidden_empty_session(s) -> bool:
+    return (
+        getattr(s, "title", "Untitled") == "Untitled"
+        and not getattr(s, "messages", None)
+        and not getattr(s, "active_stream_id", None)
+        and not getattr(s, "pending_user_message", None)
+        and not getattr(s, "worktree_path", None)
+    )
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -8109,6 +8332,7 @@ def _start_chat_stream_for_session(
     diag.stage("session_lock_wait") if diag else None
     with session_lock:
         diag.stage("save_pending_state") if diag else None
+        was_hidden_empty_session = _is_hidden_empty_session(s)
         _prepare_chat_start_session_for_stream(
             s,
             msg=msg,
@@ -8118,6 +8342,8 @@ def _start_chat_stream_for_session(
             model_provider=model_provider,
             stream_id=stream_id,
         )
+    if was_hidden_empty_session:
+        publish_session_list_changed("session_new")
     diag.stage("turn_journal_submitted") if diag else None
     journal_event = {}
     try:
@@ -8925,6 +9151,488 @@ def _handle_cron_resume(handler, body):
     return bad(handler, "Job not found", 404)
 
 
+def _git_session(handler, session_id: str):
+    if not session_id:
+        bad(handler, "session_id required")
+        return None
+    try:
+        return get_session(session_id)
+    except KeyError:
+        bad(handler, "Session not found", 404)
+        return None
+
+
+def _git_session_workspace(handler, session_id: str):
+    session = _git_session(handler, session_id)
+    if session is None:
+        return None
+    return Path(session.workspace)
+
+
+def _git_session_and_workspace(handler, session_id: str):
+    session = _git_session(handler, session_id)
+    if session is None:
+        return None, None
+    return session, Path(session.workspace)
+
+
+def _git_locked_by_active_stream(session) -> bool:
+    stream_id = getattr(session, "active_stream_id", None)
+    if not stream_id:
+        return False
+    try:
+        from api.config import STREAMS, STREAMS_LOCK
+
+        with STREAMS_LOCK:
+            return stream_id in STREAMS
+    except Exception:
+        return False
+
+
+def _git_reject_destructive_if_unsafe(handler, session) -> bool:
+    from api.workspace_git import (
+        GitWorkspaceError,
+        WORKSPACE_GIT_DESTRUCTIVE_ENV,
+        workspace_git_destructive_enabled,
+    )
+
+    if not workspace_git_destructive_enabled():
+        _git_bad(
+            handler,
+            GitWorkspaceError(
+                f"Destructive workspace Git operations are disabled. Set {WORKSPACE_GIT_DESTRUCTIVE_ENV}=1 to enable them.",
+                "destructive_git_disabled",
+            ),
+            status=403,
+        )
+        return True
+    if _git_locked_by_active_stream(session):
+        _git_bad(
+            handler,
+            GitWorkspaceError(
+                "A session run is active. Wait for it to finish before running this Git operation.",
+                "active_stream",
+            ),
+            status=409,
+        )
+        return True
+    return False
+
+
+def _handle_git_status(handler, parsed):
+    qs = parse_qs(parsed.query)
+    workspace = _git_session_workspace(handler, qs.get("session_id", [""])[0])
+    if workspace is None:
+        return True
+    try:
+        from api.workspace_git import GitWorkspaceError, git_status
+
+        return j(handler, {"git": git_status(workspace)})
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+
+
+def _handle_git_branches(handler, parsed):
+    qs = parse_qs(parsed.query)
+    workspace = _git_session_workspace(handler, qs.get("session_id", [""])[0])
+    if workspace is None:
+        return True
+    try:
+        from api.workspace_git import GitWorkspaceError, git_branches
+
+        return j(handler, {"branches": git_branches(workspace)})
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+
+
+def _handle_git_diff(handler, parsed):
+    qs = parse_qs(parsed.query)
+    workspace = _git_session_workspace(handler, qs.get("session_id", [""])[0])
+    if workspace is None:
+        return True
+    path = qs.get("path", [""])[0]
+    kind = qs.get("kind", ["unstaged"])[0]
+    if not path:
+        return bad(handler, "path required")
+    try:
+        from api.workspace_git import GitWorkspaceError, git_diff
+
+        return j(handler, {"diff": git_diff(workspace, path, kind)})
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+
+
+def _git_bad(handler, err, status: int = 400):
+    return j(
+        handler,
+        {
+            "error": _sanitize_error(err),
+            "code": getattr(err, "code", "git_failed") or "git_failed",
+        },
+        status=status,
+    )
+
+
+def _git_paths_from_body(body) -> list[str]:
+    raw_paths = body.get("paths")
+    if raw_paths is None and body.get("path"):
+        raw_paths = [body.get("path")]
+    if isinstance(raw_paths, str):
+        raw_paths = [raw_paths]
+    if not isinstance(raw_paths, list):
+        raise ValueError("paths must be a list")
+    return [str(path) for path in raw_paths]
+
+
+def _handle_git_stage(handler, body):
+    try:
+        require(body, "session_id")
+        paths = _git_paths_from_body(body)
+        session, workspace = _git_session_and_workspace(handler, body["session_id"])
+        if workspace is None:
+            return True
+        if _git_reject_destructive_if_unsafe(handler, session):
+            return True
+        from api.workspace_git import GitWorkspaceError, git_stage
+
+        return j(handler, {"ok": True, "git": git_stage(workspace, paths)})
+    except ValueError as e:
+        return bad(handler, str(e))
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+
+
+def _handle_git_unstage(handler, body):
+    try:
+        require(body, "session_id")
+        paths = _git_paths_from_body(body)
+        session, workspace = _git_session_and_workspace(handler, body["session_id"])
+        if workspace is None:
+            return True
+        if _git_reject_destructive_if_unsafe(handler, session):
+            return True
+        from api.workspace_git import GitWorkspaceError, git_unstage
+
+        return j(handler, {"ok": True, "git": git_unstage(workspace, paths)})
+    except ValueError as e:
+        return bad(handler, str(e))
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+
+
+def _handle_git_discard(handler, body):
+    try:
+        require(body, "session_id")
+        paths = _git_paths_from_body(body)
+        session, workspace = _git_session_and_workspace(handler, body["session_id"])
+        if workspace is None:
+            return True
+        if _git_reject_destructive_if_unsafe(handler, session):
+            return True
+        from api.workspace_git import GitWorkspaceError, git_discard
+
+        return j(
+            handler,
+            {
+                "ok": True,
+                "git": git_discard(
+                    workspace,
+                    paths,
+                    delete_untracked=bool(body.get("delete_untracked")),
+                ),
+            },
+        )
+    except ValueError as e:
+        return bad(handler, str(e))
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+
+
+def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) -> str:
+    from api import profiles as profiles_api
+
+    active_profile = profiles_api.get_active_profile_name() or "default"
+    with profiles_api.profile_env_for_background_worker(
+        active_profile,
+        "git commit message",
+        logger_override=logger,
+    ):
+        from api.config import (
+            get_effective_default_model,
+            model_with_provider_context,
+            resolve_custom_provider_connection,
+            resolve_model_provider,
+        )
+
+        session_model = str(getattr(session, "model", "") or "").strip()
+        session_provider = str(getattr(session, "model_provider", "") or "").strip() or None
+        model_for_resolution = (
+            model_with_provider_context(session_model, session_provider)
+            if session_model
+            else get_effective_default_model()
+        )
+        _main_model, _main_provider, _main_base_url = resolve_model_provider(model_for_resolution)
+        _main_api_key = None
+        try:
+            from api.oauth import resolve_runtime_provider_with_anthropic_env_lock
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+
+            _rt = resolve_runtime_provider_with_anthropic_env_lock(
+                resolve_runtime_provider,
+                requested=_main_provider,
+            )
+            _main_api_key = _rt.get("api_key")
+            if not _main_provider:
+                _main_provider = _rt.get("provider")
+            if not _main_base_url:
+                _main_base_url = _rt.get("base_url")
+        except Exception as _e:
+            logger.debug("git commit message runtime provider resolution failed: %s", _e)
+        if isinstance(_main_provider, str) and _main_provider.startswith("custom:"):
+            _cp_key, _cp_base = resolve_custom_provider_connection(_main_provider)
+            if not _main_api_key and _cp_key:
+                _main_api_key = _cp_key
+            if not _main_base_url and _cp_base:
+                _main_base_url = _cp_base
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        main_runtime = {
+            "provider": _main_provider,
+            "model": _main_model,
+            "base_url": _main_base_url,
+            "api_key": _main_api_key,
+        }
+        try:
+            from agent.auxiliary_client import get_text_auxiliary_client
+
+            aux_client, aux_model = get_text_auxiliary_client(
+                "compression",
+                main_runtime=main_runtime,
+            )
+            if aux_client is not None and aux_model:
+                response = aux_client.chat.completions.create(
+                    model=aux_model,
+                    messages=messages,
+                )
+                return str(response.choices[0].message.content or "").strip()
+        except Exception as _e:
+            logger.debug("git commit message auxiliary model failed; falling back to main model: %s", _e)
+
+        from run_agent import AIAgent
+
+        agent = AIAgent(
+            model=_main_model,
+            provider=_main_provider,
+            base_url=_main_base_url,
+            api_key=_main_api_key,
+            platform="webui",
+            quiet_mode=True,
+            enabled_toolsets=[],
+            session_id=f"git-commit-message-{uuid.uuid4().hex[:8]}",
+        )
+        result = agent.run_conversation(
+            user_message=user_prompt,
+            system_message=system_prompt,
+            conversation_history=[],
+            task_id=f"git-commit-message-{uuid.uuid4().hex[:8]}",
+        )
+        return str(result.get("final_response") or "").strip()
+
+
+def _handle_git_commit_message(handler, body):
+    from api.workspace_git import (
+        GitWorkspaceError,
+        clean_generated_commit_message,
+        staged_commit_message_prompt,
+    )
+
+    try:
+        require(body, "session_id")
+        session = get_session(body["session_id"])
+        workspace = Path(session.workspace)
+
+        prompt = staged_commit_message_prompt(workspace)
+        message = clean_generated_commit_message(
+            _llm_git_commit_message(prompt["system_prompt"], prompt["user_prompt"], session=session)
+        )
+        if not message:
+            raise GitWorkspaceError("No commit message was generated")
+        return j(handler, {"ok": True, "message": message, "truncated": bool(prompt.get("truncated"))})
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    except ValueError as e:
+        return bad(handler, str(e))
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+    except Exception as e:
+        logger.exception("git commit message generation failed")
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_git_commit_message_selected(handler, body):
+    from api.workspace_git import (
+        GitWorkspaceError,
+        clean_generated_commit_message,
+        selected_commit_message_prompt,
+    )
+
+    try:
+        require(body, "session_id")
+        paths = _git_paths_from_body(body)
+        session = get_session(body["session_id"])
+        workspace = Path(session.workspace)
+
+        prompt = selected_commit_message_prompt(workspace, paths)
+        message = clean_generated_commit_message(
+            _llm_git_commit_message(prompt["system_prompt"], prompt["user_prompt"], session=session)
+        )
+        if not message:
+            raise GitWorkspaceError("No commit message was generated")
+        return j(handler, {"ok": True, "message": message, "truncated": bool(prompt.get("truncated"))})
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    except ValueError as e:
+        return bad(handler, str(e))
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+    except Exception as e:
+        logger.exception("selected git commit message generation failed")
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_git_commit(handler, body):
+    try:
+        require(body, "session_id", "message")
+        session, workspace = _git_session_and_workspace(handler, body["session_id"])
+        if workspace is None:
+            return True
+        if _git_reject_destructive_if_unsafe(handler, session):
+            return True
+        from api.workspace_git import GitWorkspaceError, git_commit
+
+        return j(handler, git_commit(workspace, body.get("message", "")))
+    except ValueError as e:
+        return bad(handler, str(e))
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+
+
+def _handle_git_commit_selected(handler, body):
+    try:
+        require(body, "session_id", "message")
+        paths = _git_paths_from_body(body)
+        session, workspace = _git_session_and_workspace(handler, body["session_id"])
+        if workspace is None:
+            return True
+        if _git_reject_destructive_if_unsafe(handler, session):
+            return True
+        from api.workspace_git import GitWorkspaceError, git_commit_selected
+
+        return j(handler, git_commit_selected(workspace, body.get("message", ""), paths))
+    except ValueError as e:
+        return bad(handler, str(e))
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+
+
+def _handle_git_remote_action(handler, body, action: str):
+    try:
+        require(body, "session_id")
+        session, workspace = _git_session_and_workspace(handler, body["session_id"])
+        if workspace is None:
+            return True
+        if action in {"pull", "push"} and _git_reject_destructive_if_unsafe(handler, session):
+            return True
+        from api.workspace_git import GitWorkspaceError, git_fetch, git_pull, git_push
+
+        actions = {
+            "fetch": git_fetch,
+            "pull": git_pull,
+            "push": git_push,
+        }
+        return j(handler, actions[action](workspace))
+    except ValueError as e:
+        return bad(handler, str(e))
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+
+
+def _handle_git_checkout(handler, body):
+    try:
+        require(body, "session_id", "ref", "mode")
+        session, workspace = _git_session_and_workspace(handler, body["session_id"])
+        if workspace is None:
+            return True
+        if _git_reject_destructive_if_unsafe(handler, session):
+            return True
+        from api.workspace_git import GitWorkspaceError, git_checkout
+
+        result = git_checkout(
+            workspace,
+            str(body.get("ref", "")),
+            str(body.get("mode", "local")),
+            new_branch=body.get("new_branch"),
+            track=bool(body.get("track")),
+            dirty_mode=str(body.get("dirty_mode", "block")),
+        )
+        return j(
+            handler,
+            {
+                "ok": True,
+                "git": result.get("status"),
+                "branches": result.get("branches"),
+                "current_branch": result.get("current_branch"),
+                "message": result.get("message", ""),
+            },
+        )
+    except ValueError as e:
+        return bad(handler, str(e))
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+
+
+def _handle_git_stash_checkout(handler, body):
+    try:
+        require(body, "session_id", "ref", "mode")
+        session, workspace = _git_session_and_workspace(handler, body["session_id"])
+        if workspace is None:
+            return True
+        if _git_reject_destructive_if_unsafe(handler, session):
+            return True
+        from api.workspace_git import GitWorkspaceError, git_stash_and_checkout
+
+        result = git_stash_and_checkout(
+            workspace,
+            str(body.get("ref", "")),
+            str(body.get("mode", "local")),
+            new_branch=body.get("new_branch"),
+            track=bool(body.get("track")),
+        )
+        return j(
+            handler,
+            {
+                "ok": True,
+                "git": result.get("status"),
+                "branches": result.get("branches"),
+                "current_branch": result.get("current_branch"),
+                "message": result.get("message", ""),
+                "stash_name": result.get("stash_name", ""),
+                "stashed": bool(result.get("stashed")),
+                "restored_stash": result.get("restored_stash"),
+                "restore_failed": bool(result.get("restore_failed")),
+                "restore_error": result.get("restore_error", ""),
+                "restore_stash": result.get("restore_stash"),
+            },
+        )
+    except ValueError as e:
+        return bad(handler, str(e))
+    except GitWorkspaceError as e:
+        return _git_bad(handler, e)
+
+
 def _handle_file_delete(handler, body):
     try:
         require(body, "session_id", "path")
@@ -9311,14 +10019,16 @@ def _handle_approval_respond(handler, body):
 
 def _resolve_clarify_legacy(sid: str, clarify_id: str, response: str) -> bool:
     """Resolve clarify through the existing callback path without new state."""
-    # The legacy clarify queue is FIFO and does not yet expose stable ids to the
-    # browser, so clarify_id is accepted by the adapter contract but not used to
-    # create a parallel callback registry in the WebUI process.
+    # When a stable clarify_id is provided, match the specific entry so stale
+    # or late responses from the frontend are reliably rejected (issue #2639).
+    if clarify_id:
+        from api.clarify import resolve_clarify_by_id
+        return resolve_clarify_by_id(sid, clarify_id, response)
+    # Legacy path: resolve the oldest pending entry.  Return the REAL result
+    # instead of the old unconditional True so the frontend can detect when
+    # there is no pending prompt to resolve.
     resolved = resolve_clarify(sid, response, resolve_all=False)
-    # Preserve the historical no-id response shape for old clients/tests: a
-    # plain /api/clarify/respond call returns ok even when no pending prompt is
-    # active. Explicit stale ids remain bounded as not-active under the adapter.
-    return bool(resolved) or not bool(clarify_id)
+    return bool(resolved)
 
 
 def _handle_clarify_respond(handler, body):
@@ -9342,7 +10052,18 @@ def _handle_clarify_respond(handler, body):
         ok = adapter.respond_clarify(sid, clarify_id, response).accepted
     else:
         ok = _resolve_clarify_legacy(sid, clarify_id, response)
-    return j(handler, {"ok": ok, "response": response})
+
+    if not ok:
+        # Both the runtime adapter and legacy paths set ok=False for
+        # stale/expired/wrong-session responses.  The 409 status applies
+        # uniformly regardless of which path resolved the clarify request.
+        return j(handler, {
+            "ok": False,
+            "error": "Clarification prompt expired or not found. The agent may have already proceeded.",
+            "stale": True,
+        }, status=409)
+
+    return j(handler, {"ok": True, "response": response})
 
 
 class _ManualCompressionMemoryHandler:
@@ -10683,6 +11404,7 @@ def _handle_session_import_cli(handler, body):
                     changed = True
         if changed:
             existing.save(touch_updated_at=False)
+            publish_session_list_changed("session_import_cli")
         return j(
             handler,
             {
@@ -10799,6 +11521,7 @@ def _handle_session_import_cli(handler, body):
     s.platform = cli_platform
     s._cli_origin = sid
     s.save(touch_updated_at=False)
+    publish_session_list_changed("session_import_cli")
     return j(
         handler,
         {
@@ -10839,6 +11562,7 @@ def _handle_session_import(handler, body):
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
     s.save()
+    publish_session_list_changed("session_import")
     return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
 
 

@@ -4,8 +4,8 @@ Tests for profile-switch UX improvements — spinner indicator + parallelized fe
 Two changes:
 1. switchToProfile() shows a spinner on the profile chip during the async switch,
    with an optimistic name update and error revert.
-2. populateModelDropdown() and loadWorkspaceList() are now parallelized via Promise.all
-   instead of sequential awaits.
+2. loadWorkspaceList() refreshes in the background and the model catalog is
+   invalidated for lazy refresh instead of holding the visible switch animation open.
 """
 import re
 from pathlib import Path
@@ -79,7 +79,7 @@ class TestProfileSwitchSpinner:
 
 
 class TestParallelizedFetches:
-    """Verify that model and workspace fetches are parallelized."""
+    """Verify that background refresh work does not block visible profile switching."""
 
     JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 
@@ -95,11 +95,15 @@ class TestParallelizedFetches:
                     return self.JS[idx: i + 1]
         raise AssertionError("Could not extract switchToProfile")
 
-    def test_populate_and_workspace_in_promise_all(self):
-        """Both fetches must be inside Promise.all([...])."""
+    def test_workspace_refresh_in_background_and_model_catalog_lazy(self):
+        """Workspace refresh should run behind completion; model catalog waits for picker open."""
         fn = self._get_switch_fn()
-        assert "Promise.all([populateModelDropdown(), loadWorkspaceList()])" in fn, (
-            "populateModelDropdown() and loadWorkspaceList() are not parallelized."
+        assert "_refreshProfileSwitchBackground(_switchGen)" in fn, (
+            "switchToProfile() must schedule non-visible refreshes after the switch."
+        )
+        assert "window._modelDropdownReady=null" in self.JS
+        assert "await Promise.all([populateModelDropdown(), loadWorkspaceList()])" not in fn, (
+            "Profile switching still awaits full model/workspace catalog refreshes."
         )
 
     def test_no_sequential_await_pattern(self):
@@ -114,14 +118,24 @@ class TestParallelizedFetches:
         )
 
     def test_apply_steps_after_promise_all(self):
-        """Model apply step must come after Promise.all resolves."""
+        """Model defaults must apply before background catalog refresh starts."""
         fn = self._get_switch_fn()
-        promise_all_idx = fn.find("await Promise.all(")
+        background_idx = fn.find("_refreshProfileSwitchBackground(_switchGen)")
         apply_model_idx = fn.find("S._pendingProfileModel = modelToUse")
         assert apply_model_idx != -1
-        assert apply_model_idx > promise_all_idx, (
-            "Model apply step must come AFTER Promise.all resolves."
+        assert background_idx != -1
+        assert apply_model_idx < background_idx, (
+            "Model defaults must apply before background refresh starts."
         )
+        assert "existingDefaultOpt.dataset.provider = providerId" in fn
+
+    def test_workspace_load_is_awaited_only_when_visible(self):
+        """Profile switches should not duplicate workspace-tree loads."""
+        fn = self._get_switch_fn()
+        assert "awaitWorkspaceLoad: workspaceVisible" in fn
+        sessions_js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+        assert "if(options&&options.awaitWorkspaceLoad) await dirLoad" in sessions_js
+        assert "loadDir('.') is fire-and-forget while the workspace panel is closed" in sessions_js
 
 
 class TestSpinnerCss:
@@ -143,3 +157,50 @@ class TestSpinnerCss:
         assert idx != -1
         block = self.CSS[idx: idx + 200]
         assert "pointer-events:none" in block
+
+
+class TestProfileSessionListFlip:
+    """Verify session-list refreshes use row-level FLIP motion."""
+
+    JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    def test_profile_refresh_captures_row_positions(self):
+        assert "function _captureSessionListFlipPositions()" in self.JS
+        start = self.JS.index("function _captureSessionListFlipPositions()")
+        end = self.JS.index("function _sessionListPrefersReducedMotion()", start)
+        fn = self.JS[start:end]
+        assert "querySelectorAll('.session-item[data-sid]')" in fn
+        assert "positions.set(row.dataset.sid,row.getBoundingClientRect().top);" in fn
+
+    def test_profile_refresh_reflows_existing_rows(self):
+        assert "function _playSessionListFlipAnimation(before)" in self.JS
+        start = self.JS.index("function _playSessionListFlipAnimation(before)")
+        end = self.JS.index("function _isOptimisticFirstTurnSessionRow(s)", start)
+        fn = self.JS[start:end]
+        assert "const delta=oldTop-row.getBoundingClientRect().top;" in fn
+        assert "row.style.setProperty('--session-reflow-offset',delta+'px');" in fn
+        assert "row.classList.add('session-reflowing');" in fn
+
+    def test_profile_refresh_flips_new_rows(self):
+        assert "session-list-flip-enter" in self.JS
+        assert "@keyframes sessionListFlipIn" in self.CSS
+        assert "rotateX" in self.CSS
+
+    def test_profile_refresh_captures_before_render_and_plays_after_rows_exist(self):
+        capture = self.JS.index("const flipBefore=animateRefresh?_captureSessionListFlipPositions():null;")
+        clear = self.JS.index("list.innerHTML='';", capture)
+        row_render = self.JS.index("body.appendChild(_renderOneSession", clear)
+        play = self.JS.index("_playSessionListFlipAnimation(flipBefore);", row_render)
+
+        assert capture < clear < row_render < play
+
+    def test_first_non_empty_session_render_is_animated(self):
+        assert "_sessionListFirstRenderAnimated" in self.JS
+        assert "animateNextSessionListRefresh({enterAll:true});" in self.JS
+        assert "_sessionListFirstRenderAnimated=true;" in self.JS
+        assert "if(S&&S._bootReady) _sessionListFirstRenderAnimated=true;" not in self.JS
+        assert "enterAllAnimatedRows" in self.JS
+
+    def test_profile_refresh_is_not_whole_list_fade(self):
+        assert "session-list.profile-refresh" not in self.CSS
