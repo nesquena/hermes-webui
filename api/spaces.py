@@ -1460,6 +1460,34 @@ def _space_widget_patch_prompt_preflight_receipt(patch: Any) -> dict[str, Any]:
 
 
 
+def _space_widget_delete_prompt_preflight_receipt(widget_count: int, *, delete_all: bool = False) -> dict[str, Any]:
+    """Preflight metadata-only widget delete intent before persisted mutation.
+
+    Selector values are validated before this helper is called, but they are not
+    included in the prompt-preflight text. Valid IDs can legitimately contain
+    policy-rule words such as ``api-key`` or ``renderer``; preflight should gate
+    the delete intent metadata, not reclassify sanitized selector strings.
+    """
+    from api.capy_policy import prompt_preflight
+
+    preflight_text = json.dumps(
+        {
+            "widget_delete": {
+                "selector_scope": "validated_space_widget_selectors",
+                "widget_count": max(0, int(widget_count or 0)),
+                "delete_all": bool(delete_all),
+            }
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    receipt = prompt_preflight(preflight_text, boundary="creator_commit")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+
 def _context_value(value: Any, limit: int = 500) -> str:
     """Return a single-line value safe for compact agent context."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -4686,6 +4714,21 @@ def _space_tool_widget_ids(payload: dict[str, Any]) -> list[str]:
     return [validate_widget_id(item) for item in raw]
 
 
+
+def _space_tool_existing_widget_ids(space_id: str, widget_ids: list[str]) -> list[str]:
+    """Validate a bulk widget selector set before any persisted mutation."""
+    seen: set[str] = set()
+    for widget_id in widget_ids:
+        if widget_id in seen:
+            raise ValueError("Duplicate widget selector")
+        seen.add(widget_id)
+    existing_ids = {widget["id"] for widget in list_widgets(space_id)}
+    if any(widget_id not in existing_ids for widget_id in widget_ids):
+        raise FileNotFoundError("Widget selector not found")
+    return widget_ids
+
+
+
 def _space_tool_space_id(payload: dict[str, Any]) -> str:
     """Return a Space id from Hermes or source-style space helper payloads."""
     _space_tool_assert_matching_aliases(
@@ -5420,8 +5463,19 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
+        prompt_preflight = _space_widget_delete_prompt_preflight_receipt(1)
+        if prompt_preflight.get("status") != "pass":
+            raise ValueError("Widget delete prompt preflight blocked")
         result = delete_widget(space_id, widget_id)
-        response = {"ok": True, "action": name, **result}
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.delete")
+        response = {
+            "ok": True,
+            "action": name,
+            **result,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_widget_mutation_action_policy_receipt(name, prompt_preflight),
+            "progress_event": progress_event,
+        }
         if name.startswith("space.current."):
             response["active_space_id"] = space_id
         return response
@@ -5434,11 +5488,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if not name.startswith("space.current."):
             _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
-        widget_ids = _space_tool_widget_ids(data)
+        widget_ids = _space_tool_existing_widget_ids(space_id, _space_tool_widget_ids(data))
+        prompt_preflight = _space_widget_delete_prompt_preflight_receipt(len(widget_ids))
+        if prompt_preflight.get("status") != "pass":
+            raise ValueError("Widget bulk delete prompt preflight blocked")
         revision_event_ids: list[str] = []
         for widget_id in widget_ids:
             result = delete_widget(space_id, widget_id)
             revision_event_ids.append(result["revision_event_id"])
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.delete")
         response = {
             "ok": True,
             "action": name,
@@ -5447,6 +5505,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widget_ids": widget_ids,
             "deleted_count": len(widget_ids),
             "revision_event_ids": revision_event_ids,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_widget_mutation_action_policy_receipt(name, prompt_preflight),
+            "progress_event": progress_event,
         }
         if name.startswith("space.current."):
             response["active_space_id"] = space_id
@@ -5461,10 +5522,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_ids = [widget["id"] for widget in list_widgets(space_id)]
+        prompt_preflight = _space_widget_delete_prompt_preflight_receipt(len(widget_ids), delete_all=True)
+        if prompt_preflight.get("status") != "pass":
+            raise ValueError("Widget bulk delete prompt preflight blocked")
         revision_event_ids = []
         for widget_id in widget_ids:
             result = delete_widget(space_id, widget_id)
             revision_event_ids.append(result["revision_event_id"])
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.delete")
         response = {
             "ok": True,
             "action": name,
@@ -5473,6 +5538,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widget_ids": widget_ids,
             "deleted_count": len(widget_ids),
             "revision_event_ids": revision_event_ids,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_widget_mutation_action_policy_receipt(name, prompt_preflight),
+            "progress_event": progress_event,
         }
         if name.startswith("space.current."):
             response["active_space_id"] = space_id
@@ -8829,6 +8897,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "save-layout",
         "shared-slot.set",
         "shared-slot.delete",
+        "widget.delete",
         "widget.patch",
         "widget.upsert",
     }:

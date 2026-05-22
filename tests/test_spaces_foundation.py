@@ -5312,13 +5312,29 @@ def test_space_tool_adapter_supports_source_widget_delete_helper_metadata_only(m
     assert deleted["space_id"] == created["space_id"]
     assert deleted["widget_id"] == "weather-card"
     assert deleted["revision_event_id"]
+    for result, action in ((deleted, "space.spaces.deletewidget"), (removed, "space.spaces.removewidget")):
+        assert result["prompt_preflight"]["boundary"] == "creator_commit"
+        assert result["prompt_preflight"]["status"] == "pass"
+        assert result["prompt_preflight"]["metadata_only"] is True
+        assert result["prompt_preflight"]["raw_prompt_stored"] is False
+        assert result["autonomy_policy"]["action"] == action
+        assert result["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+        assert result["autonomy_policy"]["prompt_preflight_status"] == "pass"
+        assert result["autonomy_policy"]["model_route_hint"] == "hint:fast"
+        assert result["autonomy_policy"]["metadata_only"] is True
+        assert result["progress_event"]["event_type"] == "tool.completed"
+        assert result["progress_event"]["family"] == "tool"
+        assert result["progress_event"]["run_id"] == f"widget.delete:{created['space_id']}"
+        assert result["progress_event"]["space_id"] == created["space_id"]
+        assert result["progress_event"]["redaction_status"] == "metadata_only"
     assert removed["ok"] is True
     assert removed["action"] == "space.spaces.removewidget"
     assert removed["deleted"] is True
     assert removed["widget_id"] == "notes-card"
     assert spaces.list_widgets(created["space_id"]) == []
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
+    assert "stored(" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized
@@ -5371,6 +5387,21 @@ def test_space_tool_adapter_supports_current_widget_delete_helpers_metadata_only
     assert deleted["space_id"] == created["space_id"]
     assert deleted["widget_id"] == "weather-card"
     assert deleted["revision_event_id"]
+    for result, action in ((deleted, "space.current.deletewidget"), (removed, "space.current.removewidget")):
+        assert result["prompt_preflight"]["boundary"] == "creator_commit"
+        assert result["prompt_preflight"]["status"] == "pass"
+        assert result["prompt_preflight"]["metadata_only"] is True
+        assert result["prompt_preflight"]["raw_prompt_stored"] is False
+        assert result["autonomy_policy"]["action"] == action
+        assert result["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+        assert result["autonomy_policy"]["prompt_preflight_status"] == "pass"
+        assert result["autonomy_policy"]["model_route_hint"] == "hint:fast"
+        assert result["autonomy_policy"]["metadata_only"] is True
+        assert result["progress_event"]["event_type"] == "tool.completed"
+        assert result["progress_event"]["family"] == "tool"
+        assert result["progress_event"]["run_id"] == f"widget.delete:{created['space_id']}"
+        assert result["progress_event"]["space_id"] == created["space_id"]
+        assert result["progress_event"]["redaction_status"] == "metadata_only"
     assert removed["ok"] is True
     assert removed["action"] == "space.current.removewidget"
     assert removed["deleted"] is True
@@ -5378,7 +5409,8 @@ def test_space_tool_adapter_supports_current_widget_delete_helpers_metadata_only
     assert removed["widget_id"] == "notes-card"
     assert spaces.list_widgets(created["space_id"]) == []
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
+    assert "stored(" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized
@@ -5387,6 +5419,74 @@ def test_space_tool_adapter_supports_current_widget_delete_helpers_metadata_only
     assert "token" not in serialized
     assert "secret" not in serialized
     assert '"source":' not in serialized
+
+
+
+def test_space_tool_widget_delete_receipts_do_not_block_policy_word_selectors(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "selector-delete-lab", "name": "Selector Delete Lab"})
+    for widget_id in ["api-key-widget", "renderer-widget"]:
+        spaces.upsert_widget(created["space_id"], {"id": widget_id, "kind": "markdown", "title": widget_id})
+
+    deleted = spaces.run_space_tool(
+        "space.spaces.deleteWidget",
+        {"spaceId": created["space_id"], "widgetId": "api-key-widget"},
+    )
+    removed = spaces.run_space_tool(
+        "space.current.removeWidget",
+        {"activeSpaceId": created["space_id"], "widgetId": "renderer-widget"},
+    )
+    serialized = json.dumps({"deleted": deleted, "removed": removed}, sort_keys=True).lower()
+
+    assert deleted["deleted"] is True
+    assert deleted["prompt_preflight"]["status"] == "pass"
+    assert deleted["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert removed["deleted"] is True
+    assert removed["prompt_preflight"]["status"] == "pass"
+    assert removed["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert spaces.list_widgets(created["space_id"]) == []
+    assert "api-key-widget" in serialized
+    assert "renderer-widget" in serialized
+    assert "<script" not in serialized
+    assert "secret" not in serialized
+
+
+
+def test_space_tool_bulk_widget_delete_rejects_missing_selector_before_mutation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "bulk-delete-missing-lab", "name": "Bulk Delete Missing Lab"})
+    for widget_id in ["one-card", "two-card"]:
+        spaces.upsert_widget(created["space_id"], {"id": widget_id, "kind": "markdown", "title": widget_id})
+    before_widgets = spaces.list_widgets(created["space_id"])
+    before_events = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+
+    with pytest.raises(FileNotFoundError, match="Widget selector not found"):
+        spaces.run_space_tool(
+            "space.spaces.removeWidgets",
+            {"spaceId": created["space_id"], "widgetIds": ["one-card", "missing-card"]},
+        )
+
+    assert spaces.list_widgets(created["space_id"]) == before_widgets
+    assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == before_events
+
+
+
+def test_space_tool_bulk_widget_delete_rejects_duplicate_selectors_before_mutation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "bulk-delete-duplicate-lab", "name": "Bulk Delete Duplicate Lab"})
+    for widget_id in ["one-card", "two-card"]:
+        spaces.upsert_widget(created["space_id"], {"id": widget_id, "kind": "markdown", "title": widget_id})
+    before_widgets = spaces.list_widgets(created["space_id"])
+    before_events = sorted(path.name for path in spaces.events_dir().glob("*.json"))
+
+    with pytest.raises(ValueError, match="Duplicate widget selector"):
+        spaces.run_space_tool(
+            "space.current.deleteWidgets",
+            {"activeSpaceId": created["space_id"], "widgetIds": ["one-card", "one-card"]},
+        )
+
+    assert spaces.list_widgets(created["space_id"]) == before_widgets
+    assert sorted(path.name for path in spaces.events_dir().glob("*.json")) == before_events
 
 
 
@@ -5425,6 +5525,15 @@ def test_space_tool_adapter_supports_current_widget_bulk_delete_helpers_metadata
     assert removed_many["widget_ids"] == ["weather-card", "notes-card"]
     assert removed_many["deleted_count"] == 2
     assert len(removed_many["revision_event_ids"]) == 2
+    assert removed_many["prompt_preflight"]["boundary"] == "creator_commit"
+    assert removed_many["prompt_preflight"]["status"] == "pass"
+    assert removed_many["prompt_preflight"]["metadata_only"] is True
+    assert removed_many["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert removed_many["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert removed_many["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert removed_many["progress_event"]["event_type"] == "tool.completed"
+    assert removed_many["progress_event"]["run_id"] == f"widget.delete:{created['space_id']}"
+    assert removed_many["progress_event"]["redaction_status"] == "metadata_only"
     assert [widget["id"] for widget in spaces.list_widgets(created["space_id"])] == ["chart-card", "research-card"]
 
     removed_all = spaces.run_space_tool(
@@ -5439,9 +5548,19 @@ def test_space_tool_adapter_supports_current_widget_bulk_delete_helpers_metadata
     assert removed_all["space_id"] == created["space_id"]
     assert removed_all["widget_ids"] == ["chart-card", "research-card"]
     assert removed_all["deleted_count"] == 2
+    assert removed_all["prompt_preflight"]["boundary"] == "creator_commit"
+    assert removed_all["prompt_preflight"]["status"] == "pass"
+    assert removed_all["prompt_preflight"]["metadata_only"] is True
+    assert removed_all["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert removed_all["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert removed_all["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert removed_all["progress_event"]["event_type"] == "tool.completed"
+    assert removed_all["progress_event"]["run_id"] == f"widget.delete:{created['space_id']}"
+    assert removed_all["progress_event"]["redaction_status"] == "metadata_only"
     assert spaces.list_widgets(created["space_id"]) == []
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
+    assert "stored(" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized
@@ -5641,6 +5760,15 @@ def test_space_tool_adapter_supports_source_widget_bulk_delete_helpers_metadata_
     assert removed_many["widget_ids"] == ["weather-card", "notes-card"]
     assert removed_many["deleted_count"] == 2
     assert len(removed_many["revision_event_ids"]) == 2
+    assert removed_many["prompt_preflight"]["boundary"] == "creator_commit"
+    assert removed_many["prompt_preflight"]["status"] == "pass"
+    assert removed_many["prompt_preflight"]["metadata_only"] is True
+    assert removed_many["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert removed_many["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert removed_many["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert removed_many["progress_event"]["event_type"] == "tool.completed"
+    assert removed_many["progress_event"]["run_id"] == f"widget.delete:{created['space_id']}"
+    assert removed_many["progress_event"]["redaction_status"] == "metadata_only"
     assert [widget["id"] for widget in spaces.list_widgets(created["space_id"])] == ["chart-card", "research-card"]
 
     removed_all = spaces.run_space_tool(
@@ -5653,9 +5781,19 @@ def test_space_tool_adapter_supports_source_widget_bulk_delete_helpers_metadata_
     assert removed_all["action"] == "space.spaces.removeallwidgets"
     assert removed_all["widget_ids"] == ["chart-card", "research-card"]
     assert removed_all["deleted_count"] == 2
+    assert removed_all["prompt_preflight"]["boundary"] == "creator_commit"
+    assert removed_all["prompt_preflight"]["status"] == "pass"
+    assert removed_all["prompt_preflight"]["metadata_only"] is True
+    assert removed_all["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert removed_all["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert removed_all["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert removed_all["progress_event"]["event_type"] == "tool.completed"
+    assert removed_all["progress_event"]["run_id"] == f"widget.delete:{created['space_id']}"
+    assert removed_all["progress_event"]["redaction_status"] == "metadata_only"
     assert spaces.list_widgets(created["space_id"]) == []
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
+    assert "stored(" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized
