@@ -780,11 +780,15 @@ Recent completed slices:
 - `7aabd6b6 feat: add widget patch safety receipts`
   - Added metadata-only `prompt_preflight`, `autonomy_policy`, and `progress_event` receipts to direct `widget.patch` / `space.widget.patch` / `space.current.widget.patch` tool-route mutations.
   - Widget patch metadata now uses a stricter patch-only payload summarizer so unsafe patch keys such as renderer/source/html/script/token/raw_prompt/generated body/body are omitted before preflight and persistence, while existing non-patch safe notes-body detail behavior stays intact.
+- `9334d648 feat: add patchwidget alias safety receipts`
+  - Extended the same creator-commit preflight, `hint:fast` autonomy policy, and `widget.patch:<space_id>` progress receipts to legacy `space.spaces.patchWidget` / `space.current.patchWidget` alias helpers.
 
 Last known validation bundle:
 
 - RED check for widget.patch receipts/leak coverage: extended regression failed before implementation (`status == 400` / unsafe body-style patch metadata not safely accepted).
+- RED check for legacy patchWidget alias receipts: focused alias regressions failed before implementation with missing `prompt_preflight`.
 - Focused widget.patch receipt/leak regression: passed (`1 passed`).
+- Focused patchWidget alias receipt regressions: passed (`2 passed`).
 - Full Spaces foundation suite: passed (`515 passed`).
 - `py_compile api/spaces.py`: passed.
 - `git diff --check`: passed.
