@@ -648,9 +648,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
 
-  let assistantText='';
-  let reasoningText='';
-  let liveReasoningText='';
+  // On reconnect, restore accumulated text from INFLIGHT so we don't lose
+  // progress made before the session switch. Without this the closure starts
+  // empty and tokens arriving on the new SSE connection append to nothing —
+  // the already-rendered content vanishes.
+  const _lastLiveAssistant = reconnecting
+    ? INFLIGHT[activeSid]?.messages?.findLast?.(m => m.role === 'assistant' && m._live)
+    : null;
+  let assistantText = _lastLiveAssistant ? (_lastLiveAssistant.content || '') : '';
+  let reasoningText = _lastLiveAssistant ? (_lastLiveAssistant.reasoning || '') : '';
+  let liveReasoningText = reasoningText;
   let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
   let _pendingGoalContinuation=null;
