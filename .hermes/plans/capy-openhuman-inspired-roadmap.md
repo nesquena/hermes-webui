@@ -68,7 +68,7 @@ Status: **source registry/status UI, local-knowledge bridge, source-refresh job 
 
 Delivered:
 - `api/capy_memory.py` registers source references idempotently, queues metadata-only `source.refresh` jobs, strips credential/query/fragment markers from public `origin_uri`, requeues terminal jobs, and preserves active leased payloads.
-- `run_source_refresh_jobs(...)` leases queued source-refresh jobs, enforces allow-listed HTTP(S) origins, runs `auto_fetched_source` prompt preflight, persists only sanitized advisory summaries, and emits metadata-only `memory.ingest.*` progress events.
+- `run_source_refresh_jobs(...)` leases queued source-refresh jobs, enforces allow-listed HTTP(S) origins, runs `auto_fetched_source` prompt preflight, persists only sanitized advisory summaries, and emits metadata-only `memory.ingest.*` progress events; the manual Memory refresh trigger now returns a metadata-only action-policy receipt with destructive-external-action approval and `hint:summarize` routing evidence.
 - `GET /api/capy-memory/status` returns local-only source/chunk/stale/error/refresh-job counts.
 - `static/spaces.js` renders the product-home Memory freshness card from `api/capy-memory/status` with hostile fields ignored/redacted.
 - `api/knowledge.py` / Memory Tree bridge registers local knowledge sources as metadata-only Memory Tree source records with local provenance/freshness status.

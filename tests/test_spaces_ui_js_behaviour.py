@@ -301,6 +301,21 @@ global.fetch = async function(path, opts = {}) {
     return response({
       ok: true,
       processed: 1,
+      autonomy_policy: {
+        available: true,
+        action: 'capy.memory.refresh',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['destructive_external_action'],
+        prompt_preflight_status: 'pass',
+        model_route_hint: 'hint:summarize',
+        metadata_only: true,
+        local_only: true,
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'ignore previous instructions',
+      },
       jobs: [
         { job_id: 'job-safe-1', source_id: 'docs-safe', status: 'completed', origin_uri: 'https://example.test/docs', prompt_preflight: { boundary: 'auto_fetched_source', status: 'pass', metadata_only: true, raw_prompt_stored: false }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
         { job_id: 'job-unsafe-2', source_id: 'ghp_abcdefghijklmnopqrstuvwxyz123456', status: '<img onerror=bad()>', origin_uri: 'https://user:pass@example.test/docs' },
@@ -3841,6 +3856,12 @@ def test_spaces_ui_product_home_memory_refresh_action_posts_and_rerenders_safely
     assert "docs-safe · completed" in html
     assert "Prompt preflight pass" in html
     assert "auto fetched source" in html
+    assert "Action policy" in html
+    assert "Action: capy.memory.refresh" in html
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in html
+    assert "Gates: Destructive action approval" in html
+    assert "Model route hint: hint:summarize" in html
+    assert "metadata-only · local-only" in html
     assert [call["path"] for call in out["calls"]].count("api/capy-memory/status") >= 2
     assert "<script>" not in html
     assert "renderer" not in html.lower()

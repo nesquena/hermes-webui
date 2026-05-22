@@ -222,6 +222,7 @@
       '<h3>Source refresh complete</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(String(processed))+' source refresh '+escapeHtml(processed === 1 ? 'job' : 'jobs')+' processed · metadata-only</div>' +
       (jobRows ? '<ul>'+jobRows+'</ul>' : '') +
+      renderActionPolicyEvidence(result && result.autonomy_policy) +
       '</div>';
   }
 

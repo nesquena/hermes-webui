@@ -4412,7 +4412,28 @@ def handle_post(handler, parsed) -> bool:
             except (TypeError, ValueError):
                 processed = 0
             processed = max(0, min(processed, limit))
-            j(handler, {"ok": True, "processed": processed, "jobs": safe_jobs})
+            preflight_statuses = [
+                job.get("prompt_preflight", {}).get("status")
+                for job in safe_jobs
+                if isinstance(job.get("prompt_preflight"), dict)
+            ]
+            if "block" in preflight_statuses:
+                route_preflight_status = "block"
+            elif "warn" in preflight_statuses:
+                route_preflight_status = "warn"
+            elif "pass" in preflight_statuses:
+                route_preflight_status = "pass"
+            else:
+                route_preflight_status = "required"
+            from api.capy_policy import action_policy_receipt
+
+            policy = action_policy_receipt(
+                "capy.memory.refresh",
+                approval_gates=["destructive_external_action"],
+                prompt_preflight_status=route_preflight_status,
+                model_route_hint="hint:summarize",
+            )
+            j(handler, {"ok": True, "processed": processed, "jobs": safe_jobs, "autonomy_policy": policy})
             return True
         except ValueError as exc:
             return bad(handler, str(exc), status=400)

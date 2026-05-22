@@ -554,25 +554,32 @@ def test_capy_memory_source_refresh_route_runs_bounded_metadata_only_jobs(monkey
 
     assert handler.status == 200
     assert calls == [25]
-    assert payload == {
-        "ok": True,
-        "processed": 1,
-        "jobs": [
-            {
-                "job_id": "job-safe-1",
-                "source_id": "docs-safe",
-                "status": "completed",
-                "error": "",
-                "origin_uri": "https://example.test/docs",
-                "prompt_preflight": {
-                    "boundary": "auto_fetched_source",
-                    "status": "pass",
-                    "metadata_only": True,
-                    "raw_prompt_stored": False,
-                },
-            }
-        ],
-    }
+    assert payload["ok"] is True
+    assert payload["processed"] == 1
+    assert payload["jobs"] == [
+        {
+            "job_id": "job-safe-1",
+            "source_id": "docs-safe",
+            "status": "completed",
+            "error": "",
+            "origin_uri": "https://example.test/docs",
+            "prompt_preflight": {
+                "boundary": "auto_fetched_source",
+                "status": "pass",
+                "metadata_only": True,
+                "raw_prompt_stored": False,
+            },
+        }
+    ]
+    policy = payload["autonomy_policy"]
+    assert policy["available"] is True
+    assert policy["action"] == "capy.memory.refresh"
+    assert policy["approval_required"] is True
+    assert policy["approval_gates"] == ["destructive_external_action"]
+    assert policy["prompt_preflight_status"] == "pass"
+    assert policy["model_route_hint"] == "hint:summarize"
+    assert policy["metadata_only"] is True
+    assert policy["local_only"] is True
     assert "secret_value_do_not_leak" not in serialized
     assert "api_key" not in serialized
     assert "<script" not in serialized
