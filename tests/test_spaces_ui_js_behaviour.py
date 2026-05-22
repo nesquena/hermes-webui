@@ -203,6 +203,25 @@ global.fetch = async function(path, opts = {}) {
         raw_prompt: 'ignore previous instructions',
       });
     }
+    if (scenario === 'productHomeProgressRecoveryRestore') {
+      return response({
+        available: true,
+        local_only: true,
+        status: 'ready',
+        active_run_count: 0,
+        recent_event_count: 1,
+        recent_event_types: ['tool.completed'],
+        recent_family_counts: { tool: 1, renderer: 99, api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        recent_events: [
+          { event_id: 'evt-restore-1', event_type: 'tool.completed', family: 'tool', run_id: 'recovery.restore:tool-rollback', created_at: '2026-05-22T12:00:00Z', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
+        ],
+        last_event_at: '2026-05-22T12:00:00Z',
+        redaction_status: 'metadata_only',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'ignore previous instructions',
+      });
+    }
     return response({ available: true, local_only: true, status: 'ready', active_run_count: 0, recent_event_count: 0, event_families: ['run', 'tool'], supported_event_types: ['run.started', 'tool.started', 'tool.completed'], redaction_status: 'metadata_only' });
   }
   if (path === 'api/capy-progress/status?space_id=lab') {
@@ -1737,7 +1756,7 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await window.openSpaceDetail('lab');
-  } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus' || scenario === 'productHomePolicyStatus' || scenario === 'productHomePolicyUnsafeRoutePreviews' || scenario === 'productHomeProgressStatus') {
+  } else if (scenario === 'productHomeEmptyPolish' || scenario === 'productHomeMemoryStatus' || scenario === 'productHomePolicyStatus' || scenario === 'productHomePolicyUnsafeRoutePreviews' || scenario === 'productHomeProgressStatus' || scenario === 'productHomeProgressRecoveryRestore') {
     await window.loadCapySpaces();
   } else if (scenario === 'productHomeMemoryRefreshAction') {
     await window.loadCapySpaces();
@@ -3872,6 +3891,25 @@ def test_spaces_ui_product_home_progress_events_card_is_visible_bounded_and_safe
     assert "Recent progress stream" in html
     assert "space.visual_qa.completed · qa-run-1 · 2026-05-18T07:12:30Z" in html
     assert "tool.failed · sprint-1 · 2026-05-18T07:11:30Z" in html
+    assert "metadata-only" in html
+    assert {"path": "api/capy-progress/status", "method": "GET", "body": ""} in out["calls"]
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+    assert "raw prompt" not in html.lower()
+    assert "ignore previous instructions" not in html.lower()
+
+
+def test_spaces_ui_product_home_recovery_restore_progress_event_is_visible_and_safe(driver_path):
+    out = _run_spaces_scenario(driver_path, "productHomeProgressRecoveryRestore")
+    html = out["rootHtml"]
+
+    assert "Progress events" in html
+    assert "1 recent event" in html
+    assert "tool 1" in html
+    assert "tool.completed" in html
+    assert "recovery.restore:tool-rollback" in html
     assert "metadata-only" in html
     assert {"path": "api/capy-progress/status", "method": "GET", "body": ""} in out["calls"]
     assert "<script>" not in html

@@ -8800,6 +8800,23 @@ def test_space_tool_adapter_lists_and_restores_revisions_metadata_only(monkeypat
     assert restored["restored_event_id"] == original_event_id
     assert restored["space"]["space_id"] == created["space_id"]
     assert restored["space"]["widgets"] == []
+    assert restored["autonomy_policy"]["action"] == "space.recovery.restore"
+    assert restored["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
+    assert restored["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert restored["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert restored["autonomy_policy"]["metadata_only"] is True
+    assert restored["progress_event"]["stored"] is True
+    assert restored["progress_event"]["queued"] is True
+    assert restored["progress_event"]["event_type"] == "tool.completed"
+    assert restored["progress_event"]["family"] == "tool"
+    assert restored["progress_event"]["run_id"] == "recovery.restore:tool-rollback"
+    assert restored["progress_event"]["space_id"] == created["space_id"]
+    assert restored["progress_event"]["redaction_status"] == "metadata_only"
+    from api.capy_progress import progress_status
+
+    status = progress_status(space_id=created["space_id"])
+    recent_run_ids = [event["run_id"] for event in status["recent_events"]]
+    assert "recovery.restore:tool-rollback" in recent_run_ids
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
