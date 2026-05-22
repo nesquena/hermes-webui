@@ -2143,6 +2143,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden()) return;
       _closeSource(source);
+      // If the user has switched to a different session, don't attempt to
+      // reconnect — the old stream's EventSource was closed intentionally
+      // during session switch and reconnecting would leak a background stream.
+      if(!_isSessionActivelyViewed(activeSid)) return;
+      if(_terminalStateReached || _streamFinalized){
+        return;
+      }
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
