@@ -777,17 +777,20 @@ Recent completed slices:
 - `feat: preflight Space Agent imports`
   - Added active Space instruction prompt-preflight to Space Agent YAML/ZIP imports so role-override/system-prompt-exfiltration instructions are blocked before any Space/widget persistence.
   - Added metadata-only prompt-preflight and action-policy receipts for successful imports, including creator-commit/generated-widget-execution gates and `hint:reasoning` routing evidence without echoing raw active instructions.
+- `7aabd6b6 feat: add widget patch safety receipts`
+  - Added metadata-only `prompt_preflight`, `autonomy_policy`, and `progress_event` receipts to direct `widget.patch` / `space.widget.patch` / `space.current.widget.patch` tool-route mutations.
+  - Widget patch metadata now uses a stricter patch-only payload summarizer so unsafe patch keys such as renderer/source/html/script/token/raw_prompt/generated body/body are omitted before preflight and persistence, while existing non-patch safe notes-body detail behavior stays intact.
 
 Last known validation bundle:
 
-- RED check for hostile Space Agent import instructions: new regression failed as expected before implementation with `DID NOT RAISE <class 'ValueError'>` because imports persisted active instructions without preflight.
-- Focused hostile-import regression and safe import receipt regression: passed (`2 passed`).
-- Focused Space Agent import regression set: passed (`10 passed, 494 deselected`).
-- Full Spaces foundation suite: passed (`504 passed`).
+- RED check for widget.patch receipts/leak coverage: extended regression failed before implementation (`status == 400` / unsafe body-style patch metadata not safely accepted).
+- Focused widget.patch receipt/leak regression: passed (`1 passed`).
+- Full Spaces foundation suite: passed (`515 passed`).
 - `py_compile api/spaces.py`: passed.
 - `git diff --check`: passed.
-- Browser/Visual QA: file-harness rendered metadata-only Space Agent import policy receipts using the checked-out Spaces CSS, showed balanced hierarchy/spacing/alignment, and visible leak checks found no raw prompt, hostile instruction, secret, renderer, API auth, or script markers. Screenshot artifact: `/tmp/capy-space-agent-import-policy-qa.png`.
-- WebUI local/tailnet health: local `/health` returned OK after LaunchAgent restart, tailnet `/health` returned OK, Hermes gateway service `ai.hermes.gateway` was loaded/running, and Tailscale Serve still points `https://capy.tail9c6e3.ts.net/` to `http://127.0.0.1:8787`.
+- Spec review: PASS after body/generated-body leak gap was fixed; code quality review approved the receipt approach with no critical/important issues.
+- Browser/Visual QA: fallback Chrome headless harness rendered the widget.patch metadata-only receipt using checked-out Spaces CSS; hierarchy, spacing, alignment, density, and readability looked clean, and rendered-text leak checks found no secret/body/generated-body/raw-prompt/source/token/script markers. Screenshot artifact: `/tmp/capy-widget-patch-receipt-qa.png`.
+- WebUI local/tailnet health: local `/health` returned OK after LaunchAgent restart, tailnet `https://capy.tail9c6e3.ts.net/health` returned OK, Hermes gateway service `ai.hermes.gateway` was loaded/running, and Tailscale Serve still points `https://capy.tail9c6e3.ts.net/` to `http://127.0.0.1:8787`.
 
 Known warning: unknown `pytest.mark.integration` in `tests/test_onboarding_network.py`.
 
