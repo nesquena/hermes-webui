@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Bound browser in-flight recovery snapshots with configurable limits and make active-stream marker writes recover from localStorage quota errors, so submitting a chat does not fail when older recovery data has filled the browser storage budget.
+
 ## [v0.51.113] — 2026-05-22 — Release CK (stage-406 — 1-PR — composer model picker lag fix + hard-refresh recovery)
 
 ### Fixed

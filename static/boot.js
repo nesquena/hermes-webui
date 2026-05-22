@@ -1459,6 +1459,13 @@ function applyBotName(){
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
+    window._inflightStateLimits={
+      maxSessions:parseInt(s.inflight_state_max_sessions||8,10)||8,
+      messages:parseInt(s.inflight_state_max_messages||24,10)||24,
+      toolCalls:parseInt(s.inflight_state_max_tool_calls||48,10)||48,
+      stringChars:parseInt(s.inflight_state_max_string_chars||60000,10)||60000,
+      jsonChars:parseInt(s.inflight_state_max_json_chars||1500000,10)||1500000,
+    };
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
