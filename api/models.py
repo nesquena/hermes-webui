@@ -3078,21 +3078,19 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     if best_len < 2:
         return state_messages
 
-    sidecar_key_set = set(sidecar_keys)
-    last_represented_state_index = best_len - 1
-    for idx, key in enumerate(state_keys[best_len:], start=best_len):
-        if key in sidecar_key_set:
-            last_represented_state_index = idx
-
-    delta = []
-    for msg, key in zip(
-        state_messages[last_represented_state_index + 1:],
-        state_keys[last_represented_state_index + 1:],
-    ):
-        if key in sidecar_key_set:
-            continue
-        delta.append(msg)
-    return delta
+    # Drop only rows that can be aligned with the remaining sidecar context in
+    # order. This still tolerates stale state-only rows between mirrored context
+    # rows, but once the sidecar context is exhausted every later state row is a
+    # real delta, even if it repeats a short earlier message.
+    sidecar_index = best_len
+    state_index = best_len
+    while sidecar_index < len(sidecar_keys) and state_index < len(state_keys):
+        if state_keys[state_index] == sidecar_keys[sidecar_index]:
+            sidecar_index += 1
+        state_index += 1
+    if sidecar_index == len(sidecar_keys):
+        return state_messages[state_index:]
+    return state_messages[best_len:]
 
 
 def merge_session_messages_append_only(sidecar_messages: list, state_messages: list) -> list:
