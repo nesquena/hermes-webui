@@ -49,3 +49,35 @@ def test_stale_inflight_purge_preserves_current_send_before_stream_id_exists():
     skip_idx = body.index("_sendInProgress")
     delete_idx = body.index("delete INFLIGHT[sid];")
     assert skip_idx < delete_idx, "the current-send skip must run before any purge deletion"
+
+
+def test_server_absent_optimistic_first_turn_rows_are_not_kept_forever():
+    """A local first-turn sidebar row must expire when /api/chat/start never persisted it."""
+    body = _function_body(SESSIONS_JS, "_mergeOptimisticFirstTurnSessions")
+
+    assert "_shouldKeepLocalOnlyOptimisticSessionRow(local)" in body, (
+        "server-absent optimistic rows need an explicit keep/drop gate"
+    )
+    keep_idx = body.index("if(_shouldKeepLocalOnlyOptimisticSessionRow(local))")
+    append_idx = body.index("merged.push({...local,is_streaming:true});")
+    drop_idx = body.index("_dropStaleOptimisticSessionRow(sid);", append_idx)
+    assert keep_idx < append_idx < drop_idx, (
+        "local optimistic rows may only be appended inside the explicit keep gate"
+    )
+    drop_body = _function_body(SESSIONS_JS, "_dropStaleOptimisticSessionRow")
+    assert "clearInflightState(sid)" in drop_body, (
+        "dropping a phantom row should also clear persisted browser recovery state"
+    )
+
+
+def test_server_idle_row_wins_over_stale_optimistic_count():
+    """If the server says the row is idle, stale local message_count/title must not win."""
+    body = _function_body(SESSIONS_JS, "_mergeOptimisticFirstTurnSessions")
+
+    assert "const keepLocalOptimistic=" in body
+    assert "message_count:keepLocalOptimistic?Math.max(localCount,fetchedCount):fetchedCount" in body, (
+        "stale optimistic message_count must not override a confirmed idle server row"
+    )
+    assert "title:keepLocalOptimistic?(local.title||fetched.title):fetched.title" in body, (
+        "stale optimistic provisional title must not override a confirmed idle server row"
+    )
