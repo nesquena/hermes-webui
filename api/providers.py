@@ -1996,6 +1996,18 @@ def get_providers() -> dict[str, Any]:
     if isinstance(model_cfg, dict):
         active_provider = model_cfg.get("provider")
 
+    # Sort providers: active first, then custom:*, then has_key, then rest.
+    def _provider_sort_key(p):
+        pid = p.get("id") or ""
+        if pid == active_provider:
+            return (0, pid)
+        if pid.startswith("custom:"):
+            return (1, pid)
+        if p.get("has_key"):
+            return (2, pid)
+        return (3, pid)
+    providers.sort(key=_provider_sort_key)
+
     return {
         "providers": providers,
         "active_provider": active_provider,

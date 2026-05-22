@@ -337,7 +337,7 @@ class TestIssue765FollowupHardening:
             "with _agent_lock:\n"
             "                if not ephemeral and not _stream_writeback_is_current(s, stream_id):"
         )
-        save_idx = src.find("s.context_messages = _next_context_messages")
+        save_idx = src.find("_deduplicate_context_messages(_next_context_messages)")
 
         assert stop_idx != -1, "Success path must stop the checkpoint thread"
         assert join_idx != -1, "Success path must join the checkpoint thread"

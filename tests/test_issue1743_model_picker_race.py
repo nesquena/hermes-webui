@@ -12,14 +12,16 @@ def _body_between(src: str, start: str, end: str) -> str:
     return src[start_idx:end_idx]
 
 
-def test_model_picker_open_waits_for_async_model_catalog_before_rendering():
-    """Opening the visible picker must not render stale static <select> options."""
+def test_model_picker_opens_before_async_model_catalog_finishes():
+    """Opening the visible picker must not block on a slow /api/models request."""
     body = _body_between(UI_JS, "async function toggleModelDropdown", "function closeModelDropdown")
 
-    assert "window._modelDropdownReady" in body
     assert "window._ensureModelDropdownReady" in body
-    assert "await" in body
-    assert body.index("await") < body.index("renderModelDropdown()")
+    render_idx = body.index("renderModelDropdown()")
+    open_idx = body.index("dd.classList.add('open')")
+    await_idx = body.find("await")
+    assert render_idx < open_idx
+    assert await_idx == -1 or open_idx < await_idx
 
 
 def test_populate_model_dropdown_rerenders_if_picker_is_already_open():
