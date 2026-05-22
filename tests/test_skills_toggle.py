@@ -80,3 +80,113 @@ def test_disabled_list_round_trip(tmp_path):
 
     cfg3 = _load_yaml_config_file(config_path)
     assert cfg3["skills"]["disabled"] == ["skill-b"]
+
+
+def test_normalize_names_list():
+    """_normalize_names_list handles None, str, list, and deduplicates."""
+    from api.routes import _normalize_names_list
+
+    assert _normalize_names_list(None) == []
+    assert _normalize_names_list("foo") == ["foo"]
+    assert _normalize_names_list(["a", "b"]) == ["a", "b"]
+    assert _normalize_names_list(["a", "a"]) == ["a"]
+    assert _normalize_names_list([" a ", "b"]) == ["a", "b"]
+    assert _normalize_names_list("") == []
+    assert _normalize_names_list([]) == []
+
+
+def test_toggle_name_in_list():
+    """_toggle_name_in_list adds when enabled=False, removes when enabled=True."""
+    from api.routes import _toggle_name_in_list
+
+    # Add to empty list
+    assert _toggle_name_in_list([], "foo", enabled=False) == ["foo"]
+    # Add to existing list
+    assert _toggle_name_in_list(["bar"], "foo", enabled=False) == ["bar", "foo"]
+    # Idempotent add
+    assert _toggle_name_in_list(["foo"], "foo", enabled=False) == ["foo"]
+    # Remove from list
+    assert _toggle_name_in_list(["foo", "bar"], "foo", enabled=True) == ["bar"]
+    # Remove non-existent is a no-op
+    assert _toggle_name_in_list(["bar"], "foo", enabled=True) == ["bar"]
+    # Remove from empty is a no-op
+    assert _toggle_name_in_list([], "foo", enabled=True) == []
+    # Handles str input (normalization)
+    assert _toggle_name_in_list("foo", "bar", enabled=False) == ["foo", "bar"]
+    assert _toggle_name_in_list("foo", "foo", enabled=True) == []
+
+
+def test_platform_disabled_write_through(tmp_path, monkeypatch):
+    """Toggle writes through to platform_disabled.webui when that key exists."""
+    from unittest.mock import MagicMock
+    from api.routes import _handle_skill_toggle
+    from api.config import _load_yaml_config_file
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+
+    import yaml
+
+    config = {
+        "skills": {
+            "disabled": ["skill-a"],
+            "platform_disabled": {
+                "webui": ["skill-a", "skill-b"],
+                "telegram": ["skill-c"],
+            },
+        }
+    }
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump(config), encoding="utf-8")
+
+    # Create a fake skill directory so filesystem validation passes
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    (skills_dir / "skill-a").mkdir(parents=True, exist_ok=True)
+    (skills_dir / "skill-a" / "SKILL.md").write_text("---\nname: skill-a\n---\nA skill", encoding="utf-8")
+    monkeypatch.setattr("api.routes._active_skills_dir", lambda: skills_dir)
+
+    handler = MagicMock()
+
+    # Toggle skill-a OFF — it's already disabled, verify idempotency
+    _handle_skill_toggle(handler, {"name": "skill-a", "enabled": False})
+    cfg_after = _load_yaml_config_file(config_path)
+    assert "skill-a" in cfg_after["skills"]["disabled"]
+    assert "skill-a" in cfg_after["skills"]["platform_disabled"]["webui"]
+
+    # Toggle skill-a ON
+    _handle_skill_toggle(handler, {"name": "skill-a", "enabled": True})
+    cfg_after2 = _load_yaml_config_file(config_path)
+    assert "skill-a" not in cfg_after2["skills"]["disabled"]
+    assert "skill-a" not in cfg_after2["skills"]["platform_disabled"]["webui"]
+    # Other platform keys are untouched
+    assert cfg_after2["skills"]["platform_disabled"]["telegram"] == ["skill-c"]
+
+
+def test_platform_disabled_no_write_through_when_key_absent(tmp_path, monkeypatch):
+    """Toggle does NOT create platform_disabled.webui when it doesn't exist."""
+    from unittest.mock import MagicMock
+    from api.routes import _handle_skill_toggle
+    from api.config import _load_yaml_config_file
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+
+    import yaml
+
+    config = {"skills": {"disabled": []}}
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(yaml.dump(config), encoding="utf-8")
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(parents=True, exist_ok=True)
+    (skills_dir / "skill-b").mkdir(parents=True, exist_ok=True)
+    (skills_dir / "skill-b" / "SKILL.md").write_text("---\nname: skill-b\n---\nB skill", encoding="utf-8")
+    monkeypatch.setattr("api.routes._active_skills_dir", lambda: skills_dir)
+
+    handler = MagicMock()
+    _handle_skill_toggle(handler, {"name": "skill-b", "enabled": False})
+    cfg_after = _load_yaml_config_file(config_path)
+    assert "skill-b" in cfg_after["skills"]["disabled"]
+    # platform_disabled was never created
+    assert "platform_disabled" not in cfg_after.get("skills", {})

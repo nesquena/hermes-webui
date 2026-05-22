@@ -10960,12 +10960,34 @@ def _handle_skill_delete(handler, body):
     return j(handler, {"ok": True, "name": body["name"]})
 
 
+def _normalize_names_list(names) -> list[str]:
+    """Normalize a config value (None/str/list) into a deduplicated str list."""
+    if names is None:
+        return []
+    if isinstance(names, str):
+        names = [names]
+    elif not isinstance(names, list):
+        names = list(names) if names else []
+    return list(dict.fromkeys(str(d).strip() for d in names if str(d).strip()))
+
+
+def _toggle_name_in_list(names, name: str, enabled: bool) -> list[str]:
+    """Add or remove *name* from *names*, returning a new list."""
+    names = _normalize_names_list(names)
+    if enabled:
+        return [d for d in names if d != name]
+    if name not in names:
+        names.append(name)
+    return names
+
+
 def _handle_skill_toggle(handler, body):
     """Toggle a skill's enabled/disabled state in the active profile's config.yaml.
 
-    Note: this only affects the global ``skills.disabled`` list. Per-platform
-    overrides (``skills.platform_disabled.<platform>``) are not managed here
-    and must be edited directly in config.yaml.
+    Writes through to ``skills.platform_disabled.webui`` when that key exists
+    so the toggle takes effect for WebUI sessions (the agent's
+    ``get_disabled_skill_names`` checks platform-specific lists first when
+    ``HERMES_SESSION_PLATFORM`` is set).
     """
     try:
         require(body, "name", "enabled")
@@ -10991,26 +11013,20 @@ def _handle_skill_toggle(handler, body):
             cfg["skills"] = {}
         skills_cfg = cfg["skills"]
 
-        # Normalize the disabled list
-        disabled = skills_cfg.get("disabled")
-        if disabled is None:
-            disabled = []
-        elif isinstance(disabled, str):
-            disabled = [disabled]
-        elif not isinstance(disabled, list):
-            disabled = list(disabled) if disabled else []
-        disabled = [str(d).strip() for d in disabled if str(d).strip()]
+        # Always update the global disabled list
+        skills_cfg["disabled"] = _toggle_name_in_list(
+            skills_cfg.get("disabled"), name, enabled
+        )
 
-        if enabled:
-            # Remove from disabled list
-            disabled = [d for d in disabled if d != name]
-        else:
-            # Add to disabled list (if not already there)
-            if name not in disabled:
-                disabled.append(name)
+        # Write-through to platform_disabled.webui if it exists so that the
+        # toggle takes effect for WebUI sessions (the agent checks the
+        # platform-specific list first when HERMES_SESSION_PLATFORM=webui).
+        platform_disabled = skills_cfg.get("platform_disabled")
+        if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
+            platform_disabled["webui"] = _toggle_name_in_list(
+                platform_disabled["webui"], name, enabled
+            )
 
-        # Write back
-        skills_cfg["disabled"] = disabled
         cfg["skills"] = skills_cfg
         _save_yaml_config_file(config_path, cfg)
 
