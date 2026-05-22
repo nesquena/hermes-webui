@@ -5711,6 +5711,17 @@ async function loadSettingsPanel(){
 
 // ── Plugins panel (read-only plugin/hook visibility) ───────────────────────
 
+async function handlePluginEnableToggle(pluginKey, checked){
+  try{
+    const body={dashboard_plugins:{}};
+    body.dashboard_plugins[pluginKey]=!!checked;
+    await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    loadPluginsPanel();
+  }catch(e){
+    showToast(t('settings_save_failed')+e.message);
+  }
+}
+
 async function loadPluginsPanel(){
   const list=$('pluginsList');
   const empty=$('pluginsEmpty');
@@ -5746,22 +5757,41 @@ function _buildPluginCard(plugin){
   const desc=(plugin&&plugin.description)?esc(plugin.description):t('plugins_no_description');
   const enabled=plugin&&plugin.enabled!==false;
   const tab=plugin&&plugin.tab;
-  const openBtn=tab&&tab.path
+  const isDashboardPlugin=!!(tab&&tab.path);
+  const openBtn=enabled&&tab&&tab.path
     ? `<a href="${esc(tab.path)}" class="plugin-open-btn" onclick="switchPluginPage(event,'${esc(tab.path)}','${esc(tab.label||plugin.name)}');return false;">${esc(tab.label||plugin.name||'Open')} \u2197</a>`
     : '';
+  const toggleHtml=enabled&&isDashboardPlugin
+    ? `<div class="plugin-card-footer-row">
+         <span class="plugin-toggle-label">${t('plugins_enable_toggle')||'Enabled'}</span>
+         <label class="plugin-toggle-switch">
+           <input type="checkbox" checked onchange="handlePluginEnableToggle('${esc(plugin.key)}',this.checked)">
+           <span class="plugin-toggle-slider"></span>
+         </label>
+       </div>`
+    : (isDashboardPlugin
+    ? `<div class="plugin-card-footer-row">
+         <span class="plugin-toggle-label">${t('plugins_enable_toggle')||'Enable'}</span>
+         <label class="plugin-toggle-switch">
+           <input type="checkbox" onchange="handlePluginEnableToggle('${esc(plugin.key)}',this.checked)">
+           <span class="plugin-toggle-slider"></span>
+         </label>
+       </div>`
+    : '');
   card.innerHTML=`
     <div class="provider-card-header plugin-card-header">
       <div class="provider-card-info">
         <div class="provider-card-name">${esc((plugin&&plugin.name)||t('plugins_unnamed'))}</div>
         <div class="provider-card-meta">${esc((plugin&&plugin.key)||'plugin')}${version}</div>
       </div>
-      <span class="provider-card-badge ${enabled?'':'plugin-card-badge-disabled'}">${enabled?t('plugins_enabled'):t('plugins_disabled')}</span>
+      ${isDashboardPlugin?`<span class="provider-card-badge ${enabled?'':'plugin-card-badge-disabled'}">${enabled?t('plugins_enabled'):t('plugins_disabled')}</span>`:''}
     </div>
     <div class="provider-card-body plugin-card-body">
       <div class="provider-card-hint">${desc}</div>
       <div class="provider-card-label">${t('plugins_registered_hooks')}</div>
       <div class="plugin-hook-list">${hookHtml}</div>
       ${openBtn ? `<div class="plugin-card-footer">${openBtn}</div>` : ''}
+      ${toggleHtml}
     </div>
   `;
   return card;
@@ -5804,6 +5834,7 @@ async function _loadPluginPage(path, label) {
   iframe.src = path;
   iframe.style.cssText = 'width:100%;height:100%;border:none;display:block;';
   iframe.setAttribute('title', label || 'Plugin');
+  iframe.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups');
   container.appendChild(iframe);
   _currentPluginPage = { path, label };
 }

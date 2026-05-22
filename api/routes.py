@@ -4530,33 +4530,36 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, str(e), status=500)
 
     # ── Plugin shared assets (e.g. /plugins/plugin.css) ──
+    # Restricted to shared plugin assets only — no cross-plugin file access.
     if parsed.path.startswith("/plugins/"):
         from api.plugins import _get_plugin_base
         plugin_base = _get_plugin_base()
         rel = parsed.path[len("/plugins/"):]
+        allowed = {"plugin.css"}
+        if rel not in allowed:
+            return False  # 404
         safe = (plugin_base / rel).resolve()
         try:
             safe.relative_to(plugin_base.resolve())
         except ValueError:
-            pass  # path traversal — fall through to 404
-        else:
-            if safe.is_file():
-                import os as _os
-                data = safe.read_bytes()
-                ext = _os.path.splitext(rel.lower())[1]
-                ct = {
-                    ".css": "text/css; charset=utf-8",
-                    ".js": "application/javascript; charset=utf-8",
-                    ".json": "application/json; charset=utf-8",
-                    ".png": "image/png",
-                    ".svg": "image/svg+xml",
-                }.get(ext, "application/octet-stream")
-                handler.send_response(200)
-                handler.send_header("Content-Type", ct)
-                handler.send_header("Content-Length", str(len(data)))
-                handler.end_headers()
-                handler.wfile.write(data)
-                return True
+            return False  # path traversal — 404
+        if safe.is_file():
+            import os as _os
+            data = safe.read_bytes()
+            ext = _os.path.splitext(rel.lower())[1]
+            ct = {
+                ".css": "text/css; charset=utf-8",
+                ".js": "application/javascript; charset=utf-8",
+                ".json": "application/json; charset=utf-8",
+                ".png": "image/png",
+                ".svg": "image/svg+xml",
+            }.get(ext, "application/octet-stream")
+            handler.send_response(200)
+            handler.send_header("Content-Type", ct)
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+            return True
 
     # ── Plugin static assets ──
     if parsed.path.startswith("/dashboard-plugins/"):
@@ -4589,6 +4592,7 @@ def handle_get(handler, parsed) -> bool:
                     data = index_html.read_bytes()
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
                     handler.send_header("Content-Length", str(len(data)))
                     handler.end_headers()
                     handler.wfile.write(data)
@@ -4600,6 +4604,7 @@ def handle_get(handler, parsed) -> bool:
                     data = static_html.read_bytes()
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
                     handler.send_header("Content-Length", str(len(data)))
                     handler.end_headers()
                     handler.wfile.write(data)
@@ -4607,10 +4612,12 @@ def handle_get(handler, parsed) -> bool:
                 # 3) Fallback: generate shell that loads the IIFE bundle
                 index_js = dashboard_dir / "dist" / "index.js"
                 if index_js.is_file():
-                    label = manifest.get("label") or name
-                    css = manifest.get("css", "")
-                    css_tag = f'<link rel="stylesheet" href="/dashboard-plugins/{name}/{css}">' if css else ""
-                    html = (
+                    import html
+                    label = html.escape(manifest.get("label") or name)
+                    css = html.escape(manifest.get("css", ""))
+                    name_escaped = html.escape(name)
+                    css_tag = f'<link rel="stylesheet" href="/dashboard-plugins/{name_escaped}/{css}">' if css else ""
+                    html_content = (
                         f"<!doctype html>\n"
                         f"<html lang=\"en\">\n"
                         f"<head>\n"
@@ -4620,15 +4627,16 @@ def handle_get(handler, parsed) -> bool:
                         f"</head>\n"
                         f"<body>\n"
                         f'  <div id="pluginPageContainer"></div>\n'
-                        f'  <script src="/dashboard-plugins/{name}/dist/index.js"></script>\n'
+                        f'  <script src="/dashboard-plugins/{name_escaped}/dist/index.js"></script>\n'
                         f"</body>\n"
                         f"</html>\n"
                     ).encode("utf-8")
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
-                    handler.send_header("Content-Length", str(len(html)))
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
+                    handler.send_header("Content-Length", str(len(html_content)))
                     handler.end_headers()
-                    handler.wfile.write(html)
+                    handler.wfile.write(html_content)
                     return True
 
     return False  # 404

@@ -158,3 +158,4 @@ class TestPluginsSettingsUi:
         assert "esc(plugin.description" in js
         segment = js[js.find("function _buildPluginCard"):js.find("// ── Plugin pages")]
         assert ".callback" not in segment
+        assert ".path" not in segment or "tab.path" in segment  # tab.path is allowed (whitelisted)
