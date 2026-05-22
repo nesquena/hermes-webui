@@ -1401,7 +1401,39 @@ global.fetch = async function(path, opts = {}) {
     return response({ disabled: true, space_id: 'broken', widget_id: 'bad-widget', revision_event_id: 'rev-disable' });
   }
   if (path === 'api/spaces/recovery/enable-widget') {
-    return response({ disabled: false, space_id: 'broken', widget_id: 'disabled-widget', revision_event_id: 'rev-enable', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+    return response({
+      disabled: false,
+      space_id: 'broken',
+      widget_id: 'disabled-widget',
+      revision_event_id: 'rev-enable',
+      autonomy_policy: {
+        available: true,
+        action: 'space.widget.recovery.enable',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['generated_widget_execution'],
+        prompt_preflight_status: 'required',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-enable-widget',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'recovery.widget.enable:broken',
+        redaction_status: 'metadata-only',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET',
+    });
   }
   if (path === 'api/spaces/recovery/disable-space') {
     return response({
@@ -1438,7 +1470,38 @@ global.fetch = async function(path, opts = {}) {
     });
   }
   if (path === 'api/spaces/recovery/enable-space') {
-    return response({ disabled: false, space_id: 'disabled-space', revision_event_id: 'rev-enable-space', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+    return response({
+      disabled: false,
+      space_id: 'disabled-space',
+      revision_event_id: 'rev-enable-space',
+      autonomy_policy: {
+        available: true,
+        action: 'space.recovery.enable',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['generated_widget_execution'],
+        prompt_preflight_status: 'required',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-enable-space',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'recovery.enable:disabled-space',
+        redaction_status: 'metadata-only',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET',
+    });
   }
   if (path === 'api/spaces/recovery/disable-module') {
     return response({ disabled: true, module_id: 'safe-module', revision_event_id: 'rev-disable-module', renderer: '<script>bad()</script>', api_key: 'SECRET' });
@@ -6199,6 +6262,27 @@ def test_spaces_ui_recovery_enable_widget_uses_shared_confirm_and_refreshes(driv
     assert "SECRET" not in out["recoveryHtml"]
 
 
+def test_spaces_ui_recovery_enable_widget_renders_metadata_only_action_receipt(driver_path):
+    out = _run_spaces_scenario(driver_path, "enableRecoveryWidget")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/recovery/enable-widget")
+
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "broken", "widget_id": "disabled-widget", "reason": "enabled from recovery panel"}
+    assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "Recovery action receipt" in out["recoveryHtml"]
+    assert "Action policy" in out["recoveryHtml"]
+    assert "Action: space.widget.recovery.enable" in out["recoveryHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: required" in out["recoveryHtml"]
+    assert "Gates: Generated widget execution approval" in out["recoveryHtml"]
+    assert "Recovery progress" in out["recoveryHtml"]
+    assert "tool.completed · tool · run recovery.widget.enable:broken · metadata-only progress receipt" in out["recoveryHtml"]
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+    assert "raw_prompt" not in out["recoveryHtml"]
+
+
 def test_spaces_ui_recovery_enable_widget_cancel_does_not_post(driver_path):
     out = _run_spaces_scenario(driver_path, "enableRecoveryWidgetCancelled")
 
@@ -6219,6 +6303,27 @@ def test_spaces_ui_recovery_enable_space_uses_shared_confirm_and_refreshes(drive
     assert "renderer" not in out["recoveryHtml"]
     assert "api_key" not in out["recoveryHtml"]
     assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_enable_space_renders_metadata_only_action_receipt(driver_path):
+    out = _run_spaces_scenario(driver_path, "enableRecoverySpace")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/recovery/enable-space")
+
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "disabled-space", "reason": "enabled from recovery panel"}
+    assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "Recovery action receipt" in out["recoveryHtml"]
+    assert "Action policy" in out["recoveryHtml"]
+    assert "Action: space.recovery.enable" in out["recoveryHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: required" in out["recoveryHtml"]
+    assert "Gates: Generated widget execution approval" in out["recoveryHtml"]
+    assert "Recovery progress" in out["recoveryHtml"]
+    assert "tool.completed · tool · run recovery.enable:disabled-space · metadata-only progress receipt" in out["recoveryHtml"]
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+    assert "raw_prompt" not in out["recoveryHtml"]
 
 
 def test_spaces_ui_recovery_enable_space_cancel_does_not_post(driver_path):

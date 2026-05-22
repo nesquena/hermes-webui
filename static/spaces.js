@@ -3778,8 +3778,9 @@
     if (action === 'enableRecoverySpace') {
       const ok = await showConfirmDialog({title: 'Enable space?', message: 'Re-enable Space "'+spaceId+'" from safe recovery? Generated widgets are still not rendered in recovery.', confirmLabel: 'Enable space', danger: true, focusCancel: true});
       if (!ok) return;
-      await postSpacesJson('api/spaces/recovery/enable-space', {space_id: spaceId, reason: 'enabled from recovery panel'});
+      const enableResult = await postSpacesJson('api/spaces/recovery/enable-space', {space_id: spaceId, reason: 'enabled from recovery panel'});
       await loadCapySpacesRecovery();
+      prependRecoveryActionReceipt(enableResult || {});
       return;
     }
     const widgetId = button.dataset.widgetId || '';
@@ -3793,8 +3794,9 @@
     }
     const ok = await showConfirmDialog({title: 'Enable widget?', message: 'Re-enable widget "'+widgetId+'" from safe recovery? Generated content is still not rendered in recovery.', confirmLabel: 'Enable widget', danger: true, focusCancel: true});
     if (!ok) return;
-    await postSpacesJson('api/spaces/recovery/enable-widget', {space_id: spaceId, widget_id: widgetId, reason: 'enabled from recovery panel'});
+    const enableResult = await postSpacesJson('api/spaces/recovery/enable-widget', {space_id: spaceId, widget_id: widgetId, reason: 'enabled from recovery panel'});
     await loadCapySpacesRecovery();
+    prependRecoveryActionReceipt(enableResult || {});
   }
 
   function ensureCapySpacesRecoveryHandlers(){
