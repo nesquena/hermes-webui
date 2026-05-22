@@ -2018,28 +2018,15 @@ def _message_summary(messages) -> dict:
 
 
 def _metadata_only_message_summary(sid: str) -> dict:
-    """Return the cheap message summary used by metadata-only session loads."""
+    """Return the reconciled message summary used by metadata-only session loads."""
     sidecar_session = Session.load(sid)
     sidecar_messages = []
     if sidecar_session:
         sidecar_messages = getattr(sidecar_session, "messages", []) or []
-    sidecar_summary = _message_summary(sidecar_messages)
-    state_db_summary = get_state_db_session_summary(
-        sid,
-        after_timestamp=sidecar_summary["last_message_at"] or None,
+    state_db_messages = get_state_db_session_messages(sid)
+    return _message_summary(
+        merge_session_messages_append_only(sidecar_messages, state_db_messages)
     )
-    try:
-        sidecar_summary["message_count"] += max(0, int(state_db_summary.get("message_count") or 0))
-    except (TypeError, ValueError):
-        pass
-    try:
-        sidecar_summary["last_message_at"] = max(
-            sidecar_summary["last_message_at"],
-            float(state_db_summary.get("last_message_at") or 0),
-        )
-    except (TypeError, ValueError):
-        pass
-    return sidecar_summary
 
 
 def _session_requires_cli_metadata_lookup(session) -> bool:
@@ -2272,7 +2259,6 @@ from api.models import (
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
-    get_state_db_session_summary,
     merge_session_messages_append_only,
     _session_message_merge_key,
     ensure_cron_project,
@@ -3797,10 +3783,9 @@ def handle_get(handler, parsed) -> bool:
                 state_db_messages = get_state_db_session_messages(sid)
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
-                # reconciliation contract as full loads. Count state.db rows
-                # only after the newest sidecar timestamp so stale rows that
-                # the merge intentionally filters out do not make sidebar
-                # polling think the transcript is always newer.
+                # reconciliation contract as full loads so stale/replayed
+                # state.db rows do not make sidebar polling think the
+                # transcript is always newer.
                 metadata_summary = _metadata_only_message_summary(sid)
             _t2 = _time.monotonic()
             effective_model = (
