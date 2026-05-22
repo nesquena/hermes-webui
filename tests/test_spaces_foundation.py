@@ -7534,6 +7534,11 @@ def test_space_data_delete_tool_records_metadata_only_progress_event(monkeypatch
     assert result["progress_event"]["family"] == "tool"
     assert result["progress_event"]["run_id"] == "shared-slot.delete:shared-data-delete-progress"
     assert result["progress_event"]["space_id"] == created["space_id"]
+    assert result["autonomy_policy"]["action"] == "space.shared_slot.delete"
+    assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert result["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert result["autonomy_policy"]["model_route_hint"] == "hint:summarize"
+    assert result["autonomy_policy"]["metadata_only"] is True
     assert status["recent_event_count"] == 1
     assert status["recent_family_counts"] == {"tool": 1}
     assert status["recent_events"][0]["run_id"] == "shared-slot.delete:shared-data-delete-progress"

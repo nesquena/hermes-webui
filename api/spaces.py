@@ -1390,7 +1390,13 @@ def _shared_data_slot_action_policy_receipt(action: str, preflight_receipt: dict
     status = "required"
     if isinstance(preflight_receipt, dict):
         status = str(preflight_receipt.get("status") or "required")
-    safe_action = "space.shared_slot.set" if str(action).endswith("data.set") else "space.shared_slot.mutate"
+    action_text = str(action)
+    if action_text.endswith("data.set"):
+        safe_action = "space.shared_slot.set"
+    elif action_text.endswith("data.delete"):
+        safe_action = "space.shared_slot.delete"
+    else:
+        safe_action = "space.shared_slot.mutate"
     return action_policy_receipt(
         safe_action,
         approval_gates=["creator_commit"],
@@ -5563,7 +5569,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         result = delete_shared_data_slot(space_id, data.get("key"))
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="shared-slot.delete")
-        return {"ok": True, "action": name, **result, "progress_event": progress_event}
+        response = {"ok": True, "action": name, **result, "progress_event": progress_event}
+        response["autonomy_policy"] = _shared_data_slot_action_policy_receipt(name, None)
+        return response
     if name in {"space.research.artifact.set", "space.current.research.artifact.set", "space.research.report.set", "space.current.research.report.set"}:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
