@@ -3315,9 +3315,23 @@ function renderSkills(skills) {
     sec.appendChild(hdr);
     for (const skill of items.sort((a,b) => a.name.localeCompare(b.name))) {
       const el = document.createElement('div');
-      el.className = 'skill-item';
+      el.className = 'skill-item' + (skill.disabled ? ' disabled' : '');
       el.style.display = collapsed ? 'none' : '';
-      el.innerHTML = `<span class="skill-name">${esc(skill.name)}</span><span class="skill-desc">${esc(skill.description||'')}</span>`;
+      const isDisabled = skill.disabled || false;
+      const toggle = document.createElement('span');
+      toggle.className = 'skill-toggle' + (isDisabled ? '' : ' enabled');
+      toggle.title = isDisabled ? t('skill_disabled') : t('skill_enabled');
+      toggle.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        toggleSkill(skill.name, !isDisabled);
+      });
+      const nameEl = document.createElement('span');
+      nameEl.className = 'skill-name';
+      nameEl.textContent = skill.name;
+      const descEl = document.createElement('span');
+      descEl.className = 'skill-desc';
+      descEl.textContent = skill.description || '';
+      el.append(toggle, nameEl, descEl);
       el.onclick = () => openSkill(skill.name, el);
       sec.appendChild(el);
     }
@@ -3327,6 +3341,28 @@ function renderSkills(skills) {
 
 function filterSkills() {
   if (_skillsData) renderSkills(_skillsData);
+}
+
+
+async function toggleSkill(name, currentlyEnabled) {
+  const newEnabled = !currentlyEnabled;
+  try {
+    const result = await api('/api/skills/toggle', {
+      method: 'POST',
+      body: JSON.stringify({ name, enabled: newEnabled })
+    });
+    if (result && result.ok) {
+      if (_skillsData) {
+        const skill = _skillsData.find(s => s.name === name);
+        if (skill) skill.disabled = !newEnabled;
+      }
+      renderSkills(_skillsData || []);
+    } else {
+      setStatus((result && result.error) || t('skill_toggle_failed'));
+    }
+  } catch(e) {
+    setStatus(t('skill_toggle_failed') + e.message);
+  }
 }
 
 // Currently selected skill detail — kept across panel switches so re-entering
