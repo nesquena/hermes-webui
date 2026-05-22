@@ -1949,6 +1949,44 @@ def test_space_tool_save_meta_progress_fallback_redacts_secret_like_space_ids(mo
 
 
 
+def test_space_tool_delete_space_progress_fallback_redacts_secret_like_space_ids(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "secret-delete-lab", "name": "Secret Delete Lab"})
+
+    deleted = spaces.run_space_tool(
+        "space.spaces.deleteSpace",
+        {
+            "spaceId": created["space_id"],
+            "renderer": "<script>steal()</script>",
+            "source": "SECRET_SOURCE",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized_progress = json.dumps(deleted["progress_event"], sort_keys=True).lower()
+
+    assert deleted["ok"] is True
+    assert deleted["space_id"] == "secret-delete-lab"
+    assert deleted["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert deleted["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert deleted["progress_event"] == {
+        "stored": False,
+        "queued": False,
+        "event_type": "tool.completed",
+        "family": "tool",
+        "run_id": "space.delete:redacted-space",
+        "space_id": "redacted-space",
+        "redaction_status": "metadata_only",
+        "error": "progress event recording unavailable",
+    }
+    assert "secret-delete-lab" not in serialized_progress
+    assert "secret_value_do_not_leak" not in serialized_progress
+    assert "renderer" not in serialized_progress
+    assert "<script" not in serialized_progress
+    assert "source" not in serialized_progress
+    assert "api_key" not in serialized_progress
+
+
+
 def test_space_tool_adapter_supports_source_size_to_token_helper_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
@@ -5610,13 +5648,33 @@ def test_space_tool_adapter_supports_source_space_delete_helpers_metadata_only(m
     assert removed["deleted"] is True
     assert removed["space_id"] == first["space_id"]
     assert removed["revision_event_id"]
+    assert removed["autonomy_policy"]["action"] == "space.spaces.removespace"
+    assert removed["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert removed["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert removed["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert removed["autonomy_policy"]["metadata_only"] is True
+    assert removed["progress_event"]["event_type"] == "tool.completed"
+    assert removed["progress_event"]["family"] == "tool"
+    assert removed["progress_event"]["run_id"] == f"space.delete:{first['space_id']}"
+    assert removed["progress_event"]["space_id"] == first["space_id"]
+    assert removed["progress_event"]["redaction_status"] == "metadata_only"
     assert deleted["ok"] is True
     assert deleted["action"] == "space.spaces.deletespace"
     assert deleted["deleted"] is True
     assert deleted["space_id"] == second["space_id"]
+    assert deleted["autonomy_policy"]["action"] == "space.spaces.deletespace"
+    assert deleted["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert deleted["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert deleted["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert deleted["autonomy_policy"]["metadata_only"] is True
+    assert deleted["progress_event"]["event_type"] == "tool.completed"
+    assert deleted["progress_event"]["run_id"] == f"space.delete:{second['space_id']}"
+    assert deleted["progress_event"]["space_id"] == second["space_id"]
+    assert deleted["progress_event"]["redaction_status"] == "metadata_only"
     assert spaces.list_spaces() == []
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
+    assert "stored(" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized

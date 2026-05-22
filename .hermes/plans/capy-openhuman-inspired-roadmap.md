@@ -132,6 +132,7 @@ Delivered:
 - Recovery widget quarantine/enable tool actions now emit metadata-only `tool.completed` progress events with safe `recovery.widget.*:<space_id>` run ids, so Space-scoped progress reflects recovery admin widget toggles without exposing disabled widget bodies, renderer/source fields, prompts, scripts, or credentials.
 - Space Agent package import/export boundaries now emit metadata-only `tool.completed` progress events with safe `package.import:<space_id>` and `package.export:<space_id>` run ids after successful sanitized package operations, without storing package YAML, widget bodies, renderer/source/API-auth fields, prompts, scripts, or credentials; unsupported export formats fail before recording false completion telemetry.
 - Recovery revision restores now return metadata-only autonomy-policy evidence and `tool.completed` progress receipts with `recovery.restore:<space_id>` run ids, so rollback/time-travel actions surface in Space-scoped progress without exposing stored renderer/source/API-auth fields, prompts, scripts, disabled widget bodies, or secret-looking fixture markers.
+- Source-style Space deletion/removal aliases now return metadata-only autonomy-policy receipts and `tool.completed` progress receipts with safe `space.delete:<space_id>` run ids after successful revisioned deletion, without exposing hostile renderer/source/html/API-auth fields, scripts, tokens, or secret-looking fixture markers.
 
 Remaining:
 - Emit progress events from more real long-running browser, development, repair, and creator workflows.

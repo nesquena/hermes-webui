@@ -5323,7 +5323,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
         result = delete_space(space_id)
-        return {"ok": True, "action": name, **result}
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="space.delete")
+        return {
+            "ok": True,
+            "action": name,
+            **result,
+            "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "progress_event": progress_event,
+        }
     if name in {"space.spaces.upsertwidget", "space.spaces.upsertwidgets"}:
         _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -8905,6 +8912,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "save-layout",
         "shared-slot.set",
         "shared-slot.delete",
+        "space.delete",
         "widget.delete",
         "widget.patch",
         "widget.upsert",
