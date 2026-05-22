@@ -548,10 +548,10 @@ async function loadSession(sid){
     S.toolCalls = [];
     _messagesTruncated = false;
     _oldestIdx = 0;
-    // Close live SSE streams from the session we're leaving so they stop
-    // pumping token/reasoning events on the main thread. The stream for
-    // the session we're switching TO is reconnected later via
-    // attachLiveStream({reconnecting:true}) when it has an activeStreamId.
+    // Close live SSE streams from the session we're leaving. The error
+    // handler checks _isSessionActivelyViewed() and won't auto-reconnect
+    // for a backgrounded session, preventing leaked connections that would
+    // pump token events into an orphaned closure, freezing the main thread.
     if (currentSid && currentSid !== sid && typeof closeOtherLiveStreams === 'function') {
       closeOtherLiveStreams(sid);
     }
