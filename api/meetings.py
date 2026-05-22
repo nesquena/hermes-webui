@@ -64,6 +64,10 @@ def _load_store() -> list[dict]:
         for m in data:
             if "participants" in m:
                 m["participants"] = _normalize_participants(m["participants"])
+            m.setdefault("scheduled_at", None)
+            m.setdefault("updated_at", m.get("created_at") or _now())
+            m.setdefault("archived", False)
+            m.setdefault("notes", "")
         return data
     except (json.JSONDecodeError, OSError):
         return []
@@ -84,6 +88,7 @@ def create_meeting(
     project: str,
     objective: str = "alinhamento",
     participants: list | None = None,
+    scheduled_at: float | None = None,
 ) -> dict:
     room_slug = _generate_room_slug(project, title)
     meeting = {
@@ -96,6 +101,10 @@ def create_meeting(
         "room_url": f"{MEET_BASE_URL}/{room_slug}",
         "status": "planned",
         "created_at": _now(),
+        "scheduled_at": scheduled_at,
+        "updated_at": _now(),
+        "archived": False,
+        "notes": "",
         "started_at": None,
         "finished_at": None,
         "summary": None,
@@ -122,6 +131,7 @@ def start_meeting(meeting_id: str) -> dict | None:
             if m["id"] == meeting_id:
                 m["status"] = "active"
                 m["started_at"] = _now()
+                m["updated_at"] = _now()
                 _save_store(store)
                 return m
     return None
@@ -134,6 +144,7 @@ def finish_meeting(meeting_id: str) -> dict | None:
             if m["id"] == meeting_id:
                 m["status"] = "finished"
                 m["finished_at"] = _now()
+                m["updated_at"] = _now()
                 _save_store(store)
                 return m
     return None
@@ -146,6 +157,7 @@ def update_summary(meeting_id: str, summary: dict[str, Any]) -> dict | None:
             if m["id"] == meeting_id:
                 m["summary"] = summary
                 m["status"] = "processed"
+                m["updated_at"] = _now()
                 _save_store(store)
                 return m
     return None

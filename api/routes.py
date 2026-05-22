@@ -2310,11 +2310,18 @@ def handle_post(handler, parsed) -> bool:
         project = body.get("project", "").strip()
         if not title or not project:
             return j(handler, {"ok": False, "error": "title and project required"}, status=400)
+        scheduled_at = body.get("scheduled_at")
+        if scheduled_at is not None:
+            try:
+                scheduled_at = float(scheduled_at)
+            except (ValueError, TypeError):
+                scheduled_at = None
         meeting = neo_meetings.create_meeting(
             title=title,
             project=project,
             objective=body.get("objective", "alinhamento"),
             participants=body.get("participants"),
+            scheduled_at=scheduled_at,
         )
         return j(handler, {"ok": True, "meeting": meeting})
 

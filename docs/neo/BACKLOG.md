@@ -24,6 +24,7 @@
 | [EP-06](#ep-06--página-finanças) | Página Finanças (shell visual) | P0 | Sprint 6 |
 | [EP-07](#ep-07--qualidade-testes-e-evidências) | Qualidade, testes e evidências | P0 | Transversal |
 | [EP-AG](#ep-ag--painel-agentes-pixel-agents-híbrido) | Painel Agentes (pixel-agents híbrido) | P1 (pós-MVP) | Sprint 7 |
+| [EP-11](#ep-11--videoconferência-jitsi-meet-ecossistema-neo) | Videoconferência Jitsi Meet (ecossistema Neo) | P1 | Sprint 8+ |
 
 ---
 
@@ -447,6 +448,112 @@ já estabelecido pelas Sprints 3 e 4.
 **Risco residual:** o front do `pixel-agents-standalone` espera a entrega
 ordenada de `existingAgents` → `layoutLoaded` → eventos. Garantir que o
 `agents_activity.py` emita nessa ordem está coberto pela HU-AG.13.
+
+---
+
+## EP-11 — Videoconferência Jitsi Meet (ecossistema Neo)
+
+**Objetivo:** Integrar videoconferência self-hosted ao ecossistema Neo usando
+Jitsi Meet com instância própria, autenticação JWT e integração progressiva
+com calendário, Jira, Obsidian e pipeline de IA. Escopo: projetos pessoais e
+300 Soluções (MGI usa Teams — fora de escopo).
+
+**Referência:** `02-Projetos/Neo/NeoWebUI/2026-05-17-jitsi-meet-ecossistema-neo.md`
+
+**Infraestrutura base:** VPS atual (6 vCPU, 3.8 GiB RAM, 18 GiB livres) —
+suficiente para piloto leve. Gravação/IA exige servidor separado ou job
+assíncrono.
+
+---
+
+### Fase 1 — Piloto privado (infra + autenticação)
+
+**Objetivo:** Jitsi Meet funcional em subdomínio dedicado, com Docker, TLS,
+JWT obrigatório e reverse proxy. Resultado: criar e entrar em salas
+autenticadas via navegador.
+
+| HU | Descrição | Prioridade |
+|---|---|---|
+| HU-11.1 | Como operador, quero deploy Docker do Jitsi Meet (`docker-jitsi-meet`) em portas isoladas atrás do reverse proxy existente (Nginx/Caddy), com TLS via Let's Encrypt no subdomínio `meet.neo.investiorion.com` | P0 |
+| HU-11.2 | Como operador, quero autenticação JWT obrigatória para criação de sala — backend FastAPI/Django emite token com claims (room, user, exp); visitantes convidados entram conforme política da sala | P0 |
+| HU-11.3 | Como operador, quero configuração de rede validada: portas UDP (10000), TURN/STUN, firewall rules — com teste de qualidade em NAT simétrico | P0 |
+| HU-11.4 | Como operador, quero rate limiting e headers de segurança no reverse proxy (HSTS, CSP, X-Frame-Options allow-from Neo WebUI) | P0 |
+| HU-11.5 | Como operador, quero health check automatizado (cron ou systemd timer) que alerta se o Jitsi stack cair | P1 |
+| HU-11.6 | Como Júnior, quero documentação de operação: como subir/derrubar/atualizar o stack, troubleshooting de rede, rotação de JWT secret | P0 |
+
+**Dependências:** nenhuma (infra pura, independente do Neo WebUI).
+**Artefatos:** `docker-compose.yml`, `.env` (secrets fora do repo), docs em
+`docs/neo/jitsi/`.
+
+---
+
+### Fase 2 — Integração com ecossistema (Calendar, Jira, Obsidian, Neo WebUI)
+
+**Objetivo:** Salas criadas automaticamente por projeto/task, agendamento via
+Google Calendar, link disponível no Neo WebUI e atas registradas no Obsidian.
+
+| HU | Descrição | Prioridade |
+|---|---|---|
+| HU-11.7 | Como Júnior, quero gerar sala Jitsi a partir de um projeto/task no Neo WebUI — botão "Iniciar Reunião" no card do projeto que cria sala com nome derivado (`neo-<projeto>-<timestamp>`) e abre em nova aba ou iframe | P0 |
+| HU-11.8 | Como Júnior, quero endpoint `POST /api/meetings/create` que emite JWT, cria sala e retorna link + token de acesso para convidados | P0 |
+| HU-11.9 | Como Júnior, quero integração com Google Calendar: ao criar reunião, evento é criado no calendário com link Jitsi no campo de videoconferência | P1 |
+| HU-11.10 | Como Júnior, quero vincular reunião a uma issue Jira — link da sala e futura ata ficam como comentário na issue | P1 |
+| HU-11.11 | Como Júnior, quero registrar ata/resumo manual no Obsidian após reunião — modal no Neo WebUI com template pré-preenchido (participantes, projeto, data) que salva via skill `salvar-obsidian` | P0 |
+| HU-11.12 | Como Júnior, quero painel "Reuniões" embutido no dashboard (ou seção dentro de Projetos) listando reuniões recentes e agendadas com status (concluída/em andamento/agendada) | P1 |
+| HU-11.13 | Como Júnior, quero embed do Jitsi via IFrame API dentro do Neo WebUI com controles mínimos (mute, camera, sair) — sem sair da interface Neo | P2 |
+
+**Dependências:** Fase 1 concluída; EP-04 (Projetos) para vínculo com tasks;
+EP-10 (Jira sync) para HU-11.10.
+**Arquivos tocados:**
+- Novo: `api/meetings.py` (rotas `POST/GET /api/meetings/*`)
+- Aditivo: `static/projects.js` ou `static/kanban.js` (botão "Iniciar Reunião")
+- Aditivo: `static/i18n.js` (chaves `meetings_*`)
+- Novo: template Obsidian de ata em `~/.hermes/templates/meeting-notes.md`
+
+---
+
+### Fase 3 — Gravação, transcrição e IA (bot participante)
+
+**Objetivo:** Bot Neo participa da reunião como observador, grava áudio,
+transcreve via Whisper/Gemini, gera resumo estruturado, extrai decisões e
+tarefas automaticamente. Requer servidor separado ou job assíncrono (não cabe
+na VPS atual com carga de produção).
+
+| HU | Descrição | Prioridade |
+|---|---|---|
+| HU-11.14 | Como operador, quero Jibri configurado em servidor separado (ou container dedicado com recursos reservados) para gravação de áudio/vídeo das reuniões autorizadas | P0 |
+| HU-11.15 | Como operador, quero bot Neo que entra na sala Jitsi como participante silencioso (sem vídeo, mic mudo) via Jitsi Bot SDK ou headless browser, capturando stream de áudio | P0 |
+| HU-11.16 | Como Júnior, quero que ao encerrar reunião com bot ativo, o áudio seja enviado para pipeline de transcrição (Whisper local ou Gemini API) como job assíncrono | P0 |
+| HU-11.17 | Como Júnior, quero resumo estruturado gerado por LLM a partir da transcrição: participantes, tópicos discutidos, decisões tomadas, action items com responsável e prazo | P0 |
+| HU-11.18 | Como Júnior, quero que decisões e action items extraídos sejam propostos como tasks no Neo WebUI (vinculados ao projeto da reunião) — com confirmação antes de criar | P0 |
+| HU-11.19 | Como Júnior, quero que resumo + transcrição completa sejam salvos automaticamente no Obsidian Vault com template padronizado e backlinks para projeto/tasks | P0 |
+| HU-11.20 | Como Júnior, quero controle de privacidade: bot só entra com consentimento explícito (toggle ao criar sala); gravação indicada visualmente para todos os participantes | P0 |
+| HU-11.21 | Como operador, quero política de retenção: gravações brutas deletadas após N dias (configurável), transcrições e resumos permanecem no Obsidian | P1 |
+
+**Dependências:** Fase 2 concluída; servidor adicional ou budget de cloud para
+Jibri + transcrição; decisão sobre Whisper local vs API (Gemini/OpenAI).
+**Artefatos:**
+- Novo: serviço `neo-meeting-bot/` (repo separado ou módulo isolado)
+- Novo: `api/transcription.py` (webhook de conclusão do job)
+- Pipeline: áudio → Whisper → texto → LLM → resumo JSON → Obsidian + tasks
+
+---
+
+### Resumo de fases e dependências
+
+```
+Fase 1 (Piloto)          Fase 2 (Integração)         Fase 3 (IA)
+─────────────────────    ─────────────────────────    ─────────────────────
+Docker + TLS + JWT  ───► Sala por projeto/task   ───► Bot participante
+Rede + TURN/STUN         Google Calendar              Gravação (Jibri)
+Health check             Ata manual Obsidian          Transcrição (Whisper)
+Docs operação            Painel reuniões              Resumo LLM
+                         Embed iframe (P2)            Extração de tasks
+                                                      Política retenção
+```
+
+**Tech Radar:** Adopt (piloto controlado) → Trial (produção) após Fase 1
+validada operacionalmente.
 
 ---
 

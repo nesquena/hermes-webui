@@ -54,6 +54,46 @@ class TestMeetingsStore:
         result = finish_meeting("nonexistent-id")
         assert result is None
 
+    def test_create_meeting_with_scheduled_at(self):
+        from api.meetings import create_meeting, load_meetings
+        scheduled = 1778937600.0
+        meeting = create_meeting(
+            title="Scheduled Sprint Review",
+            project="obreiro",
+            scheduled_at=scheduled,
+        )
+        assert meeting["scheduled_at"] == scheduled
+        assert meeting["updated_at"] is not None
+        assert meeting["archived"] is False
+        assert meeting["notes"] == ""
+        
+        stored = load_meetings()
+        assert stored[0]["scheduled_at"] == scheduled
+        assert stored[0]["updated_at"] == meeting["updated_at"]
+
+    def test_retrocompatibility_normalization(self, isolate_meetings):
+        # isolate_meetings returns the fake meetings.json path
+        legacy_meeting = {
+            "id": "legacy-uuid",
+            "title": "Legacy Meeting",
+            "project": "old-project",
+            "created_at": 1716300000.0,
+            "status": "planned",
+            "participants": ["legacy-user"]
+        }
+        import json
+        isolate_meetings.write_text(json.dumps([legacy_meeting]), encoding="utf-8")
+        
+        from api.meetings import load_meetings
+        stored = load_meetings()
+        assert len(stored) == 1
+        m = stored[0]
+        assert m["id"] == "legacy-uuid"
+        assert m["scheduled_at"] is None
+        assert m["updated_at"] == 1716300000.0
+        assert m["archived"] is False
+        assert m["notes"] == ""
+
 
 class TestMeetingsPanelRegistration:
     """Verify the meetings panel is properly wired in the frontend."""
