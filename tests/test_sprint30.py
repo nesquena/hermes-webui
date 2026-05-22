@@ -98,6 +98,7 @@ class TestClarifyCardHTML:
         assert 'id="clarifyChoices"' in html, "clarify choices container missing"
         assert 'id="clarifyInput"' in html, "clarify input missing"
         assert 'id="clarifySubmit"' in html, "clarify submit button missing"
+        assert 'id="clarifyCollapse"' in html, "clarify collapse button missing"
 
     def test_clarify_card_has_data_i18n(self):
         html = read(REPO / "static/index.html")
@@ -167,7 +168,9 @@ class TestClarifyCardCSS:
             ".clarify-response",
             ".clarify-input",
             ".clarify-submit",
+            ".clarify-collapse",
             ".clarify-hint",
+            ".clarify-card.collapsed",
         ):
             assert cls in css, f"CSS class '{cls}' missing"
 
@@ -316,6 +319,13 @@ class TestClarifyMessagesJS:
         src = read(REPO / "static/messages.js")
         for token in ("startClarifyPolling", "stopClarifyPolling", "hideClarifyCard", "_clarifySessionId"):
             assert token in src, f"{token} missing from messages.js"
+
+    def test_clarify_card_can_collapse_without_hiding_prompt(self):
+        src = read(REPO / "static/messages.js")
+        assert "function toggleClarifyCardCollapsed" in src, "clarify collapse toggle missing"
+        assert "aria-expanded" in src, "clarify collapse button should expose expanded state"
+        assert "card.classList.remove(\"collapsed\")" in src, \
+            "new clarification prompts should reopen rather than stay collapsed"
 
 
 # ── boot.js keyboard shortcut ────────────────────────────────────────────────

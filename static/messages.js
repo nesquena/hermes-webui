@@ -2502,6 +2502,7 @@ function _ensureClarifyCardDom() {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17h.01"/><path d="M9.09 9a3 3 0 1 1 5.82 1c0 2-3 2-3 4"/><circle cx="12" cy="12" r="10"/></svg>
         <span id="clarifyHeading" data-i18n="clarify_heading">Clarification needed</span>
         <span class="clarify-countdown" id="clarifyCountdown"></span>
+        <button type="button" class="clarify-collapse" id="clarifyCollapse" aria-expanded="true" aria-controls="clarifyQuestion clarifyChoices clarifyInput clarifyHint" onclick="toggleClarifyCardCollapsed()" title="Collapse clarification">Collapse</button>
       </div>
       <div class="clarify-question" id="clarifyQuestion"></div>
       <div class="clarify-choices" id="clarifyChoices"></div>
@@ -2515,8 +2516,27 @@ function _ensureClarifyCardDom() {
   host.appendChild(card);
   const submit = $("clarifySubmit");
   if (submit) submit.onclick = () => respondClarify();
+  const collapse = $("clarifyCollapse");
+  if (collapse) collapse.onclick = () => toggleClarifyCardCollapsed();
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   return card;
+}
+
+function _syncClarifyCollapseButton(card) {
+  const collapse = $("clarifyCollapse");
+  if (!collapse || !card) return;
+  const collapsed = card.classList.contains("collapsed");
+  collapse.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  collapse.textContent = collapsed ? "Expand" : "Collapse";
+  collapse.title = collapsed ? "Expand clarification" : "Collapse clarification";
+}
+
+function toggleClarifyCardCollapsed(forceCollapsed) {
+  const card = $("clarifyCard");
+  if (!card) return;
+  const collapsed = typeof forceCollapsed === "boolean" ? forceCollapsed : !card.classList.contains("collapsed");
+  card.classList.toggle("collapsed", collapsed);
+  _syncClarifyCollapseButton(card);
 }
 
 function _clearClarifyHideTimer() {
@@ -2685,6 +2705,7 @@ function showClarifyCard(pending) {
   if (!sameClarify) {
     _clarifyVisibleSince = Date.now();
     _clearClarifyHideTimer();
+    card.classList.remove("collapsed");
   }
   if (questionEl) questionEl.textContent = question;
   if (choicesEl) {
@@ -2745,6 +2766,7 @@ function showClarifyCard(pending) {
   }
   _clarifySetControlsDisabled(false, false);
   card.classList.add("visible");
+  _syncClarifyCollapseButton(card);
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   if (input && !sameClarify) setTimeout(() => input.focus({preventScroll: true}), 50);
 }

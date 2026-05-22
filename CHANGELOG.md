@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2731** by @Michaelyklam — Clarification prompts now include a compact Collapse/Expand control so users can temporarily shrink a blocking decision card and reread the chat context behind it before responding.
 
 ## [v0.51.107] — 2026-05-21 — Release CE (stage-400 — 8-PR batch — pinned-sessions-limit getter rename + uploaded-file user-turn dedupe + active-run repair guard + incremental KaTeX streaming + profile default model on fresh boot + French locale completion + update-check error surfacing + release-update apply path)
 
