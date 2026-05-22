@@ -349,6 +349,7 @@ def test_real_completion_event_shape_routes_to_session_channel():
     import time as _t
 
     from api import background_process as bp, config as cfg
+    pytest.importorskip("tools.process_registry", reason="hermes-agent not installed")
     from tools.process_registry import process_registry, ProcessSession
 
     webui_sid = "sess-real-completion-shape"

@@ -70,6 +70,7 @@ def test_concurrent_turns_capture_their_own_session_under_env_race():
     import os
 
     streaming = importlib.import_module("api.streaming")
+    pytest.importorskip("tools.approval", reason="hermes-agent not installed")
     from tools.approval import get_current_session_key
     from gateway import session_context as sc
 
@@ -131,6 +132,7 @@ def test_turn_identity_binder_restores_previous_value():
     (those keep their env fallback so the notify_on_complete watcher
     registration that reads HERMES_SESSION_PLATFORM still works)."""
     streaming = importlib.import_module("api.streaming")
+    pytest.importorskip("tools.approval", reason="hermes-agent not installed")
     from tools.approval import get_current_session_key
     from gateway import session_context as sc
 

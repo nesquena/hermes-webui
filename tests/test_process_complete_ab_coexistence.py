@@ -24,6 +24,8 @@ import queue
 import threading
 import types
 
+import pytest
+
 
 class _FakeProcessRegistry:
     """Minimal stand-in for tools.process_registry.process_registry."""
@@ -187,6 +189,7 @@ def test_registry_completion_consumed_contract():
     any of these, the double-wakeup bug would silently come back. This test
     pins the contract so the rename breaks HERE (visibly) instead.
     """
+    pytest.importorskip("tools.process_registry", reason="hermes-agent not installed")
     from tools.process_registry import ProcessRegistry
     from api import background_process as bp
 
