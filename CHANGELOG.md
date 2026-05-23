@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Reasoning effort chip visibility** — `/api/reasoning` now accepts `model` and `provider` query params and returns `supported_efforts` so the composer chip hides for models without configurable reasoning levels (for example Cursor Composer) while remaining available for models like GPT-5.5.
+
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed

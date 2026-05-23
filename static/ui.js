@@ -1549,6 +1549,7 @@ async function selectModelFromDropdown(value){
   }
   sel.value=value;
   syncModelChip();
+  if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   closeModelDropdown();
   if(typeof sel.onchange==='function') await sel.onchange();
 }
@@ -1606,6 +1607,7 @@ window.addEventListener('resize',()=>{
 
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
+let _currentReasoningEffortsSupported=null;
 
 function _normalizeReasoningEffort(eff){
   return String(eff||'').trim().toLowerCase();
@@ -1617,17 +1619,58 @@ function _formatReasoningEffortLabel(effort){
   return effort;
 }
 
-function _applyReasoningChip(eff){
+function _reasoningEffortQuery(){
+  const sel=$('modelSelect');
+  const model=(S&&S.session&&S.session.model)||(sel&&sel.value)||'';
+  const provider=(S&&S.session&&S.session.model_provider)||'';
+  const params=new URLSearchParams();
+  if(model) params.set('model', model);
+  if(provider) params.set('provider', provider);
+  const qs=params.toString();
+  return qs?('?'+qs):'';
+}
+
+function _applyReasoningOptions(supportedEfforts){
+  const dd=$('composerReasoningDropdown');
+  if(!dd) return;
+  const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
+  dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+    const effort=opt.dataset.effort;
+    if(effort==='none'){
+      opt.style.display='';
+      return;
+    }
+    if(!supported.size){
+      opt.style.display='none';
+      return;
+    }
+    opt.style.display=supported.has(effort)?'':'none';
+  });
+}
+
+function _applyReasoningChip(eff, meta){
   const effort=_normalizeReasoningEffort(eff);
   _currentReasoningEffort=effort;
+  if(meta&&Array.isArray(meta.supported_efforts)){
+    _currentReasoningEffortsSupported=meta.supported_efforts;
+  }
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
   const chip=$('composerReasoningChip');
   const mobileLabel=$('composerMobileReasoningLabel');
   const mobileAction=$('composerMobileReasoningAction');
   if(!wrap||!label) return;
+  const supports=Array.isArray(_currentReasoningEffortsSupported)
+    ?_currentReasoningEffortsSupported.length>0
+    :true;
+  if(!supports){
+    wrap.style.display='none';
+    if(mobileAction) mobileAction.style.display='none';
+    return;
+  }
   wrap.style.display='';
   if(mobileAction) mobileAction.style.display='';
+  _applyReasoningOptions(_currentReasoningEffortsSupported);
   const text=_formatReasoningEffortLabel(effort);
   label.textContent=text;
   if(mobileLabel) mobileLabel.textContent=text;
@@ -1641,14 +1684,13 @@ function _applyReasoningChip(eff){
 }
 
 function fetchReasoningChip(){
-  api('/api/reasoning').then(function(st){
-    _applyReasoningChip((st&&st.reasoning_effort)||'');
-  }).catch(function(){_applyReasoningChip('');});
+  api('/api/reasoning'+_reasoningEffortQuery()).then(function(st){
+    _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
+  }).catch(function(){_applyReasoningChip('', {supported_efforts:[]});});
 }
 
 function syncReasoningChip(){
-  if(_currentReasoningEffort===null){fetchReasoningChip();return;}
-  _applyReasoningChip(_currentReasoningEffort);
+  fetchReasoningChip();
 }
 
 function _highlightReasoningOption(effort){
@@ -1714,7 +1756,7 @@ document.addEventListener('click',function(e){
     if(effort){
       api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
         .then(function(st){
-          _applyReasoningChip((st&&st.reasoning_effort)||effort);
+          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
         })
         .catch(function(){showToast('🧠 Failed to set effort');});

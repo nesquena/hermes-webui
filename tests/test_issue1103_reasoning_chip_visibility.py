@@ -47,12 +47,13 @@ def test_reasoning_chip_html_starts_hidden():
     assert m, "composerReasoningWrap must start with style='display:none'"
 
 
-def test_applyReasoningChip_shows_wrap():
-    """_applyReasoningChip must set wrap display to empty string (visible)."""
+def test_ui_js_passes_model_context_to_reasoning_api():
     with open("static/ui.js") as f:
         src = f.read()
-    assert "wrap.style.display=''" in src or "wrap.style.display =''" in src, \
-        "_applyReasoningChip must set wrap.style.display='' to make chip visible"
+    assert "_reasoningEffortQuery" in src, (
+        "ui.js must pass the active session model/provider to /api/reasoning"
+    )
+    assert "api('/api/reasoning'+_reasoningEffortQuery())" in src
 
 
 def test_fetchReasoningChip_calls_apply():
