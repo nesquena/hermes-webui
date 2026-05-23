@@ -481,6 +481,56 @@ def _widget_runtime_prompt_preflight_receipt(
     return receipt
 
 
+def _is_widget_reload_event(event_name: str) -> bool:
+    name = str(event_name or "").strip().lower()
+    return name in {
+        "widget.refresh",
+        "widget.reload",
+        "space.widget.refresh",
+        "space.widget.reload",
+        "space.current.widget.refresh",
+        "space.current.widget.reload",
+        "space.current.reloadwidget",
+        "space.spaces.reloadwidget",
+        "space.spaces.refreshwidget",
+    }
+
+
+def _widget_reload_prompt_preflight_receipt(prompt: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Preflight explicit widget reload/refresh prompts before queueing events.
+
+    Reload/refresh events are not themselves `agent.prompt` runtime messages, but
+    the optional prompt field still crosses an agent/tool boundary. Keep the
+    receipt metadata-only and block hostile prompt text before recording an event.
+    """
+    prompt_parts = _widget_runtime_prompt_text_parts(prompt, payload)
+    reason_text = _context_value(payload.get("reason") if isinstance(payload, dict) else "", 1000)
+    if reason_text:
+        prompt_parts.append(reason_text)
+    if not prompt_parts:
+        return None
+    from api.capy_policy import prompt_preflight
+
+    receipt = prompt_preflight("\n".join(prompt_parts), boundary="widget_runtime_prompt")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    if receipt.get("status") != "pass":
+        raise ValueError("Widget reload prompt preflight blocked")
+    return receipt
+
+
+def _widget_reload_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not preflight_receipt:
+        return None
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        action,
+        approval_gates=["generated_widget_execution"],
+        prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
+        model_route_hint="hint:reasoning",
+    )
+
+
 def _space_repair_prompt_preflight_receipt(prompt: str, *, error_prefix: str) -> dict[str, Any] | None:
     """Return metadata-only preflight evidence for recovery repair prompts.
 
@@ -1822,6 +1872,7 @@ def _payload_text_summary(value: Any, limit: int = 500) -> str:
     lowered = text.lower()
     if text and (
         _SECRET_LIKE_VALUE_RE.search(text)
+        or _SHARED_DATA_PREFLIGHT_SECRET_SHAPE_RE.search(text)
         or any(marker in lowered for marker in _EXECUTABLE_VALUE_MARKERS)
     ):
         return "[REDACTED]"
@@ -6238,6 +6289,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 safe_key = str(key or "")
                 if safe_key != "action":
                     payload[safe_key] = value
+        prompt_preflight = _widget_reload_prompt_preflight_receipt(data.get("prompt") or "", payload)
         result = queue_widget_event(
             space_id,
             widget_id,
@@ -6246,7 +6298,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             prompt=data.get("prompt") or "",
             session_id=data.get("session_id") or "",
         )
-        return {"ok": True, "action": name, **result}
+        response = {"ok": True, "action": name, **result}
+        if prompt_preflight:
+            response["prompt_preflight"] = prompt_preflight
+            response["autonomy_policy"] = _widget_reload_action_policy_receipt(name, prompt_preflight)
+        return response
     if name in {"widget.events", "widget.event.list", "space.widget.events", "space.widget.event.list", "space.current.widget.events", "space.current.widget.event.list"}:
         args = data.get("args")
         positional_space_id = _space_tool_arg(data, 0) if isinstance(args, (list, tuple)) else ""
@@ -9077,17 +9133,23 @@ def queue_widget_event(
             "widget_id": wid,
             "event_name": local_message_type,
         }
+    is_reload_event = _is_widget_reload_event(name)
     preflight_receipt = _widget_runtime_prompt_preflight_receipt(name, payload_data, prompt=prompt)
+    if preflight_receipt is None and is_reload_event:
+        preflight_receipt = _widget_reload_prompt_preflight_receipt(prompt, payload_data)
     autonomy_policy_receipt = None
     if preflight_receipt:
-        from api.capy_policy import action_policy_receipt
+        if is_reload_event:
+            autonomy_policy_receipt = _widget_reload_action_policy_receipt("space.widget.event", preflight_receipt)
+        else:
+            from api.capy_policy import action_policy_receipt
 
-        autonomy_policy_receipt = action_policy_receipt(
-            "space.widget.event",
-            approval_gates=["generated_widget_execution"],
-            prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
-            model_route_hint="hint:reasoning",
-        )
+            autonomy_policy_receipt = action_policy_receipt(
+                "space.widget.event",
+                approval_gates=["generated_widget_execution"],
+                prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
+                model_route_hint="hint:reasoning",
+            )
     prompt_preview = "[REDACTED]" if _context_value(prompt, 1) else ""
     payload_summary = _payload_summary(payload_data)
     event_details = {
