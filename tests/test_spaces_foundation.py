@@ -436,6 +436,15 @@ def test_space_tool_adapter_create_list_and_get_are_metadata_only(monkeypatch, t
     assert created["action"] == "space.create"
     assert created["space"]["space_id"] == "tool-lab"
     assert created["space"]["widget_count"] == 0
+    assert created["autonomy_policy"]["action"] == "space.create"
+    assert created["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert created["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert created["autonomy_policy"]["metadata_only"] is True
+    assert created["progress_event"]["event_type"] == "tool.completed"
+    assert created["progress_event"]["family"] == "tool"
+    assert created["progress_event"]["run_id"] == "space.create:tool-lab"
+    assert created["progress_event"]["space_id"] == "tool-lab"
+    assert created["progress_event"]["redaction_status"] == "metadata_only"
     assert spaces.read_space("tool-lab")["widgets"] == []
 
     spaces.upsert_widget(

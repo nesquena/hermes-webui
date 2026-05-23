@@ -1456,6 +1456,18 @@ def _shared_data_slot_action_policy_receipt(action: str, preflight_receipt: dict
 
 
 
+def _space_create_action_policy_receipt(action: str) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        action,
+        approval_gates=["creator_commit"],
+        prompt_preflight_status="required",
+        model_route_hint="hint:reasoning",
+    )
+
+
+
 def _space_layout_action_policy_receipt(action: str) -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
@@ -5424,7 +5436,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         created = create_space(_space_tool_create_payload(data))
         space = read_space_detail(created["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
-        return {"ok": True, "action": name, "space": space}
+        progress_event = _record_space_tool_progress_event(created["space_id"], run_prefix="space.create")
+        return {
+            "ok": True,
+            "action": name,
+            "space": space,
+            "autonomy_policy": _space_create_action_policy_receipt(name),
+            "progress_event": progress_event,
+        }
     if name in {"space.creator.preview", "space.creator.spec.preview", "space.spaces.previewcreatorspec"}:
         return _space_creator_preview_payload(name, data)
     if name in {"space.creator.commit", "space.creator.spec.commit", "space.spaces.commitcreatorspec"}:
@@ -9227,6 +9246,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "save-layout",
         "shared-slot.set",
         "shared-slot.delete",
+        "space.create",
         "space.delete",
         "space.duplicate",
         "widget.delete",
