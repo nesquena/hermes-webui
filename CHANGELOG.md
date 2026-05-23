@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Cursor ACP provider integration** — Add `cursor-acp` to the WebUI model picker and route slash model IDs (for example `cursor/composer-2.5`) through explicit `@cursor-acp:` provider hints so they do not fall through to the configured default HTTP provider.
+
+### Fixed
+
+- **Cursor ACP routing and new-chat defaults** — New conversations now carry the visible composer picker selection into `POST /api/session/new`, persist model changes before a session exists, and evict cached session agents when the model/provider changes mid-session.
+
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed

@@ -5027,6 +5027,9 @@ def handle_post(handler, parsed) -> bool:
                     )
                     s.threshold_tokens = 0
                     s.last_prompt_tokens = 0
+                    from api.config import _evict_session_agent
+
+                    _evict_session_agent(body["session_id"])
             s.save()
         if str(old_ws or "") != str(new_ws or ""):
             try:

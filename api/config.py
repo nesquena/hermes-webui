@@ -1969,6 +1969,12 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     return None, None
 
 
+# Subprocess ACP transports (Cursor/Copilot CLI). Model IDs often contain '/'
+# but must still route via explicit @provider:model so they do not fall through
+# to the configured default HTTP provider (e.g. openai-codex).
+_ACP_SUBPROCESS_PROVIDERS = frozenset({"cursor-acp", "copilot-acp"})
+
+
 def model_with_provider_context(model_id: str, model_provider: str | None = None) -> str:
     """Return the model string to pass to ``resolve_model_provider()``.
 
@@ -1987,6 +1993,11 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     config_provider = None
     if isinstance(model_cfg, dict):
         config_provider = str(model_cfg.get("provider") or "").strip().lower()
+
+    # ACP subprocess providers always need the explicit hint — their slash IDs
+    # are not OpenRouter paths and must not inherit config_provider routing.
+    if provider in _ACP_SUBPROCESS_PROVIDERS:
+        return f"@{provider}:{model}"
 
     # If the selected provider is already the configured provider, leaving the
     # model bare preserves provider-specific base_url/proxy settings.
