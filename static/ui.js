@@ -4081,7 +4081,7 @@ function _boundedInflightInt(value, fallback, min, max){
   if(!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, n));
 }
-function _inflightStateLimits(){
+function _getInflightStateLimits(){
   const configured=(typeof window!=='undefined'&&window._inflightStateLimits&&typeof window._inflightStateLimits==='object')?window._inflightStateLimits:{};
   return {
     maxSessions:_boundedInflightInt(configured.maxSessions, INFLIGHT_STATE_DEFAULT_LIMITS.maxSessions, 1, 25),
@@ -4110,7 +4110,7 @@ function _isStorageQuotaError(err){
   );
 }
 function _truncateInflightValue(value, maxChars){
-  const limits=_inflightStateLimits();
+  const limits=_getInflightStateLimits();
   const stringLimit=_boundedInflightInt(maxChars, limits.stringChars, 1000, 500000);
   if(typeof value==='string'){
     if(value.length<=stringLimit) return value;
@@ -4125,7 +4125,7 @@ function _truncateInflightValue(value, maxChars){
   return value;
 }
 function _compactInflightState(state){
-  const limits=_inflightStateLimits();
+  const limits=_getInflightStateLimits();
   const messages=Array.isArray(state.messages)?state.messages.slice(-limits.messages):[];
   const toolCalls=Array.isArray(state.toolCalls)?state.toolCalls.slice(-limits.toolCalls):[];
   return _truncateInflightValue({
@@ -4136,7 +4136,7 @@ function _compactInflightState(state){
   }, limits.stringChars);
 }
 function _writeInflightStateMap(all){
-  const limits=_inflightStateLimits();
+  const limits=_getInflightStateLimits();
   const entries=Object.entries(all||{})
     .sort((a,b)=>Number(b[1]&&b[1].updated_at||0)-Number(a[1]&&a[1].updated_at||0))
     .slice(0,limits.maxSessions);
