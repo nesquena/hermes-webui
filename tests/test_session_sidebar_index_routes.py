@@ -146,6 +146,46 @@ def test_messaging_dedupe_profile_aware_contract(monkeypatch):
     assert {row["session_id"] for row in profile_aware} == {"old_default", "new_haku"}
 
 
+def test_profile_aware_dedupe_does_not_hide_stale_rows_for_other_profiles(monkeypatch):
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "_load_gateway_session_identity_map",
+        lambda: {
+            "active_default": {
+                "raw_source": "telegram",
+            }
+        },
+    )
+    rows = [
+        {
+            "session_id": "active_default",
+            "profile": "default",
+            "raw_source": "telegram",
+            "user_id": "default-user",
+            "updated_at": 30,
+        },
+        {
+            "session_id": "stale_other",
+            "profile": "other",
+            "raw_source": "telegram",
+            "user_id": "other-user",
+            "updated_at": 20,
+            "end_reason": "session_reset",
+        },
+    ]
+
+    profile_blind = routes._keep_latest_messaging_session_per_source(rows)
+    assert [row["session_id"] for row in profile_blind] == ["active_default"]
+
+    profile_aware = routes._keep_latest_messaging_session_per_source(
+        rows,
+        profile_aware=True,
+    )
+    assert {row["session_id"] for row in profile_aware} == {"active_default", "stale_other"}
+
+
 def test_session_new_accepts_chats_workspace_group_with_runtime_workspace():
     data, status = post("/api/session/new", {"workspace_group": "chats"})
     assert status == 200
@@ -153,6 +193,18 @@ def test_session_new_accepts_chats_workspace_group_with_runtime_workspace():
     try:
         session = data["session"]
         assert session["workspace_group"] == "chats"
+        assert session["workspace"]
+    finally:
+        post("/api/session/delete", {"session_id": sid})
+
+
+def test_session_new_without_workspace_group_preserves_workspace_default():
+    data, status = post("/api/session/new", {})
+    assert status == 200
+    sid = data["session"]["session_id"]
+    try:
+        session = data["session"]
+        assert session["workspace_group"] == "workspace"
         assert session["workspace"]
     finally:
         post("/api/session/delete", {"session_id": sid})

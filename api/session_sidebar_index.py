@@ -12,6 +12,7 @@ from typing import Any, Iterable
 ARCHIVE_AFTER_DAY_CHOICES = (7, 14, 30, 90)
 DEFAULT_ARCHIVE_AFTER_DAYS = 7
 DEFAULT_ARCHIVE_LIMIT = 30
+MAX_ARCHIVE_LIMIT = 100
 SECONDS_PER_DAY = 86_400
 WORKSPACE_GROUP_WORKSPACE = "workspace"
 WORKSPACE_GROUP_CHATS = "chats"
@@ -231,7 +232,6 @@ def _compact_sidebar_row(
             "is_streaming",
             "active_stream_id",
             "has_pending_user_message",
-            "pending_user_message",
             "is_cli_session",
             "source_tag",
             "session_source",
@@ -366,4 +366,4 @@ def _normalize_archive_limit(limit: Any) -> int:
         return DEFAULT_ARCHIVE_LIMIT
     if parsed <= 0:
         return DEFAULT_ARCHIVE_LIMIT
-    return parsed
+    return min(parsed, MAX_ARCHIVE_LIMIT)

@@ -6,6 +6,7 @@ from api.session_sidebar_index import (
     ARCHIVE_AFTER_DAY_CHOICES,
     DEFAULT_ARCHIVE_AFTER_DAYS,
     DEFAULT_ARCHIVE_LIMIT,
+    MAX_ARCHIVE_LIMIT,
     SECONDS_PER_DAY,
     VALID_WORKSPACE_GROUPS,
     build_archive_page,
@@ -43,6 +44,7 @@ def _group(index, group_id):
 def test_public_contract_exports_are_available():
     assert DEFAULT_ARCHIVE_AFTER_DAYS == 7
     assert DEFAULT_ARCHIVE_LIMIT == 30
+    assert MAX_ARCHIVE_LIMIT == 100
     assert ARCHIVE_AFTER_DAY_CHOICES == (7, 14, 30, 90)
     assert VALID_WORKSPACE_GROUPS == {"workspace", "chats"}
     assert callable(workspace_key_for)
@@ -194,6 +196,30 @@ def test_important_rows_stay_current_even_when_old_without_current_session(sessi
     assert group["archive_count"] == 0
 
 
+def test_pending_prompt_text_is_not_returned_but_marks_pending():
+    rows = [
+        _row(
+            "pending-text",
+            workspace_group="chats",
+            age_days=30,
+            pending_user_message="private prompt text",
+        )
+    ]
+
+    index = build_session_sidebar_index(
+        rows,
+        server_time=1_700_000_000.0,
+        session_archive_after_days=7,
+    )
+    group = _group(index, "chats")
+    row = group["sessions"][0]
+
+    assert row["session_id"] == "pending-text"
+    assert row["pending"] is True
+    assert row["age_archived"] is False
+    assert "pending_user_message" not in row
+
+
 def test_current_session_stays_current_even_when_old():
     rows = [_row("current", workspace_group="chats", age_days=30)]
 
@@ -321,3 +347,23 @@ def test_archive_page_bad_or_non_positive_limit_defaults(limit):
     assert len(page["sessions"]) == DEFAULT_ARCHIVE_LIMIT
     assert page["remaining_count"] == 1
     assert page["next_cursor"]
+
+
+def test_archive_page_positive_limit_is_capped_to_max():
+    rows = [
+        _row(f"old-{idx:03d}", workspace_group="chats", age_days=10 + idx)
+        for idx in range(MAX_ARCHIVE_LIMIT + 25)
+    ]
+
+    page = build_session_archive_page(
+        rows,
+        group_id="chats",
+        server_time=1_700_000_000.0,
+        session_archive_after_days=7,
+        limit=999999,
+    )
+
+    assert len(page["sessions"]) == MAX_ARCHIVE_LIMIT
+    assert page["remaining_count"] == 25
+    assert page["next_cursor"]
+    assert "pending_user_message" not in page["sessions"][0]

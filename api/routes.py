@@ -1941,6 +1941,9 @@ def _should_hide_stale_messaging_session(
     session: dict,
     active_gateway_session_ids: set[str],
     active_gateway_sources: set[str],
+    *,
+    profile_aware: bool = False,
+    active_gateway_profile_sources: set[tuple[str, str]] | None = None,
 ) -> bool:
     """Hide stale Gateway-owned internal rows after an external chat moved on.
 
@@ -1954,7 +1957,14 @@ def _should_hide_stale_messaging_session(
     raw_source = _session_messaging_raw_source(session)
     if not _is_known_messaging_source(raw_source):
         return False
-    if not active_gateway_session_ids or raw_source not in active_gateway_sources:
+    if not active_gateway_session_ids:
+        return False
+    if profile_aware:
+        profile_key = _safe_first(session.get("profile"))
+        profile_sources = active_gateway_profile_sources or set()
+        if (profile_key, raw_source) not in profile_sources:
+            return False
+    elif raw_source not in active_gateway_sources:
         return False
 
     sid = _safe_first(session.get("session_id"))
@@ -2252,18 +2262,30 @@ def _keep_latest_messaging_session_per_source(
 
     gateway_metadata = _load_gateway_session_identity_map()
     active_gateway_session_ids = {str(sid) for sid in gateway_metadata.keys() if sid}
+    sessions_by_id = {
+        _safe_first(session.get("session_id")): session
+        for session in sessions
+        if isinstance(session, dict) and _safe_first(session.get("session_id"))
+    }
     session_ids = {
         _safe_first(session.get("session_id"))
         for session in sessions
         if isinstance(session, dict)
     }
     visible_active_gateway_session_ids = active_gateway_session_ids & session_ids
-    active_gateway_sources = {
-        _normalize_messaging_source(_safe_first(meta.get("raw_source"), meta.get("platform")))
-        for sid, meta in gateway_metadata.items()
-        if sid in visible_active_gateway_session_ids and isinstance(meta, dict)
-    }
-    active_gateway_sources = {source for source in active_gateway_sources if _is_known_messaging_source(source)}
+    active_gateway_sources: set[str] = set()
+    active_gateway_profile_sources: set[tuple[str, str]] = set()
+    for sid, meta in gateway_metadata.items():
+        sid = str(sid)
+        if sid not in visible_active_gateway_session_ids or not isinstance(meta, dict):
+            continue
+        source = _normalize_messaging_source(_safe_first(meta.get("raw_source"), meta.get("platform")))
+        if not _is_known_messaging_source(source):
+            continue
+        active_gateway_sources.add(source)
+        session = sessions_by_id.get(sid) or {}
+        profile_key = _safe_first(meta.get("profile"), session.get("profile"))
+        active_gateway_profile_sources.add((profile_key, source))
 
     kept_sources: set[str] = set()
     best_by_source: dict[str, dict] = {}
@@ -2275,7 +2297,13 @@ def _keep_latest_messaging_session_per_source(
             continue
         profile_key = _safe_first(session.get("profile"))
         dedupe_key = f"{profile_key}\x1f{key}" if profile_aware else key
-        if _should_hide_stale_messaging_session(session, visible_active_gateway_session_ids, active_gateway_sources):
+        if _should_hide_stale_messaging_session(
+            session,
+            visible_active_gateway_session_ids,
+            active_gateway_sources,
+            profile_aware=profile_aware,
+            active_gateway_profile_sources=active_gateway_profile_sources,
+        ):
             continue
         if dedupe_key in kept_sources:
             kept_sources.add(dedupe_key)
@@ -5168,7 +5196,9 @@ def handle_post(handler, parsed) -> bool:
             except Exception as e:
                 logger.exception("failed to create worktree-backed session")
                 return bad(handler, f"Failed to create worktree: {e}", status=500)
-        workspace_group = normalize_workspace_group(body.get("workspace_group"), workspace=workspace)
+        workspace_group = None
+        if "workspace_group" in body:
+            workspace_group = normalize_workspace_group(body.get("workspace_group"), workspace=workspace)
         if worktree_info:
             workspace_group = "workspace"
         model, model_provider = _session_model_state_from_request(
