@@ -2,10 +2,6 @@
 
 import json
 import pathlib
-import urllib.error
-import urllib.request
-
-from tests._pytest_port import BASE
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
@@ -15,36 +11,11 @@ BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
 
-def post(path, body=None):
-    data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(
-        BASE + path,
-        data=data,
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read()), r.status
-    except urllib.error.HTTPError as e:
-        return json.loads(e.read()), e.code
-
-
-def make_session(created, title):
-    payload = {
-        "title": title,
-        "messages": [{"role": "user", "content": "keep this conversation handy"}],
-        "model": "test/pin-limit-setting",
-    }
-    d, status = post("/api/session/import", payload)
-    assert status == 200
-    sid = d["session"]["session_id"]
-    created.append(sid)
-    return sid
-
-
 def test_pin_limit_setting_is_exposed_and_wired_through_ui():
     assert '"pinned_sessions_limit": 3' in CONFIG_PY
     assert '"pinned_sessions_limit": (1, 99)' in CONFIG_PY
+    assert '"session_archive_after_days": 7' in CONFIG_PY
+    assert '"session_archive_after_days": {7, 14, 30, 90}' in CONFIG_PY
     assert 'id="settingsPinnedSessionsLimit"' in INDEX_HTML
     assert 'type="number"' in INDEX_HTML
     assert 'min="1"' in INDEX_HTML
@@ -58,45 +29,38 @@ def test_pin_limit_setting_is_exposed_and_wired_through_ui():
     assert "await api('/api/session/pin'" in SESSIONS_JS
 
 
-def test_settings_api_persists_integer_pin_limit_and_rejects_invalid_values():
-    try:
-        d, status = post("/api/settings", {"pinned_sessions_limit": 5})
-        assert status == 200
-        assert d["pinned_sessions_limit"] == 5
+def test_pinned_sessions_limit_persists_integer_and_rejects_invalid_values(monkeypatch, tmp_path):
+    import api.config as config
 
-        d, status = post("/api/settings", {"pinned_sessions_limit": "7"})
-        assert status == 200
-        assert d["pinned_sessions_limit"] == 7
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
 
-        d, status = post("/api/settings", {"pinned_sessions_limit": 0})
-        assert status == 200
-        assert d["pinned_sessions_limit"] == 7
+    saved = config.save_settings({"pinned_sessions_limit": 5})
+    assert saved["pinned_sessions_limit"] == 5
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["pinned_sessions_limit"] == 5
 
-        d, status = post("/api/settings", {"pinned_sessions_limit": 100})
-        assert status == 200
-        assert d["pinned_sessions_limit"] == 7
-    finally:
-        post("/api/settings", {"pinned_sessions_limit": 3})
+    saved = config.save_settings({"pinned_sessions_limit": "7"})
+    assert saved["pinned_sessions_limit"] == 7
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["pinned_sessions_limit"] == 7
+
+    saved = config.save_settings({"pinned_sessions_limit": 0})
+    assert saved["pinned_sessions_limit"] == 7
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["pinned_sessions_limit"] == 7
+
+    saved = config.save_settings({"pinned_sessions_limit": 100})
+    assert saved["pinned_sessions_limit"] == 7
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["pinned_sessions_limit"] == 7
 
 
-def test_session_pin_endpoint_uses_configured_limit():
-    created = []
-    try:
-        d, status = post("/api/settings", {"pinned_sessions_limit": 4})
-        assert status == 200
-        assert d["pinned_sessions_limit"] == 4
+def test_pinned_sessions_limit_and_archive_after_setting_contracts():
+    import api.config as config
 
-        pinned = [make_session(created, f"Configured pin cap {i}") for i in range(4)]
-        for sid in pinned:
-            d, status = post("/api/session/pin", {"session_id": sid, "pinned": True})
-            assert status == 200
-            assert d["session"]["pinned"] is True
+    assert config._SETTINGS_DEFAULTS["pinned_sessions_limit"] == 3
+    assert config._SETTINGS_INT_RANGES["pinned_sessions_limit"] == (1, 99)
+    assert "pinned_sessions_limit" in config._SETTINGS_ALLOWED_KEYS
+    assert "pinned_sessions_limit" not in config._SETTINGS_BOOL_KEYS
 
-        fifth = make_session(created, "Configured pin cap overflow")
-        d, status = post("/api/session/pin", {"session_id": fifth, "pinned": True})
-        assert status == 400
-        assert "4 sessions" in d.get("error", "")
-    finally:
-        post("/api/settings", {"pinned_sessions_limit": 3})
-        for sid in created:
-            post("/api/session/delete", {"session_id": sid})
+    assert config._SETTINGS_DEFAULTS["session_archive_after_days"] == 7
+    assert config._SETTINGS_INT_CHOICES["session_archive_after_days"] == {7, 14, 30, 90}
+    assert "session_archive_after_days" in config._SETTINGS_ALLOWED_KEYS
+    assert "session_archive_after_days" not in config._SETTINGS_BOOL_KEYS

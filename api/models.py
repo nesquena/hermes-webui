@@ -26,6 +26,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
+from api.session_sidebar_index import normalize_workspace_group
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -395,7 +396,7 @@ class Session:
                  model_provider=None,
                  messages=None, created_at=None, updated_at=None,
                  tool_calls=None, pinned: bool=False, archived: bool=False,
-                 project_id: str=None, profile=None,
+                 project_id: str=None, workspace_group=None, profile=None,
                  input_tokens: int=0, output_tokens: int=0, estimated_cost=None,
                  cache_read_tokens: int=0, cache_write_tokens: int=0,
                  personality=None,
@@ -437,6 +438,7 @@ class Session:
         self.pinned = bool(pinned)
         self.archived = bool(archived)
         self.project_id = project_id or None
+        self.workspace_group = normalize_workspace_group(workspace_group, workspace=self.workspace)
         self.profile = profile
         self.input_tokens = input_tokens or 0
         self.output_tokens = output_tokens or 0
@@ -514,7 +516,7 @@ class Session:
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
         METADATA_FIELDS = [
-            'session_id', 'title', 'workspace', 'model', 'model_provider', 'created_at', 'updated_at',
+            'session_id', 'title', 'workspace', 'workspace_group', 'model', 'model_provider', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
@@ -690,6 +692,7 @@ class Session:
             'session_id': self.session_id,
             'title': self.title,
             'workspace': self.workspace,
+            'workspace_group': self.workspace_group,
             'model': self.model,
             'model_provider': self.model_provider,
             'message_count': message_count,
@@ -1905,7 +1908,7 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None):
+def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, workspace_group=None, worktree_info=None):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -1966,6 +1969,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         profile=profile,
         project_id=project_id,
         personality=_default_personality,
+        workspace_group=workspace_group,
         worktree_path=wt.get('path') if wt else None,
         worktree_branch=wt.get('branch') if wt else None,
         worktree_repo_root=wt.get('repo_root') if wt else None,

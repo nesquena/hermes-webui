@@ -4485,6 +4485,7 @@ _SETTINGS_DEFAULTS = {
     "inflight_state_max_tool_calls": 48,  # max recent tool-call records kept per recovery snapshot
     "inflight_state_max_string_chars": 60000,  # max string length kept inside a recovery snapshot field
     "inflight_state_max_json_chars": 1500000,  # max serialized recovery snapshot payload before pruning
+    "session_archive_after_days": 7,  # age cutoff for backend session archive grouping
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
@@ -4523,6 +4524,9 @@ _SETTINGS_LEGACY_THEME_MAP = {
     "monokai": ("dark", "sisyphus"),
     "nord": ("dark", "slate"),
     "oled": ("dark", "default"),
+}
+_SETTINGS_INT_CHOICES = {
+    "session_archive_after_days": {7, 14, 30, 90},
 }
 
 
@@ -4592,6 +4596,13 @@ def load_settings() -> dict:
         stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
     )
+    for key, choices in _SETTINGS_INT_CHOICES.items():
+        default = _SETTINGS_DEFAULTS[key]
+        try:
+            value = int(settings.get(key))
+        except (TypeError, ValueError):
+            value = default
+        settings[key] = value if value in choices else default
     settings["default_model"] = get_effective_default_model()
     try:
         model_cfg = get_config().get("model", {})
@@ -4691,6 +4702,13 @@ def save_settings(settings: dict) -> dict:
                     continue
                 min_value, max_value = _SETTINGS_INT_RANGES[k]
                 if v < min_value or v > max_value:
+                    continue
+            if k in _SETTINGS_INT_CHOICES:
+                try:
+                    v = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if v not in _SETTINGS_INT_CHOICES[k]:
                     continue
             # Validate language codes (BCP-47-like: 'en', 'zh', 'fr', 'zh-CN')
             if k == "language" and (
