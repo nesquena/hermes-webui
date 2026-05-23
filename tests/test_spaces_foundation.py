@@ -2521,6 +2521,13 @@ def test_space_tool_adapter_supports_source_repair_layout_metadata_only(monkeypa
     assert repaired["progress_event"]["family"] == "tool"
     assert repaired["progress_event"]["run_id"] == "repair:source-repair-layout-lab"
     assert repaired["progress_event"]["space_id"] == created["space_id"]
+    assert repaired["autonomy_policy"]["action"] == "space.spaces.repairlayout"
+    assert repaired["autonomy_policy"]["approval_required"] is True
+    assert repaired["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert repaired["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert repaired["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert repaired["autonomy_policy"]["metadata_only"] is True
+    assert repaired["autonomy_policy"]["local_only"] is True
 
     from api.capy_progress import progress_status
 

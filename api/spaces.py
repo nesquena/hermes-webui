@@ -5294,7 +5294,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name == "space.spaces.repairlayout":
         _space_tool_reject_ambient_current_selectors(data)
         result = repair_space_layout_from_tool(data)
-        return {"ok": True, "action": name, **result}
+        return {
+            "ok": True,
+            "action": name,
+            **result,
+            "autonomy_policy": _space_layout_action_policy_receipt(name),
+        }
     if name == "space.spaces.rearrangewidgets":
         _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
