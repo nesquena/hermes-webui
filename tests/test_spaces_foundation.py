@@ -5138,15 +5138,19 @@ def test_space_tool_adapter_supports_source_render_widget_helper_quarantines_gen
         {
             "spaceId": created["space_id"],
             "widgetId": "weather-card",
-            "name": "Weather Card",
+            "name": "SECRET_VALUE_DO_NOT_LEAK",
             "type": "weather",
             "col": 2,
             "row": 3,
             "cols": 8,
             "rows": 5,
             "metadata": {"location": "Prague", "api_key": "***"},
+            "prompt": "Summarize weather only.",
             "renderer": "async () => ({ html: '<script>steal()</script>' })",
             "html": "<img src=x onerror=steal()>",
+            "body": "generated body value",
+            "generated_body": "generated widget body value",
+            "generatedCode": "generated code value",
             "data": {"token": "***"},
             "source": "SECRET_SOURCE",
         },
@@ -5161,23 +5165,116 @@ def test_space_tool_adapter_supports_source_render_widget_helper_quarantines_gen
     assert rendered["widget"]["id"] == "weather-card"
     assert rendered["widget"]["kind"] == "weather"
     assert rendered["widget"]["layout"] == {"x": 2, "y": 3, "w": 8, "h": 5, "minimized": False}
-    assert rendered["render"] == {"mode": "metadata-only", "executed": False, "omitted_field_count": 4}
+    assert rendered["render"] == {"mode": "metadata-only", "executed": False, "omitted_field_count": 8}
+    assert rendered["prompt_preflight"]["boundary"] == "creator_commit"
+    assert rendered["prompt_preflight"]["status"] == "pass"
+    assert rendered["prompt_preflight"]["raw_prompt_stored"] is False
+    assert rendered["autonomy_policy"]["action"] == "space.spaces.renderwidget"
+    assert rendered["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert rendered["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert rendered["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert rendered["autonomy_policy"]["metadata_only"] is True
+    assert rendered["progress_event"]["event_type"] == "tool.completed"
+    assert rendered["progress_event"]["family"] == "tool"
+    assert rendered["progress_event"]["run_id"] == "widget.render:source-render-widget-lab"
+    assert rendered["progress_event"]["space_id"] == created["space_id"]
+    assert rendered["progress_event"]["redaction_status"] == "metadata_only"
     assert stored["metadata"] == {"location": "Prague"}
     assert stored["recovery"]["disabled"] is True
     assert stored["content_status"]["status"] == "quarantined"
     assert detail["recovery"]["disabled"] == "True"
-    assert detail["metadata"]["content_status"]["omitted_field_count"] == "4"
+    assert detail["metadata"]["content_status"]["omitted_field_count"] == "8"
+    assert stored.get("prompt") is None
+    assert detail.get("metadata", {}).get("prompt") is None
+    assert "summarize weather only" not in serialized
+    assert "generated body value" not in serialized
+    assert "generated widget body value" not in serialized
+    assert "generated code value" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized
     assert '"html":' not in serialized
+    assert '"body":' not in serialized
+    assert '"generated_body":' not in serialized
     assert '"data":' not in serialized
     assert "api_key" not in serialized
     assert "token" not in serialized
     assert "secret" not in serialized
     assert '"source":' not in serialized
 
+
+
+def test_space_tool_adapter_render_widget_sanitizes_non_scalar_display_fields(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "render-display-safety-lab", "name": "Render Display Safety Lab"})
+
+    rendered = spaces.run_space_tool(
+        "space.spaces.renderWidget",
+        {
+            "spaceId": created["space_id"],
+            "name": {"label": "SECRET_VALUE_DO_NOT_LEAK"},
+            "type": {"kind": "weather"},
+            "metadata": {
+                "safe": "ok",
+                "body": "hello world",
+                "generated-code": "dash generated code value",
+                "rawCode": "raw code value",
+            },
+        },
+    )
+    stored = spaces.read_widget(created["space_id"], rendered["widget"]["id"])
+    serialized = json.dumps({"rendered": rendered, "stored": stored}, sort_keys=True).lower()
+
+    assert rendered["ok"] is True
+    assert rendered["widget"]["id"] == "widget"
+    assert rendered["render"]["omitted_field_count"] == 3
+    assert stored["title"] == "[REDACTED]"
+    assert stored["kind"] == "markdown"
+    assert stored["metadata"] == {"safe": "ok"}
+    assert stored["content_status"]["status"] == "quarantined"
+    assert stored["recovery"]["disabled"] is True
+    assert "hello world" not in serialized
+    assert "dash generated code value" not in serialized
+    assert "raw code value" not in serialized
+    assert "secret" not in serialized
+    assert "<script" not in serialized
+    assert "steal" not in serialized
+
+
+def test_space_tool_render_widget_payload_strips_deep_nested_generated_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    payload, omitted_count = spaces._space_tool_render_widget_payload(
+        {
+            "widgetId": "deep-card",
+            "title": "Deep Card",
+            "metadata": {
+                "safe": "ok",
+                "deep": {
+                    "layer1": {
+                        "layer2": {
+                            "layer3": {
+                                "layer4": {
+                                    "layer5": {
+                                        "body": "deep body leak",
+                                        "generated_code": "deep code leak",
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            },
+        }
+    )
+    serialized = json.dumps(payload, sort_keys=True).lower()
+
+    assert omitted_count == 2
+    assert payload["metadata"] == {"safe": "ok"}
+    assert payload["content_status"]["status"] == "quarantined"
+    assert "deep body leak" not in serialized
+    assert "deep code leak" not in serialized
 
 
 def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(monkeypatch, tmp_path):

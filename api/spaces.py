@@ -1546,6 +1546,37 @@ def _space_widget_upsert_prompt_preflight_receipt(
 
 
 
+def _space_widget_render_prompt_preflight_receipt(
+    widget: dict[str, Any], raw_widget: dict[str, Any] | None, *, omitted_count: int
+) -> dict[str, Any]:
+    """Preflight a metadata-only renderWidget mutation before persistence."""
+    from api.capy_policy import prompt_preflight
+
+    prompt_fragments = _space_widget_upsert_prompt_fragments(raw_widget or widget)
+    public_widget = _widget_summary(widget)
+    metadata = widget.get("metadata") if isinstance(widget.get("metadata"), dict) else None
+    if metadata:
+        public_widget["metadata"] = _payload_summary(metadata)
+    preflight_text = json.dumps(
+        {
+            "widget_render": {
+                "widget": public_widget,
+                "omitted_field_count": max(0, int(omitted_count or 0)),
+                "prompt_fragment_count": len(prompt_fragments),
+                "prompt_fragments": prompt_fragments,
+                "generated_execution": "disabled",
+            }
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    receipt = prompt_preflight(preflight_text, boundary="creator_commit")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+
 def _space_widget_delete_prompt_preflight_receipt(widget_count: int, *, delete_all: bool = False) -> dict[str, Any]:
     """Preflight metadata-only widget delete intent before persisted mutation.
 
@@ -3736,6 +3767,64 @@ def _space_tool_source_widget_layout(widget: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _space_tool_render_key_is_omitted(key: str, omitted_keys: set[str]) -> bool:
+    lowered = str(key or "").strip().lower()
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    omitted_compact = {re.sub(r"[^a-z0-9]+", "", item.lower()) for item in omitted_keys}
+    return (
+        "prompt" in compact
+        or "body" in compact
+        or "rawcode" in compact
+        or "generatedcode" in compact
+        or compact in omitted_compact
+    )
+
+
+def _space_tool_render_safe_payload(
+    value: Any,
+    *,
+    omitted_keys: set[str],
+    unsafe_payload: dict[str, Any],
+    path: str,
+    depth: int = 0,
+) -> Any:
+    """Return renderWidget metadata with prompt/body/generated fields removed."""
+    if depth > 20:
+        return None
+    if isinstance(value, dict):
+        clean: dict[str, Any] = {}
+        for key, child in value.items():
+            key_text = str(key or "")
+            child_path = f"{path}.{key_text}" if path else key_text
+            if _space_tool_render_key_is_omitted(key_text, omitted_keys):
+                unsafe_payload[child_path] = child
+                continue
+            if not _payload_key_is_safe(key_text):
+                continue
+            safe_child = _space_tool_render_safe_payload(
+                child,
+                omitted_keys=omitted_keys,
+                unsafe_payload=unsafe_payload,
+                path=child_path,
+                depth=depth + 1,
+            )
+            if safe_child in ({}, [], ""):
+                continue
+            clean[key_text] = safe_child
+        return clean
+    if isinstance(value, list):
+        return [
+            _space_tool_render_safe_payload(
+                child,
+                omitted_keys=omitted_keys,
+                unsafe_payload=unsafe_payload,
+                path=f"{path}[{idx}]",
+                depth=depth + 1,
+            )
+            for idx, child in enumerate(value[:20])
+        ]
+    return _payload_summary(value)
+
 
 def _space_tool_render_widget_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
     """Convert source-style renderWidget input to safe quarantined metadata."""
@@ -3743,19 +3832,47 @@ def _space_tool_render_widget_payload(payload: dict[str, Any]) -> tuple[dict[str
     if not isinstance(widget, dict):
         raise ValueError("widget must be an object")
     clean = _space_tool_widget_payload(widget)
+    render_omitted_keys = _OMITTED_PAYLOAD_KEYS | {"body", "generated_body", "generatedcode", "generated_code", "raw_prompt"}
+    metadata_omitted_keys = {"body", "generated_body", "generatedcode", "generated_code", "raw_prompt"}
+    unsafe_payload: dict[str, Any] = {}
+    if "title" in clean:
+        if isinstance(clean.get("title"), str):
+            title = _payload_text_summary(clean.get("title"), 120)
+            clean["title"] = title if title and title != "[REDACTED]" else "[REDACTED]"
+        else:
+            clean["title"] = "[REDACTED]"
+    if "kind" in clean:
+        if isinstance(clean.get("kind"), str):
+            kind = _payload_text_summary(clean.get("kind"), 80)
+            clean["kind"] = kind if kind and kind != "[REDACTED]" else "markdown"
+        else:
+            clean["kind"] = "markdown"
     if isinstance(widget.get("metadata"), dict):
-        metadata = _payload_summary(widget.get("metadata"))
+        metadata = _space_tool_render_safe_payload(
+            widget.get("metadata"),
+            omitted_keys=metadata_omitted_keys,
+            unsafe_payload=unsafe_payload,
+            path="metadata",
+        )
         if isinstance(metadata, dict) and metadata:
             clean["metadata"] = metadata
-    widget_id = _space_tool_widget_id(widget) or _slugify(str(widget.get("title") or widget.get("name") or "widget"))
+    explicit_widget_id = _space_tool_widget_id(widget)
+    fallback_title = clean.get("title") if isinstance(clean.get("title"), str) and clean.get("title") != "[REDACTED]" else ""
+    widget_id = explicit_widget_id or _slugify(str(fallback_title or "widget"))
     clean["id"] = validate_widget_id(widget_id)
     clean["layout"] = _space_tool_source_widget_layout(widget)
 
-    unsafe_payload = {
-        str(key): widget.get(key)
-        for key in widget
-        if str(key or "").strip().lower() != "metadata" and not _payload_key_is_safe(str(key))
-    }
+    unsafe_payload.update(
+        {
+            str(key): widget.get(key)
+            for key in widget
+            if str(key or "").strip().lower() != "metadata"
+            and (
+                _payload_key_is_prompt_bearing(str(key))
+                or _space_tool_render_key_is_omitted(str(key), render_omitted_keys)
+            )
+        }
+    )
     omitted_count = len(unsafe_payload)
     if omitted_count:
         digest = hashlib.sha256(json.dumps(unsafe_payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
@@ -3771,8 +3888,8 @@ def _space_tool_render_widget_payload(payload: dict[str, Any]) -> tuple[dict[str
         }
         permissions = clean.get("permissions") if isinstance(clean.get("permissions"), dict) else {}
         clean["permissions"] = {**permissions, "generated_rendering": "disabled"}
+    clean = _space_widget_upsert_persistence_payload(clean)
     return clean, omitted_count
-
 
 
 def _space_tool_preview_widget_detail(widget: dict[str, Any]) -> dict[str, Any]:
@@ -5527,8 +5644,17 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name == "space.spaces.renderwidget":
         _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
+        raw_widget = data.get("widget") if isinstance(data.get("widget"), dict) else data
         widget_payload, omitted_count = _space_tool_render_widget_payload(data)
+        prompt_preflight = _space_widget_render_prompt_preflight_receipt(
+            widget_payload,
+            raw_widget if isinstance(raw_widget, dict) else None,
+            omitted_count=omitted_count,
+        )
+        if prompt_preflight.get("status") != "pass":
+            raise ValueError("Widget render prompt preflight blocked")
         result = upsert_widget(space_id, widget_payload)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.render")
         widget_id = result["widget"]["id"]
         return {
             "ok": True,
@@ -5537,6 +5663,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widget": read_widget_detail(space_id, widget_id),
             "revision_event_id": result["revision_event_id"],
             "render": {"mode": "metadata-only", "executed": False, "omitted_field_count": omitted_count},
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_widget_mutation_action_policy_receipt(name, prompt_preflight),
+            "progress_event": progress_event,
         }
     if name in {"space.spaces.patchwidget", "space.current.patchwidget"}:
         if not name.startswith("space.current."):
@@ -9034,6 +9163,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "space.duplicate",
         "widget.delete",
         "widget.patch",
+        "widget.render",
         "widget.upsert",
     }:
         safe_prefix = "tool"
