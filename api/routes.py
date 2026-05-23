@@ -3672,7 +3672,18 @@ def handle_get(handler, parsed) -> bool:
         # Current reasoning config (shared source of truth with the CLI —
         # reads display.show_reasoning and agent.reasoning_effort from
         # the active profile's config.yaml).
-        return j(handler, get_reasoning_status())
+        query = parse_qs(parsed.query)
+        model_id = (query.get("model", [""])[0] or "").strip() or None
+        provider_id = (query.get("provider", [""])[0] or "").strip() or None
+        base_url = (query.get("base_url", [""])[0] or "").strip() or None
+        return j(
+            handler,
+            get_reasoning_status(
+                model_id=model_id,
+                provider_id=provider_id,
+                base_url=base_url,
+            ),
+        )
 
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())

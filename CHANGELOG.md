@@ -11,6 +11,8 @@
 
 - **Cursor ACP routing and new-chat defaults** — New conversations now carry the visible composer picker selection into `POST /api/session/new`, persist model changes before a session exists, and evict cached session agents when the model/provider changes mid-session.
 
+- **Reasoning effort chip visibility** — `/api/reasoning` now accepts `model` and `provider` query params and returns `supported_efforts` so the composer chip hides for models without configurable reasoning levels (for example Cursor Composer) while remaining available for models like GPT-5.5. Model picker changes now re-sync the chip after the session model/provider update instead of querying with stale session state. Composer dropdown selections now pass the provider id into `selectModelFromDropdown()` so duplicate bare model ids (for example `gpt-5.5` under OpenAI Codex vs OpenRouter) no longer fall back to the profile default provider when refreshing the chip.
+
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed

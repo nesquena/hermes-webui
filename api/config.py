@@ -2062,7 +2062,112 @@ def parse_reasoning_effort(effort):
     return None
 
 
-def get_reasoning_status() -> dict:
+def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
+    """Fallback when hermes_cli is unavailable."""
+    model = str(model_id or "").strip().lower()
+    provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
+    if not model or provider in {"cursor-acp", "copilot-acp"}:
+        return []
+    bare = model.rsplit("/", 1)[-1]
+    if provider == "openai-codex" and bare.startswith(("gpt-5", "o1", "o3", "o4")):
+        if bare.startswith(("o1", "o3", "o4")):
+            return ["low", "medium", "high"]
+        return list(VALID_REASONING_EFFORTS)
+    if provider in {"copilot", "github-copilot"}:
+        if bare.startswith(("gpt-5", "o1", "o3", "o4")):
+            if bare.startswith(("o1", "o3", "o4")):
+                return ["low", "medium", "high"]
+            return list(VALID_REASONING_EFFORTS)
+    prefixes = (
+        "deepseek/",
+        "anthropic/",
+        "openai/",
+        "x-ai/",
+        "google/gemini-2",
+        "google/gemma-4",
+        "qwen/qwen3",
+        "tencent/hy3-preview",
+        "xiaomi/",
+    )
+    if any(model.startswith(prefix) for prefix in prefixes):
+        return list(VALID_REASONING_EFFORTS)
+    return []
+
+
+def resolve_model_reasoning_efforts(
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> list[str]:
+    """Return supported reasoning-effort levels for *model_id*, or [] if none."""
+    model = str(model_id or "").strip()
+    if not model:
+        return []
+
+    provider = str(provider_id or "").strip().lower() if provider_id else ""
+    resolved_base_url = str(base_url or "").strip() or None
+    if not provider:
+        try:
+            _, provider, resolved_base_url = resolve_model_provider(model)
+        except Exception:
+            provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
+
+    provider = _resolve_provider_alias(provider)
+    if provider in {"cursor-acp", "copilot-acp"}:
+        return []
+
+    try:
+        from hermes_cli.models import (
+            github_model_reasoning_efforts,
+            lmstudio_model_reasoning_options,
+        )
+    except Exception:
+        return _heuristic_reasoning_efforts(model, provider)
+
+    if provider in {"copilot", "github-copilot"}:
+        return github_model_reasoning_efforts(model)
+
+    if provider == "openai-codex":
+        bare = model.rsplit("/", 1)[-1]
+        return github_model_reasoning_efforts(bare)
+
+    if provider == "lmstudio":
+        probe_base = resolved_base_url or _get_provider_base_url(provider)
+        opts = lmstudio_model_reasoning_options(model, probe_base)
+        normalized = [str(opt).strip().lower() for opt in opts if str(opt).strip()]
+        if not normalized or set(normalized).issubset({"off"}):
+            return []
+        level_opts = [opt for opt in normalized if opt in VALID_REASONING_EFFORTS]
+        if level_opts:
+            return list(dict.fromkeys(level_opts))
+        if set(normalized).issubset({"off", "on"}):
+            return []
+        return []
+
+    model_lower = model.lower()
+    prefixes = (
+        "deepseek/",
+        "anthropic/",
+        "openai/",
+        "x-ai/",
+        "google/gemini-2",
+        "google/gemma-4",
+        "qwen/qwen3",
+        "tencent/hy3-preview",
+        "xiaomi/",
+    )
+    if any(model_lower.startswith(prefix) for prefix in prefixes):
+        return list(VALID_REASONING_EFFORTS)
+
+    return []
+
+
+def get_reasoning_status(
+    *,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> dict:
     """Return current reasoning configuration from the active profile's
     config.yaml — the same source of truth the CLI reads from.
 
@@ -2075,10 +2180,17 @@ def get_reasoning_status() -> dict:
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
     effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    supported_efforts = resolve_model_reasoning_efforts(
+        model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
         "reasoning_effort": str(effort_raw or "").strip().lower(),
+        "supported_efforts": supported_efforts,
+        "supports_reasoning_effort": bool(supported_efforts),
     }
 
 

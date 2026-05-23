@@ -1455,7 +1455,7 @@ function renderModelDropdown(){
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
         row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-        row.onclick=()=>selectModelFromDropdown(m.value);
+        row.onclick=()=>selectModelFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
     }
@@ -1494,7 +1494,7 @@ function renderModelDropdown(){
       // Inline provider chip on every row that has a group (#1425)
       const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
       row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-      row.onclick=()=>selectModelFromDropdown(m.value);
+      row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
       dd.appendChild(row);
     }
     // Show "No results" if filtered and nothing matched
@@ -1531,23 +1531,23 @@ function renderModelDropdown(){
   _filterModels('');
 }
 
-async function selectModelFromDropdown(value){
+async function selectModelFromDropdown(value, preferredProviderId){
   const sel=$('modelSelect');
-  if(!sel||sel.value===value) { closeModelDropdown(); return; }
-  // If the value isn't in the option list (custom model ID), add a temporary option
-  // so sel.value assignment succeeds and the model chip shows the custom ID.
-  if(!Array.from(sel.options).some(o=>o.value===value)){
-    const opt=document.createElement('option');
-    opt.value=value;
-    opt.textContent=getModelLabel(value);
-    opt.dataset.custom='1';
-    const badge=(window._configuredModelBadges||{})[value];
-    if(badge&&badge.provider) opt.dataset.provider=badge.provider;
-    // Remove any previous custom option before adding new one
-    sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
-    sel.appendChild(opt);
+  if(!sel) { closeModelDropdown(); return; }
+  const provider=String(preferredProviderId||'').trim()||null;
+  const currentState=(typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel, sel.value)
+    : {model:sel.value,model_provider:null};
+  const sameModel=String(currentState.model||'')===String(value||'');
+  const sameProvider=String(currentState.model_provider||'')===String(provider||'');
+  if(sameModel&&sameProvider){ closeModelDropdown(); return; }
+  // Resolve the provider-specific option so duplicate bare IDs (e.g. gpt-5.5
+  // under OpenAI Codex vs OpenRouter) update session model_provider correctly.
+  if(typeof _ensureModelOptionInDropdown==='function'){
+    _ensureModelOptionInDropdown(value, sel, provider);
+  }else{
+    sel.value=value;
   }
-  sel.value=value;
   syncModelChip();
   closeModelDropdown();
   if(typeof sel.onchange==='function') await sel.onchange();
@@ -1606,6 +1606,7 @@ window.addEventListener('resize',()=>{
 
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
+let _currentReasoningEffortsSupported=null;
 
 function _normalizeReasoningEffort(eff){
   return String(eff||'').trim().toLowerCase();
@@ -1617,17 +1618,61 @@ function _formatReasoningEffortLabel(effort){
   return effort;
 }
 
-function _applyReasoningChip(eff){
+function _reasoningEffortQuery(){
+  const sel=$('modelSelect');
+  const model=(S&&S.session&&S.session.model)||(sel&&sel.value)||'';
+  let provider=(S&&S.session&&S.session.model_provider)||'';
+  if(!provider&&sel&&model&&typeof _modelStateForSelect==='function'){
+    provider=_modelStateForSelect(sel, model).model_provider||'';
+  }
+  const params=new URLSearchParams();
+  if(model) params.set('model', model);
+  if(provider) params.set('provider', provider);
+  const qs=params.toString();
+  return qs?('?'+qs):'';
+}
+
+function _applyReasoningOptions(supportedEfforts){
+  const dd=$('composerReasoningDropdown');
+  if(!dd) return;
+  const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
+  dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+    const effort=opt.dataset.effort;
+    if(effort==='none'){
+      opt.style.display='';
+      return;
+    }
+    if(!supported.size){
+      opt.style.display='none';
+      return;
+    }
+    opt.style.display=supported.has(effort)?'':'none';
+  });
+}
+
+function _applyReasoningChip(eff, meta){
   const effort=_normalizeReasoningEffort(eff);
   _currentReasoningEffort=effort;
+  if(meta&&Array.isArray(meta.supported_efforts)){
+    _currentReasoningEffortsSupported=meta.supported_efforts;
+  }
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
   const chip=$('composerReasoningChip');
   const mobileLabel=$('composerMobileReasoningLabel');
   const mobileAction=$('composerMobileReasoningAction');
   if(!wrap||!label) return;
+  const supports=Array.isArray(_currentReasoningEffortsSupported)
+    ?_currentReasoningEffortsSupported.length>0
+    :true;
+  if(!supports){
+    wrap.style.display='none';
+    if(mobileAction) mobileAction.style.display='none';
+    return;
+  }
   wrap.style.display='';
   if(mobileAction) mobileAction.style.display='';
+  _applyReasoningOptions(_currentReasoningEffortsSupported);
   const text=_formatReasoningEffortLabel(effort);
   label.textContent=text;
   if(mobileLabel) mobileLabel.textContent=text;
@@ -1641,14 +1686,13 @@ function _applyReasoningChip(eff){
 }
 
 function fetchReasoningChip(){
-  api('/api/reasoning').then(function(st){
-    _applyReasoningChip((st&&st.reasoning_effort)||'');
-  }).catch(function(){_applyReasoningChip('');});
+  api('/api/reasoning'+_reasoningEffortQuery()).then(function(st){
+    _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
+  }).catch(function(){_applyReasoningChip('', {supported_efforts:[]});});
 }
 
 function syncReasoningChip(){
-  if(_currentReasoningEffort===null){fetchReasoningChip();return;}
-  _applyReasoningChip(_currentReasoningEffort);
+  fetchReasoningChip();
 }
 
 function _highlightReasoningOption(effort){
@@ -1714,7 +1758,7 @@ document.addEventListener('click',function(e){
     if(effort){
       api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
         .then(function(st){
-          _applyReasoningChip((st&&st.reasoning_effort)||effort);
+          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
         })
         .catch(function(){showToast('🧠 Failed to set effort');});

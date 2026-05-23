@@ -1136,7 +1136,7 @@ class TestModelSwitchToast:
         # Find the onchange block
         idx = src.find("modelSelect').onchange")
         assert idx != -1, "modelSelect.onchange not found in boot.js"
-        block = src[idx:idx + 1100]
+        block = src[idx:idx + 1400]
         assert "model_scope_toast" in block, (
             "modelSelect.onchange must show that the selected model applies to this conversation"
         )
