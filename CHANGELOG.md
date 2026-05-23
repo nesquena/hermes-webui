@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Issue #2565** — fix(chat): reasoning/thinking display no longer accumulates across turns within a single SSE stream. Two bugs fixed: (1) `reasoningText` in `static/messages.js` was never reset between turns, so the `done` event would assign the union of every turn's reasoning to the last assistant message in multi-turn agent sessions; now reset at both turn boundaries (`tool` and `interim_assistant` events). (2) `static/ui.js` preferred `m.reasoning` (the potentially corrupted frontend-accumulated value) over `m.reasoning_content` (the clean per-turn value from the backend); the fallback now reads `m.reasoning_content || m.reasoning` so the backend's authoritative value takes priority. Nine regression tests verify both reset sites and the read-path preference.
+
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed

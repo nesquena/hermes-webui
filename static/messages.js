@@ -1410,6 +1410,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!visible){
         return;
       }
+      reasoningText='';
+      liveReasoningText='';
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid) return;
         _resetAssistantSegment();
@@ -1467,6 +1469,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // to be re-created below everything when reasoning resumed post-tool.
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       liveReasoningText='';
+      reasoningText='';
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
       snapshotLiveTurn();

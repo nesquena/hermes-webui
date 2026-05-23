@@ -6098,7 +6098,7 @@ function renderMessages(options){
       thinkingText=content.filter(p=>p&&(p.type==='thinking'||p.type==='reasoning')).map(p=>p.thinking||p.reasoning||p.text||'').join('\n');
       content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
     }
-    if(!thinkingText && m.reasoning) thinkingText=m.reasoning;
+    if(!thinkingText && (m.reasoning_content || m.reasoning)) thinkingText=m.reasoning_content || m.reasoning;
     if(!thinkingText && typeof content==='string'){
       const thinkMatch=content.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
       if(thinkMatch){
