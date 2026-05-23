@@ -1466,6 +1466,79 @@ def _space_widget_patch_prompt_preflight_receipt(patch: Any) -> dict[str, Any]:
 
 
 
+def _space_widget_upsert_prompt_fragment_text(value: Any) -> str:
+    """Return full prompt-bearing text for local preflight classification only."""
+    return re.sub(r"\s+", " ", "" if value is None else str(value)).strip()
+
+
+
+def _space_widget_upsert_prompt_fragments(value: Any, depth: int = 0) -> list[str]:
+    """Collect prompt-bearing upsert metadata for local preflight only.
+
+    The returned strings are only hashed/classified by prompt_preflight and are
+    not returned to callers or persisted with the widget.
+    """
+    if depth > 12:
+        return ["api key prompt depth limit exceeded"]
+    fragments: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if _payload_key_is_prompt_bearing(str(key or "")):
+                fragments.append(_space_widget_upsert_prompt_fragment_text(child))
+                continue
+            fragments.extend(_space_widget_upsert_prompt_fragments(child, depth + 1))
+        return [fragment for fragment in fragments if fragment]
+    if isinstance(value, list):
+        for child in value[:20]:
+            fragments.extend(_space_widget_upsert_prompt_fragments(child, depth + 1))
+    return [fragment for fragment in fragments if fragment]
+
+
+
+def _space_widget_upsert_persistence_payload(value: Any, depth: int = 0) -> Any:
+    """Return upsert widget metadata with prompt-bearing fields stripped."""
+    if depth > 12:
+        return "[omitted]"
+    if isinstance(value, dict):
+        return {
+            key: _space_widget_upsert_persistence_payload(child, depth + 1)
+            for key, child in value.items()
+            if not _payload_key_is_prompt_bearing(str(key or ""))
+        }
+    if isinstance(value, list):
+        return [_space_widget_upsert_persistence_payload(child, depth + 1) for child in value[:20]]
+    return value
+
+
+
+def _space_widget_upsert_prompt_preflight_receipt(
+    widgets: list[dict[str, Any]], raw_widgets: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    """Preflight sanitized widget-upsert metadata before persistence."""
+    from api.capy_policy import prompt_preflight
+
+    prompt_fragments: list[str] = []
+    for widget in raw_widgets if raw_widgets is not None else widgets:
+        prompt_fragments.extend(_space_widget_upsert_prompt_fragments(widget))
+    preflight_text = json.dumps(
+        {
+            "widget_upsert": {
+                "widget_count": len(widgets),
+                "widgets": [_payload_summary(widget) for widget in widgets],
+                "prompt_fragment_count": len(prompt_fragments),
+                "prompt_fragments": prompt_fragments,
+            }
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    receipt = prompt_preflight(preflight_text, boundary="creator_commit")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+
 def _space_widget_delete_prompt_preflight_receipt(widget_count: int, *, delete_all: bool = False) -> dict[str, Any]:
     """Preflight metadata-only widget delete intent before persisted mutation.
 
@@ -1906,6 +1979,8 @@ def _payload_summary(value: Any, depth: int = 0) -> Any:
         for index, (key, child) in enumerate(value.items()):
             if index >= 50:
                 break
+            if not _payload_key_is_safe(str(key or "")):
+                continue
             safe_key = _context_value(key, 80)
             if not _payload_key_is_safe(safe_key):
                 continue
@@ -4497,11 +4572,23 @@ def _space_tool_widget_patch_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
-def _space_tool_widgets_payload(payload: dict[str, Any], *, bulk: bool) -> list[dict[str, Any]]:
+def _space_tool_raw_widgets_payload(payload: dict[str, Any], *, bulk: bool) -> list[dict[str, Any]]:
     raw_widgets = payload.get("widgets") if bulk else [payload.get("widget") if isinstance(payload.get("widget"), dict) else payload]
     if bulk and not isinstance(raw_widgets, list):
         raise ValueError("widgets must be a list")
-    return [_space_tool_widget_payload(widget) for widget in raw_widgets]
+    if not isinstance(raw_widgets, list):
+        raise ValueError("widgets must be a list")
+    widgets: list[dict[str, Any]] = []
+    for widget in raw_widgets:
+        if not isinstance(widget, dict):
+            raise ValueError("widget must be an object")
+        widgets.append(widget)
+    return widgets
+
+
+
+def _space_tool_widgets_payload(payload: dict[str, Any], *, bulk: bool) -> list[dict[str, Any]]:
+    return [_space_tool_widget_payload(widget) for widget in _space_tool_raw_widgets_payload(payload, bulk=bulk)]
 
 
 def _space_tool_arg(payload: dict[str, Any], index: int) -> Any:
@@ -5349,7 +5436,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.spaces.upsertwidget", "space.spaces.upsertwidgets"}:
         _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
-        widgets = _space_tool_widgets_payload(data, bulk=name.endswith("upsertwidgets"))
+        raw_widgets = _space_tool_raw_widgets_payload(data, bulk=name.endswith("upsertwidgets"))
+        widgets = [_space_tool_widget_payload(widget) for widget in raw_widgets]
+        prompt_preflight = _space_widget_upsert_prompt_preflight_receipt(widgets, raw_widgets=raw_widgets)
+        if prompt_preflight.get("status") != "pass":
+            raise ValueError("Widget upsert prompt preflight blocked")
+        widgets = [_space_widget_upsert_persistence_payload(widget) for widget in widgets]
         saved_widgets: list[dict[str, Any]] = []
         revision_event_ids: list[str] = []
         for widget in widgets:
@@ -5364,6 +5456,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widgets": saved_widgets,
             "widget_count": len(saved_widgets),
             "revision_event_ids": revision_event_ids,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_widget_mutation_action_policy_receipt(name, prompt_preflight),
             "progress_event": progress_event,
         }
         if name.endswith("upsertwidget") and saved_widgets:
