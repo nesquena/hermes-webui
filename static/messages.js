@@ -1285,6 +1285,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     step();
   }
+  function _flushPendingSegmentRender(){
+    if(!assistantBody||!_renderPending) return;
+    _cancelAnimationFramePendingStreamRender();
+    const displayText=segmentStart===0
+      ? _parseStreamState().displayText
+      : _stripXmlToolCalls(assistantText.slice(segmentStart));
+    if(_smdParser){
+      _smdWrite(displayText);
+    } else if(renderMd){
+      assistantBody.innerHTML=renderMd(displayText);
+    } else {
+      assistantBody.innerHTML=esc(displayText);
+    }
+  }
   function _resetAssistantSegment(){
     assistantRow=null;
     assistantBody=null;
@@ -1423,6 +1437,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof updateThinking==='function') updateThinking(_liveThinkingText());
         else appendThinking(_liveThinkingText());
       }
+      _flushPendingSegmentRender();
       ensureAssistantRow(true);
       _resetAssistantSegment();
       _scheduleRender();
@@ -1473,6 +1488,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Reset the live assistant row reference so that any text tokens arriving
       // after this tool call create a NEW segment appended below the tool card,
       // rather than updating the old segment that sits above it in the DOM.
+      _flushPendingSegmentRender();
       _freshSegment=true;
       _smdEndParser();
       _resetAssistantSegment();

@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Issue #2713** — fix(chat): flush pending render work before sealing assistant text segments at tool-call and interim_assistant boundaries during live streaming. Tokens that arrived during the rAF throttle window (66ms) could be lost from the live DOM when `_resetAssistantSegment()` cleared `assistantBody` before the scheduled render callback fired. The fix synchronously writes any pending segment text to the DOM (via smd, renderMd, or esc fallback) and cancels the stale rAF before resetting. Completed transcripts were never affected — this was a live-streaming display bug only.
+
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed
