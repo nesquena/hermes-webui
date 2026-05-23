@@ -2831,6 +2831,14 @@ def test_recovery_enable_disable_primitives_return_metadata_only_action_policy_r
     serialized = json.dumps([result for result, _ in results], sort_keys=True).lower()
 
     for result, action in results:
+        preflight = result["prompt_preflight"]
+        assert preflight["available"] is True
+        assert preflight["action"] == action
+        assert preflight["boundary"] == "recovery_action"
+        assert preflight["status"] == "required"
+        assert preflight["metadata_only"] is True
+        assert preflight["raw_prompt_stored"] is False
+        assert preflight["local_only"] is True
         policy = result["autonomy_policy"]
         assert policy["action"] == action
         assert policy["approval_required"] is True
@@ -9614,6 +9622,12 @@ def test_space_tool_adapter_lists_and_restores_revisions_metadata_only(monkeypat
     assert restored["restored_event_id"] == original_event_id
     assert restored["space"]["space_id"] == created["space_id"]
     assert restored["space"]["widgets"] == []
+    assert restored["prompt_preflight"]["available"] is True
+    assert restored["prompt_preflight"]["action"] == "space.recovery.restore"
+    assert restored["prompt_preflight"]["boundary"] == "recovery_action"
+    assert restored["prompt_preflight"]["status"] == "required"
+    assert restored["prompt_preflight"]["metadata_only"] is True
+    assert restored["prompt_preflight"]["raw_prompt_stored"] is False
     assert restored["autonomy_policy"]["action"] == "space.recovery.restore"
     assert restored["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
     assert restored["autonomy_policy"]["prompt_preflight_status"] == "required"
@@ -10192,6 +10206,12 @@ def test_restore_widget_revision_restores_one_widget_without_leaking_sources(mon
     revisions = spaces.list_revision_events(created["space_id"])
     assert revisions[0]["event_type"] == "widget.restored"
     assert revisions[0]["details"] == {"restored_event_id": original["revision_event_id"], "widget_id": "weather"}
+    assert restored["prompt_preflight"]["available"] is True
+    assert restored["prompt_preflight"]["action"] == "space.recovery.restore_widget"
+    assert restored["prompt_preflight"]["boundary"] == "recovery_action"
+    assert restored["prompt_preflight"]["status"] == "required"
+    assert restored["prompt_preflight"]["metadata_only"] is True
+    assert restored["prompt_preflight"]["raw_prompt_stored"] is False
     assert restored["autonomy_policy"]["action"] == "space.recovery.restore_widget"
     assert restored["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
     assert restored["autonomy_policy"]["prompt_preflight_status"] == "required"

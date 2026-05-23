@@ -574,6 +574,29 @@ def _recovery_toggle_action_policy_receipt(action: str) -> dict[str, Any]:
     )
 
 
+def _recovery_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only evidence that a recovery action remains preflight-gated.
+
+    Disable/enable/restore controls do not submit free-form prompts, so there is
+    no raw prompt to classify. They still cross the safe-recovery/autonomy
+    boundary and must surface prompt-injection preflight as a required upstream
+    gate alongside the action policy receipt.
+    """
+    safe_action = _context_value(action, 120) or "space.recovery.action"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "recovery_action",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["shared_confirmation_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
 def _recovery_restore_action_policy_receipt(action: str = "space.recovery.restore") -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
@@ -6597,12 +6620,14 @@ def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
     restored["revision_events"] = merged_revision_events
     restored = _preserve_admin_space_recovery_control_state(current, restored)
     saved = _write_manifest(restored, "space.restored", {"restored_event_id": safe_event_id}, allow_stale_revision=True)
+    action = "space.recovery.restore"
     return {
         "ok": True,
         "space": read_space_detail(sid),
         "restored_event_id": safe_event_id,
         "revision_event_id": saved["revision_event_id"],
-        "autonomy_policy": _recovery_restore_action_policy_receipt(),
+        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
+        "autonomy_policy": _recovery_restore_action_policy_receipt(action),
         "progress_event": _record_space_recovery_progress_event(sid, action="restore"),
     }
 
@@ -6652,13 +6677,15 @@ def restore_widget_revision(space_id: str, event_id: str, widget_id: str) -> dic
         restored_widgets.append(target_widget)
     current["widgets"] = restored_widgets
     saved = _write_manifest(current, "widget.restored", {"restored_event_id": safe_event_id, "widget_id": wid})
+    action = "space.recovery.restore_widget"
     return {
         "ok": True,
         "space_id": sid,
         "widget": read_widget_detail(sid, wid),
         "restored_event_id": safe_event_id,
         "revision_event_id": saved["revision_event_id"],
-        "autonomy_policy": _recovery_restore_action_policy_receipt("space.recovery.restore_widget"),
+        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
+        "autonomy_policy": _recovery_restore_action_policy_receipt(action),
         "progress_event": _record_space_recovery_progress_event(sid, action="widget.restore"),
     }
 
@@ -8525,12 +8552,14 @@ def disable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, 
     space["recovery"] = recovery
     saved = _write_manifest(space, "space.recovery_disabled", {"reason": recovery["disabled_reason"]})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="disable")
+    action = "space.recovery.disable"
     return {
         "disabled": True,
         "space_id": saved["space_id"],
         "revision_event_id": saved["revision_event_id"],
+        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
         "progress_event": progress_event,
-        "autonomy_policy": _recovery_toggle_action_policy_receipt("space.recovery.disable"),
+        "autonomy_policy": _recovery_toggle_action_policy_receipt(action),
     }
 
 
@@ -8548,12 +8577,14 @@ def enable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, A
     detail_reason = _context_value(reason or "enabled from recovery", 300)
     saved = _write_manifest(space, "space.recovery_enabled", {"reason": detail_reason})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="enable")
+    action = "space.recovery.enable"
     return {
         "disabled": False,
         "space_id": saved["space_id"],
         "revision_event_id": saved["revision_event_id"],
+        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
         "progress_event": progress_event,
-        "autonomy_policy": _recovery_toggle_action_policy_receipt("space.recovery.enable"),
+        "autonomy_policy": _recovery_toggle_action_policy_receipt(action),
     }
 
 
@@ -8581,13 +8612,15 @@ def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = 
     space["widgets"] = widgets
     saved = _write_manifest(space, "widget.recovery_disabled", {"widget_id": wid, "reason": recovery["disabled_reason"]})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.disable")
+    action = "space.widget.recovery.disable"
     return {
         "disabled": True,
         "space_id": saved["space_id"],
         "widget_id": wid,
         "revision_event_id": saved["revision_event_id"],
+        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
         "progress_event": progress_event,
-        "autonomy_policy": _recovery_toggle_action_policy_receipt("space.widget.recovery.disable"),
+        "autonomy_policy": _recovery_toggle_action_policy_receipt(action),
     }
 
 
@@ -8610,13 +8643,15 @@ def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "
     detail_reason = _context_value(reason or "enabled from recovery", 300)
     saved = _write_manifest(space, "widget.recovery_enabled", {"widget_id": wid, "reason": detail_reason})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.enable")
+    action = "space.widget.recovery.enable"
     return {
         "disabled": False,
         "space_id": saved["space_id"],
         "widget_id": wid,
         "revision_event_id": saved["revision_event_id"],
+        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
         "progress_event": progress_event,
-        "autonomy_policy": _recovery_toggle_action_policy_receipt("space.widget.recovery.enable"),
+        "autonomy_policy": _recovery_toggle_action_policy_receipt(action),
     }
 
 
@@ -8755,11 +8790,13 @@ def disable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str
     module["revision_event_id"] = event_id
     _atomic_write_json(_recovery_module_path(mid), module)
     summary = _module_summary(module)
+    action = "space.module.recovery.disable"
+    summary["prompt_preflight"] = _recovery_required_prompt_preflight_receipt(action)
     summary["progress_event"] = _record_space_recovery_progress_event(
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
         action="disable",
     )
-    summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt("space.module.recovery.disable")
+    summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt(action)
     return summary
 
 
@@ -8782,11 +8819,13 @@ def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str,
     module["revision_event_id"] = event_id
     _atomic_write_json(_recovery_module_path(mid), module)
     summary = _module_summary(module)
+    action = "space.module.recovery.enable"
+    summary["prompt_preflight"] = _recovery_required_prompt_preflight_receipt(action)
     summary["progress_event"] = _record_space_recovery_progress_event(
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
         action="enable",
     )
-    summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt("space.module.recovery.enable")
+    summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt(action)
     return summary
 
 

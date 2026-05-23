@@ -3721,12 +3721,13 @@
         confirmLabel: 'Queue repair',
       });
       if (!promptText) return;
-      await postSpacesJson('api/spaces/recovery/repair-space', {
+      const repairResult = await postSpacesJson('api/spaces/recovery/repair-space', {
         space_id: spaceId,
         prompt: promptText,
         payload: {source: 'recovery-panel', action: 'repair-space'},
       });
       await loadCapySpacesRecovery();
+      prependRecoveryActionReceipt(repairResult || {});
       return;
     }
     if (action === 'repairRecoveryWidget') {
@@ -3740,13 +3741,14 @@
         confirmLabel: 'Queue repair',
       });
       if (!promptText) return;
-      await postSpacesJson('api/spaces/recovery/repair-widget', {
+      const repairResult = await postSpacesJson('api/spaces/recovery/repair-widget', {
         space_id: spaceId,
         widget_id: widgetId,
         prompt: promptText,
         payload: {source: 'recovery-panel', action: 'repair', widget_title: widgetTitle},
       });
       await loadCapySpacesRecovery();
+      prependRecoveryActionReceipt(repairResult || {});
       return;
     }
     if (typeof showConfirmDialog !== 'function') return;

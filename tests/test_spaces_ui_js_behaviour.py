@@ -1656,7 +1656,56 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/recovery/repair-widget') {
     const eventBody = opts.body ? JSON.parse(opts.body) : {};
-    return response({ queued: true, space_id: eventBody.space_id || 'broken', widget_id: eventBody.widget_id || 'bad-widget', event_name: 'agent.repair', event_id: 'evt-widget-repair', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+    return response({
+      queued: true,
+      space_id: eventBody.space_id || 'broken',
+      widget_id: eventBody.widget_id || 'bad-widget',
+      event_name: 'agent.repair',
+      event_id: 'evt-widget-repair',
+      prompt_preflight: {
+        available: true,
+        action: 'space.widget.repair.queue',
+        boundary: 'recovery-widget-repair',
+        status: 'passed',
+        severity: 'low',
+        categories: ['prompt_injection_scan', 'secret_scan'],
+        checks: ['prompt_injection_scan', 'secret_scan'],
+        metadata_only: true,
+        raw_prompt_stored: false,
+        local_only: true,
+        prompt_hash: 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      autonomy_policy: {
+        available: true,
+        action: 'space.widget.repair.queue',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['generated_widget_execution'],
+        prompt_preflight_status: 'passed',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-widget-repair',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'recovery.widget.repair:' + (eventBody.space_id || 'broken'),
+        redaction_status: 'metadata-only',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET'
+    });
   }
   if (path === 'api/spaces/create') {
     return response({ space: { space_id: 'ops', name: 'Ops', description: '<b>Operations</b>', widget_count: 0, revision_event_id: 'rev4' } });
@@ -1858,6 +1907,47 @@ global.fetch = async function(path, opts = {}) {
       event_id: 'evt-space-repair',
       prompt_preview: '[REDACTED]',
       payload_summary: { action: 'repair-space', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      prompt_preflight: {
+        available: true,
+        action: 'space.repair.queue',
+        boundary: 'recovery-space-repair',
+        status: 'passed',
+        severity: 'low',
+        categories: ['prompt_injection_scan', 'secret_scan'],
+        checks: ['prompt_injection_scan', 'secret_scan'],
+        metadata_only: true,
+        raw_prompt_stored: false,
+        local_only: true,
+        prompt_hash: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      autonomy_policy: {
+        available: true,
+        action: 'space.repair.queue',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['generated_widget_execution'],
+        prompt_preflight_status: 'passed',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-space-repair',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'recovery.space.repair:' + (body.space_id || 'broken'),
+        redaction_status: 'metadata-only',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       renderer: '<script>bad()</script>',
       api_key: 'SECRET_VALUE_DO_NOT_LEAK',
     });
@@ -6221,6 +6311,14 @@ def test_spaces_ui_recovery_repair_widget_queues_agent_event_from_safe_panel(dri
         "payload": {"source": "recovery-panel", "action": "repair", "widget_title": "Bad <Widget>"},
     }
     assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "Recovery action receipt" in out["recoveryHtml"]
+    assert "Prompt preflight" in out["recoveryHtml"]
+    assert "Boundary: recovery-widget-repair" in out["recoveryHtml"]
+    assert "Action policy" in out["recoveryHtml"]
+    assert "Action: space.widget.repair.queue" in out["recoveryHtml"]
+    assert "Recovery progress" in out["recoveryHtml"]
+    assert "recovery.widget.repair:broken" in out["recoveryHtml"]
+    assert "raw prompt not stored" in out["recoveryHtml"]
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
     assert "SECRET" not in out["recoveryHtml"]
@@ -6249,6 +6347,14 @@ def test_spaces_ui_recovery_repair_space_queues_metadata_only_event_from_safe_pa
         "payload": {"source": "recovery-panel", "action": "repair-space"},
     }
     assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "Recovery action receipt" in out["recoveryHtml"]
+    assert "Prompt preflight" in out["recoveryHtml"]
+    assert "Boundary: recovery-space-repair" in out["recoveryHtml"]
+    assert "Action policy" in out["recoveryHtml"]
+    assert "Action: space.repair.queue" in out["recoveryHtml"]
+    assert "Recovery progress" in out["recoveryHtml"]
+    assert "recovery.space.repair:broken" in out["recoveryHtml"]
+    assert "raw prompt not stored" in out["recoveryHtml"]
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
     assert "api_key" not in out["recoveryHtml"]
