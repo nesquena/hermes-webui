@@ -28,7 +28,7 @@ def test_inflight_state_is_compacted_before_localstorage_write():
     compact_body = _function_body(UI_JS, "_compactInflightState")
 
     assert "const entry={..._compactInflightState(state),updated_at:Date.now()};" in save_body
-    assert "const limits=_inflightStateLimits();" in compact_body
+    assert "const limits=_getInflightStateLimits();" in compact_body
     assert ".slice(-limits.messages)" in compact_body
     assert ".slice(-limits.toolCalls)" in compact_body
     assert "limits.jsonChars" in UI_JS
@@ -49,7 +49,16 @@ def test_inflight_state_limits_are_configurable_from_settings():
     assert "window._inflightStateLimits={" in BOOT_JS
     assert "maxSessions:parseInt(s.inflight_state_max_sessions||8,10)||8" in BOOT_JS
     assert "messages:parseInt(s.inflight_state_max_messages||24,10)||24" in BOOT_JS
-    assert "function _inflightStateLimits()" in UI_JS
+    # The reader function MUST use a different name than the window-attached
+    # config object — top-level `function foo(){}` in non-module scripts
+    # attaches to `window`, so a collision causes boot.js to overwrite the
+    # function with the config object and every later call throws
+    # `_inflightStateLimits is not a function`. See #2771.
+    assert "function _getInflightStateLimits()" in UI_JS
+    assert "function _inflightStateLimits()" not in UI_JS, (
+        "Function name must not collide with window._inflightStateLimits "
+        "config object (#2771)."
+    )
     assert "window._inflightStateLimits" in UI_JS
     assert "INFLIGHT_STATE_MAX_SESSIONS = 3" not in UI_JS
     assert "INFLIGHT_STATE_MAX_MESSAGES = 8" not in UI_JS

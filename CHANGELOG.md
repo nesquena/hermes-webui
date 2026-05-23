@@ -7,6 +7,12 @@
 
 - Add an opt-in gateway-backed WebUI chat mode behind `HERMES_WEBUI_CHAT_BACKEND=gateway`, letting browser chat delegate model/tool execution to the Hermes Gateway/API Server while preserving the existing direct WebUI path as the default.
 
+## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
+
+### Fixed
+
+- **PR #2773** by @nesquena-hermes — fix(chat): rename `_inflightStateLimits()` in `static/ui.js` to `_getInflightStateLimits()` so it no longer collides with the `window._inflightStateLimits` config object set in `static/boot.js`. Closes #2771. The v0.51.117 in-flight-recovery quota fix (#2766) declared a top-level helper with the same name as a window-attached config object; because top-level `function foo(){…}` declarations in classic (non-module) scripts attach to `window`, boot.js's `window._inflightStateLimits = {…}` assignment overwrote the function reference before any session could send. Every new chat broke on first `send()` with `TypeError: _inflightStateLimits is not a function`, leaving v0.51.117 effectively unusable. Renamed the function only (the public-ish window key is unchanged) and updated all 4 call sites. **New regression test `tests/test_window_function_collision.py` scans every static JS file for top-level `function NAME()` declarations whose name is also the target of `window.NAME = {…}` / `= <number>`, the exact shape that broke #2715 (`_pinnedSessionsLimit` in v0.51.106) and #2771 (`_inflightStateLimits` in v0.51.117). The test fails loudly with a precise file:name diagnostic if the bug class returns. Verified end-to-end against the live browser before merge: `_getInflightStateLimits()` returns the limits object and `saveInflightState()` persists to localStorage without throwing.
+
 ## [v0.51.117] — 2026-05-22 — Release CO (stage-pr2766 — 1-PR — in-flight recovery storage quota-safe)
 
 ### Fixed
