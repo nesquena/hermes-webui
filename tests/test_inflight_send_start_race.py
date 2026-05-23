@@ -24,7 +24,7 @@ def _function_body(src: str, name: str) -> str:
 def test_send_preserves_optimistic_messages_across_chat_start_await():
     """send() must not dereference INFLIGHT[activeSid] after await without a fallback."""
     body = _function_body(MESSAGES_JS, "send")
-    setup_idx = body.index("const optimisticMessages=[...S.messages];")
+    setup_idx = body.index("optimisticMessages=[...S.messages];")
     inflight_idx = body.index("INFLIGHT[activeSid]={messages:optimisticMessages")
     await_idx = body.index("const startData=await api('/api/chat/start'")
     save_idx = body.index("saveInflightState(activeSid,{streamId", await_idx)
@@ -63,6 +63,42 @@ def test_send_clears_stale_busy_state_before_queue_branch():
     chat_start_idx = body.index("api('/api/chat/start'")
     assert reconcile_idx < busy_branch_idx < chat_start_idx, (
         "stale busy reconciliation must run before the queue branch and before /api/chat/start"
+    )
+
+
+def test_pre_start_optimistic_ui_helpers_cannot_block_chat_start():
+    """Optional optimistic UI helpers must not strand a local bubble before /api/chat/start."""
+    body = _function_body(MESSAGES_JS, "send")
+    helper_body = _function_body(MESSAGES_JS, "_runOptionalPreStartUiStep")
+
+    optimistic_idx = body.index("S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);")
+    chat_start_idx = body.index("api('/api/chat/start'")
+    pre_start = body[optimistic_idx:chat_start_idx]
+
+    assert "try" in helper_body and "catch" in helper_body, (
+        "optional pre-start UI helper wrapper must catch errors before /api/chat/start"
+    )
+    assert "_runOptionalPreStartUiStep" in pre_start, (
+        "send() should wrap optimistic sidebar/title/polling helpers before /api/chat/start"
+    )
+    assert "upsertActiveSessionForLocalTurn" in pre_start and "applySessionTitleUpdate" in pre_start
+
+
+def test_pre_start_optimistic_block_cannot_prevent_chat_start():
+    """Any pre-start UI/storage exception must still fall through to /api/chat/start."""
+    body = _function_body(MESSAGES_JS, "send")
+    optimistic_idx = body.index("S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);")
+    chat_start_idx = body.index("api('/api/chat/start'")
+    pre_start = body[optimistic_idx:chat_start_idx]
+
+    assert "}catch(preStartError){" in pre_start, (
+        "The whole optimistic pre-start block needs a catch, not only individual optional helpers"
+    )
+    assert "continuing to /api/chat/start" in pre_start, (
+        "The recovery path should document that chat/start must still execute"
+    )
+    assert pre_start.rindex("}catch(preStartError){") < chat_start_idx, (
+        "pre-start catch must be before the /api/chat/start call"
     )
 
 
