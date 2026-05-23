@@ -978,6 +978,89 @@ function refreshAssistantProfileAvatars(opts={}){
   });
 }
 
+let _composerPresenceMeasureRaf=0;
+let _composerPresenceMeasureSeq=0;
+let _composerPresenceInitialBoxHeight=0;
+let _composerPresenceMeasureKey='';
+
+function _measureComposerPresenceTextareaBaseline(textarea, textareaRect){
+  if(!textarea||!textareaRect||!document.body) return 0;
+  const textareaStyle=getComputedStyle(textarea);
+  const clone=textarea.cloneNode(false);
+  clone.removeAttribute('id');
+  clone.value='';
+  clone.rows=1;
+  clone.style.position='fixed';
+  clone.style.left='-10000px';
+  clone.style.top='0';
+  clone.style.visibility='hidden';
+  clone.style.pointerEvents='none';
+  clone.style.width=Math.max(0,textareaRect.width||0)+'px';
+  clone.style.height='auto';
+  clone.style.maxHeight='none';
+  clone.style.overflow='hidden';
+  clone.style.boxSizing=textareaStyle.boxSizing;
+  clone.style.font=textareaStyle.font;
+  clone.style.lineHeight=textareaStyle.lineHeight;
+  clone.style.letterSpacing=textareaStyle.letterSpacing;
+  clone.style.padding=textareaStyle.padding;
+  clone.style.border=textareaStyle.border;
+  clone.style.minHeight=textareaStyle.minHeight;
+  document.body.appendChild(clone);
+  const rect=clone.getBoundingClientRect();
+  const minHeight=parseFloat(textareaStyle.minHeight)||0;
+  const baseline=Math.max(rect.height||0,clone.scrollHeight||0,minHeight);
+  clone.remove();
+  return baseline;
+}
+
+function measureComposerPresenceAvatarSize(){
+  const root=document.documentElement;
+  const box=$('composerBox');
+  const textarea=$('msg');
+  if(!root||!box||!textarea) return;
+  const boxRect=box.getBoundingClientRect();
+  if(!boxRect.height) return;
+  const textareaRect=textarea.getBoundingClientRect();
+  const textareaHeight=textareaRect.height||0;
+  const baselineHeight=_measureComposerPresenceTextareaBaseline(textarea,textareaRect)||textareaHeight;
+  const growth=Math.max(0,textareaHeight-baselineHeight);
+  const initialHeight=Math.max(44,Math.round(boxRect.height-growth));
+  const measureKey=[
+    Math.round(window.innerWidth||0),
+    document.documentElement.dataset.fontSize||'default',
+    document.documentElement.dataset.avatarPresence||'thread',
+  ].join('|');
+  if(!_composerPresenceInitialBoxHeight||_composerPresenceMeasureKey!==measureKey||growth===0){
+    _composerPresenceMeasureKey=measureKey;
+    _composerPresenceInitialBoxHeight=initialHeight;
+  }
+  const size=Math.max(44,Math.round(_composerPresenceInitialBoxHeight||initialHeight));
+  root.style.setProperty('--composer-presence-avatar-size',size+'px');
+}
+
+function scheduleComposerPresenceAvatarMeasure(){
+  if(_composerPresenceMeasureRaf) cancelAnimationFrame(_composerPresenceMeasureRaf);
+  const seq=++_composerPresenceMeasureSeq;
+  const run=()=>{
+    if(seq!==_composerPresenceMeasureSeq) return;
+    _composerPresenceMeasureRaf=0;
+    measureComposerPresenceAvatarSize();
+  };
+  _composerPresenceMeasureRaf=requestAnimationFrame(()=>requestAnimationFrame(run));
+}
+
+window.addEventListener('resize',()=>scheduleComposerPresenceAvatarMeasure());
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',()=>{
+    refreshComposerPresenceAvatar({force:true});
+    scheduleComposerPresenceAvatarMeasure();
+  },{once:true});
+}else{
+  refreshComposerPresenceAvatar({force:true});
+  scheduleComposerPresenceAvatarMeasure();
+}
+
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
 let _providerQuotaRefreshInFlight=false;
 

@@ -1908,9 +1908,9 @@
     .composer-box{border-radius:12px;}
     .composer-box textarea{min-height:40px;}
     .composer-footer{padding:6px 8px 8px!important;gap:6px;flex-wrap:nowrap;align-items:center;}
-    :root[data-avatar-presence="composer"] .composer-presence-row{max-width:none;grid-template-columns:56px minmax(0,1fr);gap:6px;}
-    :root[data-avatar-presence="composer"] .composer-presence-avatar{width:56px;height:56px;}
-    :root[data-avatar-presence="composer"] .composer-presence-avatar .profile-avatar--composer{width:56px;height:56px;}
+    :root[data-avatar-presence="composer"] .composer-presence-row{max-width:none;grid-template-columns:var(--composer-presence-avatar-size,56px) minmax(0,1fr);gap:6px;}
+    :root[data-avatar-presence="composer"] .composer-presence-avatar{width:var(--composer-presence-avatar-size,56px);height:var(--composer-presence-avatar-size,56px);}
+    :root[data-avatar-presence="composer"] .composer-presence-avatar .profile-avatar--composer{width:var(--composer-presence-avatar-size,56px);height:var(--composer-presence-avatar-size,56px);}
     .composer-left{flex:1 1 auto;width:auto;flex-wrap:nowrap;align-items:center;gap:10px;overflow-x:auto;overflow-y:hidden;max-height:none;row-gap:0;-webkit-overflow-scrolling:touch;}
     .composer-left > *{flex-shrink:0;}
     .composer-profile-wrap,

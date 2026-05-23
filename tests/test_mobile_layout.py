@@ -942,7 +942,7 @@ def test_composer_presence_css_preserves_default_and_enables_opt_in_layout():
 
 
 def test_composer_presence_mobile_rule_keeps_avatar_56px_and_layout_compact():
-    """Phone composer mode keeps a fixed 56px avatar track beside the compact box."""
+    """Phone composer mode consumes the measured avatar size beside the compact box."""
     mobile = _composer_phone_media_block()
     active_row = _declarations(_rule_body(mobile, ':root[data-avatar-presence="composer"] .composer-presence-row'))
     active_avatar = _declarations(_rule_body(mobile, ':root[data-avatar-presence="composer"] .composer-presence-avatar'))
@@ -950,11 +950,11 @@ def test_composer_presence_mobile_rule_keeps_avatar_56px_and_layout_compact():
 
     assert active_row.get("gap") == "6px"
     assert active_row.get("max-width") == "none"
-    assert active_row.get("grid-template-columns") == "56px minmax(0,1fr)"
-    assert active_avatar.get("width") == "56px"
-    assert active_avatar.get("height") == "56px"
-    assert composer_inner.get("width") == "56px"
-    assert composer_inner.get("height") == "56px"
+    assert active_row.get("grid-template-columns") == "var(--composer-presence-avatar-size,56px) minmax(0,1fr)"
+    assert active_avatar.get("width") == "var(--composer-presence-avatar-size,56px)"
+    assert active_avatar.get("height") == "var(--composer-presence-avatar-size,56px)"
+    assert composer_inner.get("width") == "var(--composer-presence-avatar-size,56px)"
+    assert composer_inner.get("height") == "var(--composer-presence-avatar-size,56px)"
 
 
 def test_mobile_composer_overflow_control_present():

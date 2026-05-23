@@ -328,6 +328,28 @@ def test_composer_presence_forces_repaint_when_active_avatar_payload_changes():
     )
 
 
+def test_composer_presence_avatar_measurement_is_initial_height_not_input_driven():
+    assert "function measureComposerPresenceAvatarSize()" in UI_JS
+    assert "function scheduleComposerPresenceAvatarMeasure()" in UI_JS
+    measure = _extract_function(UI_JS, "measureComposerPresenceAvatarSize")
+    schedule = _extract_function(UI_JS, "scheduleComposerPresenceAvatarMeasure")
+    assert "getBoundingClientRect()" in measure
+    assert "_composerPresenceInitialBoxHeight" in measure
+    assert "function _measureComposerPresenceTextareaBaseline" in UI_JS
+    baseline = _extract_function(UI_JS, "_measureComposerPresenceTextareaBaseline")
+    assert "textareaRect.height" not in baseline
+    assert "textareaHeight-baselineHeight" in measure
+    assert "boxRect.height-growth" in measure
+    assert "const size=Math.max(44,Math.round(_composerPresenceInitialBoxHeight||initialHeight))" in measure
+    assert "setProperty('--composer-presence-avatar-size'" in measure
+    assert "requestAnimationFrame" in schedule
+    assert "_composerPresenceMeasureSeq" in schedule
+    assert "addEventListener('input',scheduleComposerPresenceAvatarMeasure" not in UI_JS
+    assert 'addEventListener("input",scheduleComposerPresenceAvatarMeasure' not in UI_JS
+    assert "scheduleComposerPresenceAvatarMeasure()" in BOOT_JS
+    assert "var(--composer-presence-avatar-size,56px) minmax(0,1fr)" in STYLE_CSS
+
+
 def test_session_profile_avatar_refresh_helpers_exist():
     assert "function _currentConversationProfileName()" in UI_JS
     assert "function _profileAvatarEntryForName(" in UI_JS
