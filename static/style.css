@@ -221,6 +221,52 @@
   :root[data-skin="catppuccin"] .tool-card-more{color:var(--accent-text);}
   :root[data-skin="catppuccin"] .tool-card-running-dot{background:var(--accent);}
 
+  /* Skin: Hepburn — magenta-rose palette derived from the Hepburn TUI theme */
+  :root[data-skin="hepburn"]{
+    --bg:#fff3f7;--sidebar:#fbe4ed;--surface:#fff9fb;
+    --border:#ecc8d5;--border2:rgba(242,120,173,0.18);
+    --text:#3d1a28;--muted:#906270;--strong:#260912;--em:#72384a;
+    --accent:#d44a7a;--accent-hover:#c6246a;--accent-text:#c6246a;
+    --accent-bg:rgba(242,120,173,0.10);--accent-bg-strong:rgba(242,120,173,0.20);
+    --code-bg:#fbe6ef;--code-inline-bg:rgba(242,120,173,0.12);--code-text:#d44a7a;--pre-text:#3d1a28;
+    --topbar-bg:rgba(251,228,237,0.96);--main-bg:rgba(255,243,247,0.5);
+    --input-bg:rgba(242,120,173,0.06);--hover-bg:rgba(242,120,173,0.08);
+    --focus-ring:rgba(242,120,173,0.35);--focus-glow:rgba(242,120,173,0.12);
+    --blue:#8671e5;--gold:#d44a7a;
+    --error:#c0392b;--success:#3d8b40;--warning:#e67e22;--info:#8671e5;
+    --surface-subtle:rgba(242,120,173,0.04);--surface-subtle-hover:rgba(242,120,173,0.08);
+    --border-subtle:rgba(242,120,173,0.10);--border-muted:rgba(242,120,173,0.16);
+  }
+  :root.dark[data-skin="hepburn"]{
+    --bg:#110a0f;--sidebar:#1e0f19;--surface:#241420;
+    --border:#311a28;--border2:rgba(242,120,173,0.20);
+    --text:#f2e4ee;--muted:#c8a4b8;--strong:#fcf4f8;--em:#e5c4d8;
+    --accent:#f278ad;--accent-hover:#f5a0c5;--accent-text:#f278ad;
+    --accent-bg:rgba(242,120,173,0.14);--accent-bg-strong:rgba(242,120,173,0.25);
+    --code-bg:#1e0f19;--code-inline-bg:rgba(242,120,173,0.22);--code-text:#f5a0c5;--pre-text:#f2e4ee;
+    --topbar-bg:rgba(30,15,25,0.96);--main-bg:rgba(17,10,15,0.5);
+    --input-bg:rgba(242,120,173,0.08);--hover-bg:rgba(242,120,173,0.12);
+    --focus-ring:rgba(242,120,173,0.45);--focus-glow:rgba(242,120,173,0.18);
+    --blue:#8671e5;--gold:#ec5597;
+    --error:#ff5c5c;--success:#6cd4a5;--warning:#f2b370;--info:#8671e5;
+    --surface-subtle:rgba(242,120,173,0.05);--surface-subtle-hover:rgba(242,120,173,0.10);
+    --border-subtle:rgba(242,120,173,0.12);--border-muted:rgba(242,120,173,0.22);
+  }
+  :root[data-skin="hepburn"]:not(.dark) .new-chat-btn,
+  :root.dark[data-skin="hepburn"] .new-chat-btn{background:#ec5597;border-color:#ec5597;color:#fff;font-weight:600;box-shadow:0 1px 3px rgba(236,85,151,0.3);}
+  :root[data-skin="hepburn"]:not(.dark) .new-chat-btn:hover,
+  :root.dark[data-skin="hepburn"] .new-chat-btn:hover{background:#c6246a;border-color:#c6246a;color:#fff;}
+  :root[data-skin="hepburn"] .tool-card{background:rgba(242,120,173,0.04);border-color:var(--border);}
+  :root.dark[data-skin="hepburn"] .tool-card{background:rgba(242,120,173,0.06);}
+  :root[data-skin="hepburn"] .tool-card:hover{border-color:var(--accent-bg-strong);}
+  :root[data-skin="hepburn"] .tool-card-running{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+  :root[data-skin="hepburn"] .tool-arg-key,
+  :root[data-skin="hepburn"] .tool-card-more{color:var(--accent-text);}
+  :root[data-skin="hepburn"] .tool-card-running-dot{background:var(--accent);}
+  :root[data-skin="hepburn"] .send-btn{background:#ec5597;border-color:#ec5597;color:#fff;box-shadow:0 1px 3px rgba(236,85,151,0.3);}
+  :root[data-skin="hepburn"] .send-btn:hover{background:#c6246a;border-color:#c6246a;color:#fff;box-shadow:0 2px 8px rgba(198,36,106,0.45);}
+  :root[data-skin="hepburn"] .session-item.active{border-left:2px solid var(--accent);}
+
   /* ── Skin: Nous Research (steel blue, monospace, sharp corners, deep navy dark) ──
      Full palette rewrite inspired by the Nous Research visual identity.
      Monochromatic steel blue accent, monospace typography, near-sharp corners,
