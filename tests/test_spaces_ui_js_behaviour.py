@@ -1536,13 +1536,123 @@ global.fetch = async function(path, opts = {}) {
     });
   }
   if (path === 'api/spaces/recovery/disable-module') {
-    return response({ disabled: true, module_id: 'safe-module', revision_event_id: 'rev-disable-module', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+    return response({
+      disabled: true,
+      module_id: 'safe-module',
+      revision_event_id: 'rev-disable-module',
+      autonomy_policy: {
+        available: true,
+        action: 'space.module.recovery.disable',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['generated_widget_execution'],
+        prompt_preflight_status: 'required',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-disable-module',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'recovery.module.disable:safe-module',
+        redaction_status: 'metadata-only',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET'
+    });
   }
   if (path === 'api/spaces/recovery/enable-module') {
-    return response({ disabled: false, module_id: 'unsafe-module', revision_event_id: 'rev-enable-module', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+    return response({
+      disabled: false,
+      module_id: 'unsafe-module',
+      revision_event_id: 'rev-enable-module',
+      autonomy_policy: {
+        available: true,
+        action: 'space.module.recovery.enable',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['generated_widget_execution'],
+        prompt_preflight_status: 'required',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-enable-module',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'recovery.module.enable:unsafe-module',
+        redaction_status: 'metadata-only',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET'
+    });
   }
   if (path === 'api/spaces/recovery/repair-module') {
-    return response({ queued: true, module_id: 'safe-module', event_name: 'agent.repair', event_id: 'evt-module-repair', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+    return response({
+      queued: true,
+      module_id: 'safe-module',
+      event_name: 'agent.repair',
+      event_id: 'evt-module-repair',
+      prompt_preflight: {
+        available: true,
+        action: 'space.module.repair.queue',
+        boundary: 'recovery-module-repair',
+        status: 'passed',
+        severity: 'low',
+        categories: ['prompt_injection_scan', 'secret_scan'],
+        checks: ['prompt_injection_scan', 'secret_scan'],
+        metadata_only: true,
+        raw_prompt_stored: false,
+        local_only: true,
+        prompt_hash: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      autonomy_policy: {
+        available: true,
+        action: 'space.module.repair.queue',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['generated_widget_execution'],
+        prompt_preflight_status: 'passed',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-module-repair',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'recovery.module.repair:safe-module',
+        redaction_status: 'metadata-only',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET'
+    });
   }
   if (path === 'api/spaces/recovery/repair-widget') {
     const eventBody = opts.body ? JSON.parse(opts.body) : {};
@@ -5973,6 +6083,11 @@ def test_spaces_ui_recovery_module_controls_use_shared_confirm_and_refresh(drive
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"module_id": "safe-module", "reason": "disabled from recovery panel"}
     assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "Recovery action receipt" in out["recoveryHtml"]
+    assert "Action policy" in out["recoveryHtml"]
+    assert "Action: space.module.recovery.disable" in out["recoveryHtml"]
+    assert "Recovery progress" in out["recoveryHtml"]
+    assert "recovery.module.disable:safe-module" in out["recoveryHtml"]
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
     assert "api_key" not in out["recoveryHtml"]
@@ -6014,6 +6129,11 @@ def test_spaces_ui_recovery_enable_module_uses_shared_confirm_and_refresh(driver
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"module_id": "unsafe-module", "reason": "enabled from recovery panel"}
     assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "Recovery action receipt" in out["recoveryHtml"]
+    assert "Action policy" in out["recoveryHtml"]
+    assert "Action: space.module.recovery.enable" in out["recoveryHtml"]
+    assert "Recovery progress" in out["recoveryHtml"]
+    assert "recovery.module.enable:unsafe-module" in out["recoveryHtml"]
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
     assert "api_key" not in out["recoveryHtml"]
@@ -6043,6 +6163,16 @@ def test_spaces_ui_recovery_repair_module_queues_metadata_only_event_from_safe_p
         "payload": {"source": "recovery-panel", "action": "repair-module"},
     }
     assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "Recovery action receipt" in out["recoveryHtml"]
+    assert "Prompt preflight" in out["recoveryHtml"]
+    assert "Status: passed" in out["recoveryHtml"]
+    assert "Boundary: recovery-module-repair" in out["recoveryHtml"]
+    assert "Prompt hash: 0123456789ab" in out["recoveryHtml"]
+    assert "prompt_injection_scan" in out["recoveryHtml"]
+    assert "Action policy" in out["recoveryHtml"]
+    assert "Recovery progress" in out["recoveryHtml"]
+    assert "raw prompt not stored" in out["recoveryHtml"]
+    assert "source" not in out["recoveryHtml"].lower()
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
     assert "api_key" not in out["recoveryHtml"]

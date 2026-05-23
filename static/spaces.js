@@ -1115,7 +1115,7 @@
     if (listValues.length) details.push('Checks: '+listValues.join(' · '));
     return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Prompt preflight</strong>' +
       '<div class="capy-spaces-muted">'+escapeHtml(details.join(' · '))+'</div>' +
-      '<div class="capy-spaces-muted">Preflight receipt is metadata-only; raw prompt/source text remains omitted.</div>' +
+      '<div class="capy-spaces-muted">Preflight receipt is metadata-only; raw prompt text remains omitted.</div>' +
       '</div></div></div>';
   }
 
@@ -1167,12 +1167,13 @@
   function renderRecoveryActionReceipt(data){
     const result = data && typeof data === 'object' && !Array.isArray(data) ? data : null;
     if (!result) return '';
+    const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
     const policy = renderActionPolicyEvidence(result.autonomy_policy);
     const progress = renderPackageProgressEvidence(result.progress_event, 'Recovery progress');
-    if (!policy && !progress) return '';
+    if (!preflight && !policy && !progress) return '';
     return '<div class="capy-spaces-card" role="status"><h3>Recovery action receipt</h3>' +
       '<div class="capy-spaces-muted">Confirmed recovery action completed with metadata-only policy and progress evidence. Raw widget bodies, prompts, implementation fields, and secrets stay omitted.</div>' +
-      policy + progress + '</div>';
+      preflight + policy + progress + '</div>';
   }
 
   function prependRecoveryActionReceipt(data){
@@ -3675,12 +3676,13 @@
         confirmLabel: 'Queue repair',
       });
       if (!promptText) return;
-      await postSpacesJson('api/spaces/recovery/repair-module', {
+      const repairResult = await postSpacesJson('api/spaces/recovery/repair-module', {
         module_id: moduleId,
         prompt: promptText,
         payload: {source: 'recovery-panel', action: 'repair-module'},
       });
       await loadCapySpacesRecovery();
+      prependRecoveryActionReceipt(repairResult || {});
       return;
     }
     if (action === 'disableRecoveryModule' || action === 'enableRecoveryModule') {
@@ -3690,14 +3692,16 @@
       if (action === 'disableRecoveryModule') {
         const ok = await showConfirmDialog({title: 'Disable module?', message: 'Disable quarantined module "'+moduleId+'" from safe recovery? The raw body is preserved only for repair/rollback.', confirmLabel: 'Disable module', danger: true, focusCancel: true});
         if (!ok) return;
-        await postSpacesJson('api/spaces/recovery/disable-module', {module_id: moduleId, reason: 'disabled from recovery panel'});
+        const disableResult = await postSpacesJson('api/spaces/recovery/disable-module', {module_id: moduleId, reason: 'disabled from recovery panel'});
         await loadCapySpacesRecovery();
+        prependRecoveryActionReceipt(disableResult || {});
         return;
       }
       const ok = await showConfirmDialog({title: 'Enable module?', message: 'Re-enable quarantined module "'+moduleId+'" in safe recovery? Generated module bodies are still not rendered.', confirmLabel: 'Enable module', danger: true, focusCancel: true});
       if (!ok) return;
-      await postSpacesJson('api/spaces/recovery/enable-module', {module_id: moduleId, reason: 'enabled from recovery panel'});
+      const enableResult = await postSpacesJson('api/spaces/recovery/enable-module', {module_id: moduleId, reason: 'enabled from recovery panel'});
       await loadCapySpacesRecovery();
+      prependRecoveryActionReceipt(enableResult || {});
       return;
     }
     const spaceId = button.dataset.spaceId || '';
