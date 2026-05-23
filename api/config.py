@@ -694,6 +694,7 @@ _PROVIDER_DISPLAY = {
     "openai-codex": "OpenAI Codex",
     "xai-oauth": "xAI Grok OAuth",
     "copilot": "GitHub Copilot",
+    "cursor-acp": "Cursor ACP",
     "zai": "Z.AI / GLM",
     "kimi-coding": "Kimi / Moonshot",
     "deepseek": "DeepSeek",
@@ -1114,6 +1115,13 @@ _PROVIDER_MODELS = {
         {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"},
         {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
         {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+    ],
+    # Cursor ACP — models served via Cursor CLI agent acp
+    "cursor-acp": [
+        {"id": "cursor/composer-2.5", "label": "Composer 2.5"},
+        {"id": "cursor/composer-2", "label": "Composer 2"},
+        {"id": "cursor/default", "label": "Default"},
+        {"id": "cursor-acp", "label": "Cursor ACP"},
     ],
     # OpenCode Zen — curated models via opencode.ai/zen (pay-as-you-go credits)
     "opencode-zen": [
