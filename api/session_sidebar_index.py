@@ -11,11 +11,11 @@ from typing import Any, Iterable
 
 ARCHIVE_AFTER_DAY_CHOICES = (7, 14, 30, 90)
 DEFAULT_ARCHIVE_AFTER_DAYS = 7
-DEFAULT_ARCHIVE_LIMIT = 50
+DEFAULT_ARCHIVE_LIMIT = 30
 SECONDS_PER_DAY = 86_400
 WORKSPACE_GROUP_WORKSPACE = "workspace"
 WORKSPACE_GROUP_CHATS = "chats"
-VALID_WORKSPACE_GROUPS = (WORKSPACE_GROUP_WORKSPACE, WORKSPACE_GROUP_CHATS)
+VALID_WORKSPACE_GROUPS = {WORKSPACE_GROUP_WORKSPACE, WORKSPACE_GROUP_CHATS}
 
 
 def normalize_archive_after_days(value: Any) -> int:
@@ -54,13 +54,9 @@ def session_activity_ts(row: dict[str, Any]) -> float:
     return 0
 
 
-def workspace_key_for(workspace: Any = None, workspace_group: Any = None) -> str:
-    """Return the stable sidebar group key for workspace or general chats."""
-    normalized_workspace = _normalize_workspace_path(workspace)
-    group = normalize_workspace_group(workspace_group, workspace=normalized_workspace)
-    if group == WORKSPACE_GROUP_WORKSPACE and normalized_workspace:
-        return f"workspace:{normalized_workspace}"
-    return WORKSPACE_GROUP_CHATS
+def workspace_key_for(workspace: Any = None) -> str | None:
+    """Return the normalized workspace key, or None when no workspace is set."""
+    return _normalize_workspace_path(workspace)
 
 
 def session_is_current(
@@ -255,8 +251,8 @@ def _compact_sidebar_row(
     compact["age_seconds"] = max(0, server_time - activity_ts) if activity_ts else None
     compact["pinned"] = bool(row.get("pinned"))
     compact["unread"] = bool(row.get("unread"))
-    compact["streaming"] = bool(row.get("is_streaming") or row.get("active_stream_id"))
-    compact["pending"] = bool(row.get("has_pending_user_message") or row.get("pending_user_message"))
+    compact["streaming"] = bool(row.get("streaming") or row.get("is_streaming") or row.get("active_stream_id"))
+    compact["pending"] = bool(row.get("pending") or row.get("has_pending_user_message") or row.get("pending_user_message"))
     compact["age_archived"] = _is_age_archived(
         compact,
         server_time=server_time,
@@ -280,8 +276,10 @@ def _is_age_archived(
         or row.get("unread")
         or row.get("is_streaming")
         or row.get("active_stream_id")
+        or row.get("streaming")
         or row.get("has_pending_user_message")
         or row.get("pending_user_message")
+        or row.get("pending")
     ):
         return False
     if current_session_id and row.get("session_id") == current_session_id:

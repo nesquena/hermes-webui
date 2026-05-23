@@ -42,9 +42,9 @@ def _group(index, group_id):
 
 def test_public_contract_exports_are_available():
     assert DEFAULT_ARCHIVE_AFTER_DAYS == 7
-    assert DEFAULT_ARCHIVE_LIMIT > 0
+    assert DEFAULT_ARCHIVE_LIMIT == 30
     assert ARCHIVE_AFTER_DAY_CHOICES == (7, 14, 30, 90)
-    assert VALID_WORKSPACE_GROUPS == ("workspace", "chats")
+    assert VALID_WORKSPACE_GROUPS == {"workspace", "chats"}
     assert callable(workspace_key_for)
     assert callable(session_is_current)
     assert callable(build_session_archive_page)
@@ -101,8 +101,8 @@ def test_build_index_groups_workspaces_across_profiles_and_names_workspace(tmp_p
     workspace_group = _group(index, f"workspace:{normalized}")
     chats_group = _group(index, "chats")
 
-    assert workspace_key_for(str(workspace)) == f"workspace:{normalized}"
-    assert workspace_key_for(str(workspace), workspace_group=" Chats ") == "chats"
+    assert workspace_key_for(None) is None
+    assert workspace_key_for(str(workspace)) == normalized
     assert index["archive_after_days"] == 7
     assert index["manual_archived"] == {"count": 0}
     assert workspace_group["kind"] == "project"
@@ -172,8 +172,10 @@ def test_old_rows_increment_archive_count_without_current_group_sessions(tmp_pat
         ("unread", {"unread": True}),
         ("streaming", {"is_streaming": True}),
         ("active-stream-id", {"active_stream_id": "stream-1"}),
+        ("streaming-alias", {"streaming": True}),
         ("pending-user-message", {"has_pending_user_message": True}),
         ("pending-user-text", {"pending_user_message": "still working"}),
+        ("pending-alias", {"pending": True}),
     ],
 )
 def test_important_rows_stay_current_even_when_old_without_current_session(session_id, extra):
