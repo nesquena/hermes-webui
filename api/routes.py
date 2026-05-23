@@ -6237,9 +6237,10 @@ _COMPRESSIBLE_MIME = {
     "application/json", "text/plain",
 }
 
-# In-process cache for compressed bytes + ETag, invalidated on (mtime, size)
-# change so a redeploy is picked up without a process restart. Memory cost is
-# bounded by the static/ tree (~3 MB raw + ~600 KB gzipped).
+# In-process cache for raw bytes, compressed bytes, and ETag. The cache is keyed
+# by absolute path and invalidated on (size, high-precision mtime) change, so a
+# redeploy is picked up without a process restart. Missing/random paths never
+# enter the cache; memory cost is bounded by the static/ tree's served files.
 _STATIC_CACHE: dict = {}
 _STATIC_CACHE_LOCK = threading.Lock()
 
@@ -6261,9 +6262,9 @@ def _serve_static(handler, parsed):
     ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
 
     # Look up or populate the per-file cache (raw, optional gzip, ETag).
-    # Keyed by absolute path; invalidated by (mtime, size).
+    # Keyed by absolute path; invalidated by (size, nanosecond mtime).
     st = static_file.stat()
-    sig = (st.st_size, int(st.st_mtime))
+    sig = (st.st_size, st.st_mtime_ns)
     cache_key = str(static_file)
     raw = gz = etag = None
     with _STATIC_CACHE_LOCK:
@@ -6284,7 +6285,8 @@ def _serve_static(handler, parsed):
     # `/`/`/index.html`/`/session/` branch above), and static/sw.js's
     # SHELL_ASSETS list relies on the same convention. So a fingerprinted URL
     # is safe to cache aggressively: any redeploy changes the URL.
-    has_fingerprint = "v" in parse_qs(parsed.query)
+    version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
+    has_fingerprint = bool(version_values[0])
     cache_control = (
         "public, max-age=31536000, immutable" if has_fingerprint
         else "public, max-age=300"
@@ -6295,6 +6297,8 @@ def _serve_static(handler, parsed):
         handler.send_response(304)
         handler.send_header("ETag", etag)
         handler.send_header("Cache-Control", cache_control)
+        if gz is not None:
+            handler.send_header("Vary", "Accept-Encoding")
         handler.end_headers()
         return True
 
@@ -6307,9 +6311,10 @@ def _serve_static(handler, parsed):
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("ETag", etag)
     handler.send_header("Cache-Control", cache_control)
+    if gz is not None:
+        handler.send_header("Vary", "Accept-Encoding")
     if use_gzip:
         handler.send_header("Content-Encoding", "gzip")
-        handler.send_header("Vary", "Accept-Encoding")
     handler.end_headers()
     handler.wfile.write(body)
     return True

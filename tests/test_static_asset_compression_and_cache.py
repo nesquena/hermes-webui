@@ -165,6 +165,15 @@ def test_fingerprinted_url_gets_immutable_cache(isolated_static):
     assert h.header("Cache-Control") == "public, max-age=31536000, immutable"
 
 
+def test_empty_fingerprint_value_gets_short_cache(isolated_static):
+    """Only a non-empty version token is an immutable-cache fingerprint."""
+    from api import routes
+    _make_static_file(isolated_static, "ui.js", b"x" * 2000)
+
+    h = _serve(routes, "/static/ui.js", query="v=")
+    assert h.header("Cache-Control") == "public, max-age=300"
+
+
 def test_unfingerprinted_url_gets_short_cache(isolated_static):
     from api import routes
     _make_static_file(isolated_static, "ui.js", b"x" * 2000)
@@ -186,6 +195,7 @@ def test_conditional_get_returns_304(isolated_static):
     assert second.status == 304
     assert second.header("ETag") == etag
     assert second.header("Cache-Control") == "public, max-age=31536000, immutable"
+    assert second.header("Vary") == "Accept-Encoding"
     assert bytes(second.body) == b""
 
 
@@ -208,6 +218,27 @@ def test_etag_changes_when_file_changes(isolated_static):
     # Old ETag now produces a 200, not a stale 304.
     third = _serve(routes, "/static/ui.js", request_headers={"If-None-Match": etag_v1})
     assert third.status == 200
+
+
+def test_etag_changes_for_same_size_edits_within_same_second(isolated_static):
+    """The cache signature must keep sub-second mtime precision."""
+    import os
+    from api import routes
+
+    f = _make_static_file(isolated_static, "ui.js", b"a" * 2048)
+    second = 1_900_000_000
+    os.utime(f, ns=(second * 1_000_000_000, second * 1_000_000_000))
+
+    first = _serve(routes, "/static/ui.js")
+    etag_v1 = first.header("ETag")
+
+    f.write_bytes(b"b" * 2048)
+    os.utime(f, ns=(second * 1_000_000_000 + 123_000_000,
+                    second * 1_000_000_000 + 123_000_000))
+
+    second_response = _serve(routes, "/static/ui.js")
+    assert second_response.header("ETag") != etag_v1
+    assert bytes(second_response.body) == b"b" * 2048
 
 
 def test_image_is_not_gzipped(isolated_static):
