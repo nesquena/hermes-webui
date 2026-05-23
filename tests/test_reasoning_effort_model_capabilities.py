@@ -19,6 +19,15 @@ def test_openai_codex_gpt5_supports_reasoning_effort_levels():
     assert "high" in efforts
 
 
+def test_openai_codex_prefixed_gpt5_supports_reasoning_effort_levels():
+    efforts = cfg.resolve_model_reasoning_efforts(
+        "@openai-codex:gpt-5.5",
+        provider_id="openai-codex",
+    )
+    assert "medium" in efforts
+    assert "high" in efforts
+
+
 def test_get_reasoning_status_includes_supported_efforts(monkeypatch):
     monkeypatch.setattr(
         cfg,

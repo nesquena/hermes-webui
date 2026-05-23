@@ -2062,9 +2062,17 @@ def parse_reasoning_effort(effort):
     return None
 
 
+def _strip_provider_hint_for_reasoning(model_id: str) -> str:
+    """Remove WebUI routing hints before provider-specific capability lookup."""
+    model = str(model_id or "").strip()
+    if model.startswith("@") and ":" in model:
+        return model.split(":", 1)[1]
+    return model
+
+
 def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     """Fallback when hermes_cli is unavailable."""
-    model = str(model_id or "").strip().lower()
+    model = _strip_provider_hint_for_reasoning(model_id).lower()
     provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
     if not model or provider in {"cursor-acp", "copilot-acp"}:
         return []
@@ -2124,11 +2132,12 @@ def resolve_model_reasoning_efforts(
     except Exception:
         return _heuristic_reasoning_efforts(model, provider)
 
+    hinted_model = _strip_provider_hint_for_reasoning(model)
     if provider in {"copilot", "github-copilot"}:
-        return github_model_reasoning_efforts(model)
+        return github_model_reasoning_efforts(hinted_model)
 
     if provider == "openai-codex":
-        bare = model.rsplit("/", 1)[-1]
+        bare = hinted_model.rsplit("/", 1)[-1]
         return github_model_reasoning_efforts(bare)
 
     if provider == "lmstudio":
