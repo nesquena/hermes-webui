@@ -2815,21 +2815,28 @@ def _json_loads_if_string(value):
         return value
 
 
-def get_state_db_session_messages(sid, *, stitch_continuations: bool = False) -> list:
-    """Read messages for a Hermes session from the active profile's state.db.
+def get_state_db_session_messages(sid, *, stitch_continuations: bool = False, profile=None) -> list:
+    """Read messages for a Hermes session from state.db.
 
-    This generic reader intentionally works for any session source, including
-    WebUI-origin sessions that were later updated through another Hermes surface
-    such as the Gateway API Server.  When ``stitch_continuations`` is true it
-    preserves the historical CLI/external-agent behavior of walking compatible
-    compression/close parent segments before reading messages.
+    When *profile* is supplied, reads from that profile's state.db; otherwise
+    falls back to the active profile's state.db.  This generic reader works for
+    any session source, including WebUI-origin sessions that were later updated
+    through another Hermes surface such as the Gateway API Server.  When
+    ``stitch_continuations`` is true it preserves the historical CLI/external-agent
+    behavior of walking compatible compression/close parent segments before reading
+    messages.
     """
     try:
         import sqlite3
     except ImportError:
         return []
 
-    db_path = _active_state_db_path()
+    if profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
     if not db_path.exists():
         return []
 
@@ -2852,7 +2859,8 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False) ->
                 'reasoning_content',
                 'codex_message_items',
             ]
-            selected = ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
+            id_col = ['id'] if 'id' in available else []
+            selected = id_col + ['role', 'content', 'timestamp'] + [c for c in optional if c in available]
 
             session_chain = [str(sid)]
             if stitch_continuations:
