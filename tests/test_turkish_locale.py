@@ -145,3 +145,11 @@ def test_turkish_locale_keys_use_standard_indentation():
         if re.match(r"^\s{1,3}[a-zA-Z0-9_]+\s*:", line)
     ]
     assert badly_indented == []
+
+
+def test_turkish_locale_has_no_double_escaped_unicode_sequences():
+    """JSON-style double escapes (\\\\u2026) render literal backslash-u in the UI."""
+    src = read(REPO / "static" / "i18n.js")
+    tr_block = extract_locale_block(src, "tr")
+    for bad in ("\\\\u2026", "\\\\u2192", "\\\\u2713"):
+        assert bad not in tr_block, f"Turkish locale must not contain {bad!r}"
