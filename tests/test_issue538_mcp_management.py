@@ -5,6 +5,7 @@ from api.routes import (
     _handle_mcp_servers_list,
     _handle_mcp_server_update,
     _handle_mcp_server_delete,
+    _handle_mcp_server_toggle,
     _mask_secrets,
     _parse_mcp_enabled,
     _server_summary,
@@ -60,7 +61,7 @@ class TestMcpList:
         assert status == 200
         payload = _json_payload(h)
         assert payload['servers'] == []
-        assert payload['toggle_supported'] is False
+        assert payload['toggle_supported'] is True
         assert payload['reload_required'] is True
 
     @patch('api.routes._mcp_runtime_status_by_name')
@@ -307,3 +308,83 @@ class TestStripMaskedValues:
     def test_empty_dicts(self):
         assert _strip_masked_values({}, {}) == {}
         assert _strip_masked_values({"k": "v"}, {}) == {"k": "v"}
+
+
+class TestMcpToggle:
+    """PATCH /api/mcp/servers/<name> — enable/disable."""
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes._save_yaml_config_file')
+    @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
+    @patch('api.routes.get_config')
+    def test_disable_server(self, mock_cfg, mock_path, mock_save, mock_reload):
+        mock_cfg.return_value = {'mcp_servers': {'myserver': {'command': 'run'}}}
+        h = _make_handler()
+        h.command = 'PATCH'
+        _handle_mcp_server_toggle(h, 'myserver', {'enabled': False})
+        assert mock_save.called
+        saved = mock_save.call_args[0][1]
+        assert saved['mcp_servers']['myserver']['enabled'] is False
+        assert mock_reload.called
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes._save_yaml_config_file')
+    @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
+    @patch('api.routes.get_config')
+    def test_enable_server(self, mock_cfg, mock_path, mock_save, mock_reload):
+        mock_cfg.return_value = {'mcp_servers': {'myserver': {'command': 'run', 'enabled': False}}}
+        h = _make_handler()
+        h.command = 'PATCH'
+        _handle_mcp_server_toggle(h, 'myserver', {'enabled': True})
+        saved = mock_save.call_args[0][1]
+        assert saved['mcp_servers']['myserver']['enabled'] is True
+
+    @patch('api.routes.get_config')
+    def test_nonexistent_server_returns_404(self, mock_cfg):
+        mock_cfg.return_value = {'mcp_servers': {}}
+        h = _make_handler()
+        h.command = 'PATCH'
+        _handle_mcp_server_toggle(h, 'ghost', {'enabled': True})
+        status = h.send_response.call_args[0][0]
+        assert status == 404
+
+    def test_empty_name_rejected(self):
+        h = _make_handler()
+        h.command = 'PATCH'
+        _handle_mcp_server_toggle(h, '', {'enabled': True})
+        status = h.send_response.call_args[0][0]
+        assert status == 400
+
+    def test_missing_enabled_field_rejected(self):
+        h = _make_handler()
+        h.command = 'PATCH'
+        _handle_mcp_server_toggle(h, 'myserver', {})
+        status = h.send_response.call_args[0][0]
+        assert status == 400
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes._save_yaml_config_file')
+    @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
+    @patch('api.routes.get_config')
+    def test_response_payload(self, mock_cfg, mock_path, mock_save, mock_reload):
+        mock_cfg.return_value = {'mcp_servers': {'srv': {'url': 'http://localhost'}}}
+        h = _make_handler()
+        h.command = 'PATCH'
+        _handle_mcp_server_toggle(h, 'srv', {'enabled': False})
+        body = h.wfile.write.call_args[0][0]
+        payload = json.loads(body.decode('utf-8'))
+        assert payload == {'ok': True, 'name': 'srv', 'enabled': False}
+
+    @patch('api.routes.reload_config')
+    @patch('api.routes._save_yaml_config_file')
+    @patch('api.routes._get_config_path', return_value='/tmp/test.yaml')
+    @patch('api.routes.get_config')
+    def test_url_encoded_name(self, mock_cfg, mock_path, mock_save, mock_reload):
+        """Names with special characters must be URL-decoded."""
+        mock_cfg.return_value = {'mcp_servers': {'my server': {'command': 'x'}}}
+        h = _make_handler()
+        h.command = 'PATCH'
+        _handle_mcp_server_toggle(h, 'my%20server', {'enabled': False})
+        saved = mock_save.call_args[0][1]
+        assert 'my server' in saved['mcp_servers']
+        assert saved['mcp_servers']['my server']['enabled'] is False

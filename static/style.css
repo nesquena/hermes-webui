@@ -2893,6 +2893,10 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .mcp-status-disabled{background:rgba(161,161,170,.12);color:#a1a1aa;}
 .mcp-status-invalid_config,.mcp-status-unknown{background:rgba(239,68,68,.12);color:#f87171;}
 .mcp-tool-count{color:var(--text);}
+.mcp-toggle-btn{font-size:10px;font-weight:600;padding:2px 8px;border-radius:999px;border:1px solid transparent;cursor:pointer;transition:opacity .15s;}
+.mcp-toggle-btn:hover{opacity:.8;}
+.mcp-toggle-enabled{background:rgba(34,197,94,.15);color:#4ade80;border-color:rgba(34,197,94,.3);}
+.mcp-toggle-disabled{background:rgba(161,161,170,.12);color:#a1a1aa;border-color:rgba(161,161,170,.25);}
 .mcp-readonly-note,.mcp-restart-hint{margin-top:8px;color:var(--muted);font-size:11px;line-height:1.45;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;padding:8px 10px;}
 .mcp-tool-search{width:100%;margin:0 0 8px 0;padding:8px 10px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:8px;font-size:12px;outline:none;}
 .mcp-tool-search:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg-soft);}
