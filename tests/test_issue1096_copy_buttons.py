@@ -7,6 +7,12 @@ def _src(name: str) -> str:
         return f.read()
 
 
+def _function_body(src: str, name: str, window: int = 2200) -> str:
+    m = re.search(rf"function {re.escape(name)}\b", src)
+    assert m, f"{name} must exist"
+    return src[m.start():m.start() + window]
+
+
 def _py_src() -> str:
     with open("api/helpers.py") as f:
         return f.read()
@@ -85,10 +91,7 @@ class TestCodeCopyButton:
     def test_code_copy_uses_copyText(self):
         """Code copy button onclick must call _copyText."""
         src = _src("ui.js")
-        # Find addCopyButtons function
-        m = re.search(r"function addCopyButtons", src)
-        assert m, "addCopyButtons must exist"
-        fn = src[m.start():m.start() + 1000]
+        fn = _function_body(src, "addCopyButtons")
         assert "_copyText" in fn, \
             "Code copy button must use _copyText function"
         assert "codeEl.textContent" in fn, \
@@ -103,12 +106,41 @@ class TestCodeCopyButton:
         guard must check the header as well as the <pre>.
         """
         src = _src("ui.js")
-        m = re.search(r"function addCopyButtons", src)
-        assert m, "addCopyButtons must exist"
-        fn = src[m.start():m.start() + 1200]
-        assert "const header=pre.previousElementSibling;" in fn
+        fn = _function_body(src, "addCopyButtons")
         assert "header.querySelector('.code-copy-btn')" in fn
+        assert "pre.querySelector('.code-copy-btn')" in fn
         assert fn.index("header.querySelector('.code-copy-btn')") < fn.index("document.createElement('button')")
+
+    def test_sticky_code_copy_wrapper_is_idempotent(self):
+        """Repeated post-render passes must not double-wrap code blocks or duplicate sticky actions."""
+        src = _src("ui.js")
+        wrap_fn = _function_body(src, "_ensureCodeBlockWrap")
+        sticky_fn = _function_body(src, "_ensureStickyCodeCopyButton")
+        assert "pre.closest('.code-block-wrap')" in wrap_fn
+        assert "if(existing) return existing;" in wrap_fn
+        assert "code-tree-wrap" in wrap_fn, "JSON/YAML tree wrappers must be preserved as the code-block wrapper"
+        assert "querySelector('.code-copy-sticky-actions')" in sticky_fn
+        assert "querySelector('.code-copy-sticky-btn')" in sticky_fn
+
+    def test_sticky_code_copy_button_uses_code_text_content(self):
+        """Sticky copy affordance must copy the same code text as the existing copy button."""
+        src = _src("ui.js")
+        sticky_fn = _function_body(src, "_ensureStickyCodeCopyButton")
+        assert "code-copy-sticky-btn" in sticky_fn
+        assert "_copyText(codeEl.textContent)" in sticky_fn
+
+    def test_sticky_code_copy_uses_native_css_sticky_without_scroll_listener(self):
+        """The floating affordance should be pure CSS sticky, not JS scroll tracking."""
+        ui_src = _src("ui.js")
+        css = _src("style.css")
+        sticky_fn = _function_body(ui_src, "_ensureStickyCodeCopyButton")
+        assert "addEventListener('scroll'" not in sticky_fn
+        assert 'addEventListener("scroll"' not in sticky_fn
+        assert ".onscroll" not in sticky_fn
+        assert ".code-copy-sticky-actions" in css
+        assert "position:sticky" in css.replace(" ", "")
+        assert "pointer-events:none" in css.replace(" ", "")
+        assert "pointer-events:auto" in css.replace(" ", "")
 
 class TestCopyFailedI18n:
 

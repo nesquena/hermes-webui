@@ -59,6 +59,9 @@ that slice.
   the real app stylesheet.
 - [`docs/ui-ux/two-stage-proposal.html`](ui-ux/two-stage-proposal.html):
   existing two-stage chat UX proposal for issue #536.
+- [`docs/ui-ux/sticky-code-copy.md`](ui-ux/sticky-code-copy.md): code-block
+  copy affordance design note covering the native sticky-wrapper choice,
+  alternatives considered, implementation constraints, and verification checks.
 - [`THEMES.md`](../THEMES.md): theme and skin guidance; the core palette
   variable contract lives in `static/style.css`.
 

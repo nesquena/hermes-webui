@@ -4,8 +4,9 @@ This document summarizes UI/UX principles that are already visible in the
 repository. It is a contributor guide, not a new design proposal. Source
 documents include [`DESIGN.md`](../DESIGN.md), [`README.md`](../README.md),
 [`THEMES.md`](../THEMES.md), [`docs/ui-ux/index.html`](ui-ux/index.html),
-[`docs/ui-ux/two-stage-proposal.html`](ui-ux/two-stage-proposal.html), and
-design comments in `static/style.css`.
+[`docs/ui-ux/two-stage-proposal.html`](ui-ux/two-stage-proposal.html),
+[`docs/ui-ux/sticky-code-copy.md`](ui-ux/sticky-code-copy.md), and design
+comments in `static/style.css`.
 
 Use this guide when a change touches layout, chat rendering, composer chrome,
 navigation, theme/skin behavior, responsive behavior, or visual hierarchy. For
@@ -95,6 +96,15 @@ Use split typography intentionally:
 
 Keep scale tight. Avoid introducing near-duplicate one-off font sizes, colors,
 radius values, or spacing values when an existing token works.
+
+### Code-block controls
+
+Code blocks should stay readable before their controls become noticeable. Keep
+the existing top/header copy button for familiarity, and use the lightweight
+sticky copy pattern from [`docs/ui-ux/sticky-code-copy.md`](ui-ux/sticky-code-copy.md)
+when long code blocks need a persistent affordance. The sticky affordance should
+be bounded by the code block, should use native CSS sticky positioning, and
+should live outside the horizontally scrollable `<pre>`.
 
 ## Color, depth, and shape
 

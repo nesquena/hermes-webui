@@ -7048,32 +7048,108 @@ function _buildTreeDOM(val, depth){
   return el;
 }
 
+function _codeBlockHeaderForPre(pre){
+  let header=pre.previousElementSibling;
+  if(header&&header.classList&&header.classList.contains('code-copy-sticky-actions')) header=header.previousElementSibling;
+  if(header&&header.classList&&header.classList.contains('pre-header')) return header;
+  const wrap=pre.parentElement;
+  if(wrap&&wrap.classList&&wrap.classList.contains('code-block-wrap')){
+    for(const child of Array.from(wrap.children)){
+      if(child===pre) break;
+      if(child.classList&&child.classList.contains('pre-header')) return child;
+    }
+  }
+  return null;
+}
+
+function _ensureCodeBlockWrap(pre, header){
+  const existing=pre.closest('.code-block-wrap');
+  if(existing) return existing;
+  const parent=pre.parentElement;
+  if(parent&&parent.classList&&parent.classList.contains('code-tree-wrap')){
+    parent.classList.add('code-block-wrap');
+    return parent;
+  }
+  const wrap=document.createElement('div');
+  wrap.className='code-block-wrap';
+  const anchor=header||pre;
+  anchor.parentNode.insertBefore(wrap, anchor);
+  if(header) wrap.appendChild(header);
+  wrap.appendChild(pre);
+  return wrap;
+}
+
+function _codeCopyStickyIcon(name){
+  if(typeof li==='function') return li(name,13);
+  if(name==='check') return '✓';
+  if(name==='alert-triangle') return '!';
+  return '⧉';
+}
+
+function _ensureStickyCodeCopyButton(wrap, pre, codeEl){
+  let actions=wrap.querySelector('.code-copy-sticky-actions');
+  if(!actions){
+    actions=document.createElement('div');
+    actions.className='code-copy-sticky-actions';
+    wrap.insertBefore(actions, pre);
+  }
+  let btn=actions.querySelector('.code-copy-sticky-btn');
+  if(!btn){
+    btn=document.createElement('button');
+    btn.className='code-copy-sticky-btn';
+    btn.type='button';
+    actions.appendChild(btn);
+  }
+  btn.title=t('copy');
+  btn.setAttribute('aria-label',t('copy'));
+  if(!btn.classList.contains('copied')&&!btn.classList.contains('failed')) btn.innerHTML=_codeCopyStickyIcon('copy');
+  btn.onclick=(e)=>{
+    e.stopPropagation();
+    _copyText(codeEl.textContent).then(()=>{
+      btn.classList.remove('failed');
+      btn.classList.add('copied');
+      btn.innerHTML=_codeCopyStickyIcon('check');
+      setTimeout(()=>{btn.classList.remove('copied');btn.innerHTML=_codeCopyStickyIcon('copy');},1500);
+    }).catch(()=>{
+      btn.classList.remove('copied');
+      btn.classList.add('failed');
+      btn.innerHTML=_codeCopyStickyIcon('alert-triangle');
+      setTimeout(()=>{btn.classList.remove('failed');btn.innerHTML=_codeCopyStickyIcon('copy');},1500);
+    });
+  };
+  return btn;
+}
+
 function addCopyButtons(container){
   const el=container||$('msgInner');
   if(!el) return;
   el.querySelectorAll('pre > code').forEach(codeEl=>{
     const pre=codeEl.parentElement;
-    const header=pre.previousElementSibling;
-    if(pre.querySelector('.code-copy-btn')||(header&&header.classList.contains('pre-header')&&header.querySelector('.code-copy-btn'))) return;
-    const btn=document.createElement('button');
-    btn.className='code-copy-btn';
-    btn.textContent=t('copy');
-    btn.onclick=(e)=>{
-      e.stopPropagation();
-      _copyText(codeEl.textContent).then(()=>{
-        btn.textContent=t('copied');
-        setTimeout(()=>{btn.textContent=t('copy');},1500);
-      }).catch(()=>{btn.textContent=t('copy_failed');setTimeout(()=>{btn.textContent=t('copy');},1500);});
-    };
-    if(header&&header.classList.contains('pre-header')){
-      header.style.display='flex';
-      header.style.justifyContent='space-between';
-      header.style.alignItems='center';
-      header.appendChild(btn);
-    }else{
-      pre.style.position='relative';
-      btn.style.cssText='position:absolute;top:6px;right:6px;';
-      pre.appendChild(btn);
+    const header=_codeBlockHeaderForPre(pre);
+    const wrap=_ensureCodeBlockWrap(pre, header);
+    _ensureStickyCodeCopyButton(wrap, pre, codeEl);
+    const hasCopyButton=pre.querySelector('.code-copy-btn')||(header&&header.querySelector('.code-copy-btn'));
+    if(!hasCopyButton){
+      const btn=document.createElement('button');
+      btn.className='code-copy-btn';
+      btn.textContent=t('copy');
+      btn.onclick=(e)=>{
+        e.stopPropagation();
+        _copyText(codeEl.textContent).then(()=>{
+          btn.textContent=t('copied');
+          setTimeout(()=>{btn.textContent=t('copy');},1500);
+        }).catch(()=>{btn.textContent=t('copy_failed');setTimeout(()=>{btn.textContent=t('copy');},1500);});
+      };
+      if(header&&header.classList.contains('pre-header')){
+        header.style.display='flex';
+        header.style.justifyContent='space-between';
+        header.style.alignItems='center';
+        header.appendChild(btn);
+      }else{
+        pre.style.position='relative';
+        btn.style.cssText='position:absolute;top:6px;right:6px;';
+        pre.appendChild(btn);
+      }
     }
   });
 }

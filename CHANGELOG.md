@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a lightweight sticky code-block copy icon that stays visible while scrolling long code blocks, while keeping the existing header/top copy button in place.
+
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed
