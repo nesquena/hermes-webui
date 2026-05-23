@@ -103,10 +103,16 @@ if (-not $AgentDir) {
     # stays unguarded; the dev-checkout sibling is path-derived, not env-based.
     $candidates = @()
     $candidates += (Join-Path $env:USERPROFILE '.hermes\hermes-agent')
-    foreach ($root in @($env:LOCALAPPDATA, ${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
+    foreach ($root in @($env:LOCALAPPDATA, ${env:ProgramW6432}, ${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
         if ($root) { $candidates += (Join-Path $root 'hermes\hermes-agent') }
     }
     $candidates += (Join-Path (Split-Path -Parent $RepoRoot) 'hermes-agent')
+    # De-dup: when running in a WOW64 (32-bit-on-64-bit) PowerShell process,
+    # $env:ProgramFiles is redirected to C:\Program Files (x86), so without
+    # $env:ProgramW6432 (the canonical 64-bit override) we'd miss the real
+    # C:\Program Files\hermes\hermes-agent AND duplicate the x86 entry.
+    # Select-Object -Unique collapses any collisions regardless of cause.
+    $candidates = $candidates | Select-Object -Unique
     foreach ($c in $candidates) {
         if (Test-Path (Join-Path $c 'hermes_cli') -PathType Container) { $AgentDir = $c; break }
     }
