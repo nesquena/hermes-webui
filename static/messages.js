@@ -190,6 +190,32 @@ let _sendInProgress = false;
 let _sendInProgressSid = null;  // session_id of the in-flight send
 const _sessionTitleProvisionalBySid = new Map();
 
+function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
+  if(!S||!S.busy||compressionRunning) return false;
+  const session=S.session||{};
+  const sid=session.session_id||'';
+  const hasRuntimeConfirmation=Boolean(
+    S.activeStreamId||
+    session.active_stream_id||
+    session.pending_user_message||
+    session.pending_started_at
+  );
+  if(hasRuntimeConfirmation) return false;
+  if(typeof INFLIGHT==='object'&&INFLIGHT&&sid&&INFLIGHT[sid]){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+  S.activeStreamId=null;
+  if(session) session.active_stream_id=null;
+  if(typeof setBusy==='function') setBusy(false);
+  else S.busy=false;
+  if(typeof setComposerStatus==='function') setComposerStatus('');
+  if(typeof setStatus==='function') setStatus('');
+  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(sid&&typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(sid);
+  return true;
+}
+
 function _sessionTitleLooksDefaultOrProvisional(titleText, provisionalText){
   const title=String(titleText||'').replace(/\s+/g,' ').trim();
   if(!title||title==='Untitled'||title==='New Chat')return true;
@@ -262,6 +288,7 @@ async function send(){
   }
 
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on busy_input_mode
   if(S.busy||compressionRunning){
     if(text){

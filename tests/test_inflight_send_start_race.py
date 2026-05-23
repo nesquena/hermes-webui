@@ -51,6 +51,21 @@ def test_stale_inflight_purge_preserves_current_send_before_stream_id_exists():
     assert skip_idx < delete_idx, "the current-send skip must run before any purge deletion"
 
 
+def test_send_clears_stale_busy_state_before_queue_branch():
+    """A stale client-only busy flag must not divert a new user turn into the invisible queue."""
+    body = _function_body(MESSAGES_JS, "send")
+
+    assert "_clearStaleBusyStateBeforeSend" in body, (
+        "send() should reconcile client-only stale busy state before deciding busy/queue mode"
+    )
+    reconcile_idx = body.index("_clearStaleBusyStateBeforeSend")
+    busy_branch_idx = body.index("if(S.busy||compressionRunning)")
+    chat_start_idx = body.index("api('/api/chat/start'")
+    assert reconcile_idx < busy_branch_idx < chat_start_idx, (
+        "stale busy reconciliation must run before the queue branch and before /api/chat/start"
+    )
+
+
 def test_server_absent_optimistic_first_turn_rows_are_not_kept_forever():
     """A local first-turn sidebar row must expire when /api/chat/start never persisted it."""
     body = _function_body(SESSIONS_JS, "_mergeOptimisticFirstTurnSessions")
