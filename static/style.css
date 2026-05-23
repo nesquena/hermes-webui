@@ -814,6 +814,33 @@
   .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 10px 4px;cursor:pointer;user-select:none;opacity:.8;transition:opacity .15s;}
   .session-date-header:hover{opacity:1;}
   .session-date-header.pinned{color:var(--accent);}
+  .session-section-label{padding:12px 10px 5px;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);opacity:.72;user-select:none;}
+  .session-index-project-group{margin:0 0 4px;}
+  .session-index-project-header{display:flex;align-items:center;gap:4px;margin:0 0 2px;min-width:0;}
+  .session-index-project-disclosure{flex:1;min-width:0;display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:8px;color:var(--muted);cursor:pointer;user-select:none;transition:background .15s,color .15s;}
+  .session-index-project-disclosure:hover,.session-index-project-disclosure:focus-visible{background:var(--hover-bg);color:var(--text);outline:none;}
+  .session-project-folder{width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;color:inherit;}
+  .session-project-folder svg{width:14px;height:14px;display:block;}
+  .session-project-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-size:12px;font-weight:650;}
+  .session-group-count{margin-left:auto;min-width:18px;height:16px;padding:0 6px;border:1px solid var(--border);border-radius:999px;background:var(--hover-bg);color:var(--muted);font-size:10px;font-weight:700;line-height:14px;text-align:center;flex-shrink:0;font-variant-numeric:tabular-nums;}
+  .session-project-new{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);font:inherit;font-size:15px;font-weight:700;line-height:1;cursor:pointer;transition:background .15s,color .15s,border-color .15s;}
+  .session-project-new:hover,.session-project-new:focus-visible{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--accent-text);outline:none;}
+  .session-index-project-body,.session-index-chats-body,.session-index-archive-body{min-width:0;}
+  .session-agent-avatar{width:24px;height:24px;display:grid;place-items:center;flex-shrink:0;margin-top:1px;}
+  .profile-avatar--session-row{width:24px;height:24px;font-size:11px;background:var(--hover-bg);color:var(--text);border-color:var(--border);}
+  .session-item.active .profile-avatar--session-row{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
+  .session-index-archive-group{margin:4px 0 2px;}
+  .session-index-archive-header{margin:2px 0 2px;padding:6px 10px;border-radius:8px;text-transform:none;letter-spacing:0;font-size:11px;font-weight:650;}
+  .session-index-archive-header:hover,.session-index-archive-header:focus-visible{background:var(--hover-bg);color:var(--text);outline:none;}
+  .session-index-archive-header .session-group-count{height:15px;line-height:13px;}
+  .session-index-archive-body{margin-left:10px;padding-left:6px;border-left:1px solid var(--border);}
+  .session-archive-state{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:3px 0 4px;padding:6px 8px;border-radius:8px;color:var(--muted);font-size:11px;line-height:1.35;}
+  .session-archive-loading{opacity:.76;}
+  .session-archive-error{color:var(--error);background:color-mix(in srgb,var(--error) 8%,transparent);}
+  .session-archive-error button{border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text);font:inherit;font-size:11px;font-weight:650;padding:3px 7px;cursor:pointer;}
+  .session-archive-error button:hover,.session-archive-error button:focus-visible{border-color:var(--error);color:var(--error);outline:none;}
+  .session-archive-load-more{width:100%;justify-content:center;border:1px solid var(--border);background:transparent;cursor:pointer;text-align:center;}
+  .session-archive-load-more:hover,.session-archive-load-more:focus-visible{background:var(--hover-bg);color:var(--text);outline:none;}
 
   /* ── Batch select mode ── */
   .session-select-toggle{font-size:11px;padding:6px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.6;transition:opacity .15s;user-select:none;margin-top:4px;border-radius:6px;}

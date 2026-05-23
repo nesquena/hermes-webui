@@ -97,6 +97,14 @@ def test_profile_badges_removed_but_avatar_hooks_remain():
     assert "_profileAvatar" in js
 
 
+def test_session_rows_use_existing_profile_avatar_helpers():
+    js = _js()
+
+    assert "session-agent-avatar" in js
+    assert "_profileAvatarForUi" in js or "_profileAvatarMarkup" in js
+    assert "profile-avatar--session-row" in js
+
+
 def test_virtual_scroll_flat_rows_contract_is_preserved():
     js = _js()
     body = _function_body(js, "renderSessionListFromCache")

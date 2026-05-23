@@ -12,7 +12,9 @@ def test_pinned_indicator_renders_inside_title_row():
     assert title_row_idx != -1, "session title row construction not found"
 
     assert ("body.appendChild(_renderOneSession(s, Boolean(g.isPinned)))" in SESSIONS_JS
-            or "body.appendChild(parentEl)" in SESSIONS_JS)
+            or "body.appendChild(parentEl)" in SESSIONS_JS
+            or ("const rowEl=_renderOneSession(s, false)" in SESSIONS_JS
+                and "body.appendChild(rowEl)" in SESSIONS_JS))
     assert "function _renderOneSession(s, isPinnedGroup=false)" in SESSIONS_JS
     assert "if(s.pinned&&!isPinnedGroup){" in SESSIONS_JS
 

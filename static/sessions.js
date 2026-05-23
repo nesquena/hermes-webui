@@ -1669,19 +1669,40 @@ function _syncSessionIndexGroupsWithRows(rows,currentRows=null){
   }
 }
 function _profileAvatar(s){
-  const profileName=(s&&s.profile)||'default';
+  const profileName=String((s&&s.profile)||'default').trim()||'default';
+  const hasProfile=Boolean(s&&s.profile);
   const fallback=(profileName.charAt(0)||'H').toUpperCase();
   const title=profileName?`Agent profile: ${profileName}`:'Agent profile';
-  if(typeof _profileAvatarMarkup==='function'){
-    const wrap=document.createElement('div');
-    wrap.innerHTML=_profileAvatarMarkup(s&&s.avatar,{fallback,classes:'session-agent-avatar',title,profileName});
-    return wrap.firstElementChild||wrap;
+  const wrap=document.createElement('div');
+  wrap.className='session-agent-avatar';
+  wrap.setAttribute('aria-hidden','true');
+  if(hasProfile) wrap.title=title;
+  const classes='profile-avatar--session-row';
+  const profileEntry=(typeof window!=='undefined'&&window._profileAvatarMap&&window._profileAvatarMap[profileName])?window._profileAvatarMap[profileName]:null;
+  let markup='';
+  if(typeof _profileAvatarForUi==='function'&&(profileEntry||(s&&(s.avatar||s.avatar_shape)))){
+    const profileForUi=Object.assign({name:profileName},s||{},profileEntry?{
+      avatar:profileEntry.avatar,
+      avatar_shape:profileEntry.shape,
+      avatar_mode:profileEntry.mode,
+      reactive_avatar:profileEntry.reactiveAvatar,
+      effective_reactive_avatar:profileEntry.effectiveReactiveAvatar,
+    }:{});
+    markup=_profileAvatarForUi(profileForUi,classes);
+  }else if(typeof _conversationProfileAvatarMarkupForState==='function'){
+    markup=_conversationProfileAvatarMarkupForState('idle',{fallback,classes,profileName});
+  }else if(typeof _profileAvatarMarkup==='function'){
+    markup=_profileAvatarMarkup(s&&s.avatar,{fallback,classes,profileName});
+  }
+  if(markup){
+    wrap.innerHTML=markup;
+    if(wrap.firstElementChild) return wrap;
   }
   const avatar=document.createElement('div');
-  avatar.className='session-agent-avatar';
+  avatar.className='profile-avatar profile-avatar--fallback profile-avatar--session-row';
   avatar.textContent=fallback;
-  avatar.title=title;
-  return avatar;
+  wrap.appendChild(avatar);
+  return wrap;
 }
 function _worktreeResponseCount(results){
   return (results||[]).reduce((count,result)=>{
