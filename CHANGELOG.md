@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Drop stale inactive cached user tails when `/api/session` reloads a conversation whose saved sidecar already ends on an assistant answer. This prevents compacted conversations from appearing to hide the final assistant response until the user forks/reloads the session.
+
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed

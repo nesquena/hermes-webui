@@ -467,6 +467,51 @@ def test_metadata_fast_path_excludes_state_db_rows_filtered_by_reconciliation(mo
     assert session["last_message_at"] == 1001.0
 
 
+def test_api_session_reload_drops_stale_cached_user_tail_after_saved_assistant(monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+
+    sid = "webui_reconcile_cached_user_tail"
+    _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        [
+            {"role": "user", "content": "please audit phase c", "timestamp": 1000.0},
+            {"role": "assistant", "content": "final audit complete", "timestamp": 1001.0},
+        ],
+    )
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {"role": "user", "content": "please audit phase c", "timestamp": 1000.0},
+            {"role": "assistant", "content": "final audit complete", "timestamp": 1001.0},
+        ],
+    )
+
+    cached = models.Session.load(sid)
+    cached.messages.append(
+        {
+            "role": "user",
+            "content": "please audit phase c",
+            "timestamp": 1002.0,
+        }
+    )
+    cached.pending_user_message = None
+    cached.active_stream_id = None
+    models.SESSIONS[sid] = cached
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    messages = handler.response_json["session"]["messages"]
+    assert messages[-1]["role"] == "assistant"
+    assert messages[-1]["content"] == "final audit complete"
+    assert handler.response_json["session"]["message_count"] == 2
+
+
 def test_state_db_reconciliation_preserves_tool_metadata(monkeypatch, tmp_path):
     import api.routes as routes
 
