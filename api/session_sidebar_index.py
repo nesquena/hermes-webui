@@ -214,7 +214,14 @@ def _is_age_archived(
 ) -> bool:
     if row.get("archived"):
         return False
-    if row.get("pinned") or row.get("unread") or row.get("is_streaming") or row.get("active_stream_id"):
+    if (
+        row.get("pinned")
+        or row.get("unread")
+        or row.get("is_streaming")
+        or row.get("active_stream_id")
+        or row.get("has_pending_user_message")
+        or row.get("pending_user_message")
+    ):
         return False
     if current_session_id and row.get("session_id") == current_session_id:
         return False

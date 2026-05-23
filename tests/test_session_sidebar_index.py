@@ -118,21 +118,37 @@ def test_old_rows_increment_archive_count_without_current_group_sessions(tmp_pat
         ("unread", {"unread": True}),
         ("streaming", {"is_streaming": True}),
         ("active-stream-id", {"active_stream_id": "stream-1"}),
-        ("current", {}),
+        ("pending-user-message", {"has_pending_user_message": True}),
+        ("pending-user-text", {"pending_user_message": "still working"}),
     ],
 )
-def test_important_rows_stay_current_even_when_old(session_id, extra):
+def test_important_rows_stay_current_even_when_old_without_current_session(session_id, extra):
     rows = [_row(session_id, workspace_group="chats", age_days=30, **extra)]
 
     index = build_session_sidebar_index(
         rows,
         server_time=1_700_000_000.0,
         session_archive_after_days=7,
-        current_session_id=session_id,
     )
 
     group = _group(index, "chats")
     assert [row["session_id"] for row in group["sessions"]] == [session_id]
+    assert group["current_count"] == 1
+    assert group["archive_count"] == 0
+
+
+def test_current_session_stays_current_even_when_old():
+    rows = [_row("current", workspace_group="chats", age_days=30)]
+
+    index = build_session_sidebar_index(
+        rows,
+        server_time=1_700_000_000.0,
+        session_archive_after_days=7,
+        current_session_id="current",
+    )
+
+    group = _group(index, "chats")
+    assert [row["session_id"] for row in group["sessions"]] == ["current"]
     assert group["current_count"] == 1
     assert group["archive_count"] == 0
 
