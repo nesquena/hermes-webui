@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Metadata-only conversation threads: start fresh linked conversations without copying transcripts, browse linked conversation groups from the Threads view, and export a manifest that omits messages by default.
+
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed

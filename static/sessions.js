@@ -10,6 +10,7 @@ const ICONS={
   trash:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5v8.5h7v-8.5"/><line x1="7" y1="7" x2="7" y2="11"/><line x1="9" y1="7" x2="9" y2="11"/></svg>',
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
   edit:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L5 13H3v-2z"/><path d="M10 4l2 2"/></svg>',
+  thread:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 5.2L5.2 3.9a2.7 2.7 0 0 0-3.8 3.8l1.3 1.3"/><path d="M9.5 10.8l1.3 1.3a2.7 2.7 0 0 0 3.8-3.8l-1.3-1.3"/><path d="M5.7 10.3l4.6-4.6"/></svg>',
 };
 
 // Tracks which session_id is currently being loaded. Used to discard stale
@@ -467,8 +468,12 @@ async function newSession(flash, options={}){
       workspace:inheritWs,
       profile:S.activeProfile||'default',
     };
-    if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
+    if(options&&options.prevSessionId) reqBody.prev_session_id=options.prevSessionId;
+    else if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     if(options&&options.worktree) reqBody.worktree=true;
+    if(options&&options.linkToPrev) reqBody.link_to_prev=true;
+    if(options&&options.threadId) reqBody.thread_id=options.threadId;
+    if(options&&options.threadTitle) reqBody.thread_title=options.threadTitle;
     if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=data.session;S.messages=data.session.messages||[];
@@ -1473,6 +1478,9 @@ let _showArchived = false;  // toggle to show archived sessions
 let _sessionSelectMode = false;  // batch select mode
 const _selectedSessions = new Set();  // selected session IDs
 let _allProjects = [];  // cached project list
+let _allThreads = [];  // cached thread cards for badges/view links
+let _latestThreadData = null;  // latest /api/threads payload paired with session list renders
+const _threadSummariesById = new Map();
 // Sentinel value for the _activeProject state when filtering to sessions
 // that have no project_id assigned. Distinct from real project IDs so the
 // equality check below can branch cleanly on it. The literal string is
@@ -1513,6 +1521,30 @@ function _getPinnedSessionsLimit(){
 function _pinnedSessionsLimitMessage(){
   const limit=_getPinnedSessionsLimit();
   return `Only ${limit} conversations can be pinned. Unpin one before pinning another.`;
+}
+function _cacheThreadSummaries(threads){
+  _allThreads=Array.isArray(threads)?threads:[];
+  _threadSummariesById.clear();
+  _allThreads.forEach(thread=>{if(thread&&thread.thread_id)_threadSummariesById.set(thread.thread_id,thread);});
+}
+function _threadSummaryForSession(session){
+  if(!session||!session.thread_id) return null;
+  return _threadSummariesById.get(session.thread_id)||null;
+}
+function _threadPartMeta(session, summary){
+  if(!session||!session.thread_id) return null;
+  const previews=summary&&Array.isArray(summary.sessions_preview)?summary.sessions_preview:[];
+  const found=previews.find(row=>row&&row.session_id===session.session_id)||null;
+  const sequence=Number(session.thread_sequence||found&&found.thread_sequence||0)||null;
+  const total=Number(summary&&summary.session_count||previews.length||0)||null;
+  const title=(summary&&summary.title)||session.thread_title||session.title||'Conversation thread';
+  return {sequence,total,title};
+}
+function _threadPartLabel(session, summary){
+  const meta=_threadPartMeta(session,summary);
+  if(!meta) return '';
+  if(typeof t==='function') return t('session_thread_part', meta.title, meta.sequence||'?', meta.total||'?');
+  return `${meta.title} · Part ${meta.sequence||'?'} / ${meta.total||'?'}`;
 }
 function _worktreeSessionCount(ids){
   return (ids||[]).reduce((count,sid)=>{
@@ -1785,6 +1817,48 @@ function _appendSessionDuplicateAction(menu, session){
   ));
 }
 
+async function continueInLinkedChat(session){
+  if(!session||!session.session_id) return;
+  closeSessionActionMenu();
+  try{
+    await newSession(true,{
+      prevSessionId:session.session_id,
+      linkToPrev:true,
+      threadId:session.thread_id||undefined,
+      threadTitle:session.title||undefined,
+      awaitWorkspaceLoad:true,
+    });
+    await renderSessionList();
+    if(typeof showToast==='function') showToast(t('session_thread_created'));
+  }catch(err){
+    if(typeof showToast==='function') showToast(t('session_thread_continue_failed')+(err&&err.message?err.message:String(err)),3000,'error');
+  }
+}
+
+async function linkSessionToThread(session){
+  if(!session||!session.session_id) return;
+  closeSessionActionMenu();
+  const existing=(_allThreads||[]).map(thread=>thread&&thread.thread_id?`${thread.thread_id} — ${thread.title||'Untitled thread'}`:'').filter(Boolean).slice(0,8).join('\n');
+  const promptText=(t('session_link_to_thread_prompt')||'Paste an existing thread ID, or leave blank to create a new thread from this conversation.')+(existing?'\n\n'+existing:'');
+  const threadId=await showPromptDialog({
+    title:t('session_link_to_thread'),
+    message:promptText,
+    placeholder:'thread_id',
+    confirmLabel:t('session_link_to_thread')
+  });
+  if(threadId===null) return;
+  try{
+    const trimmed=threadId.trim();
+    const endpoint=trimmed?'/api/thread/link-session':'/api/thread/create';
+    const body=trimmed?{session_id:session.session_id,thread_id:trimmed}:{session_id:session.session_id,title:session.title||'Untitled thread'};
+    await api(endpoint,{method:'POST',body:JSON.stringify(body)});
+    await renderSessionList();
+    if(typeof showToast==='function') showToast(trimmed?t('session_linked_to_thread'):t('session_thread_created'));
+  }catch(err){
+    if(typeof showToast==='function') showToast(t('session_link_to_thread_failed')+(err&&err.message?err.message:String(err)),3000,'error');
+  }
+}
+
 function _openSessionActionMenu(session, anchorEl){
   if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return; }
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
@@ -1854,6 +1928,21 @@ function _openSessionActionMenu(session, anchorEl){
       _showProjectPicker(session, anchorEl);
     }
   ));
+  if(!isExternalSession){
+    menu.appendChild(_buildSessionAction(
+      t('session_thread_continue'),
+      t('session_thread_continue_desc'),
+      ICONS.thread,
+      async()=>{await continueInLinkedChat(session);}
+    ));
+    menu.appendChild(_buildSessionAction(
+      t('session_link_to_thread'),
+      t('session_link_to_thread_desc'),
+      ICONS.thread,
+      async()=>{await linkSessionToThread(session);},
+      session.thread_id?'is-active':''
+    ));
+  }
   menu.appendChild(_buildSessionAction(
     session.archived?t('session_restore'):t('session_archive'),
     session.archived?t('session_restore_desc'):_sessionArchiveDescription(session),
@@ -2080,6 +2169,7 @@ function _schedulePendingSessionListApply(){
     const payload=_pendingSessionListPayload;
     _pendingSessionListPayload=null;
     if(payload.gen!==_renderSessionListGen) return;
+    _latestThreadData=payload.threadData||_latestThreadData;
     _applySessionListPayload(payload.sessData,payload.projData);
   }, Math.max(120, SESSION_LIST_INTERACTION_IDLE_MS));
 }
@@ -2103,6 +2193,7 @@ function _applySessionListPayload(sessData, projData){
   _allSessions = _mergeOptimisticFirstTurnSessions(sessData.sessions||[]);
   _clearLineageReportCache();
   _allProjects = projData.projects||[];
+  _cacheThreadSummaries((_latestThreadData&&_latestThreadData.threads)||[]);
   _markPollingCompletionUnreadTransitions(_allSessions);
   const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
   if (isStreaming) {
@@ -2127,14 +2218,17 @@ async function renderSessionList(opts={}){
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const allProfilesQS = _showAllProfiles ? '?all_profiles=1' : '';
-    const [sessData, projData] = await Promise.all([
+    const [sessData, projData, threadData] = await Promise.all([
       api('/api/sessions' + allProfilesQS),
       api('/api/projects' + allProfilesQS),
+      api('/api/threads' + allProfilesQS),
     ]);
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
+    _latestThreadData=threadData;
     if(deferWhileInteracting&&_isSessionListUserInteracting()){
       _pendingSessionListPayload={gen:_gen,sessData,projData};
+      _pendingSessionListPayload.threadData=threadData;
       _schedulePendingSessionListApply();
       return;
     }
@@ -3289,7 +3383,9 @@ function renderSessionListFromCache(){
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=_hasUnreadForSession(s)&&!isActive;
     const readOnly=_isReadOnlySession(s);
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'');
+    const threadSummary=_threadSummaryForSession(s);
+    const threadLabel=_threadPartLabel(s,threadSummary);
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'')+(s.thread_id?' threaded':'');
     if(animateRefresh&&(enterAllAnimatedRows||!(flipBefore&&flipBefore.has(s.session_id)))){
       el.classList.add('session-list-flip-enter');
     }
@@ -3347,6 +3443,20 @@ function renderSessionListFromCache(){
       const parentLabel=_sessionTitleForForkParent(s.parent_session_id)||_truncatedSessionId(s.parent_session_id);
       branchInd.title=(typeof t==='function'?t('forked_from'):'Forked from')+' '+parentLabel;
       titleRow.appendChild(branchInd);
+    }
+    if(s.thread_id){
+      const threadInd=document.createElement('span');
+      threadInd.className='session-thread-indicator';
+      threadInd.innerHTML=ICONS.thread;
+      threadInd.title=threadLabel||t('session_thread_badge');
+      titleRow.appendChild(threadInd);
+      if(threadSummary&&threadSummary.session_count>1){
+        const partCount=document.createElement('span');
+        partCount.className='session-thread-count';
+        partCount.textContent=`${s.thread_sequence||'?'} / ${threadSummary.session_count}`;
+        partCount.title=threadLabel;
+        titleRow.appendChild(partCount);
+      }
     }
     const title=document.createElement('span');
     title.className='session-title';
@@ -3436,6 +3546,7 @@ function renderSessionListFromCache(){
         ? t('session_meta_messages', msgCount)
         : `${msgCount} msg${msgCount===1?'':'s'}`;
       metaBits.push(msgLabel);
+      if(threadLabel) metaBits.push((t('session_thread_badge')||'Thread')+': '+threadLabel);
       if(childCount>0) metaBits.push(t('session_meta_children', childCount));
       const modelMeta=_formatSessionModelWithGateway(s);
       if(modelMeta) metaBits.push(modelMeta);
@@ -3444,7 +3555,7 @@ function renderSessionListFromCache(){
       if(readOnly) metaBits.push('read-only');
       if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
       const meta=document.createElement('div');
-      meta.className='session-meta';
+      meta.className='session-meta'+(threadLabel?' session-thread-meta':'');
       meta.textContent=metaBits.join(' · ');
       sessionText.appendChild(meta);
     }

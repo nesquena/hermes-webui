@@ -52,6 +52,7 @@ SESSION_INDEX_FILE = SESSION_DIR / "_index.json"
 SETTINGS_FILE = STATE_DIR / "settings.json"
 LAST_WORKSPACE_FILE = STATE_DIR / "last_workspace.txt"
 PROJECTS_FILE = STATE_DIR / "projects.json"
+SESSION_THREADS_FILE = STATE_DIR / "session_threads.json"
 
 logger = logging.getLogger(__name__)
 

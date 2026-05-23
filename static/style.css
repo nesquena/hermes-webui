@@ -1112,6 +1112,19 @@
   .memory-content p{margin-bottom:6px;}
   .memory-empty{color:var(--muted);font-size:12px;font-style:italic;}
   .memory-detail-mtime{font-size:11px;color:var(--muted);opacity:.7;margin-bottom:12px;}
+.thread-list{flex:1;overflow-y:auto;padding:10px 8px 16px;}
+.thread-card{border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.025);margin-bottom:10px;padding:8px;}
+.thread-card-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;}
+.thread-card-title{min-width:0;font-size:12px;font-weight:700;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.thread-export-btn{appearance:none;border:1px solid var(--border2);border-radius:999px;background:rgba(255,255,255,.04);color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:4px 7px;cursor:pointer;flex-shrink:0;}
+.thread-export-btn:hover{color:var(--text);background:var(--hover-bg);}
+.thread-session-list{display:flex;flex-direction:column;gap:4px;}
+.thread-session-item{appearance:none;width:100%;border:0;border-radius:7px;background:transparent;color:var(--muted);font:inherit;font-size:12px;text-align:left;padding:6px 7px;cursor:pointer;display:flex;align-items:center;gap:6px;min-width:0;}
+.thread-session-item:hover{background:var(--hover-bg);color:var(--text);}
+.thread-session-item.active{background:var(--accent-bg);color:var(--accent-text);}
+.thread-session-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;}
+.thread-session-meta{font-size:10px;opacity:.68;flex-shrink:0;}
+.threads-empty{font-size:12px;color:var(--muted);line-height:1.5;padding:12px 8px;}
 .field-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:5px;opacity:.8;}
   select{width:100%;background:var(--input-bg);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:8px 28px 8px 10px;font-size:12px;outline:none;appearance:none;margin-bottom:6px;cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238888aa' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;}
   select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg);}
@@ -3164,6 +3177,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .session-pin-indicator svg{width:10px;height:10px;}
 
 /* ── Fork lineage indicator (inline, subtle until row focus/hover) ── */
+.session-thread-indicator,
 .session-branch-indicator,
 .session-worktree-indicator{
   flex-shrink:0;
@@ -3178,12 +3192,16 @@ main.main.showing-logs > #mainLogs{display:flex;}
   pointer-events:none;
   transition:opacity .15s ease,color .15s ease;
 }
+.session-thread-indicator svg,
 .session-branch-indicator svg,
 .session-worktree-indicator svg{width:12px;height:12px;}
+.session-item:hover .session-thread-indicator,
 .session-item:hover .session-branch-indicator,
 .session-item:hover .session-worktree-indicator,
+.session-item:focus-within .session-thread-indicator,
 .session-item:focus-within .session-branch-indicator,
 .session-item:focus-within .session-worktree-indicator,
+.session-item.menu-open .session-thread-indicator,
 .session-item.menu-open .session-branch-indicator{
   opacity:.85;
   color:var(--text);
@@ -3192,8 +3210,11 @@ main.main.showing-logs > #mainLogs{display:flex;}
   opacity:.85;
   color:var(--text);
 }
+.session-item.active .session-thread-indicator,
 .session-item.active .session-branch-indicator,
 .session-item.active .session-worktree-indicator{color:var(--accent-text);}
+.session-thread-count{display:inline-flex;align-items:center;justify-content:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:rgba(129,140,248,.16);color:#a5b4fc;margin-left:6px;flex-shrink:0;user-select:none;cursor:pointer;}
+.session-thread-count:hover{background:rgba(129,140,248,.26);color:#c4b5fd;}
 
 /* ── Cron alert badge ── */
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}

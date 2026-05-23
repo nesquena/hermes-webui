@@ -37,7 +37,7 @@ let _logsSeverityFilter = 'all';
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
-  chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
+  chat: 'tab_chat', threads: 'tab_threads', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs', settings: 'tab_settings',
 };
@@ -243,12 +243,13 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs'].forEach(p => {
+    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs','threads'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
+  if (nextPanel === 'threads') await renderThreadsPanel();
   if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
@@ -272,6 +273,125 @@ async function switchPanel(name, opts = {}) {
   _resyncChatSidebarAfterPanelSwitch();
   syncAppTitlebar();
   return true;
+}
+
+// ── Threads panel ──
+let _threadsPanelSelectedId = null;
+
+function _threadStatusLabel(status){
+  const key='thread_status_'+(status||'active');
+  return typeof t==='function'?t(key):(status||'active');
+}
+
+function _threadPanelDate(value){
+  const ts=Number(value||0);
+  if(!ts) return '';
+  try{return new Date(ts*1000).toLocaleString();}
+  catch(_){return '';}
+}
+
+function _threadPanelSessionLabel(row){
+  const title=row&&row.title?row.title:'Untitled';
+  const sequence=row&&row.thread_sequence?row.thread_sequence:'?';
+  const count=Number(row&&row.message_count||0);
+  return `${sequence}. ${title} · ${count} msg${count===1?'':'s'}`;
+}
+
+async function _loadThreadDetail(threadId){
+  return api('/api/thread?thread_id='+encodeURIComponent(threadId));
+}
+
+async function renderThreadsPanel(){
+  const list=$('threadsList');
+  if(!list) return;
+  list.innerHTML='<div class="threads-empty">'+(t('loading')||'Loading...')+'</div>';
+  try{
+    const data=await api('/api/threads');
+    const threads=Array.isArray(data.threads)?data.threads:[];
+    if(!threads.length){
+      list.innerHTML='<div class="threads-empty">'+(t('threads_empty')||'No conversation threads yet.')+'</div>';
+      return;
+    }
+    list.innerHTML='';
+    threads.forEach(thread=>{
+      const card=document.createElement('div');
+      card.className='thread-card';
+      card.dataset.threadId=thread.thread_id;
+      const head=document.createElement('div');
+      head.className='thread-card-head';
+      const title=document.createElement('button');
+      title.type='button';
+      title.className='thread-card-title';
+      title.textContent=thread.title||'Untitled thread';
+      title.onclick=()=>showThreadDetail(thread.thread_id);
+      const status=document.createElement('span');
+      status.className='thread-status thread-status-'+(thread.status||'active');
+      status.textContent=_threadStatusLabel(thread.status);
+      head.appendChild(title);head.appendChild(status);
+      const meta=document.createElement('div');
+      meta.className='thread-card-meta';
+      meta.textContent=`${thread.session_count||0} chats · ${thread.message_count||0} messages`+(_threadPanelDate(thread.latest_activity)?' · '+_threadPanelDate(thread.latest_activity):'');
+      const action=document.createElement('div');
+      action.className='thread-card-actions';
+      const openBtn=document.createElement('button');
+      openBtn.type='button';openBtn.className='btn secondary';openBtn.textContent=t('thread_open_latest')||'Open latest';
+      openBtn.onclick=()=>{if(thread.latest_session_id) loadSession(thread.latest_session_id);};
+      const continueBtn=document.createElement('button');
+      continueBtn.type='button';continueBtn.className='btn secondary';continueBtn.textContent=t('session_thread_continue')||'Continue in linked chat';
+      continueBtn.onclick=()=>continueInLinkedChat({session_id:thread.latest_session_id,thread_id:thread.thread_id,title:thread.title});
+      const manifestBtn=document.createElement('button');
+      manifestBtn.type='button';manifestBtn.className='btn secondary';manifestBtn.textContent=t('thread_export_manifest')||'Export manifest';
+      manifestBtn.onclick=()=>exportThreadManifest(thread.thread_id,false);
+      action.appendChild(openBtn);action.appendChild(continueBtn);action.appendChild(manifestBtn);
+      card.appendChild(head);card.appendChild(meta);
+      if(thread.next_action){
+        const next=document.createElement('div');next.className='thread-next-action';next.textContent=(t('thread_next_action')||'Next action')+': '+thread.next_action;card.appendChild(next);
+      }
+      card.appendChild(action);
+      const detail=document.createElement('div');detail.className='thread-detail';detail.dataset.threadDetail=thread.thread_id;card.appendChild(detail);
+      list.appendChild(card);
+    });
+    if(_threadsPanelSelectedId) showThreadDetail(_threadsPanelSelectedId);
+  }catch(err){
+    list.innerHTML='<div class="threads-empty error">'+(t('threads_load_failed')||'Failed to load threads: ')+(err&&err.message?err.message:String(err))+'</div>';
+  }
+}
+
+async function showThreadDetail(threadId){
+  _threadsPanelSelectedId=threadId;
+  const container=document.querySelector('[data-thread-detail="'+CSS.escape(threadId)+'"]');
+  if(!container) return;
+  container.innerHTML='<div class="threads-empty">'+(t('loading')||'Loading...')+'</div>';
+  try{
+    const detail=await _loadThreadDetail(threadId);
+    const sessions=Array.isArray(detail.sessions)?detail.sessions:[];
+    container.innerHTML='';
+    sessions.forEach(row=>{
+      const item=document.createElement('div');
+      item.className='thread-session-row';
+      const label=document.createElement('span');label.textContent=_threadPanelSessionLabel(row);item.appendChild(label);
+      const open=document.createElement('button');open.type='button';open.className='btn secondary';open.textContent='Open';open.onclick=()=>loadSession(row.session_id);item.appendChild(open);
+      const unlink=document.createElement('button');unlink.type='button';unlink.className='btn secondary';unlink.textContent=t('thread_unlink')||'Unlink';unlink.onclick=async()=>{await api('/api/thread/unlink-session',{method:'POST',body:JSON.stringify({session_id:row.session_id})});await renderThreadsPanel();};item.appendChild(unlink);
+      container.appendChild(item);
+    });
+    const footer=document.createElement('div');footer.className='thread-card-actions';
+    const transcript=document.createElement('button');transcript.type='button';transcript.className='btn secondary';transcript.textContent=t('thread_export_transcript')||'Export transcript bundle';transcript.onclick=()=>exportThreadManifest(threadId,true);footer.appendChild(transcript);
+    container.appendChild(footer);
+  }catch(err){
+    container.innerHTML='<div class="threads-empty error">'+(t('threads_load_failed')||'Failed to load threads: ')+(err&&err.message?err.message:String(err))+'</div>';
+  }
+}
+
+async function exportThreadManifest(threadId, includeMessages){
+  try{
+    const suffix=includeMessages?'&include_messages=1':'';
+    const data=await api('/api/thread/export?thread_id='+encodeURIComponent(threadId)+suffix);
+    const text=includeMessages?JSON.stringify(data,null,2):(data.markdown||JSON.stringify(data,null,2));
+    if(navigator.clipboard&&navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
+    if(typeof showToast==='function') showToast(includeMessages?(t('thread_export_transcript_copied')||'Transcript bundle copied'):(t('thread_export_manifest_copied')||'Manifest copied'));
+  }catch(err){
+    if(typeof showToast==='function') showToast((t('thread_export_failed')||'Thread export failed: ')+(err&&err.message?err.message:String(err)),3000,'error');
+  }
 }
 
 // ── Cron panel ──

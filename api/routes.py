@@ -1152,6 +1152,160 @@ def _ensure_full_session_before_mutation(sid: str, session):
     return full_session
 
 
+def _thread_session_rows() -> list[dict]:
+    """Return compact session rows for thread manifests only."""
+    return all_sessions()
+
+
+def _thread_scoped_threads(parsed) -> tuple[list[dict], list[dict], str, bool]:
+    from api import session_threads
+    from api.profiles import get_active_profile_name
+
+    rows = _thread_session_rows()
+    threads = session_threads.load_threads()
+    active_profile = get_active_profile_name()
+    all_profiles = _all_profiles_query_flag(parsed)
+    if not all_profiles:
+        threads = [
+            thread for thread in threads
+            if _profiles_match(thread.get("profile"), active_profile)
+        ]
+    return threads, rows, active_profile, all_profiles
+
+
+def _handle_threads_list(handler, parsed) -> bool:
+    from api import session_threads
+
+    threads, rows, active_profile, all_profiles = _thread_scoped_threads(parsed)
+    return j(handler, {
+        "threads": session_threads.summarize_threads(threads, rows),
+        "active_profile": active_profile,
+        "all_profiles": all_profiles,
+    })
+
+
+def _handle_thread_detail(handler, parsed) -> bool:
+    from api import session_threads
+
+    qs = parse_qs(parsed.query)
+    thread_id = qs.get("thread_id", [""])[0]
+    if not thread_id:
+        return bad(handler, "thread_id required", 400)
+    threads, rows, active_profile, all_profiles = _thread_scoped_threads(parsed)
+    thread = session_threads.find_thread(threads, thread_id)
+    if not thread:
+        return bad(handler, "Thread not found", 404)
+    summary = session_threads.summarize_threads([thread], rows)[0]
+    sessions = summary.pop("sessions_preview", [])
+    return j(handler, {
+        "thread": summary,
+        "sessions": sessions,
+        "active_profile": active_profile,
+        "all_profiles": all_profiles,
+    })
+
+
+def _handle_thread_export(handler, parsed) -> bool:
+    from api import session_threads
+
+    qs = parse_qs(parsed.query)
+    thread_id = qs.get("thread_id", [""])[0]
+    if not thread_id:
+        return bad(handler, "thread_id required", 400)
+    include_messages = str(qs.get("include_messages", [""])[0]).strip().lower() in {"1", "true", "yes", "on"}
+    threads, rows, _active_profile, _all_profiles = _thread_scoped_threads(parsed)
+    thread = session_threads.find_thread(threads, thread_id)
+    if not thread:
+        return bad(handler, "Thread not found", 404)
+    sessions_by_id = {}
+    if include_messages:
+        for row in rows:
+            if row.get("thread_id") != thread_id:
+                continue
+            sid = row.get("session_id")
+            try:
+                sessions_by_id[sid] = get_session(sid)
+            except KeyError:
+                continue
+    return j(handler, session_threads.export_thread_manifest(
+        thread,
+        rows,
+        include_messages=include_messages,
+        sessions_by_id=sessions_by_id,
+    ))
+
+
+def _create_or_get_thread_for_source(source, *, body: dict, threads: list[dict]):
+    from api import session_threads
+
+    explicit_thread_id = body.get("thread_id") or None
+    existing_thread_id = explicit_thread_id or getattr(source, "thread_id", None)
+    if existing_thread_id:
+        thread = session_threads.find_thread(threads, existing_thread_id)
+        if thread:
+            return thread, False
+        # Thread metadata can be missing if the state file was deleted; rebuild a
+        # lightweight display object from the source session without transcript data.
+        thread = session_threads.create_thread_for_session(
+            source,
+            title=body.get("thread_title") or getattr(source, "title", None),
+            project_id=body.get("project_id") or getattr(source, "project_id", None),
+            thread_id=existing_thread_id,
+        )
+        threads.append(thread)
+        return thread, True
+
+    thread = session_threads.create_thread_for_session(
+        source,
+        title=body.get("thread_title") or getattr(source, "title", None),
+        project_id=body.get("project_id") or getattr(source, "project_id", None),
+    )
+    threads.append(thread)
+    return thread, True
+
+
+def _persist_thread_sessions(*sessions, touch_updated_at: bool = False) -> None:
+    for session in sessions:
+        if session is None:
+            continue
+        with _get_session_agent_lock(session.session_id):
+            session.save(touch_updated_at=touch_updated_at)
+
+
+def _resequence_thread_sessions(thread: dict, *, rows=None, include_sessions=()) -> list:
+    """Load full thread members and rewrite order metadata by session time."""
+    from api import session_threads
+
+    thread_id = thread.get("thread_id") if isinstance(thread, dict) else None
+    if not thread_id:
+        return []
+    member_sessions = {}
+    for session in include_sessions or ():
+        if session is None or getattr(session, "thread_id", None) != thread_id:
+            continue
+        member_sessions[session.session_id] = session
+    for row in list(_thread_session_rows() if rows is None else rows):
+        if not isinstance(row, dict) or row.get("thread_id") != thread_id:
+            continue
+        sid = row.get("session_id")
+        if not sid or sid in member_sessions:
+            continue
+        try:
+            member = get_session(sid)
+            member = _ensure_full_session_before_mutation(sid, member)
+        except Exception:
+            logger.debug("Failed to load thread member %s for resequencing", sid, exc_info=True)
+            continue
+        if getattr(member, "thread_id", None) == thread_id:
+            member_sessions[member.session_id] = member
+    ordered = session_threads.resequence_sessions(member_sessions.values())
+    if ordered:
+        thread["root_session_id"] = ordered[0].session_id
+        thread["latest_session_id"] = ordered[-1].session_id
+        thread["updated_at"] = time.time()
+    return ordered
+
+
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
     """Clear stale persisted stream fields before /api/sessions serializes rows."""
     changed = False
@@ -4039,6 +4193,15 @@ def handle_get(handler, parsed) -> bool:
         from api.background import get_results
         return j(handler, {"results": get_results(sid)})
 
+    if parsed.path == "/api/threads":
+        return _handle_threads_list(handler, parsed)
+
+    if parsed.path == "/api/thread":
+        return _handle_thread_detail(handler, parsed)
+
+    if parsed.path == "/api/thread/export":
+        return _handle_thread_export(handler, parsed)
+
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
         try:
@@ -4651,6 +4814,132 @@ def handle_post(handler, parsed) -> bool:
             bad(handler, str(exc), status=500)
         return True
 
+    if parsed.path == "/api/thread/create":
+        from api import session_threads
+        try:
+            require(body, "session_id")
+            source = get_session(body["session_id"])
+            source = _ensure_full_session_before_mutation(body["session_id"], source)
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        threads = session_threads.load_threads()
+        existing = session_threads.find_thread(threads, getattr(source, "thread_id", None)) if getattr(source, "thread_id", None) else None
+        if existing:
+            thread = existing
+        else:
+            thread = session_threads.create_thread_for_session(
+                source,
+                title=body.get("title") or body.get("thread_title") or getattr(source, "title", None),
+                project_id=body.get("project_id") or getattr(source, "project_id", None),
+            )
+            threads.append(thread)
+            _persist_thread_sessions(source, touch_updated_at=False)
+            session_threads.save_threads(threads)
+            publish_session_list_changed("thread_create")
+        summary = session_threads.summarize_threads([thread], _thread_session_rows())[0]
+        return j(handler, {"ok": True, "thread": summary, "session": source.compact()})
+
+    if parsed.path == "/api/thread/link-session":
+        from api import session_threads
+        try:
+            require(body, "session_id")
+            require(body, "thread_id")
+            target = get_session(body["session_id"])
+            target = _ensure_full_session_before_mutation(body["session_id"], target)
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        threads = session_threads.load_threads()
+        thread = session_threads.find_thread(threads, body.get("thread_id"))
+        if not thread:
+            return bad(handler, "Thread not found", 404)
+        rows = _thread_session_rows()
+        session_threads.append_session_to_thread(
+            target,
+            thread,
+            prev_session_id=body.get("prev_session_id") or thread.get("latest_session_id"),
+            session_rows=rows,
+            link_type="manual_link",
+        )
+        ordered_sessions = _resequence_thread_sessions(thread, rows=rows, include_sessions=(target,))
+        if not thread.get("project_id") and getattr(target, "project_id", None):
+            thread["project_id"] = target.project_id
+        _persist_thread_sessions(*(ordered_sessions or [target]), touch_updated_at=False)
+        session_threads.save_threads(threads)
+        publish_session_list_changed("thread_link_session")
+        summary = session_threads.summarize_threads([thread], _thread_session_rows())[0]
+        return j(handler, {"ok": True, "thread": summary, "session": target.compact()})
+
+    if parsed.path == "/api/thread/unlink-session":
+        from api import session_threads
+        try:
+            require(body, "session_id")
+            target = get_session(body["session_id"])
+            target = _ensure_full_session_before_mutation(body["session_id"], target)
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        thread_id = getattr(target, "thread_id", None)
+        threads = session_threads.load_threads()
+        target.thread_id = None
+        target.thread_root_session_id = None
+        target.thread_prev_session_id = None
+        target.thread_sequence = None
+        target.thread_link_type = None
+        target.thread_linked_at = None
+        _persist_thread_sessions(target, touch_updated_at=False)
+        if thread_id:
+            rows = [row for row in _thread_session_rows() if row.get("thread_id") == thread_id]
+            thread = session_threads.find_thread(threads, thread_id)
+            if thread and rows:
+                ordered_sessions = []
+                for row in rows:
+                    try:
+                        member = get_session(row.get("session_id"))
+                        member = _ensure_full_session_before_mutation(member.session_id, member)
+                        ordered_sessions.append(member)
+                    except Exception:
+                        continue
+                ordered_sessions = session_threads.resequence_sessions(ordered_sessions)
+                if ordered_sessions:
+                    thread["root_session_id"] = ordered_sessions[0].session_id
+                    thread["latest_session_id"] = ordered_sessions[-1].session_id
+                    thread["updated_at"] = time.time()
+                    _persist_thread_sessions(*ordered_sessions, touch_updated_at=False)
+            elif thread:
+                threads = [item for item in threads if item.get("thread_id") != thread_id]
+            session_threads.save_threads(threads)
+        publish_session_list_changed("thread_unlink_session")
+        return j(handler, {"ok": True, "session": target.compact()})
+
+    if parsed.path == "/api/thread/update":
+        from api import session_threads
+        try:
+            require(body, "thread_id")
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        threads = session_threads.load_threads()
+        thread = session_threads.find_thread(threads, body.get("thread_id"))
+        if not thread:
+            return bad(handler, "Thread not found", 404)
+        fields = {
+            key: body[key]
+            for key in ("title", "status", "project_id", "note", "next_action")
+            if key in body
+        }
+        try:
+            session_threads.update_thread(thread, **fields)
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        session_threads.save_threads(threads)
+        publish_session_list_changed("thread_update")
+        summary = session_threads.summarize_threads([thread], _thread_session_rows())[0]
+        return j(handler, {"ok": True, "thread": summary})
+
     if parsed.path == "/api/session/new":
         try:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
@@ -4702,6 +4991,38 @@ def handle_post(handler, parsed) -> bool:
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
         )
+        link_to_prev = (
+            body.get("link_to_prev") is True
+            or str(body.get("link_to_prev")).strip().lower() in {"1", "true", "yes", "on"}
+        )
+        if link_to_prev:
+            from api import session_threads
+            if not prev_session_id:
+                return bad(handler, "prev_session_id is required when link_to_prev is true", 400)
+            try:
+                source = get_session(prev_session_id)
+                source = _ensure_full_session_before_mutation(prev_session_id, source)
+            except KeyError:
+                return bad(handler, "Previous session not found", 404)
+            if not body.get("project_id") and getattr(source, "project_id", None):
+                s.project_id = source.project_id
+            if (not s.title or s.title == "Untitled") and getattr(source, "title", None):
+                s.title = source.title
+            threads = session_threads.load_threads()
+            thread, _source_thread_created = _create_or_get_thread_for_source(source, body=body, threads=threads)
+            rows = _thread_session_rows()
+            session_threads.append_session_to_thread(
+                s,
+                thread,
+                prev_session_id=prev_session_id,
+                session_rows=rows,
+                link_type="manual_continue",
+            )
+            ordered_sessions = _resequence_thread_sessions(thread, rows=rows, include_sessions=(source, s))
+            _persist_thread_sessions(*(ordered_sessions or [source, s]), touch_updated_at=False)
+            session_threads.save_threads(threads)
+            publish_session_list_changed("thread_continue")
+            return j(handler, {"session": s.compact() | {"messages": s.messages}})
         if worktree_info:
             publish_session_list_changed("session_new")
         return j(handler, {"session": s.compact() | {"messages": s.messages}})

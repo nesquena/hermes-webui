@@ -396,6 +396,9 @@ class Session:
                  messages=None, created_at=None, updated_at=None,
                  tool_calls=None, pinned: bool=False, archived: bool=False,
                  project_id: str=None, profile=None,
+                 thread_id: str=None, thread_root_session_id: str=None,
+                 thread_prev_session_id: str=None, thread_sequence=None,
+                 thread_link_type: str=None, thread_linked_at=None,
                  input_tokens: int=0, output_tokens: int=0, estimated_cost=None,
                  cache_read_tokens: int=0, cache_write_tokens: int=0,
                  personality=None,
@@ -438,6 +441,15 @@ class Session:
         self.archived = bool(archived)
         self.project_id = project_id or None
         self.profile = profile
+        self.thread_id = thread_id or None
+        self.thread_root_session_id = thread_root_session_id or None
+        self.thread_prev_session_id = thread_prev_session_id or None
+        try:
+            self.thread_sequence = int(thread_sequence) if thread_sequence is not None else None
+        except (TypeError, ValueError):
+            self.thread_sequence = None
+        self.thread_link_type = thread_link_type or None
+        self.thread_linked_at = thread_linked_at
         self.input_tokens = input_tokens or 0
         self.output_tokens = output_tokens or 0
         self.estimated_cost = estimated_cost
@@ -516,6 +528,8 @@ class Session:
         METADATA_FIELDS = [
             'session_id', 'title', 'workspace', 'model', 'model_provider', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
+            'thread_id', 'thread_root_session_id', 'thread_prev_session_id',
+            'thread_sequence', 'thread_link_type', 'thread_linked_at',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
@@ -700,6 +714,12 @@ class Session:
             'archived': self.archived,
             'project_id': self.project_id,
             'profile': self.profile,
+            'thread_id': self.thread_id,
+            'thread_root_session_id': self.thread_root_session_id,
+            'thread_prev_session_id': self.thread_prev_session_id,
+            'thread_sequence': self.thread_sequence,
+            'thread_link_type': self.thread_link_type,
+            'thread_linked_at': self.thread_linked_at,
             'input_tokens': self.input_tokens,
             'output_tokens': self.output_tokens,
             'estimated_cost': self.estimated_cost,
