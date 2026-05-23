@@ -8330,6 +8330,41 @@ def _start_chat_stream_for_session(
     return response
 
 
+def _runtime_runner_client_factory():
+    """Return the runner-local client when a supervised backend exists.
+
+    Slice 4d wires the `/api/chat/start` selection point without silently falling
+    back to the legacy in-process runtime when `runner-local` is explicitly
+    requested. The supervised runner backend itself is intentionally not created
+    in this helper yet; a later slice can replace this factory with the concrete
+    client while keeping the route contract stable.
+    """
+    raise NotImplementedError("runner-local chat backend is not configured")
+
+
+def _chat_start_response_from_run_start(result):
+    """Expose only the legacy browser-facing chat-start response fields."""
+    payload = dict(getattr(result, "payload", {}) or {})
+    response = {}
+    for key in (
+        "stream_id",
+        "session_id",
+        "pending_started_at",
+        "turn_id",
+        "title",
+        "effective_model",
+        "effective_model_provider",
+        "error",
+        "active_stream_id",
+        "_status",
+    ):
+        if key in payload:
+            response[key] = payload[key]
+    response.setdefault("stream_id", result.stream_id)
+    response.setdefault("session_id", result.session_id)
+    return response
+
+
 def _runtime_adapter_goal_action(goal_args: str) -> str:
     """Return the bounded RuntimeAdapter goal action for WebUI /goal args."""
     action = str(goal_args or "").strip().lower()
@@ -8539,10 +8574,12 @@ def _handle_chat_start(handler, body, diag=None):
         from api.runtime_adapter import (
             LegacyJournalRuntimeAdapter,
             StartRunRequest,
+            build_runtime_adapter,
             runtime_adapter_enabled,
+            runtime_adapter_runner_enabled,
         )
 
-        if runtime_adapter_enabled():
+        if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
             def _legacy_start_run(request: StartRunRequest) -> dict:
                 return _start_chat_stream_for_session(
                     s,
@@ -8555,23 +8592,32 @@ def _handle_chat_start(handler, body, diag=None):
                     diag=diag,
                 )
 
-            adapter = LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
-            result = adapter.start_run(
-                StartRunRequest(
-                    session_id=s.session_id,
-                    message=msg,
-                    attachments=attachments,
-                    workspace=workspace,
-                    profile=getattr(s, "profile", None),
-                    provider=model_provider,
-                    model=model,
-                    source="webui",
-                    metadata={"route": "/api/chat/start"},
+            def _legacy_adapter_factory():
+                return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
+
+            try:
+                adapter = build_runtime_adapter(
+                    legacy_adapter_factory=_legacy_adapter_factory,
+                    runner_client_factory=_runtime_runner_client_factory,
                 )
-            )
-            response = dict(result.payload)
-            response.setdefault("stream_id", result.stream_id)
-            response.setdefault("session_id", result.session_id)
+                if adapter is None:
+                    raise NotImplementedError("runtime adapter selection returned no adapter")
+                result = adapter.start_run(
+                    StartRunRequest(
+                        session_id=s.session_id,
+                        message=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        profile=getattr(s, "profile", None),
+                        provider=model_provider,
+                        model=model,
+                        source="webui",
+                        metadata={"route": "/api/chat/start"},
+                    )
+                )
+            except NotImplementedError as exc:
+                return j(handler, {"error": str(exc)}, status=501)
+            response = _chat_start_response_from_run_start(result)
         else:
             response = _start_chat_stream_for_session(
                 s,

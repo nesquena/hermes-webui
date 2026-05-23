@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2794** by @Michaelyklam — RuntimeAdapter Slice 4e: wire the default-off `/api/chat/start` route-selection harness through `build_runtime_adapter(...)`. `legacy-direct` remains the default, `legacy-journal` still delegates to the existing stream-start path, and explicit `runner-local` now fails with a bounded not-configured response instead of silently falling back to WebUI-owned execution until a supervised runner client lands. Successful adapter responses are whitelisted to legacy-compatible chat-start fields so `run_id`, `status`, and `active_controls` stay internal.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added
@@ -76,7 +80,6 @@
 ### Added
 
 - **PR #2799** by @gavinssr — Add Hepburn skin (magenta-rose palette derived from the Hepburn TUI theme). Full light + dark palette under `:root[data-skin="hepburn"]` / `:root.dark[data-skin="hepburn"]`, registered in `static/boot.js` `_SKINS` and whitelisted in `static/index.html`'s inline skin gate. As part of this PR `loadSettingsPanel()` in `static/panels.js` now prefers `localStorage.getItem('hermes-skin')` over `settings.skin` when populating the skin picker (DOM truth → settings fallback), so the picker matches what the user actually sees after the inline gate has already resolved legacy aliases.
-
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed
