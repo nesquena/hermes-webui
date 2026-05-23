@@ -131,7 +131,8 @@ The bootstrap will:
 
 > Native Windows is not supported for this bootstrap yet. Use Linux, macOS, or WSL2.
 > For Windows / WSL auto-start at login, see [`docs/wsl-autostart.md`](docs/wsl-autostart.md).
-> A community-maintained native Windows guide is tracked in [#1952](https://github.com/nesquena/hermes-webui/issues/1952).
+
+A community-maintained native Windows setup (no Docker, no WSL2) is documented at [@markwang2658/hermes-windows-native-guide](https://github.com/markwang2658/hermes-windows-native-guide) (companion setup repo: [@markwang2658/hermes-windows-native](https://github.com/markwang2658/hermes-windows-native)). The community report in [#1952](https://github.com/nesquena/hermes-webui/issues/1952) measured substantially lower memory use vs containerized setups (~330 MB native vs ~1080 MB with WSL2+Docker). Chat, workspace browser, session management, and all themes work; some POSIX-style file paths appear in the workspace browser, and bash-assuming agent tools may not work natively. A PowerShell launcher (`start.ps1`) at the repo root reproduces `start.sh`'s discovery on native Windows by invoking `server.py` directly (skipping `bootstrap.py`'s platform refusal).
 
 If provider setup is still incomplete after install, the onboarding wizard will point you to finish it with `hermes model` instead of trying to replicate the full CLI setup in-browser.
 For a step-by-step walkthrough of the wizard, provider choices, local model server Base URLs, and safe re-runs, see [`docs/onboarding.md`](docs/onboarding.md).

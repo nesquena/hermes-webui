@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`start.ps1`: native Windows launcher** — PowerShell equivalent of `start.sh` that bypasses `bootstrap.py`'s `ensure_supported_platform()` refusal and invokes `server.py` directly on native Windows. Mirrors `start.sh`'s discovery (load optional `.env` with the same readonly-var filter for `UID`/`GID`/`EUID`/`EGID`/`PPID`, find Python via `HERMES_WEBUI_PYTHON` env → `python3` → `python` → `py`, locate the hermes-agent dir at `%USERPROFILE%\.hermes\hermes-agent` or `../hermes-agent`, prefer the agent's `venv\Scripts\python.exe` if present, set `HERMES_WEBUI_HOST` / `HERMES_WEBUI_PORT` / `HERMES_WEBUI_STATE_DIR` / `HERMES_HOME` defaults). Closes the launcher half of #1952; complements the README community-guide link below. Assumes Python + agent venv are already set up — for first-time setup, use WSL2 once to create the venv, then `start.ps1` works natively.
+
+### Documentation
+
+- **README: link @markwang2658's native Windows community guide** — adds a paragraph below the existing "Native Windows is not supported by this bootstrap" line pointing Windows users at the community-maintained no-Docker / no-WSL2 setup ([hermes-windows-native-guide](https://github.com/markwang2658/hermes-windows-native-guide), companion setup repo [hermes-windows-native](https://github.com/markwang2658/hermes-windows-native)) tracked in #1952, including the memory delta vs containerized setups (~330 MB native vs ~1080 MB with WSL2+Docker). Closes the docs half of #1952.
+
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed

@@ -1,0 +1,142 @@
+<#
+.SYNOPSIS
+    Native Windows launcher for Hermes WebUI - PowerShell equivalent
+    of start.sh, bypassing bootstrap.py's platform refusal.
+
+.DESCRIPTION
+    Mirrors start.sh's discovery: load optional .env, find Python,
+    locate the hermes-agent install, set sensible env defaults, then
+    invoke server.py directly. The bootstrap.py path is skipped
+    because it currently raises on platform.system() == 'Windows';
+    server.py itself runs cleanly on native Windows.
+
+    Assumes Python + hermes-agent + the WebUI Python deps are already
+    installed - same assumption start.sh makes when invoked outside
+    a fresh bootstrap. For first-time setup, run bootstrap.py inside
+    WSL2 once to create the venv, then this script can use that venv.
+
+.PARAMETER Port
+    TCP port the WebUI binds to. Overrides HERMES_WEBUI_PORT env.
+    Default: 8787.
+
+.PARAMETER BindHost
+    Bind address. Overrides HERMES_WEBUI_HOST env.
+    Default: 127.0.0.1.
+
+.EXAMPLE
+    .\start.ps1
+    # Bind to 127.0.0.1:8787, foreground.
+
+.EXAMPLE
+    .\start.ps1 -Port 9000
+    # Bind to 127.0.0.1:9000.
+
+.EXAMPLE
+    $env:HERMES_WEBUI_HOST = '0.0.0.0'
+    .\start.ps1
+    # Bind to all interfaces (set a password first via env or Settings).
+
+.LINK
+    https://github.com/nesquena/hermes-webui/issues/1952
+#>
+
+[CmdletBinding()]
+param(
+    [int]$Port = 0,
+    [string]$BindHost = ''
+)
+
+$ErrorActionPreference = 'Stop'
+$RepoRoot = Split-Path -Parent $PSCommandPath
+
+# === Load .env (mirroring start.sh's filtering) ========================
+$envFile = Join-Path $RepoRoot '.env'
+if (Test-Path $envFile) {
+    foreach ($line in Get-Content $envFile -Encoding UTF8) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#') -or -not $trimmed.Contains('=')) { continue }
+        $kv = $trimmed -split '=', 2
+        $key = ($kv[0].Trim() -replace '^export\s+', '')
+        # Filter out shell-readonly vars (UID, GID, EUID, EGID, PPID) per start.sh
+        if ($key -in @('UID', 'GID', 'EUID', 'EGID', 'PPID')) { continue }
+        if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
+        if ([Environment]::GetEnvironmentVariable($key)) { continue }
+        $val = $kv[1]
+        if ($val -match '^"(.*)"$') { $val = $Matches[1] }
+        elseif ($val -match "^'(.*)'$") { $val = $Matches[1] }
+        [Environment]::SetEnvironmentVariable($key, $val)
+    }
+}
+
+# === Find Python (matches start.sh order) ==============================
+$Python = $env:HERMES_WEBUI_PYTHON
+if (-not $Python) {
+    foreach ($candidate in @('python3', 'python', 'py')) {
+        $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($cmd) { $Python = $cmd.Source; break }
+    }
+}
+if (-not $Python) {
+    Write-Error 'Python 3 is required to run server.py (set HERMES_WEBUI_PYTHON or add python to PATH).'
+    exit 1
+}
+
+# === Find Hermes Agent dir (server.py imports from it) =================
+$AgentDir = $env:HERMES_WEBUI_AGENT_DIR
+if (-not $AgentDir) {
+    $candidates = @(
+        (Join-Path $env:USERPROFILE '.hermes\hermes-agent'),
+        (Join-Path (Split-Path -Parent $RepoRoot) 'hermes-agent')
+    )
+    foreach ($c in $candidates) {
+        if (Test-Path (Join-Path $c 'hermes_cli')) { $AgentDir = $c; break }
+    }
+}
+if (-not $AgentDir) {
+    Write-Error 'hermes-agent not found at $env:USERPROFILE\.hermes\hermes-agent or ../hermes-agent. Set HERMES_WEBUI_AGENT_DIR explicitly.'
+    exit 1
+}
+
+# === Prefer the agent's venv Python if available =======================
+$agentVenvPython = Join-Path $AgentDir 'venv\Scripts\python.exe'
+if (Test-Path $agentVenvPython) {
+    $Python = $agentVenvPython
+}
+
+# === Resolve bind + state defaults =====================================
+$BindHostFinal = if ($BindHost) { $BindHost } elseif ($env:HERMES_WEBUI_HOST) { $env:HERMES_WEBUI_HOST } else { '127.0.0.1' }
+$PortFinal = if ($Port) { $Port } elseif ($env:HERMES_WEBUI_PORT) { [int]$env:HERMES_WEBUI_PORT } else { 8787 }
+$env:HERMES_WEBUI_HOST = $BindHostFinal
+$env:HERMES_WEBUI_PORT = "$PortFinal"
+if (-not $env:HERMES_WEBUI_STATE_DIR) {
+    $env:HERMES_WEBUI_STATE_DIR = Join-Path $env:USERPROFILE '.hermes\webui'
+}
+if (-not $env:HERMES_HOME) {
+    $env:HERMES_HOME = Join-Path $env:USERPROFILE '.hermes'
+}
+
+# === Ensure dirs exist =================================================
+New-Item -ItemType Directory -Force -Path $env:HERMES_HOME | Out-Null
+New-Item -ItemType Directory -Force -Path $env:HERMES_WEBUI_STATE_DIR | Out-Null
+
+# === Launch (foreground, matches start.sh) =============================
+Write-Host "[start.ps1] Hermes WebUI native Windows launcher" -ForegroundColor Cyan
+Write-Host "[start.ps1] Python:     $Python"
+Write-Host "[start.ps1] Agent dir:  $AgentDir"
+Write-Host "[start.ps1] State dir:  $env:HERMES_WEBUI_STATE_DIR"
+Write-Host "[start.ps1] Binding:    ${BindHostFinal}:${PortFinal}"
+Write-Host ""
+
+$serverPath = Join-Path $RepoRoot 'server.py'
+if (-not (Test-Path $serverPath)) {
+    Write-Error "server.py not found at $serverPath - is this the hermes-webui repo root?"
+    exit 1
+}
+
+Push-Location $RepoRoot
+try {
+    & $Python $serverPath @args
+    exit $LASTEXITCODE
+} finally {
+    Pop-Location
+}
