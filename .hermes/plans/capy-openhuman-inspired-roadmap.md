@@ -92,7 +92,7 @@ Remaining:
 
 ### Phase 5 — Autonomy policy, prompt-injection preflight, model-routing hints
 
-Status: **metadata-only status surface plus creator preview/commit, active-space instruction/context, repair prompt, source-refresh preflight, camera-stream tool receipts, and package-export policy receipts implemented; broader per-action enforcement and actual model-routing decisions remain**.
+Status: **metadata-only status surface plus creator preview/commit, active-space instruction/context, repair prompt, source-refresh preflight, camera-stream tool receipts, package policy receipts, and safe model-route resolution receipts implemented; broader per-action enforcement and actual model invocation routing remain**.
 
 Delivered:
 - `api/capy_policy.py` exposes allow-listed autonomy modes, approval gates, prompt-preflight status, model-routing hints, and bounded/deduplicated action-policy receipts without echoing raw env/provider/model secrets.
@@ -106,11 +106,12 @@ Delivered:
 - Shared data slot delete tool actions (`space.data.delete` / `space.current.data.delete`) now return metadata-only `space.shared_slot.delete` autonomy-policy receipts with creator-commit approval, required prompt-preflight status, and `hint:summarize` route evidence while preserving existing redacted progress telemetry.
 - Space Agent package export responses now include a metadata-only `space.agent.export` autonomy-policy receipt with supervised-mode approval gates, required prompt-preflight status, and `hint:reasoning` model-route evidence; the export UI renders the policy beside package progress without displaying package YAML, widget bodies, renderer/source/API-auth fields, prompts, scripts, archives, or credentials.
 - Space Agent package import tool aliases now return per-invocation metadata-only autonomy-policy receipts, so `space.import`, `space.package.import`, and `space.agent.import` can be distinguished in product/tool evidence while preserving prompt-preflight status, approval gates, model-route hints, and import quarantine redaction.
+- Action-policy receipts now include a metadata-only `model_route_resolution` decision derived from safe configured route fields or deterministic default fallbacks, and Spaces UI receipts render the selected route plus fallback reason without exposing raw provider config, API-auth fields, renderer/source/script markers, prompts, or credentials.
 - Active-space context receipts, repair prompts, widget-runtime prompts (including direct sandbox queue-status UI receipts), and source-refresh ingestion paths now use protected prompt-preflight boundaries before advisory context or user-provided instructions can influence an agent/tool action.
 
 Remaining:
 - Extend pass/warn/block preflight and action-policy receipts to additional high-risk browser/development/recovery/tool boundaries beyond the current creator/context/repair/source-refresh/camera/package-export coverage.
-- Wire model-routing hints into actual Capy/Hermes execution decisions while preserving Brendan's provider-agnostic OpenAI/xAI/LM Studio setup.
+- Wire model-routing resolution into actual Capy/Hermes invocation selection while preserving Brendan's provider-agnostic OpenAI/xAI/LM Studio setup.
 
 ### Phase 6 — Structured progress events
 
@@ -165,7 +166,10 @@ Only after the remaining Phase 1-6 integration items are working:
    - Expand due-job scheduler/cron coverage and source-specific fetchers now that the safe metadata-only refresh worker and manual trigger path exist; keep raw fetched content out of public receipts/UI.
 
 4. **Progress producer expansion**
-   - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh workers, demo-suite runs, individual Browser Surface demo smokes, source-style layout-repair actions, shared-data/widget-upsert actions, and recovery widget toggles now cover the first workflow/gate/ingest/run/browser/repair/cooperation/construction/recovery producers.
+   - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, the demo smoke suite, individual browser demo smokes, source-style layout-repair actions, shared-data/widget-upsert actions, and recovery widget toggles now cover the first workflow/gate/ingest/run/browser/repair/cooperation/construction/recovery producers.
+
+5. **Model-route invocation plumbing**
+   - Reuse the new metadata-only `model_route_resolution` receipts as the visible decision envelope, then wire safe configured hints into actual Capy/Hermes invocation selection without exposing provider config or weakening Brendan's provider-agnostic OpenAI/xAI/LM Studio setup.
 
 ---
 

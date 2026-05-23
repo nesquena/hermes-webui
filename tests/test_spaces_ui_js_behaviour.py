@@ -819,6 +819,18 @@ global.fetch = async function(path, opts = {}) {
             source: 'generated renderer source SECRET_VALUE_DO_NOT_LEAK',
             api_key: 'SECRET_VALUE_DO_NOT_LEAK',
           },
+          model_route_resolution: scenario === 'creatorPreviewResolvedFallbackModelRoute' ? {
+            hint: 'hint:summarize',
+            label: 'Summarize',
+            resolved_provider: 'current Hermes provider',
+            resolved_model: 'configured summarize model',
+            resolution: 'default_fallback',
+            fallback_reason: 'unsafe_config',
+            metadata_only: true,
+            local_only: true,
+            api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+            renderer: '<script>bad()</script>',
+          } : undefined,
           raw_prompt: body.prompt,
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
           renderer: '<script>bad()</script>',
@@ -3429,7 +3441,7 @@ async function dispatchWindowMessage(data, opts) {
         }
       }
     });
-  } else if (scenario === 'creatorPreviewGate' || scenario === 'creatorPreviewUnsafeIds' || scenario === 'creatorPreviewFailure' || scenario === 'creatorPreviewMemoryAssist' || scenario === 'creatorPreviewUnsafeModelRoute' || scenario === 'creatorPreviewCredentialModelRoute' || scenario === 'creatorPreviewApiKeyModelRoute' || scenario === 'creatorPreviewRawCodeModelRoute' || scenario === 'creatorPreviewMissingModelRouteHint' || scenario === 'creatorPreviewOverlongModelRoute') {
+  } else if (scenario === 'creatorPreviewGate' || scenario === 'creatorPreviewUnsafeIds' || scenario === 'creatorPreviewFailure' || scenario === 'creatorPreviewMemoryAssist' || scenario === 'creatorPreviewUnsafeModelRoute' || scenario === 'creatorPreviewCredentialModelRoute' || scenario === 'creatorPreviewApiKeyModelRoute' || scenario === 'creatorPreviewRawCodeModelRoute' || scenario === 'creatorPreviewMissingModelRouteHint' || scenario === 'creatorPreviewOverlongModelRoute' || scenario === 'creatorPreviewResolvedFallbackModelRoute') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('previewCreatorSpec', {});
@@ -7134,6 +7146,22 @@ def test_creator_preview_action_policy_renders_selected_model_route_safely(drive
     assert "<script>" not in html
     assert "renderer" not in html
     assert "generated renderer source" not in html.lower()
+    assert "api_key" not in html.lower()
+
+
+def test_creator_preview_action_policy_renders_safe_model_route_fallback_resolution(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewResolvedFallbackModelRoute")
+    html = out["rootHtml"]
+
+    assert "Action policy" in html
+    assert "Model route hint: hint:summarize" in html
+    assert "Model route: Summarize · current Hermes provider · configured summarize model" in html
+    assert "Route resolution: default fallback · unsafe config" in html
+    assert "metadata-only" in html
+    assert "local-only" in html
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in html
+    assert "<script>" not in html
+    assert "renderer" not in html
     assert "api_key" not in html.lower()
 
 

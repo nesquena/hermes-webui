@@ -3,7 +3,13 @@ import io
 import json
 from urllib.parse import urlparse
 
-from api.capy_policy import action_policy_receipt, model_routing_status, policy_status, prompt_preflight
+from api.capy_policy import (
+    action_policy_receipt,
+    model_routing_status,
+    policy_status,
+    prompt_preflight,
+    resolve_model_route_hint,
+)
 
 
 def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
@@ -150,6 +156,67 @@ def test_model_routing_status_uses_configured_hints_without_exposing_secrets(mon
     assert "<script" not in serialized
 
 
+def test_resolve_model_route_hint_returns_execution_decision_with_safe_fallback(monkeypatch):
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:summarize": {
+            "provider": "Local summary provider",
+            "model": "Summary model",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+        "hint:code": {
+            "provider": "renderer <script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "model": "source api_key SECRET_VALUE_DO_NOT_LEAK",
+        },
+        "hint:vision": {
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    }))
+
+    configured = resolve_model_route_hint("hint:summarize")
+    unsafe = resolve_model_route_hint("hint:code")
+    credential_only = resolve_model_route_hint("hint:vision")
+    unknown = resolve_model_route_hint("hint:<script>SECRET_VALUE_DO_NOT_LEAK</script>")
+
+    assert configured == {
+        "hint": "hint:summarize",
+        "label": "Summarize",
+        "resolved_provider": "Local summary provider",
+        "resolved_model": "Summary model",
+        "resolution": "configured",
+        "metadata_only": True,
+        "local_only": True,
+    }
+    assert unsafe == {
+        "hint": "hint:code",
+        "label": "Code",
+        "resolved_provider": "current Hermes provider",
+        "resolved_model": "configured code model",
+        "resolution": "default_fallback",
+        "fallback_reason": "unsafe_config",
+        "metadata_only": True,
+        "local_only": True,
+    }
+    assert credential_only == {
+        "hint": "hint:vision",
+        "label": "Vision",
+        "resolved_provider": "vision tool path",
+        "resolved_model": "configured vision model",
+        "resolution": "default_fallback",
+        "fallback_reason": "unconfigured_hint",
+        "metadata_only": True,
+        "local_only": True,
+    }
+    assert unknown["hint"] == "hint:reasoning"
+    assert unknown["resolution"] == "default_fallback"
+    assert unknown["fallback_reason"] == "unknown_hint"
+    serialized = json.dumps([configured, unsafe, credential_only, unknown], sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "source api_key" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_action_policy_receipt_includes_safe_selected_model_route_preview(monkeypatch):
     monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
         "hint:summarize": {
@@ -188,6 +255,16 @@ def test_action_policy_receipt_includes_safe_selected_model_route_preview(monkey
     )
     assert hostile_receipt["model_route_hint"] == "hint:code"
     assert "model_route" not in hostile_receipt
+    assert hostile_receipt["model_route_resolution"] == {
+        "hint": "hint:code",
+        "label": "Code",
+        "resolved_provider": "current Hermes provider",
+        "resolved_model": "configured code model",
+        "resolution": "default_fallback",
+        "fallback_reason": "unsafe_config",
+        "metadata_only": True,
+        "local_only": True,
+    }
 
     unknown_receipt = action_policy_receipt(
         "space.creator.preview",

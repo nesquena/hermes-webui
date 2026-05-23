@@ -222,6 +222,55 @@ def policy_status() -> Dict[str, Any]:
     }
 
 
+def resolve_model_route_hint(hint: Any) -> Dict[str, Any]:
+    """Return the metadata-only route decision for a requested model hint.
+
+    Unsafe or unknown configured route fields fall back to fixed safe labels. The
+    returned receipt is suitable for product-visible action receipts and never
+    includes raw provider config, credential fields, prompt/source text, or model
+    configuration objects.
+    """
+
+    requested_hint = str(hint or "").strip().lower()
+    fallback_reason = None
+    selected_hint = requested_hint if requested_hint in _MODEL_HINT_ORDER else "hint:reasoning"
+    if selected_hint != requested_hint:
+        fallback_reason = "unknown_hint"
+    defaults = _MODEL_HINT_DEFAULTS[selected_hint]
+    configured = _configured_model_routes()
+    override = configured.get(selected_hint)
+    if not isinstance(override, dict):
+        override = {}
+    has_provider_override = "provider" in override or "resolved_provider" in override
+    has_model_override = "model" in override or "resolved_model" in override
+    has_route_override = has_provider_override or has_model_override
+    provider_source = override.get("provider") or override.get("resolved_provider") or defaults["resolved_provider"]
+    model_source = override.get("model") or override.get("resolved_model") or defaults["resolved_model"]
+    provider = safe_model_route_field(provider_source)
+    model = safe_model_route_field(model_source)
+    resolution = "configured" if has_route_override and provider and model and not fallback_reason else "default_fallback"
+    if not provider or not model:
+        provider = defaults["resolved_provider"]
+        model = defaults["resolved_model"]
+        fallback_reason = fallback_reason or "unsafe_config"
+    elif not has_route_override:
+        fallback_reason = fallback_reason or "unconfigured_hint"
+    if fallback_reason:
+        resolution = "default_fallback"
+    receipt = {
+        "hint": selected_hint,
+        "label": defaults["label"],
+        "resolved_provider": provider,
+        "resolved_model": model,
+        "resolution": resolution,
+        "metadata_only": True,
+        "local_only": True,
+    }
+    if fallback_reason:
+        receipt["fallback_reason"] = fallback_reason
+    return receipt
+
+
 def _selected_model_route_preview(model_routing: Dict[str, Any], hint: str) -> Dict[str, Any] | None:
     selected_hint = hint if hint in _MODEL_HINT_ORDER else model_routing.get("default_hint", "hint:reasoning")
     if selected_hint not in _MODEL_HINT_DEFAULTS:
@@ -261,7 +310,8 @@ def action_policy_receipt(
     if not gates:
         gates = ["creator_commit"]
     routing = status["model_routing"]
-    hint = model_route_hint if model_route_hint in _MODEL_HINT_ORDER else routing["default_hint"]
+    route_resolution = resolve_model_route_hint(model_route_hint)
+    hint = route_resolution["hint"]
     preflight = prompt_preflight_status if prompt_preflight_status in {"pass", "warn", "block", "required"} else "required"
     receipt = {
         "available": True,
@@ -272,6 +322,7 @@ def action_policy_receipt(
         "approval_gates": gates,
         "prompt_preflight_status": preflight,
         "model_route_hint": hint,
+        "model_route_resolution": route_resolution,
         "metadata_only": True,
         "local_only": True,
     }

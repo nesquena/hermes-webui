@@ -469,6 +469,32 @@
     return labelByHint[hint] + ' · ' + provider + ' · ' + model;
   }
 
+  function safeModelRouteResolutionLabel(value){
+    const normalized = String(value == null ? '' : value).trim().toLowerCase().replace(/[_-]+/g, ' ');
+    if (normalized === 'configured') return 'configured';
+    if (normalized === 'default fallback') return 'default fallback';
+    return '';
+  }
+
+  function safeModelRouteFallbackReasonLabel(value){
+    const normalized = String(value == null ? '' : value).trim().toLowerCase().replace(/[_-]+/g, ' ');
+    if (normalized === 'unsafe config') return 'unsafe config';
+    if (normalized === 'unknown hint') return 'unknown hint';
+    if (normalized === 'unconfigured hint') return 'unconfigured hint';
+    return '';
+  }
+
+  function safeSelectedModelRouteResolution(route, selectedHint){
+    const routeText = safeSelectedModelRoutePreview(route, selectedHint);
+    if (!routeText) return null;
+    const resolution = safeModelRouteResolutionLabel(route && route.resolution);
+    const fallbackReason = safeModelRouteFallbackReasonLabel(route && route.fallback_reason);
+    const details = [];
+    if (resolution) details.push(resolution);
+    if (fallbackReason) details.push(fallbackReason);
+    return { route: routeText, details: details.join(' · ') };
+  }
+
   function safeNonNegativeCount(value){
     const num = Number(value || 0);
     if (!Number.isFinite(num) || num < 0) return 0;
@@ -1130,7 +1156,9 @@
     const gates = safePolicyGateLabels(data.approval_gates);
     const promptStatus = safeDisplayMetadataText(data.prompt_preflight_status || 'required', 'required') || 'required';
     const routeHint = safeModelRouteHint(data.model_route_hint || '');
-    const selectedRoute = safeSelectedModelRoutePreview(data.model_route, routeHint);
+    const routeResolution = safeSelectedModelRouteResolution(data.model_route_resolution, routeHint);
+    const selectedRoute = routeResolution && routeResolution.route ? routeResolution.route : safeSelectedModelRoutePreview(data.model_route, routeHint);
+    const routeResolutionDetails = routeResolution && routeResolution.details ? routeResolution.details : '';
     const action = safeProgressPublicId(data.action || '');
     const flags = [];
     if (data.metadata_only === true) flags.push('metadata-only');
@@ -1141,6 +1169,7 @@
       '<div class="capy-spaces-muted">Gates: '+escapeHtml(gates.join(', '))+'</div>' +
       (routeHint ? '<div class="capy-spaces-muted">Model route hint: '+escapeHtml(routeHint)+'</div>' : '') +
       (selectedRoute ? '<div class="capy-spaces-muted">Model route: '+escapeHtml(selectedRoute)+'</div>' : '') +
+      (routeResolutionDetails ? '<div class="capy-spaces-muted">Route resolution: '+escapeHtml(routeResolutionDetails)+'</div>' : '') +
       (flags.length ? '<div class="capy-spaces-muted">'+escapeHtml(flags.join(' · '))+'</div>' : '') +
       '</div>';
   }

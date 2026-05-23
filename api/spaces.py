@@ -9057,6 +9057,29 @@ def _action_policy_receipt_metadata_summary(receipt: dict[str, Any]) -> dict[str
                 "resolved_model": route_model,
                 "metadata_only": True,
             }
+    raw_route_resolution = receipt.get("model_route_resolution") if isinstance(receipt.get("model_route_resolution"), dict) else None
+    if raw_route_resolution and raw_route_resolution.get("metadata_only") is True:
+        from api.capy_policy import safe_model_route_field
+
+        route_hint = safe_model_route_field(raw_route_resolution.get("hint"))
+        route_label = safe_model_route_field(raw_route_resolution.get("label"))
+        route_provider = safe_model_route_field(raw_route_resolution.get("resolved_provider"))
+        route_model = safe_model_route_field(raw_route_resolution.get("resolved_model"))
+        route_resolution = str(raw_route_resolution.get("resolution") or "").strip().lower()
+        fallback_reason = str(raw_route_resolution.get("fallback_reason") or "").strip().lower()
+        if route_hint and route_label and route_provider and route_model and route_resolution in {"configured", "default_fallback"}:
+            model_route_resolution = {
+                "hint": route_hint,
+                "label": route_label,
+                "resolved_provider": route_provider,
+                "resolved_model": route_model,
+                "resolution": route_resolution,
+                "metadata_only": True,
+                "local_only": bool(raw_route_resolution.get("local_only")),
+            }
+            if fallback_reason in {"unsafe_config", "unknown_hint", "unconfigured_hint"}:
+                model_route_resolution["fallback_reason"] = fallback_reason
+            summary["model_route_resolution"] = model_route_resolution
     return summary
 
 
