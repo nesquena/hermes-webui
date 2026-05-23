@@ -11,9 +11,15 @@
     server.py itself runs cleanly on native Windows.
 
     Assumes Python + hermes-agent + the WebUI Python deps are already
-    installed - same assumption start.sh makes when invoked outside
-    a fresh bootstrap. For first-time setup, run bootstrap.py inside
-    WSL2 once to create the venv, then this script can use that venv.
+    installed natively on Windows - same assumption start.sh makes
+    when invoked outside a fresh bootstrap. For first-time setup, the
+    native Windows path is to install Python 3.11+, then create a
+    Windows venv (`python -m venv venv`) and `pip install -r
+    requirements.txt` from the hermes-agent root in PowerShell - this
+    script then finds `venv\Scripts\python.exe` automatically. A venv
+    created inside WSL2 is a Linux virtual environment (`venv/bin/python`)
+    and cannot be used by native Windows Python, so the bootstrap.py-
+    inside-WSL2 path produces a venv `start.ps1` can't invoke.
 
 .PARAMETER Port
     TCP port the WebUI binds to. Overrides HERMES_WEBUI_PORT env.
