@@ -2259,18 +2259,22 @@ def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
             aux_cfg = config_data.get("auxiliary", {})
             if not isinstance(aux_cfg, dict):
                 aux_cfg = {}
-            entry = {"provider": provider or "auto", "model": model or ""}
-            if provider and (provider.startswith("custom:") or provider == "custom"):
-                # Resolve base_url only for custom providers — never silently
-                # rewrite the user's chosen provider from the dropdown.
-                try:
-                    _, _, resolved_base_url = resolve_model_provider(model)
-                    if resolved_base_url:
-                        entry["base_url"] = str(resolved_base_url).strip().rstrip("/")
-                except Exception:
-                    pass
-            aux_cfg[task] = entry
-            config_data["auxiliary"] = aux_cfg
+        slot_cfg = aux_cfg.get(task, {})
+        if not isinstance(slot_cfg, dict):
+            slot_cfg = {}
+        slot_cfg["provider"] = provider or "auto"
+        slot_cfg["model"] = model or ""
+        if provider and (provider.startswith("custom:") or provider == "custom"):
+            # Resolve base_url only for custom providers — never silently
+            # rewrite the user's chosen provider from the dropdown.
+            try:
+                _, _, resolved_base_url = resolve_model_provider(model)
+                if resolved_base_url:
+                    slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+            except Exception:
+                pass
+        aux_cfg[task] = slot_cfg
+        config_data["auxiliary"] = aux_cfg
 
         _save_yaml_config_file(config_path, config_data)
 
