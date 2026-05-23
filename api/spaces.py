@@ -5788,6 +5788,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         read_space_detail(space_id)
         widget_payload, omitted_count = _space_tool_render_widget_payload(data)
+        prompt_preflight = _space_widget_render_prompt_preflight_receipt(
+            widget_payload,
+            data,
+            omitted_count=omitted_count,
+        )
+        if prompt_preflight.get("status") != "pass":
+            raise ValueError("Widget preview prompt preflight blocked")
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.blueprint.preview")
         widget_detail = _space_tool_preview_widget_detail(widget_payload)
         preview_metadata = widget_payload.get("metadata") if isinstance(widget_payload.get("metadata"), dict) else {}
         if preview_metadata:
@@ -5803,6 +5811,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 "executed": False,
                 "omitted_field_count": omitted_count,
             },
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_widget_mutation_action_policy_receipt("space.widget.blueprint", prompt_preflight),
+            "progress_event": progress_event,
         }
     if name == "space.spaces.renderwidget":
         _space_tool_reject_ambient_current_selectors(data)
@@ -9386,6 +9397,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "widget.delete",
         "widget.patch",
         "widget.blueprint.create",
+        "widget.blueprint.preview",
         "widget.render",
         "widget.upsert",
     }:

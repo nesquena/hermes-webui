@@ -26,16 +26,20 @@ Decision summary:
 
 Roadmap priority for upcoming autonomous sprints:
 
-1. Remaining prompt-preflight + advisory memory enforcement for high-risk browser/development/recovery/tool boundaries; creator preview/commit, active-space instruction/context, save-meta instruction writes, repair prompt, widget-runtime prompt queue/status UI, source-refresh worker/manual refresh paths, camera streams, package export, and recovery revision restore now have initial metadata-only receipts.
+1. Remaining prompt-preflight + advisory memory enforcement for high-risk browser/development/recovery/tool boundaries; creator preview/commit, active-space instruction/context, save-meta instruction writes, repair prompt, widget-runtime prompt queue/status UI, source-style widget blueprint preview/source helpers, source-refresh worker/manual refresh paths, camera streams, package export, and recovery revision restore now have initial metadata-only receipts.
 2. Product-visible compaction evidence for remaining long tool/subagent/browser/development/recovery outputs; run-all, individual demos, creator preview/commit, active context, and scoped progress already use the first receipt pattern.
 3. Broaden safe source-refresh scheduler/cron coverage and source-specific fetchers now that the metadata-only refresh worker, manual trigger path, and local knowledge bridge exist.
-4. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, the demo smoke suite, individual browser demo smokes, source-style layout-repair progress events with companion action-policy receipts, active-context tool calls, shared data slot set/delete actions, source-style widget upsert/renderWidget actions, source-style Space deletions, recovery widget enable/disable toggles, recovery revision restores, and Space Agent package import/export operations now emit the first workflow/gate/ingest/run/repair/browser/cooperation/construction/recovery/package events, and Space detail can inspect Space-scoped streams.
+4. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, the demo smoke suite, individual browser demo smokes, source-style layout-repair progress events with companion action-policy receipts, active-context tool calls, shared data slot set/delete actions, source-style widget upsert/renderWidget/blueprint preview actions, source-style Space deletions, recovery widget enable/disable toggles, recovery revision restores, and Space Agent package import/export operations now emit the first workflow/gate/ingest/run/repair/browser/cooperation/construction/recovery/package events, and Space detail can inspect Space-scoped streams.
 5. Model-route invocation plumbing; action-policy receipts now include safe metadata-only `model_route_resolution` decisions and fallback reasons, while actual Capy/Hermes invocation selection still needs wiring.
 6. Optional connector catalog/sidecar exploration only after the remaining integration slices above are proven end-to-end.
 
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
 
 Recent completed slices:
+
+- `feat(spaces): gate widget preview blueprints`
+  - Added RED/GREEN backend coverage proving `space.spaces.previewWidgetRecord` now returns metadata-only prompt-preflight, autonomy-policy, and structured progress receipts before exposing a non-persisted widget blueprint preview.
+  - Added hostile prompt-injection coverage proving preview blueprints fail closed before widget persistence or progress-event recording, while renderer/html/script/source/API-auth/raw-prompt and secret-looking fixture text stay omitted from errors and serialized responses.
 
 - `feat(spaces): resolve model route receipts`
   - Added RED/GREEN backend coverage for safe configured route decisions, unsafe route fallback, credential-only route fallback, unknown-hint fallback, and metadata-only leak prevention in `resolve_model_route_hint(...)` / `action_policy_receipt(...)`.
