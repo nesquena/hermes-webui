@@ -6457,6 +6457,7 @@ def create_space_checkpoint(space_id: str, *, reason: Any = "manual checkpoint")
         "reason": reason_text,
     }
     saved = _write_manifest(space, "space.checkpointed", details)
+    progress_event = _record_space_tool_progress_event(sid, run_prefix="checkpoint")
     return {
         "ok": True,
         "space_id": sid,
@@ -6465,6 +6466,8 @@ def create_space_checkpoint(space_id: str, *, reason: Any = "manual checkpoint")
         "generated_widgets_rendered": False,
         "reason": reason_text,
         "revision_event_id": saved["revision_event_id"],
+        "autonomy_policy": _recovery_restore_action_policy_receipt("space.checkpoint"),
+        "progress_event": progress_event,
     }
 
 
@@ -9230,6 +9233,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
     sid = validate_space_id(space_id)
     safe_prefix = str(run_prefix or "tool").strip().lower()
     if safe_prefix not in {
+        "checkpoint",
         "context",
         "package.export",
         "package.import",

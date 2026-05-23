@@ -366,6 +366,16 @@ def test_space_checkpoint_tool_creates_metadata_only_revision_anchor(monkeypatch
     assert result["generated_widgets_rendered"] is False
     assert result["revision_event_id"]
     assert result["revision_event_id"] not in before_revisions
+    assert result["autonomy_policy"]["action"] == "space.checkpoint"
+    assert result["autonomy_policy"]["metadata_only"] is True
+    assert result["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
+    assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert result["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert result["progress_event"]["event_type"] == "tool.completed"
+    assert result["progress_event"]["family"] == "tool"
+    assert result["progress_event"]["run_id"] == f"checkpoint:{created['space_id']}"
+    assert result["progress_event"]["space_id"] == created["space_id"]
+    assert result["progress_event"]["redaction_status"] == "metadata_only"
 
     loaded = spaces.read_space(created["space_id"])
     assert loaded["revision_event_id"] == result["revision_event_id"]
