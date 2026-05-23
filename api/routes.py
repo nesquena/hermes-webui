@@ -6,6 +6,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 import html as _html
 import copy
 import io
+import gzip
 import json
 import logging
 import os
@@ -6229,6 +6230,19 @@ _STATIC_MIME = {
 # MIME types that are text-based and should carry charset=utf-8
 _TEXT_MIME_TYPES = {"text/css", "application/javascript", "text/html", "image/svg+xml", "text/plain"}
 
+# MIME types worth gzipping. Image and font formats (png/jpg/webp/woff2) are
+# already compressed; gzip would only add CPU and a few bytes of framing.
+_COMPRESSIBLE_MIME = {
+    "text/css", "application/javascript", "text/html", "image/svg+xml",
+    "application/json", "text/plain",
+}
+
+# In-process cache for compressed bytes + ETag, invalidated on (mtime, size)
+# change so a redeploy is picked up without a process restart. Memory cost is
+# bounded by the static/ tree (~3 MB raw + ~600 KB gzipped).
+_STATIC_CACHE: dict = {}
+_STATIC_CACHE_LOCK = threading.Lock()
+
 
 def _serve_static(handler, parsed):
     static_root = (Path(__file__).parent.parent / "static").resolve()
@@ -6241,16 +6255,63 @@ def _serve_static(handler, parsed):
         return j(handler, {"error": "not found"}, status=404)
     if not static_file.exists() or not static_file.is_file():
         return j(handler, {"error": "not found"}, status=404)
+
     ext = static_file.suffix.lower()
     ct = _STATIC_MIME.get(ext.lstrip("."), "text/plain")
     ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
+
+    # Look up or populate the per-file cache (raw, optional gzip, ETag).
+    # Keyed by absolute path; invalidated by (mtime, size).
+    st = static_file.stat()
+    sig = (st.st_size, int(st.st_mtime))
+    cache_key = str(static_file)
+    raw = gz = etag = None
+    with _STATIC_CACHE_LOCK:
+        cached = _STATIC_CACHE.get(cache_key)
+        if cached and cached[0] == sig:
+            _, raw, gz, etag = cached
+    if raw is None:
+        raw = static_file.read_bytes()
+        # Weak ETag: equality semantics, derived from filesystem identity.
+        etag = f'W/"{sig[0]:x}-{sig[1]:x}"'
+        gz = (gzip.compress(raw, compresslevel=6)
+              if ct in _COMPRESSIBLE_MIME and len(raw) > 1024
+              else None)
+        with _STATIC_CACHE_LOCK:
+            _STATIC_CACHE[cache_key] = (sig, raw, gz, etag)
+
+    # The page template substitutes __WEBUI_VERSION__ at request time (see the
+    # `/`/`/index.html`/`/session/` branch above), and static/sw.js's
+    # SHELL_ASSETS list relies on the same convention. So a fingerprinted URL
+    # is safe to cache aggressively: any redeploy changes the URL.
+    has_fingerprint = "v" in parse_qs(parsed.query)
+    cache_control = (
+        "public, max-age=31536000, immutable" if has_fingerprint
+        else "public, max-age=300"
+    )
+
+    # 304 short-circuit on conditional GET.
+    if handler.headers.get("If-None-Match") == etag:
+        handler.send_response(304)
+        handler.send_header("ETag", etag)
+        handler.send_header("Cache-Control", cache_control)
+        handler.end_headers()
+        return True
+
+    accept_enc = (handler.headers.get("Accept-Encoding") or "").lower()
+    use_gzip = gz is not None and "gzip" in accept_enc
+    body = gz if use_gzip else raw
+
     handler.send_response(200)
     handler.send_header("Content-Type", ct_header)
-    handler.send_header("Cache-Control", "no-store")
-    raw = static_file.read_bytes()
-    handler.send_header("Content-Length", str(len(raw)))
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("ETag", etag)
+    handler.send_header("Cache-Control", cache_control)
+    if use_gzip:
+        handler.send_header("Content-Encoding", "gzip")
+        handler.send_header("Vary", "Accept-Encoding")
     handler.end_headers()
-    handler.wfile.write(raw)
+    handler.wfile.write(body)
     return True
 
 
