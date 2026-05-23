@@ -98,6 +98,8 @@
     return '<div class="capy-spaces-card" role="status"><h3>'+escapeHtml(title)+'</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(spaceName)+' · '+escapeHtml(widgetLabel)+' · safe metadata-only install</div>' +
       (widgetItems ? '<ul>'+widgetItems+'</ul>' : '') + actions +
+      renderPromptPreflightEvidence(result && result.prompt_preflight) +
+      renderActionPolicyEvidence(result && result.autonomy_policy) +
       '</div>';
   }
 

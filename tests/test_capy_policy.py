@@ -39,6 +39,7 @@ def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
                 "memory_context",
                 "active_space_instructions",
                 "shared_data_slot",
+                "browser_surface",
             ],
         },
         "model_routing": {

@@ -14662,6 +14662,15 @@ def test_install_browser_surface_template_creates_safe_browser_widgets(monkeypat
     controls_widget = spaces.read_widget(installed["space"]["space_id"], "browser-controls")
     assert controls_widget["actions"] == ["open_url", "snapshot", "click_ref", "type_ref"]
     assert controls_widget["permissions"] == {"network": "explicit-approval", "browser_control": "agent-mediated"}
+    assert installed["prompt_preflight"]["boundary"] == "browser_surface"
+    assert installed["prompt_preflight"]["status"] == "pass"
+    assert installed["prompt_preflight"]["metadata_only"] is True
+    assert installed["prompt_preflight"]["raw_prompt_stored"] is False
+    assert installed["autonomy_policy"]["action"] == "space.template.install.browser_surface"
+    assert installed["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    assert installed["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert installed["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert installed["autonomy_policy"]["metadata_only"] is True
     serialized = json.dumps(installed).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized
@@ -14683,6 +14692,11 @@ def test_browser_surface_template_install_route_returns_safe_metadata(monkeypatc
     assert body["space"]["name"] == "Browser Surface"
     assert body["installed_widgets"][0]["id"] == "browser-panel"
     assert len(body["installed_widgets"]) == 3
+    assert body["prompt_preflight"]["boundary"] == "browser_surface"
+    assert body["prompt_preflight"]["status"] == "pass"
+    assert body["autonomy_policy"]["action"] == "space.template.install.browser_surface"
+    assert body["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    assert body["autonomy_policy"]["prompt_preflight_status"] == "pass"
     serialized = json.dumps(body).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized

@@ -55,6 +55,7 @@ _PROTECTED_BOUNDARIES = [
     "memory_context",
     "active_space_instructions",
     "shared_data_slot",
+    "browser_surface",
 ]
 
 _MODEL_HINT_ORDER = [

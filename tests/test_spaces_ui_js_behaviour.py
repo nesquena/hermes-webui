@@ -1807,6 +1807,8 @@ global.fetch = async function(path, opts = {}) {
       return response({
         template: 'browser',
         space: { space_id: 'browser-surface', name: 'Browser Surface', description: 'Inspectable browser panel starter', widget_count: 3, revision_event_id: 'rev-browser' },
+        prompt_preflight: { available: true, action: 'capy.prompt_preflight', boundary: 'browser_surface', status: 'pass', severity: 'none', categories: [], metadata_only: true, raw_prompt_stored: false, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        autonomy_policy: { available: true, action: 'space.template.install.browser_surface', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['destructive_external_action'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
         installed_widgets: [
           { id: 'browser-panel', kind: 'browser-surface', title: 'Shared browser panel', layout: { x: 0, y: 0, w: 16, h: 10, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
           { id: 'browser-controls', kind: 'browser-controls', title: 'Agent controls', layout: { x: 16, y: 0, w: 8, h: 5, minimized: false } },
@@ -5204,6 +5206,12 @@ def test_spaces_ui_install_browser_surface_posts_template_and_shows_safe_open_ma
     assert "Open browser surface" in out["rootHtml"]
     assert "Manage browser widgets" in out["rootHtml"]
     assert "Run browser smoke" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "browser_surface" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "space.template.install.browser_surface" in out["rootHtml"]
+    assert "Destructive action approval" in out["rootHtml"]
+    assert "Status: pass" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="browser-surface"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="browser-surface"' in out["rootHtml"]
     assert 'data-capy-action="runDemoSmoke" data-demo="demo_browser_cocontrol_google_or_test_site"' in out["rootHtml"]

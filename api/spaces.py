@@ -608,6 +608,26 @@ def _recovery_restore_action_policy_receipt(action: str = "space.recovery.restor
     )
 
 
+def _browser_surface_template_prompt_preflight_receipt() -> dict[str, Any]:
+    from api.capy_policy import prompt_preflight
+
+    return prompt_preflight(
+        "Install browser surface template with explicit user approval required for navigation and browser control.",
+        boundary="browser_surface",
+    )
+
+
+def _browser_surface_template_action_policy_receipt(preflight_receipt: dict[str, Any]) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        "space.template.install.browser_surface",
+        approval_gates=["destructive_external_action"],
+        prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
+        model_route_hint="hint:reasoning",
+    )
+
+
 def _space_dir(space_id: str) -> Path:
     sid = validate_space_id(space_id)
     root = manifests_dir().resolve()
@@ -8558,11 +8578,16 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
 
     for widget in widgets:
         upsert_widget(space["space_id"], widget)
-    return {
+    result = {
         "template": response_template,
         "space": read_space_detail(space["space_id"]),
         "installed_widgets": list_widgets(space["space_id"]),
     }
+    if response_template == "browser":
+        preflight_receipt = _browser_surface_template_prompt_preflight_receipt()
+        result["prompt_preflight"] = preflight_receipt
+        result["autonomy_policy"] = _browser_surface_template_action_policy_receipt(preflight_receipt)
+    return result
 
 
 def reset_template(template: str, *, space_id: str | None = None) -> dict[str, Any]:
