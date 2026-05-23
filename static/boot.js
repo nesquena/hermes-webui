@@ -959,6 +959,7 @@ $('modelSelect').onchange=async()=>{
   S.session.model=modelState.model;
   S.session.model_provider=modelState.model_provider||null;
   if(typeof syncModelChip==='function') syncModelChip();
+  if(typeof syncReasoningChip==='function') syncReasoningChip();
   syncTopbar();
   // Clarify scope: composer model changes are session-local, not the global default.
   if(typeof showToast==='function'){

@@ -181,8 +181,8 @@ class TestReasoningCommandUpdatesChip:
         )
         assert m, "cmdReasoning not found in commands.js"
         fn = m.group(0)
-        assert "_applyReasoningChip(eff)" in fn, (
-            "cmdReasoning must call _applyReasoningChip(eff) with the "
+        assert "_applyReasoningChip(eff," in fn, (
+            "cmdReasoning must call _applyReasoningChip(eff, st) with the "
             "server-confirmed effort from the /api/reasoning POST response"
         )
 

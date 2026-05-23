@@ -1455,7 +1455,7 @@ function renderModelDropdown(){
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
         row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-        row.onclick=()=>selectModelFromDropdown(m.value);
+        row.onclick=()=>selectModelFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
     }
@@ -1494,7 +1494,7 @@ function renderModelDropdown(){
       // Inline provider chip on every row that has a group (#1425)
       const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
       row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-      row.onclick=()=>selectModelFromDropdown(m.value);
+      row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
       dd.appendChild(row);
     }
     // Show "No results" if filtered and nothing matched
@@ -1531,25 +1531,24 @@ function renderModelDropdown(){
   _filterModels('');
 }
 
-async function selectModelFromDropdown(value){
+async function selectModelFromDropdown(value, preferredProviderId){
   const sel=$('modelSelect');
-  if(!sel||sel.value===value) { closeModelDropdown(); return; }
-  // If the value isn't in the option list (custom model ID), add a temporary option
-  // so sel.value assignment succeeds and the model chip shows the custom ID.
-  if(!Array.from(sel.options).some(o=>o.value===value)){
-    const opt=document.createElement('option');
-    opt.value=value;
-    opt.textContent=getModelLabel(value);
-    opt.dataset.custom='1';
-    const badge=(window._configuredModelBadges||{})[value];
-    if(badge&&badge.provider) opt.dataset.provider=badge.provider;
-    // Remove any previous custom option before adding new one
-    sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
-    sel.appendChild(opt);
+  if(!sel) { closeModelDropdown(); return; }
+  const provider=String(preferredProviderId||'').trim()||null;
+  const currentState=(typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel, sel.value)
+    : {model:sel.value,model_provider:null};
+  const sameModel=String(currentState.model||'')===String(value||'');
+  const sameProvider=String(currentState.model_provider||'')===String(provider||'');
+  if(sameModel&&sameProvider){ closeModelDropdown(); return; }
+  // Resolve the provider-specific option so duplicate bare IDs (e.g. gpt-5.5
+  // under OpenAI Codex vs OpenRouter) update session model_provider correctly.
+  if(typeof _ensureModelOptionInDropdown==='function'){
+    _ensureModelOptionInDropdown(value, sel, provider);
+  }else{
+    sel.value=value;
   }
-  sel.value=value;
   syncModelChip();
-  if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   closeModelDropdown();
   if(typeof sel.onchange==='function') await sel.onchange();
 }
@@ -1622,7 +1621,10 @@ function _formatReasoningEffortLabel(effort){
 function _reasoningEffortQuery(){
   const sel=$('modelSelect');
   const model=(S&&S.session&&S.session.model)||(sel&&sel.value)||'';
-  const provider=(S&&S.session&&S.session.model_provider)||'';
+  let provider=(S&&S.session&&S.session.model_provider)||'';
+  if(!provider&&sel&&model&&typeof _modelStateForSelect==='function'){
+    provider=_modelStateForSelect(sel, model).model_provider||'';
+  }
   const params=new URLSearchParams();
   if(model) params.set('model', model);
   if(provider) params.set('provider', provider);
