@@ -3486,6 +3486,8 @@ function renderSessionListFromCache(){
     wrapper.className='session-index-project-group';
     const hdr=document.createElement('div');
     hdr.className='session-index-project-header';
+    const projectToggle=document.createElement('div');
+    projectToggle.className='session-index-project-disclosure';
     const caret=document.createElement('span');
     caret.className='session-date-caret';
     caret.textContent='\u25BE';
@@ -3508,17 +3510,18 @@ function renderSessionListFromCache(){
       e.stopPropagation();
       void newSession(true,{workspace:group.workspace,workspace_group:'workspace'});
     };
-    hdr.appendChild(caret);hdr.appendChild(folder);hdr.appendChild(name);hdr.appendChild(count);hdr.appendChild(add);
-    hdr.setAttribute('role','button');
-    hdr.tabIndex=0;
-    hdr.setAttribute('aria-expanded',collapsed?'false':'true');
-    hdr.onkeydown=_handleSidebarDisclosureKeydown;
-    hdr.onclick=()=>{
+    projectToggle.appendChild(caret);projectToggle.appendChild(folder);projectToggle.appendChild(name);projectToggle.appendChild(count);
+    projectToggle.setAttribute('role','button');
+    projectToggle.tabIndex=0;
+    projectToggle.setAttribute('aria-expanded',collapsed?'false':'true');
+    projectToggle.onkeydown=_handleSidebarDisclosureKeydown;
+    projectToggle.onclick=()=>{
       const state=_sessionIndexProjectsCollapsed();
       state[groupId]=!collapsed;
       _saveSessionIndexProjectsCollapsed(state);
       renderSessionListFromCache();
     };
+    hdr.appendChild(projectToggle);hdr.appendChild(add);
     wrapper.appendChild(hdr);
     const body=document.createElement('div');
     body.className='session-index-project-body';

@@ -9,10 +9,14 @@ caches in sync until the next `/api/session-index` refresh.
 
 from pathlib import Path
 import json
+import shutil
 import subprocess
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 SESSIONS_SRC = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 def _show_project_picker_body() -> str:
@@ -78,6 +82,8 @@ def test_cache_write_makes_render_observe_new_project_id():
     branch and confirm both the legacy list cache and the grouped render cache
     reflect the new project_id.
     """
+    if NODE is None:
+        pytest.skip("node not on PATH")
     script = """
 let _allSessions = [
   {session_id: 'sa', project_id: 'proj-old', title: 'A'},
@@ -112,7 +118,7 @@ console.log(JSON.stringify({
 }));
 """
     result = subprocess.run(
-        ["node", "-e", script], check=True, capture_output=True, text=True
+        [NODE, "-e", script], check=True, capture_output=True, text=True
     )
     observed = json.loads(result.stdout)
     expected = [

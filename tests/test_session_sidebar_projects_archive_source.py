@@ -150,7 +150,22 @@ def test_project_and_archive_headers_are_keyboard_accessible():
     assert "e.key==='Enter'||e.key===' '||e.key==='Spacebar'" in handler
     assert "e.preventDefault()" in handler
     assert "e.currentTarget.click()" in handler
-    assert body.count("hdr.setAttribute('role','button')") >= 2
-    assert body.count("hdr.tabIndex=0") >= 2
-    assert body.count("hdr.setAttribute('aria-expanded',collapsed?'false':'true')") >= 2
-    assert body.count("hdr.onkeydown=_handleSidebarDisclosureKeydown") >= 2
+    assert "hdr.setAttribute('role','button')" in body
+    assert "hdr.tabIndex=0" in body
+    assert "hdr.setAttribute('aria-expanded',collapsed?'false':'true')" in body
+    assert "hdr.onkeydown=_handleSidebarDisclosureKeydown" in body
+    assert "projectToggle.setAttribute('role','button')" in body
+    assert "projectToggle.tabIndex=0" in body
+    assert "projectToggle.setAttribute('aria-expanded',collapsed?'false':'true')" in body
+    assert "projectToggle.onkeydown=_handleSidebarDisclosureKeydown" in body
+
+
+def test_project_new_button_is_not_nested_inside_disclosure_control():
+    js = _js()
+    body = _function_body(js, "renderSessionListFromCache")
+
+    assert "const projectToggle=document.createElement('div')" in body
+    assert "projectToggle.className='session-index-project-disclosure'" in body
+    assert "projectToggle.appendChild(caret);projectToggle.appendChild(folder);projectToggle.appendChild(name);projectToggle.appendChild(count)" in body
+    assert "hdr.appendChild(projectToggle);hdr.appendChild(add)" in body
+    assert "hdr.appendChild(caret);hdr.appendChild(folder);hdr.appendChild(name);hdr.appendChild(count);hdr.appendChild(add)" not in body
