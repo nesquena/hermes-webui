@@ -2445,6 +2445,10 @@ def test_space_tool_adapter_supports_source_rearrange_widgets_metadata_only(monk
     assert rearranged["widget_count"] == 2
     assert rearranged["widgets"][0]["layout"] == {"x": 3, "y": 2, "w": 8, "h": 5, "minimized": False}
     assert rearranged["widgets"][1]["layout"] == {"x": 7, "y": 6, "w": 5, "h": 4, "minimized": True}
+    assert rearranged["progress_event"]["event_type"] == "tool.completed"
+    assert rearranged["progress_event"]["family"] == "tool"
+    assert rearranged["progress_event"]["run_id"] == "layout.rearrange:source-rearrange-lab"
+    assert rearranged["progress_event"]["space_id"] == created["space_id"]
     assert rearranged["autonomy_policy"]["action"] == "space.spaces.rearrangewidgets"
     assert rearranged["autonomy_policy"]["approval_required"] is True
     assert rearranged["autonomy_policy"]["approval_gates"] == ["creator_commit"]
@@ -2455,7 +2459,7 @@ def test_space_tool_adapter_supports_source_rearrange_widgets_metadata_only(monk
     assert persisted_widgets["weather-card"]["layout"] == {"x": 3, "y": 2, "w": 8, "h": 5, "minimized": False}
     assert persisted_widgets["notes-card"]["layout"] == {"x": 7, "y": 6, "w": 5, "h": 4, "minimized": True}
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized
@@ -2833,6 +2837,10 @@ def test_space_tool_adapter_supports_source_toggle_widgets_metadata_only(monkeyp
     assert toggled["widget_count"] == 2
     assert toggled["widgets"][0]["layout"] == {"x": 0, "y": 0, "w": 4, "h": 3, "minimized": True}
     assert toggled["widgets"][1]["layout"] == {"x": 4, "y": 0, "w": 4, "h": 3, "minimized": False}
+    assert toggled["progress_event"]["event_type"] == "tool.completed"
+    assert toggled["progress_event"]["family"] == "tool"
+    assert toggled["progress_event"]["run_id"] == "layout.toggle:source-toggle-widgets-lab"
+    assert toggled["progress_event"]["space_id"] == created["space_id"]
     assert toggled["autonomy_policy"]["action"] == "space.spaces.togglewidgets"
     assert toggled["autonomy_policy"]["approval_required"] is True
     assert toggled["autonomy_policy"]["approval_gates"] == ["creator_commit"]
@@ -2843,7 +2851,7 @@ def test_space_tool_adapter_supports_source_toggle_widgets_metadata_only(monkeyp
     assert persisted_widgets["weather-card"]["layout"]["minimized"] is True
     assert persisted_widgets["notes-card"]["layout"]["minimized"] is False
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized

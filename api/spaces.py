@@ -5535,6 +5535,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             result = patch_widget(space_id, widget_id, {"layout": layout})
             revision_event_ids.append(result["revision_event_id"])
             saved_widgets.append(read_widget_detail(space_id, widget_id))
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.rearrange")
         return {
             "ok": True,
             "action": name,
@@ -5544,6 +5545,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widget_count": len(saved_widgets),
             "revision_event_ids": revision_event_ids,
             "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "progress_event": progress_event,
         }
     if name in {"space.spaces.removespace", "space.spaces.deletespace"}:
         _space_tool_reject_ambient_current_selectors(data)
@@ -5705,6 +5707,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             result = patch_widget(space_id, widget_id, {"layout": layout})
             revision_event_ids.append(result["revision_event_id"])
             toggled_widgets.append(read_widget_detail(space_id, widget_id))
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.toggle")
         return {
             "ok": True,
             "action": name,
@@ -5715,6 +5718,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widget_count": len(toggled_widgets),
             "revision_event_ids": revision_event_ids,
             "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "progress_event": progress_event,
         }
     if name in {"space.spaces.deletewidget", "space.spaces.removewidget", "space.current.deletewidget", "space.current.removewidget"}:
         if not name.startswith("space.current."):
@@ -9149,6 +9153,8 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "package.export",
         "package.import",
         "repair",
+        "layout.rearrange",
+        "layout.toggle",
         "recovery.disable",
         "recovery.enable",
         "recovery.restore",
