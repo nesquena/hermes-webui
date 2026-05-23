@@ -91,20 +91,24 @@ if (-not $Python) {
 # that's about to crash on missing imports. Smoke-test feedback on
 # PR #2783: nesquena/hermes-webui requested this guard.
 $AgentDir = $env:HERMES_WEBUI_AGENT_DIR
-if ($AgentDir -and -not (Test-Path (Join-Path $AgentDir 'hermes_cli'))) {
+if ($AgentDir -and -not (Test-Path (Join-Path $AgentDir 'hermes_cli') -PathType Container)) {
     Write-Error "HERMES_WEBUI_AGENT_DIR is set to '$AgentDir' but no hermes_cli/ folder exists there. Unset the variable to fall back to auto-discovery, or fix the path."
     exit 1
 }
 if (-not $AgentDir) {
-    $candidates = @(
-        (Join-Path $env:USERPROFILE '.hermes\hermes-agent'),
-        (Join-Path $env:LOCALAPPDATA 'hermes\hermes-agent'),
-        (Join-Path ${env:ProgramFiles} 'hermes\hermes-agent'),
-        (Join-Path ${env:ProgramFiles(x86)} 'hermes\hermes-agent'),
-        (Join-Path (Split-Path -Parent $RepoRoot) 'hermes-agent')
-    )
+    # Build candidate list incrementally — ${env:ProgramFiles(x86)} is null on
+    # 32-bit Windows and in some constrained environments, and Join-Path throws
+    # on a null Path. Skip any system-wide root that isn't set so the launcher
+    # stays robust across Windows variants. USERPROFILE is always set so it
+    # stays unguarded; the dev-checkout sibling is path-derived, not env-based.
+    $candidates = @()
+    $candidates += (Join-Path $env:USERPROFILE '.hermes\hermes-agent')
+    foreach ($root in @($env:LOCALAPPDATA, ${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
+        if ($root) { $candidates += (Join-Path $root 'hermes\hermes-agent') }
+    }
+    $candidates += (Join-Path (Split-Path -Parent $RepoRoot) 'hermes-agent')
     foreach ($c in $candidates) {
-        if (Test-Path (Join-Path $c 'hermes_cli')) { $AgentDir = $c; break }
+        if (Test-Path (Join-Path $c 'hermes_cli') -PathType Container) { $AgentDir = $c; break }
     }
 }
 if (-not $AgentDir) {
