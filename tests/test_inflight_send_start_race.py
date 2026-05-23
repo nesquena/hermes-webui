@@ -78,6 +78,10 @@ def test_pre_start_optimistic_ui_helpers_cannot_block_chat_start():
     assert "try" in helper_body and "catch" in helper_body, (
         "optional pre-start UI helper wrapper must catch errors before /api/chat/start"
     )
+    assert "setStatus(`UI warning before send:" not in helper_body, (
+        "non-fatal pre-start UI helper failures should stay in the console; visible status flashes "
+        "look like real send errors even though /api/chat/start continues"
+    )
     assert "_runOptionalPreStartUiStep" in pre_start, (
         "send() should wrap optimistic sidebar/title/polling helpers before /api/chat/start"
     )
