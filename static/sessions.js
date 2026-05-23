@@ -2059,12 +2059,12 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
     if(idx>=0){
       const fetched=merged[idx]||{};
       const fetchedIsServerIdle=_isServerIdleSessionRow(fetched);
-      const keepLocalOptimistic=!fetchedIsServerIdle||_shouldKeepLocalOnlyOptimisticSessionRow(local);
+      const keepLocalOptimistic=fetchedIsServerIdle?false:_shouldKeepLocalOnlyOptimisticSessionRow(local);
       const localCount=Number(local.message_count||0);
       const fetchedCount=Number(fetched.message_count||0);
       const localTs=Number(local.last_message_at||local.updated_at||0);
       const fetchedTs=Number(fetched.last_message_at||fetched.updated_at||0);
-      if(!keepLocalOptimistic) _dropStaleOptimisticSessionRow(sid);
+      if(!keepLocalOptimistic&&typeof _dropStaleOptimisticSessionRow==='function') _dropStaleOptimisticSessionRow(sid);
       merged[idx]={
         ...local,
         ...fetched,
@@ -2072,10 +2072,10 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
         message_count:keepLocalOptimistic?Math.max(localCount,fetchedCount):fetchedCount,
         last_message_at:keepLocalOptimistic?Math.max(localTs,fetchedTs):fetchedTs,
         updated_at:keepLocalOptimistic?Math.max(Number(local.updated_at||0),Number(fetched.updated_at||0),localTs,fetchedTs):Number(fetched.updated_at||fetchedTs||0),
-        active_stream_id:keepLocalOptimistic?(fetched.active_stream_id||local.active_stream_id||null):null,
-        pending_user_message:keepLocalOptimistic?(fetched.pending_user_message||local.pending_user_message||null):null,
-        pending_started_at:keepLocalOptimistic?(fetched.pending_started_at||local.pending_started_at||null):null,
-        is_streaming:keepLocalOptimistic&&Boolean(fetched.is_streaming||local.is_streaming||_isSessionLocallyStreaming(local)),
+        active_stream_id:fetchedIsServerIdle?null:(keepLocalOptimistic?(fetched.active_stream_id||local.active_stream_id||null):null),
+        pending_user_message:fetchedIsServerIdle?null:(keepLocalOptimistic?(fetched.pending_user_message||local.pending_user_message||null):null),
+        pending_started_at:fetchedIsServerIdle?null:(keepLocalOptimistic?(fetched.pending_started_at||local.pending_started_at||null):null),
+        is_streaming:fetchedIsServerIdle?false:(keepLocalOptimistic&&Boolean(fetched.is_streaming||local.is_streaming||_isSessionLocallyStreaming(local))),
       };
     }else{
       if(_shouldKeepLocalOnlyOptimisticSessionRow(local)){
