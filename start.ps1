@@ -174,7 +174,13 @@ if (-not (Test-Path $serverPath)) {
 $script:serverExitCode = 0
 Push-Location $RepoRoot
 try {
-    & $Python $serverPath @args
+    # @args was non-functional here — PowerShell does NOT populate $args when the
+    # script declares [CmdletBinding()] with an explicit param() block (Copilot's
+    # finding on PR #2807). Dropped rather than added a ValueFromRemainingArguments
+    # parameter, because the existing tracked use case is the launcher running
+    # server.py with the env-var-driven config — no pass-through args are needed.
+    # If pass-through becomes a requirement later, add a [Parameter(ValueFromRemainingArguments=$true)] [string[]]$ServerArgs and splat that.
+    & $Python $serverPath
     $script:serverExitCode = $LASTEXITCODE
 } finally {
     Pop-Location
