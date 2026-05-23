@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Issue #2735** by @munim — "Open in VS Code" action in workspace file browser. Right-clicking any file, folder, or the workspace root now shows an **Open in VS Code** menu item alongside the existing Reveal in File Manager action. The action calls a new `POST /api/file/open-vscode` endpoint which resolves the workspace-relative path via `safe_resolve`, then launches VS Code via `subprocess.Popen` (fire-and-forget, consistent with `_handle_file_reveal`). The endpoint resolves the executable via `shutil.which()` first, then falls back to a hardcoded list of common install locations (macOS: `/usr/local/bin/code` and the app-bundle CLI; Linux: `/usr/bin/code`, `/snap/bin/code`; Windows: `%LOCALAPPDATA%\Programs\Microsoft VS Code\bin\code.cmd` and the `%PROGRAMFILES%` variants) so the action works even when the server process inherits a minimal PATH. Configurable via a new optional `vscode` block in `config.yaml`: `command` overrides the default `code` executable; `host_path_prefix` + `container_path_prefix` enable Docker/container host-path translation. If the command cannot be found anywhere, a descriptive error is returned instead of a bare OS error. i18n keys `open_in_vscode` and `open_in_vscode_failed` added with full translations in all 10 locales (it, ja, ru, es, de, zh-CN, zh-TW, pt, ko). New test file `tests/test_2735_open_in_vscode.py` (26 tests) pins source wiring, command-resolution logic, i18n completeness, translated strings, and live endpoint error paths.
+
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed

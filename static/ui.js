@@ -7918,6 +7918,12 @@ function _showWorkspaceRootContextMenu(e){
     catch(err){showToast(t('reveal_failed')+(err.message||err));}
   }));
 
+  menu.appendChild(_workspaceContextMenuItem(t('open_in_vscode'),async()=>{
+    menu.remove();
+    try{await api('/api/file/open-vscode',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});}
+    catch(err){showToast(t('open_in_vscode_failed')+(err.message||err));}
+  }));
+
   menu.appendChild(_workspaceContextMenuItem(t('copy_file_path'),async()=>{
     menu.remove();
     try{
@@ -8162,6 +8168,15 @@ function _showFileContextMenu(e, item){
   revealItem.onmouseleave=()=>revealItem.style.background='';
   revealItem.onclick=async()=>{menu.remove();try{await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});}catch(err){showToast(t('reveal_failed')+(err.message||err));}};
   menu.appendChild(revealItem);
+
+  // Open in VS Code (#2735)
+  const vscodeItem=document.createElement('div');
+  vscodeItem.textContent=t('open_in_vscode');
+  vscodeItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  vscodeItem.onmouseenter=()=>vscodeItem.style.background='var(--hover-bg)';
+  vscodeItem.onmouseleave=()=>vscodeItem.style.background='';
+  vscodeItem.onclick=async()=>{menu.remove();try{await api('/api/file/open-vscode',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});}catch(err){showToast(t('open_in_vscode_failed')+(err.message||err));}};
+  menu.appendChild(vscodeItem);
 
   // Copy file path — resolves the absolute on-disk path on the server (so the
   // user gets the full /home/.../workspace/foo.py rather than the relative

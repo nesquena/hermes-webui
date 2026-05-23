@@ -5447,6 +5447,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/file/path":
         return _handle_file_path(handler, body)
 
+    if parsed.path == "/api/file/open-vscode":
+        return _handle_file_open_vscode(handler, body)
+
     # ── Workspace management (POST) ──
     if parsed.path == "/api/workspaces/add":
         return _handle_workspace_add(handler, body)
@@ -9514,6 +9517,90 @@ def _handle_file_path(handler, body):
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         return j(handler, {"ok": True, "path": str(target)})
+    except (ValueError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+
+
+def _handle_file_open_vscode(handler, body):
+    """Open a workspace file or folder in VS Code (#2735).
+
+    Reads optional ``vscode`` config block from config.yaml:
+
+        vscode:
+          command: code          # executable on PATH; defaults to "code"
+          host_path_prefix: /home/user/projects       # Docker host path
+          container_path_prefix: /app/workspace       # matching container path
+
+    If ``host_path_prefix`` and ``container_path_prefix`` are both set,
+    paths that begin with ``container_path_prefix`` are translated to the
+    host prefix before being handed to VS Code.  This lets users running
+    Hermes WebUI inside Docker still open files in their local editor.
+    """
+    try:
+        require(body, "session_id", "path")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    try:
+        target = safe_resolve(Path(s.workspace), body["path"])
+        if not target.exists():
+            return bad(handler, f"File not found: {target}", 404)
+
+        target_str = str(target)
+
+        # Optional Docker host/container path translation
+        from api.config import get_config as _get_cfg  # noqa: PLC0415
+        vscode_cfg = _get_cfg().get("vscode", {})
+        if not isinstance(vscode_cfg, dict):
+            vscode_cfg = {}
+        container_prefix = vscode_cfg.get("container_path_prefix", "")
+        host_prefix = vscode_cfg.get("host_path_prefix", "")
+        if container_prefix and host_prefix and target_str.startswith(container_prefix):
+            target_str = host_prefix + target_str[len(container_prefix):]
+
+        cmd = vscode_cfg.get("command", "code")
+        # Resolve the command to an absolute path so subprocess.Popen finds it
+        # even when the server process inherits a minimal PATH (e.g. when
+        # launched via start.sh on macOS where /usr/local/bin may be absent).
+        resolved_cmd = shutil.which(cmd)
+        if resolved_cmd is None:
+            # Try common VS Code installation paths as fallback.
+            # macOS: /usr/local/bin/code (symlink) or app bundle CLI
+            # Linux: /usr/bin/code or snap
+            # Windows: user-install under %LOCALAPPDATA%, system-install under %PROGRAMFILES%
+            _local_app_data = os.environ.get("LOCALAPPDATA", "")
+            _prog_files = os.environ.get("PROGRAMFILES", "C:\\Program Files")
+            _prog_files_x86 = os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")
+            _vscode_fallbacks = [
+                # macOS
+                "/usr/local/bin/code",
+                "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code",
+                # Linux
+                "/usr/bin/code",
+                "/snap/bin/code",
+                # Windows (user install)
+                os.path.join(_local_app_data, "Programs", "Microsoft VS Code", "bin", "code.cmd"),
+                # Windows (system install)
+                os.path.join(_prog_files, "Microsoft VS Code", "bin", "code.cmd"),
+                os.path.join(_prog_files_x86, "Microsoft VS Code", "bin", "code.cmd"),
+            ]
+            for fb in _vscode_fallbacks:
+                if fb and Path(fb).exists():
+                    resolved_cmd = fb
+                    break
+        if resolved_cmd is None:
+            return bad(
+                handler,
+                f"VS Code command not found: {cmd!r}. "
+                "Install VS Code and ensure the 'code' CLI is on PATH, "
+                "or set vscode.command in config.yaml to the full path.",
+            )
+        subprocess.Popen([resolved_cmd, target_str])
+
+        return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
 
