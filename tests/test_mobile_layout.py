@@ -87,6 +87,56 @@ def _display_inline_flex(declarations):
     return declarations.get("display", "").replace(" ", "") in {"inline-flex", "inline-flex!important"}
 
 
+class _ElementRelationshipParser(HTMLParser):
+    _VOID_TAGS = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.stack = []
+        self.parent_by_id = {}
+        self.ancestor_ids_by_id = {}
+        self.previous_sibling_by_id = {}
+        self._last_child_id_by_parent = {}
+
+    def handle_starttag(self, tag, attrs):
+        self._handle_element(tag, attrs, push=True)
+
+    def handle_startendtag(self, tag, attrs):
+        self._handle_element(tag, attrs, push=False)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        for idx in range(len(self.stack) - 1, -1, -1):
+            if self.stack[idx]["tag"] == tag:
+                del self.stack[idx:]
+                break
+
+    def _handle_element(self, tag, attrs, push):
+        tag = tag.lower()
+        attrs = dict(attrs)
+        element_id = attrs.get("id") or ""
+        parent_id = self.stack[-1]["id"] if self.stack else None
+        if element_id:
+            self.parent_by_id[element_id] = parent_id
+            self.ancestor_ids_by_id[element_id] = [
+                item["id"] for item in self.stack if item["id"]
+            ]
+            parent_key = parent_id or f"__root_depth_{len(self.stack)}"
+            self.previous_sibling_by_id[element_id] = self._last_child_id_by_parent.get(parent_key)
+            self._last_child_id_by_parent[parent_key] = element_id
+        if push and tag not in self._VOID_TAGS:
+            self.stack.append({"tag": tag, "id": element_id})
+
+
+def _element_relationships(html):
+    parser = _ElementRelationshipParser()
+    parser.feed(html)
+    return parser
+
+
 class _ComposerLeftDropdownParser(HTMLParser):
     _VOID_TAGS = {
         "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -838,6 +888,73 @@ def test_mobile_composer_workspace_switch_does_not_leave_empty_icon_slot():
         "workspace files button must not grow beyond its 44px phone slot due to padding"
     assert workspace_chip.get("display") == "none!important", \
         "workspace switch chip has no visible mobile label/icon and must not consume a blank slot"
+
+
+def test_composer_presence_markup_is_adjacent_to_composer_box():
+    """Opt-in composer avatar host must sit immediately before the composer box."""
+    row_idx = HTML.find('id="composerPresenceRow"')
+    avatar_idx = HTML.find('id="composerPresenceAvatar"')
+    box_idx = HTML.find('id="composerBox"')
+    upload_idx = HTML.find('id="uploadBarWrap"')
+
+    assert row_idx != -1, "composer presence row should exist"
+    assert avatar_idx != -1, "composer presence avatar host should exist"
+    assert box_idx != -1, "composer box should still exist"
+    assert upload_idx != -1, "upload bar should still exist"
+    assert row_idx < avatar_idx < box_idx < upload_idx, \
+        "presence avatar must be adjacent before the composer box and before the upload bar"
+    assert '<div id="composerPresenceAvatar" class="composer-presence-avatar" aria-hidden="true"></div>' in HTML
+    rel = _element_relationships(HTML)
+    assert rel.parent_by_id.get("composerPresenceAvatar") == "composerPresenceRow"
+    assert rel.parent_by_id.get("composerBox") == "composerPresenceRow"
+    assert rel.previous_sibling_by_id.get("composerBox") == "composerPresenceAvatar"
+    assert rel.parent_by_id.get("uploadBarWrap") == "composerBox", \
+        "upload progress bar must remain inside the composer box chrome"
+
+
+def test_composer_presence_css_preserves_default_and_enables_opt_in_layout():
+    """Composer presence CSS should be inert by default and root-gated when enabled."""
+    root_vars = _declarations(_rule_body(CSS, ":root"))
+    default_row = _declarations(_rule_body(CSS, ".composer-presence-row"))
+    default_avatar = _declarations(_rule_body(CSS, ".composer-presence-avatar"))
+    active_row = _declarations(_rule_body(CSS, ':root[data-avatar-presence="composer"] .composer-presence-row'))
+    active_avatar = _declarations(_rule_body(CSS, ':root[data-avatar-presence="composer"] .composer-presence-avatar'))
+    active_box = _declarations(_rule_body(CSS, ':root[data-avatar-presence="composer"] .composer-presence-row .composer-box'))
+    active_thread_avatar = _declarations(_rule_body(CSS, ':root[data-avatar-presence="composer"] .msg-role.assistant .profile-avatar--message'))
+    composer_inner = _declarations(_rule_body(CSS, '.composer-presence-avatar .profile-avatar--composer'))
+
+    assert root_vars.get("--composer-presence-avatar-size") == "56px"
+    assert default_row.get("max-width") == "780px"
+    assert default_row.get("margin") == "0 auto"
+    assert "display" not in default_row, "composer row layout display must be opt-in"
+    assert _display_hidden(default_avatar)
+    assert active_row.get("display") == "grid"
+    assert active_row.get("grid-template-columns") == "var(--composer-presence-avatar-size,56px) minmax(0,1fr)"
+    assert active_row.get("align-items") == "start"
+    assert active_row.get("gap") == "6px"
+    assert active_avatar.get("display") == "flex"
+    assert active_avatar.get("width") == "var(--composer-presence-avatar-size,56px)"
+    assert active_avatar.get("height") == "var(--composer-presence-avatar-size,56px)"
+    assert active_box.get("min-width") == "0"
+    assert composer_inner.get("width") == "var(--composer-presence-avatar-size,56px)"
+    assert composer_inner.get("height") == "var(--composer-presence-avatar-size,56px)"
+    assert active_thread_avatar.get("display") == "none!important"
+
+
+def test_composer_presence_mobile_rule_keeps_avatar_56px_and_layout_compact():
+    """Phone composer mode keeps a fixed 56px avatar track beside the compact box."""
+    mobile = _composer_phone_media_block()
+    active_row = _declarations(_rule_body(mobile, ':root[data-avatar-presence="composer"] .composer-presence-row'))
+    active_avatar = _declarations(_rule_body(mobile, ':root[data-avatar-presence="composer"] .composer-presence-avatar'))
+    composer_inner = _declarations(_rule_body(mobile, ':root[data-avatar-presence="composer"] .composer-presence-avatar .profile-avatar--composer'))
+
+    assert active_row.get("gap") == "6px"
+    assert active_row.get("max-width") == "none"
+    assert active_row.get("grid-template-columns") == "56px minmax(0,1fr)"
+    assert active_avatar.get("width") == "56px"
+    assert active_avatar.get("height") == "56px"
+    assert composer_inner.get("width") == "56px"
+    assert composer_inner.get("height") == "56px"
 
 
 def test_mobile_composer_overflow_control_present():

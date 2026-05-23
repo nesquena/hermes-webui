@@ -12,7 +12,7 @@
     --radius-sm:4px;--radius-md:8px;--radius-card:8px;--radius-lg:12px;--radius-pill:999px;
     --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;
     --font-size-xs:11px;--font-size-sm:12px;--font-size-md:14px;
-    --file-tree-toggle-width:10px;
+    --file-tree-toggle-width:10px;--composer-presence-avatar-size:56px;
     --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
     --surface-subtle:rgba(0,0,0,.025);--surface-subtle-hover:rgba(0,0,0,.045);
     --border-subtle:rgba(0,0,0,.08);--border-muted:rgba(0,0,0,.12);
@@ -1365,6 +1365,14 @@
   /* ── Composer ── */
   .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
   .composer-box{max-width:clamp(780px,60vw,1100px);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
+  .composer-presence-row{max-width:780px;margin:0 auto;position:relative;}
+  .composer-presence-row .composer-box{max-width:none;margin:0;width:100%;}
+  .composer-presence-avatar{display:none;box-sizing:border-box;}
+  .composer-presence-avatar .profile-avatar--composer{width:var(--composer-presence-avatar-size,56px);height:var(--composer-presence-avatar-size,56px);font-size:calc(var(--composer-presence-avatar-size,56px) * .38);background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
+  :root[data-avatar-presence="composer"] .composer-presence-row{max-width:780px;display:grid;grid-template-columns:var(--composer-presence-avatar-size,56px) minmax(0,1fr);align-items:start;gap:6px;}
+  :root[data-avatar-presence="composer"] .composer-presence-row .composer-box{min-width:0;}
+  :root[data-avatar-presence="composer"] .composer-presence-avatar{display:flex;width:var(--composer-presence-avatar-size,56px);height:var(--composer-presence-avatar-size,56px);align-items:center;justify-content:center;}
+  :root[data-avatar-presence="composer"] .msg-role.assistant .profile-avatar--message{display:none!important;}
   .composer-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   .composer-wrap.drag-over .composer-box{border-color:var(--accent-text);background:var(--accent-bg);}
   .drop-hint{display:none;position:absolute;inset:0;align-items:center;justify-content:center;background:var(--accent-bg);border:2px dashed var(--accent);border-radius:14px;font-size:14px;color:var(--accent-text);pointer-events:none;z-index:10;flex-direction:column;gap:8px;}
@@ -1900,6 +1908,9 @@
     .composer-box{border-radius:12px;}
     .composer-box textarea{min-height:40px;}
     .composer-footer{padding:6px 8px 8px!important;gap:6px;flex-wrap:nowrap;align-items:center;}
+    :root[data-avatar-presence="composer"] .composer-presence-row{max-width:none;grid-template-columns:56px minmax(0,1fr);gap:6px;}
+    :root[data-avatar-presence="composer"] .composer-presence-avatar{width:56px;height:56px;}
+    :root[data-avatar-presence="composer"] .composer-presence-avatar .profile-avatar--composer{width:56px;height:56px;}
     .composer-left{flex:1 1 auto;width:auto;flex-wrap:nowrap;align-items:center;gap:10px;overflow-x:auto;overflow-y:hidden;max-height:none;row-gap:0;-webkit-overflow-scrolling:touch;}
     .composer-left > *{flex-shrink:0;}
     .composer-profile-wrap,
@@ -2118,11 +2129,15 @@
 .assistant-turn#liveAssistantTurn .profile-avatar--message[data-avatar-state="talking"]{animation:avatar-reactive-talk 1.1s ease-in-out infinite;}
 .assistant-turn#liveAssistantTurn .profile-avatar--message[data-avatar-state="working"]{animation:avatar-reactive-work 1.3s ease-in-out infinite;}
 .assistant-turn#liveAssistantTurn .profile-avatar--message[data-avatar-state="error"]{animation:avatar-reactive-error .8s ease-in-out infinite;}
+:root[data-avatar-presence="composer"] .composer-presence-avatar .profile-avatar--composer[data-avatar-state="thinking"]{animation:avatar-reactive-pulse 1.6s ease-in-out infinite;}
+:root[data-avatar-presence="composer"] .composer-presence-avatar .profile-avatar--composer[data-avatar-state="talking"]{animation:avatar-reactive-talk 1.1s ease-in-out infinite;}
+:root[data-avatar-presence="composer"] .composer-presence-avatar .profile-avatar--composer[data-avatar-state="working"]{animation:avatar-reactive-work 1.3s ease-in-out infinite;}
+:root[data-avatar-presence="composer"] .composer-presence-avatar .profile-avatar--composer[data-avatar-state="error"]{animation:avatar-reactive-error .8s ease-in-out infinite;}
 @keyframes avatar-reactive-pulse{0%,100%{transform:scale(1);box-shadow:0 0 0 0 rgba(115,166,255,.22)}50%{transform:scale(1.05);box-shadow:0 0 0 6px rgba(115,166,255,0)}}
 @keyframes avatar-reactive-talk{0%,100%{transform:scale(1)}35%{transform:scale(1.08)}70%{transform:scale(.98)}}
 @keyframes avatar-reactive-work{0%,100%{filter:saturate(1);box-shadow:0 0 0 0 rgba(99,179,237,.18)}50%{filter:saturate(1.25);box-shadow:0 0 0 5px rgba(99,179,237,0)}}
 @keyframes avatar-reactive-error{0%,100%{transform:translateX(0);border-color:var(--error)}25%{transform:translateX(-1px)}75%{transform:translateX(1px)}}
-@media (prefers-reduced-motion:reduce){.assistant-turn#liveAssistantTurn .profile-avatar--message{animation:none!important;}}
+@media (prefers-reduced-motion:reduce){.assistant-turn#liveAssistantTurn .profile-avatar--message,:root[data-avatar-presence="composer"] .composer-presence-avatar .profile-avatar--composer{animation:none!important;}}
 .profile-opt-main{display:flex;align-items:center;gap:10px;min-width:0;}
 .profile-identity-card{position:relative;}
 .profile-identity-header{display:flex;gap:16px;align-items:center;margin:4px 0 16px;}
