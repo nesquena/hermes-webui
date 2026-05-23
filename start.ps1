@@ -98,6 +98,9 @@ if ($AgentDir -and -not (Test-Path (Join-Path $AgentDir 'hermes_cli'))) {
 if (-not $AgentDir) {
     $candidates = @(
         (Join-Path $env:USERPROFILE '.hermes\hermes-agent'),
+        (Join-Path $env:LOCALAPPDATA 'hermes\hermes-agent'),
+        (Join-Path ${env:ProgramFiles} 'hermes\hermes-agent'),
+        (Join-Path ${env:ProgramFiles(x86)} 'hermes\hermes-agent'),
         (Join-Path (Split-Path -Parent $RepoRoot) 'hermes-agent')
     )
     foreach ($c in $candidates) {
@@ -105,9 +108,8 @@ if (-not $AgentDir) {
     }
 }
 if (-not $AgentDir) {
-    $expectedPrimary = Join-Path $env:USERPROFILE '.hermes\hermes-agent'
-    $expectedSibling = Join-Path (Split-Path -Parent $RepoRoot) 'hermes-agent'
-    Write-Error "hermes-agent not found at $expectedPrimary or $expectedSibling. Set HERMES_WEBUI_AGENT_DIR explicitly."
+    $searched = $candidates -join ', '
+    Write-Error "hermes-agent not found. Searched: $searched. Set HERMES_WEBUI_AGENT_DIR explicitly to override."
     exit 1
 }
 
