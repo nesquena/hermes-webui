@@ -25,22 +25,22 @@ def test_session_list_disables_browser_scroll_anchoring():
 
 def test_polling_payloads_are_deferred_while_user_scrolls_sidebar():
     render_block = _block("async function renderSessionList", "// ── Gateway session SSE")
-    apply_block = _block("function _applySessionListPayload", "async function renderSessionList")
+    apply_block = _block("function _applySessionIndexPayload", "async function renderSessionList")
 
     assert "function _isSessionListUserInteracting()" in SESSIONS_JS
     assert "async function renderSessionList(opts={})" in render_block
     assert "const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);" in render_block
     assert "if(deferWhileInteracting&&_isSessionListUserInteracting())" in render_block
-    assert "_pendingSessionListPayload={gen:_gen,sessData,projData};" in render_block
+    assert "_pendingSessionListPayload={gen:_gen,indexData};" in render_block
     assert "_schedulePendingSessionListApply();" in render_block
-    assert "_applySessionListPayload(sessData,projData);" in render_block
+    assert "_applySessionIndexPayload(indexData);" in render_block
     assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block, (
         "deferring sidebar refreshes must preserve background-completion unread semantics"
     )
 
 
 def test_deferred_payloads_keep_generation_stale_response_guard():
-    schedule_apply_block = _block("function _schedulePendingSessionListApply", "function _applySessionListPayload")
+    schedule_apply_block = _block("function _schedulePendingSessionListApply", "function _applySessionIndexPayload")
     render_block = _block("async function renderSessionList", "// ── Gateway session SSE")
 
     assert "if(!deferWhileInteracting) _pendingSessionListPayload=null;" in render_block, (
@@ -49,18 +49,23 @@ def test_deferred_payloads_keep_generation_stale_response_guard():
     assert "payload.gen!==_renderSessionListGen" in schedule_apply_block, (
         "a deferred polling response must not apply after a newer renderSessionList generation starts"
     )
+    assert "_applySessionIndexPayload(payload.indexData);" in schedule_apply_block
 
 
 def test_only_background_refreshes_defer_while_sidebar_is_interacting():
     streaming_poll_block = _block("function startStreamingPoll", "function stopStreamingPoll")
     gateway_poll_block = _block("function startGatewayPollFallback", "function stopGatewayPollFallback")
     gateway_sse_block = _block("function startGatewaySSE", "function stopGatewaySSE")
+    batch_action_block = _block("function _renderBatchActionBar", "function _showBatchProjectPicker")
+    project_picker_block = _block("function _showBatchProjectPicker", "function closeSessionActionMenu")
 
     assert "renderSessionList({deferWhileInteracting:true})" in streaming_poll_block
     assert "renderSessionList({deferWhileInteracting:true})" in gateway_poll_block
     assert "renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render" in gateway_sse_block
-    assert "pfToggle.onclick=()=>{_showAllProfiles=true;renderSessionList();};" in SESSIONS_JS
-    assert "pfToggle.onclick=()=>{_showAllProfiles=false;renderSessionList();};" in SESSIONS_JS
+    assert "await renderSessionList();" in batch_action_block
+    assert "await renderSessionList();" in project_picker_block
+    assert "deferWhileInteracting:true" not in batch_action_block
+    assert "deferWhileInteracting:true" not in project_picker_block
 
 def test_session_list_pointer_hover_and_scroll_activity_are_tracked():
     interaction_block = _block("function _isSessionListUserInteracting()", "function _schedulePendingSessionListApply")
