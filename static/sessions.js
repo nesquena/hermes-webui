@@ -472,6 +472,11 @@ async function newSession(flash, options={}){
       ? (options.workspace||null)
       : (switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null));
     const targetProfile=String(hasOption('profile')?options.profile:(S.activeProfile||'default')).trim()||'default';
+    let workspaceGroup=hasOption('workspace_group')
+      ? String(options.workspace_group||'').trim().toLowerCase()
+      : (explicitWorkspace?'workspace':'chats');
+    workspaceGroup=workspaceGroup==='workspace'?'workspace':'chats';
+    if(options&&options.worktree) workspaceGroup='workspace';
     // Use the saved default model for new sessions (#872). The user's saved
     // default_model (from Settings) takes priority over the chat-header dropdown
     // value, which reflects the *previous* session's model. Fall back to the
@@ -493,6 +498,7 @@ async function newSession(flash, options={}){
     const reqBody={
       workspace:inheritWs,
       profile:targetProfile,
+      workspace_group:workspaceGroup,
     };
     if(options.commitPrevious!==false&&S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     if(options&&options.worktree) reqBody.worktree=true;
@@ -1508,6 +1514,11 @@ async function _ensureAllMessagesLoaded() {
 }
 
 let _allSessions = [];  // cached for search filter
+let _sessionIndexGroups = [];
+let _sessionIndexArchiveRows = {};
+let _sessionIndexArchiveNextCursor = {};
+let _sessionIndexArchiveLoading = {};
+let _sessionIndexArchiveErrors = {};
 let _renamingSid = null;  // session_id currently being renamed (blocks list re-renders)
 let _showArchived = false;  // toggle to show archived sessions
 let _sessionSelectMode = false;  // batch select mode
@@ -1537,6 +1548,9 @@ const SESSION_VIRTUAL_BUFFER_ROWS = 12;
 const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
 let _sessionVirtualScrollList = null;
 let _sessionVirtualScrollRaf = 0;
+const SESSION_INDEX_PROJECTS_COLLAPSED_KEY = 'hermes-sidebar-projects-collapsed';
+const SESSION_INDEX_ARCHIVE_COLLAPSED_KEY = 'hermes-sidebar-archive-collapsed';
+const SESSION_INDEX_ARCHIVE_LIMIT = 30;
 
 function _sessionSnapshotById(sid){
   if(!sid)return null;
@@ -1563,6 +1577,107 @@ function _worktreeSessionCount(ids){
 function _sessionResponseRetainsWorktree(response, session){
   if(response&&typeof response.worktree_retained==='boolean') return response.worktree_retained;
   return !!(session&&session.worktree_path);
+}
+function _readSidebarJsonState(key){
+  try{
+    const parsed=JSON.parse(localStorage.getItem(key)||'{}');
+    return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
+  }catch(_){return{};}
+}
+function _writeSidebarJsonState(key,value){
+  try{localStorage.setItem(key,JSON.stringify(value&&typeof value==='object'?value:{}));}catch(_){}
+}
+function _sessionIndexGroupId(group){
+  if(!group) return '';
+  return group.group_id||group.key||(group.kind==='chats'?'chats':('workspace:'+(group.workspace||group.name||'')));
+}
+function _sessionIndexProjectsCollapsed(){
+  return _readSidebarJsonState(SESSION_INDEX_PROJECTS_COLLAPSED_KEY);
+}
+function _saveSessionIndexProjectsCollapsed(state){
+  _writeSidebarJsonState(SESSION_INDEX_PROJECTS_COLLAPSED_KEY,state);
+}
+function _sessionIndexArchiveCollapsed(){
+  return _readSidebarJsonState(SESSION_INDEX_ARCHIVE_COLLAPSED_KEY);
+}
+function _saveSessionIndexArchiveCollapsed(state){
+  _writeSidebarJsonState(SESSION_INDEX_ARCHIVE_COLLAPSED_KEY,state);
+}
+function _sessionIndexCurrentRows(){
+  const rows=[];
+  for(const group of Array.isArray(_sessionIndexGroups)?_sessionIndexGroups:[]){
+    for(const s of Array.isArray(group&&group.sessions)?group.sessions:[]){
+      rows.push(s);
+    }
+  }
+  return rows;
+}
+function _sessionIndexLoadedArchiveRows(){
+  const rows=[];
+  for(const groupId of Object.keys(_sessionIndexArchiveRows||{})){
+    for(const s of Array.isArray(_sessionIndexArchiveRows[groupId])?_sessionIndexArchiveRows[groupId]:[]){
+      rows.push(s);
+    }
+  }
+  return rows;
+}
+function _sessionIndexAllRowsForState(){
+  return [..._sessionIndexCurrentRows(),..._sessionIndexLoadedArchiveRows()];
+}
+function _sessionIndexGroupIdForRow(row){
+  if(row&&row.group_id) return row.group_id;
+  if(row&&row.workspace) return 'workspace:'+row.workspace;
+  return 'chats';
+}
+function _sessionIndexEnsureGroup(groupId,row){
+  let group=(Array.isArray(_sessionIndexGroups)?_sessionIndexGroups:[]).find(g=>_sessionIndexGroupId(g)===groupId);
+  if(group) return group;
+  const workspace=groupId&&groupId.startsWith('workspace:')?groupId.slice('workspace:'.length):(row&&row.workspace)||null;
+  const name=workspace?(workspace.split(/[\\/]/).filter(Boolean).pop()||workspace):'Chats';
+  group={
+    group_id:groupId,
+    key:groupId,
+    kind:groupId==='chats'?'chats':'project',
+    type:groupId==='chats'?'chats':'workspace',
+    name:groupId==='chats'?'Chats':name,
+    label:groupId==='chats'?'Chats':name,
+    workspace,
+    current_count:0,
+    archive_count:0,
+    manual_archived_count:0,
+    archive:{count:0,has_more:false,next_offset:null,cursor:null},
+    sessions:[],
+    latest_activity_at:0,
+  };
+  _sessionIndexGroups.push(group);
+  return group;
+}
+function _syncSessionIndexGroupsWithRows(rows){
+  const currentIds=new Set(_sessionIndexCurrentRows().map(s=>s&&s.session_id).filter(Boolean));
+  for(const row of Array.isArray(rows)?rows:[]){
+    if(!row||!row.session_id||currentIds.has(row.session_id)) continue;
+    const groupId=_sessionIndexGroupIdForRow(row);
+    const group=_sessionIndexEnsureGroup(groupId,row);
+    group.sessions=Array.isArray(group.sessions)?group.sessions:[];
+    group.sessions.unshift(row);
+    group.current_count=(Number(group.current_count)||0)+1;
+    currentIds.add(row.session_id);
+  }
+}
+function _profileAvatar(s){
+  const profileName=(s&&s.profile)||'default';
+  const fallback=(profileName.charAt(0)||'H').toUpperCase();
+  const title=profileName?`Agent profile: ${profileName}`:'Agent profile';
+  if(typeof _profileAvatarMarkup==='function'){
+    const wrap=document.createElement('div');
+    wrap.innerHTML=_profileAvatarMarkup(s&&s.avatar,{fallback,classes:'session-agent-avatar',title,profileName});
+    return wrap.firstElementChild||wrap;
+  }
+  const avatar=document.createElement('div');
+  avatar.className='session-agent-avatar';
+  avatar.textContent=fallback;
+  avatar.title=title;
+  return avatar;
 }
 function _worktreeResponseCount(results){
   return (results||[]).reduce((count,result)=>{
@@ -2150,29 +2265,41 @@ function _schedulePendingSessionListApply(){
     const payload=_pendingSessionListPayload;
     _pendingSessionListPayload=null;
     if(payload.gen!==_renderSessionListGen) return;
-    _applySessionListPayload(payload.sessData,payload.projData);
+    _applySessionIndexPayload(payload.indexData);
   }, Math.max(120, SESSION_LIST_INTERACTION_IDLE_MS));
 }
 
-function _applySessionListPayload(sessData, projData){
-  // Server's other_profile_count tells us how many sessions exist outside the
-  // active profile so the "Show N from other profiles" toggle can render
-  // without a second round-trip. Stashed on the module for renderSessionListFromCache.
-  _otherProfileCount = sessData.other_profile_count || 0;
+function _applySessionIndexPayload(indexData){
+  indexData=indexData||{};
+  _sessionIndexGroups=Array.isArray(indexData.groups)?indexData.groups:[];
+  const liveGroupIds=new Set(_sessionIndexGroups.map(g=>_sessionIndexGroupId(g)).filter(Boolean));
+  for(const key of Object.keys(_sessionIndexArchiveRows||{})){
+    if(!liveGroupIds.has(key)){
+      delete _sessionIndexArchiveRows[key];
+      delete _sessionIndexArchiveNextCursor[key];
+      delete _sessionIndexArchiveLoading[key];
+      delete _sessionIndexArchiveErrors[key];
+    }
+  }
+  _otherProfileCount = 0;
+  const archiveAfter=parseInt(indexData.session_archive_after_days||indexData.archive_after_days||7,10)||7;
+  if(typeof window!=='undefined') window._sessionArchiveAfterDays=archiveAfter;
   // Capture server clock for clock-skew compensation (issue #1144).
   // server_time is epoch seconds from the server's time.time().
   // _serverTimeDelta = client - server, so (Date.now() - _serverTimeDelta)
   // gives an approximation of the current server time.
-  if (typeof sessData.server_time === 'number' && sessData.server_time > 0) {
-    _serverTimeDelta = Date.now() - (sessData.server_time * 1000);
+  if (typeof indexData.server_time === 'number' && indexData.server_time > 0) {
+    _serverTimeDelta = Date.now() - (indexData.server_time * 1000);
   }
-  if (typeof sessData.server_tz === 'string') {
-    _serverTz = sessData.server_tz;
+  if (typeof indexData.server_tz === 'string') {
+    _serverTz = indexData.server_tz;
   }
-  _reconcileActiveSessionIdleStateFromList(sessData.sessions||[]);
-  _allSessions = _mergeOptimisticFirstTurnSessions(sessData.sessions||[]);
+  const sessionRows=_sessionIndexAllRowsForState();
+  _reconcileActiveSessionIdleStateFromList(sessionRows);
+  _allSessions = _mergeOptimisticFirstTurnSessions(sessionRows);
+  _syncSessionIndexGroupsWithRows(_allSessions);
   _clearLineageReportCache();
-  _allProjects = projData.projects||[];
+  _allProjects = Array.isArray(indexData.projects)?indexData.projects:[];
   _markPollingCompletionUnreadTransitions(_allSessions);
   const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
   if (isStreaming) {
@@ -2196,23 +2323,61 @@ async function renderSessionList(opts={}){
   if(!deferWhileInteracting) _pendingSessionListPayload=null;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
-    const sessionProfile=S.session&&S.session.profile;
-    const needsCurrentProfile=Boolean(sessionProfile&&S.activeProfile&&sessionProfile!==S.activeProfile);
-    const allProfilesToggleQS = _showAllProfiles ? '?all_profiles=1' : '';
-    const allProfilesQS = needsCurrentProfile ? '?all_profiles=1' : allProfilesToggleQS;
-    const [sessData, projData] = await Promise.all([
-      api('/api/sessions' + allProfilesQS),
-      api('/api/projects' + allProfilesQS),
-    ]);
+    const params=new URLSearchParams();
+    if(S.session&&S.session.session_id) params.set('current_session_id',S.session.session_id);
+    const qs=params.toString();
+    const indexData = await api('/api/session-index' + (qs?('?'+qs):''));
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
     if(deferWhileInteracting&&_isSessionListUserInteracting()){
-      _pendingSessionListPayload={gen:_gen,sessData,projData};
+      _pendingSessionListPayload={gen:_gen,indexData};
       _schedulePendingSessionListApply();
       return;
     }
-    _applySessionListPayload(sessData,projData);
+    _applySessionIndexPayload(indexData);
   }catch(e){console.warn('renderSessionList',e);}
+}
+
+async function _loadSessionIndexArchive(groupId, opts={}){
+  groupId=String(groupId||'').trim();
+  if(!groupId) return;
+  const reset=Boolean(opts&&opts.reset);
+  const currentRows=Array.isArray(_sessionIndexArchiveRows[groupId])?_sessionIndexArchiveRows[groupId]:[];
+  const cursor=reset?null:_sessionIndexArchiveNextCursor[groupId];
+  if(_sessionIndexArchiveLoading[groupId]) return;
+  if(currentRows.length&&!cursor&&!reset&&!(opts&&opts.force)) return;
+  _sessionIndexArchiveLoading[groupId]=true;
+  _sessionIndexArchiveErrors[groupId]=null;
+  try{
+    const params=new URLSearchParams();
+    params.set('group_id',groupId);
+    params.set('limit',String((opts&&opts.limit)||SESSION_INDEX_ARCHIVE_LIMIT));
+    if(cursor) params.set('cursor',cursor);
+    if(S.session&&S.session.session_id) params.set('current_session_id',S.session.session_id);
+    const data=await api('/api/session-index/archive?'+params.toString());
+    const incoming=Array.isArray(data&&data.sessions)?data.sessions:[];
+    const merged=reset?[]:[...currentRows];
+    const seen=new Set(merged.map(s=>s&&s.session_id).filter(Boolean));
+    for(const row of incoming){
+      if(!row||!row.session_id||seen.has(row.session_id)) continue;
+      merged.push(row);
+      seen.add(row.session_id);
+    }
+    _sessionIndexArchiveRows[groupId]=merged;
+    _sessionIndexArchiveNextCursor[groupId]=(data&&data.next_cursor)||null;
+    if(data&&typeof data.server_time==='number'&&data.server_time>0){
+      _serverTimeDelta=Date.now()-(data.server_time*1000);
+    }
+    const rows=_sessionIndexAllRowsForState();
+    _reconcileActiveSessionIdleStateFromList(rows);
+    _allSessions=_mergeOptimisticFirstTurnSessions(rows);
+    _markPollingCompletionUnreadTransitions(_allSessions);
+  }catch(e){
+    _sessionIndexArchiveErrors[groupId]=e&&e.message?e.message:String(e);
+  }finally{
+    _sessionIndexArchiveLoading[groupId]=false;
+    renderSessionListFromCache();
+  }
 }
 
 // ── Gateway session SSE (real-time sync for agent sessions) ──
@@ -3054,6 +3219,43 @@ function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtual
   });
 }
 
+function _appendArchiveLoadState(body, group){
+  const groupId=_sessionIndexGroupId(group);
+  if(!body||!groupId) return;
+  const loading=Boolean(_sessionIndexArchiveLoading[groupId]);
+  const error=_sessionIndexArchiveErrors[groupId];
+  const nextCursor=_sessionIndexArchiveNextCursor[groupId];
+  if(loading){
+    const row=document.createElement('div');
+    row.className='session-archive-state session-archive-loading';
+    row.textContent='Loading archive...';
+    body.appendChild(row);
+    return;
+  }
+  if(error){
+    const row=document.createElement('div');
+    row.className='session-archive-state session-archive-error';
+    const msg=document.createElement('span');
+    msg.textContent='Archive failed to load.';
+    const retry=document.createElement('button');
+    retry.type='button';
+    retry.textContent='Retry';
+    retry.onclick=(e)=>{e.stopPropagation();void _loadSessionIndexArchive(groupId,{force:true});};
+    row.appendChild(msg);
+    row.appendChild(retry);
+    body.appendChild(row);
+    return;
+  }
+  if(nextCursor){
+    const row=document.createElement('button');
+    row.type='button';
+    row.className='session-archive-state session-archive-load-more';
+    row.textContent='Load more';
+    row.onclick=(e)=>{e.stopPropagation();void _loadSessionIndexArchive(groupId);};
+    body.appendChild(row);
+  }
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -3069,42 +3271,38 @@ function renderSessionListFromCache(){
   _purgeStaleInflightEntries();
   const q=($('sessionSearch').value||'').toLowerCase();
   const activeSidForSidebar=_activeSessionIdForSidebar();
-  const titleMatches=q?_allSessions.filter(s=>_sessionDisplayTitle(s).toLowerCase().includes(q)):_allSessions;
-  // Merge content matches (deduped): content matches appended after title matches
-  const titleIds=new Set(titleMatches.map(s=>s.session_id));
-  const allMatched=q?[...titleMatches,..._contentSearchResults.filter(s=>!titleIds.has(s.session_id))]:titleMatches;
-  // Never surface ephemeral 0-message sessions in the sidebar — they only become
-  // real once the first message is sent. The server already filters them, but this
-  // guard ensures a brand-new active session doesn't flash into the list while
-  // _allSessions is stale from a prior render (#1171).
-  const withMessages=allMatched.filter(s=>
+  const contentIds=new Set((Array.isArray(_contentSearchResults)?_contentSearchResults:[]).map(s=>s&&s.session_id).filter(Boolean));
+  const rowVisible=(s)=>Boolean(s&&(
     (s.message_count||0)>0 ||
     _isSessionEffectivelyStreaming(s) ||
     !!s.active_stream_id ||
     !!s.pending_user_message ||
     (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0)
-  );
-  // The server is authoritative for profile scoping (#1611): it filters by
-  // active profile when no query param is set, and returns the aggregate when
-  // we send ?all_profiles=1. The renamed-root cross-alias (a row tagged
-  // 'default' matching active 'kinni' when kinni.is_default) lives server-side
-  // in _profiles_match, and a strict-equality client filter would reject those
-  // rows incorrectly. So we trust the wire data and skip the redundant client
-  // filter entirely.
-  const profileFiltered=withMessages;
-  // Filter by active project. NO_PROJECT_FILTER sentinel asks for sessions
-  // with no project_id; otherwise filter to the matching project_id, or
-  // pass through when no filter is active.
-  const projectFiltered=
-    _activeProject===NO_PROJECT_FILTER
-      ?profileFiltered.filter(s=>!s.project_id)
-      :(_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered);
-  // Filter archived unless toggle is on
-  const sessionsRaw=_showArchived?projectFiltered:projectFiltered.filter(s=>!s.archived);
-  const sessions=_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
-  _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
-  const archivedCount=projectFiltered.filter(s=>s.archived).length;
+  ));
+  const rowMatches=(s)=>!q||_sessionDisplayTitle(s).toLowerCase().includes(q)||contentIds.has(s.session_id);
+  const prepareRows=(rows)=>{
+    const raw=(Array.isArray(rows)?rows:[]).filter(s=>rowVisible(s)&&rowMatches(s));
+    return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(raw), raw);
+  };
+  const sourceGroups=Array.isArray(_sessionIndexGroups)?_sessionIndexGroups:[];
+  const projectGroups=sourceGroups.filter(g=>g&&g.kind==='project');
+  const chatsGroup=sourceGroups.find(g=>g&&g.kind==='chats')||{
+    group_id:'chats',key:'chats',kind:'chats',type:'chats',name:'Chats',label:'Chats',workspace:null,
+    current_count:0,archive_count:0,manual_archived_count:0,archive:{count:0,has_more:false},sessions:[],
+  };
+  const displayGroups=[];
+  const allPreparedRows=[];
+  const buildDisplayGroup=(group)=>{
+    const groupId=_sessionIndexGroupId(group);
+    const currentRows=prepareRows(group&&group.sessions);
+    const archiveRows=prepareRows(_sessionIndexArchiveRows[groupId]||[]);
+    allPreparedRows.push(...currentRows,...archiveRows);
+    return {group,groupId,currentRows,archiveRows};
+  };
+  for(const group of projectGroups) displayGroups.push(buildDisplayGroup(group));
+  const chatsDisplay=buildDisplayGroup(chatsGroup);
+  _syncSidebarExpansionForActiveSession(allPreparedRows, activeSidForSidebar);
   const list=$('sessionList');
   const animateRefresh=_sessionListRefreshAnimationPending;
   _sessionListRefreshAnimationPending=false;
@@ -3132,122 +3330,26 @@ function renderSessionListFromCache(){
   list.appendChild(batchBar);
   if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';_renderBatchActionBar();}
   else{batchBar.style.display='none';}
-  // Project filter bar — show when there are real projects OR there are
-  // unassigned sessions (so the Unassigned chip has something to filter to).
-  const hasUnprojected=profileFiltered.some(s=>!s.project_id);
-  if(_allProjects.length>0||hasUnprojected){
-    const bar=document.createElement('div');
-    bar.className='project-bar';
-    // "All" chip
-    const allChip=document.createElement('span');
-    allChip.className='project-chip'+(!_activeProject?' active':'');
-    allChip.textContent='All';
-    allChip.onclick=()=>{_activeProject=null;renderSessionListFromCache();};
-    bar.appendChild(allChip);
-    // "Unassigned" chip — only when there are sessions with no project to
-    // filter to. Hidden in the common case where every session is already
-    // organized, to keep the chip bar uncluttered.
-    if(hasUnprojected){
-      const noneChip=document.createElement('span');
-      noneChip.className='project-chip no-project'+(_activeProject===NO_PROJECT_FILTER?' active':'');
-      noneChip.textContent='Unassigned';
-      noneChip.title='Show conversations not yet assigned to a project';
-      noneChip.onclick=()=>{_activeProject=NO_PROJECT_FILTER;renderSessionListFromCache();};
-      bar.appendChild(noneChip);
-    }
-    // Project chips
-    for(const p of _allProjects){
-      const chip=document.createElement('span');
-      chip.className='project-chip'+(p.project_id===_activeProject?' active':'');
-      if(p.color){
-        const dot=document.createElement('span');
-        dot.className='color-dot';
-        dot.style.background=p.color;
-        chip.appendChild(dot);
-      }
-      const nameSpan=document.createElement('span');
-      nameSpan.textContent=p.name;
-      chip.appendChild(nameSpan);
-      let _pClickTimer=null;
-      chip.onclick=(e)=>{
-        clearTimeout(_pClickTimer);
-        _pClickTimer=setTimeout(()=>{_pClickTimer=null;_activeProject=p.project_id;renderSessionListFromCache();},220);
-      };
-      chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
-      chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
-      bar.appendChild(chip);
-    }
-    // Create button
-    const addBtn=document.createElement('button');
-    addBtn.className='project-create-btn';
-    addBtn.textContent='+';
-    addBtn.title='New project';
-    addBtn.onclick=(e)=>{e.stopPropagation();_startProjectCreate(bar,addBtn);};
-    bar.appendChild(addBtn);
-    list.appendChild(bar);
-  }
-  // Profile filter toggle (show sessions from other profiles).
-  // Cross-profile rows live SERVER-SIDE behind ?all_profiles=1, so the toggle
-  // must trigger a refetch — there's no client-cached aggregate to slice through.
-  // The server is authoritative for the count (renamed-root cross-alias is
-  // server-side). A naive strict-equality client fallback would mis-count.
-  const otherProfileCount = _otherProfileCount;
-  if(otherProfileCount>0&&!_showAllProfiles){
-    const pfToggle=document.createElement('div');
-    pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    pfToggle.textContent='Show '+otherProfileCount+' from other profiles';
-    pfToggle.onclick=()=>{_showAllProfiles=true;renderSessionList();};
-    list.appendChild(pfToggle);
-  } else if(_showAllProfiles){
-    const pfToggle=document.createElement('div');
-    pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    pfToggle.textContent='Show active profile only';
-    pfToggle.onclick=()=>{_showAllProfiles=false;renderSessionList();};
-    list.appendChild(pfToggle);
-  }
-  // Show/hide archived toggle if there are archived sessions
-  if(archivedCount>0){
-    const toggle=document.createElement('div');
-    toggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    toggle.textContent=_showArchived?'Hide archived':'Show '+archivedCount+' archived';
-    toggle.onclick=()=>{_showArchived=!_showArchived;renderSessionListFromCache();};
-    list.appendChild(toggle);
-  }
-  // Empty state for active project filter
-  if(_activeProject&&sessions.length===0){
-    const empty=document.createElement('div');
-    empty.style.cssText='padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;';
-    empty.textContent=_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.';
-    list.appendChild(empty);
-  }
-  const orderedSessions=[...sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
-  // Separate pinned from unpinned
-  const pinned=orderedSessions.filter(s=>s.pinned);
-  const unpinned=orderedSessions.filter(s=>!s.pinned);
-  // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
-  const now=_serverNowMs();
-  // Collapse state persisted in localStorage
-  let _groupCollapsed={};
-  try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
-  const _saveCollapsed=()=>{try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}};
-  // Group sessions by date
-  const groups=[];
-  let curLabel=null,curItems=[];
-  if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
-  for(const s of unpinned){
-    const ts=_sessionTimestampMs(s);
-    const label=_sessionTimeBucketLabel(ts, now);
-    if(label!==curLabel){
-      if(curItems.length) groups.push({label:curLabel,items:curItems});
-      curLabel=label;curItems=[s];
-    } else { curItems.push(s); }
-  }
-  if(curItems.length) groups.push({label:curLabel,items:curItems});
+  const projectCollapsed=_sessionIndexProjectsCollapsed();
+  const archiveCollapsed=_sessionIndexArchiveCollapsed();
   const flatSessionRows=[];
-  for(const g of groups){
-    if(_groupCollapsed[g.label]) continue;
-    for(const s of g.items){ flatSessionRows.push({group:g,session:s}); }
+  const addFlatRows=(display, archive=false)=>{
+    const group=display.group;
+    const groupId=display.groupId;
+    if(!archive&&projectCollapsed[groupId]&&group.kind==='project') return;
+    if(archive&&archiveCollapsed[groupId]!==false) return;
+    const rows=archive?display.archiveRows:display.currentRows;
+    for(const s of rows){
+      if(archive) flatSessionRows.push({group,session:s,archive:true});
+      else flatSessionRows.push({group,session:s});
+    }
+  };
+  for(const display of displayGroups){
+    addFlatRows(display,false);
+    addFlatRows(display,true);
   }
+  addFlatRows(chatsDisplay,false);
+  addFlatRows(chatsDisplay,true);
   _sessionVisibleSidebarIds=flatSessionRows.map(row=>row.session&&row.session.session_id).filter(Boolean);
   _ensureSessionVirtualScrollHandler(list);
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
@@ -3288,48 +3390,131 @@ function renderSessionListFromCache(){
   list.dataset.sessionVirtualFilter=q;
   list.dataset.sessionVirtualStart=String(virtualWindow.start);
   list.dataset.sessionVirtualEnd=String(virtualWindow.end);
-  // Render groups with collapsible headers. Large sidebars render only the
-  // current session-row window plus top/bottom spacers inside each group body;
-  // headers remain real DOM so pin/archive/date grouping and clicks survive.
   let globalSessionRowIndex=0;
-  for(const g of groups){
-    const wrapper=document.createElement('div');
-    wrapper.className='session-date-group';
-    const hdr=document.createElement('div');
-    hdr.className='session-date-header'+(g.isPinned?' pinned':'');
-    const caret=document.createElement('span');
-    caret.className='session-date-caret';
-    caret.textContent='\u25BE'; // down when expanded; rotated right when collapsed
-    const label=document.createElement('span');
-    label.textContent=g.label;
-    hdr.appendChild(caret);hdr.appendChild(label);
-    const body=document.createElement('div');
-    body.className='session-date-body';
-    const isGroupCollapsed=Boolean(_groupCollapsed[g.label]);
-    if(isGroupCollapsed){body.style.display='none';caret.classList.add('collapsed');}
-    hdr.onclick=()=>{
-      const isCollapsed=body.style.display==='none';
-      body.style.display=isCollapsed?'':'none';
-      caret.classList.toggle('collapsed',!isCollapsed);
-      _groupCollapsed[g.label]=!isCollapsed;
-      _saveCollapsed();
-      renderSessionListFromCache();
-    };
-    wrapper.appendChild(hdr);
+  const appendSectionLabel=(labelText)=>{
+    const label=document.createElement('div');
+    label.className='session-section-label';
+    label.textContent=labelText;
+    list.appendChild(label);
+  };
+  const renderRows=(body, rows, group, archive=false)=>{
     let groupTopPad=0;
     let groupBottomPad=0;
-    for(const s of g.items){
-      if(isGroupCollapsed) continue;
+    for(const s of rows){
       const rowIndex=globalSessionRowIndex++;
       const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
-      if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
-      else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
+      if(inWindow){
+        const rowEl=_renderOneSession(s, false);
+        if(archive) rowEl.dataset.archive='true';
+        body.appendChild(rowEl);
+      }else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
       else { groupBottomPad+=virtualWindow.itemHeight; }
     }
     if(groupTopPad>0){ body.insertBefore(_sessionVirtualSpacer(groupTopPad,'before'), body.firstChild); }
     if(groupBottomPad>0){ body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after')); }
+  };
+  const appendArchiveSection=(parent, display)=>{
+    const group=display.group;
+    const groupId=display.groupId;
+    const archiveMeta=(group&&group.archive)||{};
+    const archiveCount=Number(group&&group.archive_count||archiveMeta.count||0);
+    const loadedRows=display.archiveRows;
+    if(!archiveCount&&!loadedRows.length&&!_sessionIndexArchiveErrors[groupId]) return;
+    const wrapper=document.createElement('div');
+    wrapper.className='session-date-group session-index-archive-group';
+    const hdr=document.createElement('div');
+    hdr.className='session-date-header session-index-archive-header';
+    const caret=document.createElement('span');
+    caret.className='session-date-caret';
+    caret.textContent='\u25BE';
+    const label=document.createElement('span');
+    label.textContent='Archive';
+    const count=document.createElement('span');
+    count.className='session-group-count';
+    count.textContent=String(archiveCount||loadedRows.length);
+    hdr.appendChild(caret);hdr.appendChild(label);hdr.appendChild(count);
+    const body=document.createElement('div');
+    body.className='session-date-body session-index-archive-body';
+    const collapsed=archiveCollapsed[groupId]!==false;
+    if(collapsed){body.style.display='none';caret.classList.add('collapsed');}
+    hdr.onclick=()=>{
+      const state=_sessionIndexArchiveCollapsed();
+      const willOpen=body.style.display==='none';
+      state[groupId]=!willOpen;
+      _saveSessionIndexArchiveCollapsed(state);
+      if(willOpen&&!(_sessionIndexArchiveRows[groupId]||[]).length&&archiveCount>0){
+        void _loadSessionIndexArchive(groupId);
+      }
+      renderSessionListFromCache();
+    };
+    wrapper.appendChild(hdr);
+    if(!collapsed){
+      renderRows(body,loadedRows,group,true);
+      _appendArchiveLoadState(body,group);
+    }
+    wrapper.appendChild(body);
+    parent.appendChild(wrapper);
+  };
+  const appendProjectGroup=(display)=>{
+    const group=display.group;
+    const groupId=display.groupId;
+    const collapsed=Boolean(projectCollapsed[groupId]);
+    const wrapper=document.createElement('div');
+    wrapper.className='session-index-project-group';
+    const hdr=document.createElement('div');
+    hdr.className='session-index-project-header';
+    const caret=document.createElement('span');
+    caret.className='session-date-caret';
+    caret.textContent='\u25BE';
+    if(collapsed) caret.classList.add('collapsed');
+    const folder=document.createElement('span');
+    folder.className='session-project-folder';
+    folder.innerHTML=ICONS.folder;
+    const name=document.createElement('span');
+    name.className='session-project-name';
+    name.textContent=group.label||group.name||'Workspace';
+    const count=document.createElement('span');
+    count.className='session-group-count';
+    count.textContent=String(group.current_count||display.currentRows.length||0);
+    const add=document.createElement('button');
+    add.type='button';
+    add.className='session-project-new';
+    add.textContent='+';
+    add.title='New chat in this project';
+    add.onclick=(e)=>{
+      e.stopPropagation();
+      void newSession(true,{workspace:group.workspace,workspace_group:'workspace'});
+    };
+    hdr.appendChild(caret);hdr.appendChild(folder);hdr.appendChild(name);hdr.appendChild(count);hdr.appendChild(add);
+    hdr.onclick=()=>{
+      const state=_sessionIndexProjectsCollapsed();
+      state[groupId]=!collapsed;
+      _saveSessionIndexProjectsCollapsed(state);
+      renderSessionListFromCache();
+    };
+    wrapper.appendChild(hdr);
+    const body=document.createElement('div');
+    body.className='session-index-project-body';
+    if(!collapsed){
+      renderRows(body,display.currentRows,group,false);
+      appendArchiveSection(body,display);
+    }
     wrapper.appendChild(body);
     list.appendChild(wrapper);
+  };
+  appendSectionLabel('Projects');
+  for(const display of displayGroups) appendProjectGroup(display);
+  appendSectionLabel('Chats');
+  const chatsBody=document.createElement('div');
+  chatsBody.className='session-index-chats-body';
+  renderRows(chatsBody,chatsDisplay.currentRows,chatsDisplay.group,false);
+  appendArchiveSection(chatsBody,chatsDisplay);
+  list.appendChild(chatsBody);
+  if(!flatSessionRows.length&&q){
+    const empty=document.createElement('div');
+    empty.style.cssText='padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;';
+    empty.textContent='No matching sessions.';
+    list.appendChild(empty);
   }
   if(virtualAnchorScrollTop!==null){
     list.scrollTop=virtualAnchorScrollTop;
@@ -3394,6 +3579,7 @@ function renderSessionListFromCache(){
       el.classList.toggle('selected',_selectedSessions.has(s.session_id));
       el.appendChild(cbWrapper);
     }
+    el.appendChild(_profileAvatar(s));
     const sessionText=document.createElement('div');
     sessionText.className='session-text';
     const titleRow=document.createElement('div');
@@ -3515,7 +3701,6 @@ function renderSessionListFromCache(){
       const sourceLabel=_getChannelLabel(s);
       if(s.is_cli_session&&sourceLabel) metaBits.push(sourceLabel);
       if(readOnly) metaBits.push('read-only');
-      if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
       const meta=document.createElement('div');
       meta.className='session-meta';
       meta.textContent=metaBits.join(' · ');

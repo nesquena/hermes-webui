@@ -120,7 +120,7 @@ def test_session_list_render_path_uses_virtual_spacers_and_scroll_rerender():
     assert "list.dataset.sessionVirtualFilter!==q" in render_body
     assert "list.dataset.sessionVirtualFilter=q" in render_body
     assert "const flatSessionRows=[]" in render_body
-    assert "flatSessionRows.push({group:g,session:s})" in render_body
+    assert "flatSessionRows.push({group,session:s})" in render_body
 
 def test_session_list_only_moves_to_active_when_active_row_is_not_visible():
     """Changing filters should not jump the sidebar when active row is already visible."""
