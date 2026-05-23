@@ -1395,7 +1395,39 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/widget/event') {
     const eventBody = opts.body ? JSON.parse(opts.body) : {};
-    return response({ queued: true, space_id: eventBody.space_id || 'lab', widget_id: eventBody.widget_id || 'weather', event_name: eventBody.event_name || 'agent.prompt', event_id: 'evt1', autonomy_policy: { available: true, action: 'space.widget.event', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['generated_widget_execution'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' });
+    return response({
+      queued: true,
+      space_id: eventBody.space_id || 'lab',
+      widget_id: eventBody.widget_id || 'weather',
+      event_name: eventBody.event_name || 'agent.prompt',
+      event_id: 'evt1',
+      prompt_preflight: {
+        status: 'pass',
+        boundary: 'widget_runtime_prompt',
+        severity: 'low',
+        prompt_hash: 'abcdef1234567890abcdef1234567890',
+        checks: ['instruction_override', 'secret_request'],
+        metadata_only: true,
+        local_only: true,
+        raw_prompt_stored: false,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      autonomy_policy: { available: true, action: 'space.widget.event', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['generated_widget_execution'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      progress_event: {
+        event_id: 'progress-widget-event',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'widget.event:lab',
+        redaction_status: 'metadata-only',
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+    });
   }
   if (path === 'api/spaces/recovery/disable-widget') {
     return response({
@@ -4330,6 +4362,13 @@ def test_spaces_ui_sandbox_postmessage_agent_prompt_requires_approval_and_queues
     assert "Widget event queued" in out["rootHtml"]
     assert "Sandbox prompt queued" in out["rootHtml"]
     assert "Action policy" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Status: pass" in out["rootHtml"]
+    assert "Boundary: widget_runtime_prompt" in out["rootHtml"]
+    assert "raw prompt not stored" in out["rootHtml"]
+    assert "Widget event progress" in out["rootHtml"]
+    assert "tool.completed" in out["rootHtml"]
+    assert "metadata-only progress receipt" in out["rootHtml"]
     assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in out["rootHtml"]
     assert "Gates: Generated widget execution approval" in out["rootHtml"]
     assert "Model route hint: hint:reasoning" in out["rootHtml"]

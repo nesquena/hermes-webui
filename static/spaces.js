@@ -124,7 +124,9 @@
     return '<div class="capy-spaces-card" role="status"><h3>'+escapeHtml(title)+'</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(meta || 'Metadata-only event queued')+'</div>' +
       '<div class="capy-spaces-muted">Prompt bodies and generated widget code stay redacted.</div>' +
-      renderActionPolicyEvidence(result && result.autonomy_policy) + '</div>';
+      renderPromptPreflightEvidence(result && result.prompt_preflight) +
+      renderActionPolicyEvidence(result && result.autonomy_policy) +
+      renderPackageProgressEvidence(result && result.progress_event, 'Widget event progress') + '</div>';
   }
 
   function renderSpacesList(spaces, demos, memoryStatus, policyStatus, progressStatus){
