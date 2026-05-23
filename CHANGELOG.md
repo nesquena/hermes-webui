@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Prevent compression-summary cards from using ordinary tool output that merely mentions context compression. The streaming path now reuses the shared strict compression-marker predicate, so only synthetic marker prefixes from non-tool messages can seed `compression_anchor_summary`; skill/tool JSON and user discussion about compaction no longer render as misleading `Context compaction` reference cards.
+
 ## [v0.51.118] — 2026-05-22 — Release CP (stage-pr2773 — 1-PR hotfix — v0.51.117 brick fix: chat input restored)
 
 ### Fixed
