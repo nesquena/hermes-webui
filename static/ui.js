@@ -1,4 +1,6 @@
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
+var $=window.$||function(id){return document.getElementById(id);};
+window.$=$;
 
 function assistantDisplayName(){
   if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
@@ -15,7 +17,6 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // back-to-back stream completions would overwrite it, but HTTPServer is
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
-const $=id=>document.getElementById(id);
 const OFFLINE_RECHECK_MS=2500;
 let _offlineVisible=false;
 let _offlineReason='browser';
@@ -1048,6 +1049,11 @@ function scheduleComposerPresenceAvatarMeasure(){
     measureComposerPresenceAvatarSize();
   };
   _composerPresenceMeasureRaf=requestAnimationFrame(()=>requestAnimationFrame(run));
+}
+
+function scheduleComposerPresenceAvatarMeasureSettled(){
+  scheduleComposerPresenceAvatarMeasure();
+  setTimeout(()=>scheduleComposerPresenceAvatarMeasure(),120);
 }
 
 window.addEventListener('resize',()=>scheduleComposerPresenceAvatarMeasure());

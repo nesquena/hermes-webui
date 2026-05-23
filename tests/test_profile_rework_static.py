@@ -328,6 +328,13 @@ def test_composer_presence_forces_repaint_when_active_avatar_payload_changes():
     )
 
 
+def test_shared_dom_helper_is_visible_to_boot_and_panel_scripts():
+    prefix = UI_JS[:UI_JS.find("function assistantDisplayName")]
+    assert "var $=window.$||function(id){return document.getElementById(id);}" in prefix
+    assert "window.$=$;" in prefix
+    assert "const $=id=>document.getElementById(id);" not in UI_JS
+
+
 def test_composer_presence_avatar_measurement_is_initial_height_not_input_driven():
     assert "function measureComposerPresenceAvatarSize()" in UI_JS
     assert "function scheduleComposerPresenceAvatarMeasure()" in UI_JS
@@ -344,10 +351,37 @@ def test_composer_presence_avatar_measurement_is_initial_height_not_input_driven
     assert "setProperty('--composer-presence-avatar-size'" in measure
     assert "requestAnimationFrame" in schedule
     assert "_composerPresenceMeasureSeq" in schedule
+    assert "function scheduleComposerPresenceAvatarMeasureSettled()" in UI_JS
+    settled = _extract_function(UI_JS, "scheduleComposerPresenceAvatarMeasureSettled")
+    assert "scheduleComposerPresenceAvatarMeasure()" in settled
+    assert "setTimeout(()=>scheduleComposerPresenceAvatarMeasure()" in settled
     assert "addEventListener('input',scheduleComposerPresenceAvatarMeasure" not in UI_JS
     assert 'addEventListener("input",scheduleComposerPresenceAvatarMeasure' not in UI_JS
     assert "scheduleComposerPresenceAvatarMeasure()" in BOOT_JS
     assert "var(--composer-presence-avatar-size,56px) minmax(0,1fr)" in STYLE_CSS
+
+
+def test_composer_presence_remeasures_when_chat_panel_becomes_visible():
+    fn = _extract_function(PANELS_JS, "switchPanel")
+    main_class_idx = fn.find("mainEl.classList.toggle('showing-' + p, nextPanel === p);")
+    measure_idx = fn.find("if (nextPanel === 'chat' && typeof scheduleComposerPresenceAvatarMeasureSettled === 'function')")
+    assert measure_idx != -1, (
+        "composer avatar measurement must run after returning from Settings because "
+        "Settings hides the chat composer while the placement option is changed"
+    )
+    assert main_class_idx != -1 and main_class_idx < measure_idx, \
+        "chat panel visibility must update before measuring the composer height"
+
+
+def test_composer_presence_refreshes_after_boot_layout_restore():
+    assert "function _refreshComposerPresenceAfterLayout()" in BOOT_JS
+    fn = _extract_function(BOOT_JS, "_refreshComposerPresenceAfterLayout")
+    assert "refreshAssistantProfileAvatars({state:window._activeProfileAvatarState||'idle',force:true})" in fn
+    assert "scheduleComposerPresenceAvatarMeasureSettled()" in fn
+    assert BOOT_JS.count("_refreshComposerPresenceAfterLayout();") >= 4, (
+        "boot should refresh composer presence after each restored-session/no-session "
+        "layout path, not only during early ui.js load"
+    )
 
 
 def test_session_profile_avatar_refresh_helpers_exist():

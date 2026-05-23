@@ -912,6 +912,15 @@ def test_composer_presence_markup_is_adjacent_to_composer_box():
         "upload progress bar must remain inside the composer box chrome"
 
 
+def test_main_views_remain_siblings_after_composer_markup():
+    """Main panels must not be descendants of the chat view when composer markup changes."""
+    rel = _element_relationships(HTML)
+    for view_id in ("mainSkills", "mainMemory", "mainSettings"):
+        assert view_id in rel.parent_by_id, f"#{view_id} should exist"
+        assert "mainChat" not in rel.ancestor_ids_by_id.get(view_id, []), \
+            f"#{view_id} must remain a sibling of #mainChat, not render inside it"
+
+
 def test_composer_presence_css_preserves_default_and_enables_opt_in_layout():
     """Composer presence CSS should be inert by default and root-gated when enabled."""
     root_vars = _declarations(_rule_body(CSS, ":root"))

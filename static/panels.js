@@ -253,6 +253,11 @@ async function switchPanel(name, opts = {}) {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
+  if (nextPanel === 'chat' && typeof scheduleComposerPresenceAvatarMeasureSettled === 'function') {
+    scheduleComposerPresenceAvatarMeasureSettled();
+  } else if (nextPanel === 'chat' && typeof scheduleComposerPresenceAvatarMeasure === 'function') {
+    scheduleComposerPresenceAvatarMeasure();
+  }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'kanban') await loadKanban();
