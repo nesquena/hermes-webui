@@ -1918,16 +1918,18 @@ def _payload_summary(value: Any, depth: int = 0) -> Any:
     return _payload_text_summary(type(value).__name__, 80)
 
 
-def _widget_patch_payload_key_is_safe(key: str) -> bool:
+def _widget_patch_payload_key_is_safe(key: str, *, allow_plain_body: bool = False) -> bool:
     safe_key = _context_value(key, 80)
     if not _payload_key_is_safe(safe_key):
         return False
     marker = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", safe_key)
     normalized = re.sub(r"[^a-z0-9]+", "", marker.lower())
-    return "body" not in normalized
+    if normalized == "body":
+        return allow_plain_body
+    return "body" not in normalized and "generatedcode" not in normalized and "rawcode" not in normalized
 
 
-def _widget_patch_payload_summary(value: Any, depth: int = 0) -> Any:
+def _widget_patch_payload_summary(value: Any, depth: int = 0, *, allow_plain_body: bool = False) -> Any:
     """Summarize widget.patch metadata without generated/raw body fields."""
     if depth > 3:
         return "[omitted]"
@@ -1937,12 +1939,12 @@ def _widget_patch_payload_summary(value: Any, depth: int = 0) -> Any:
             if index >= 50:
                 break
             safe_key = _context_value(key, 80)
-            if not _widget_patch_payload_key_is_safe(safe_key):
+            if not _widget_patch_payload_key_is_safe(safe_key, allow_plain_body=allow_plain_body):
                 continue
-            summary[safe_key] = _widget_patch_payload_summary(child, depth + 1)
+            summary[safe_key] = _widget_patch_payload_summary(child, depth + 1, allow_plain_body=allow_plain_body)
         return summary
     if isinstance(value, list):
-        return [_widget_patch_payload_summary(child, depth + 1) for child in value[:20]]
+        return [_widget_patch_payload_summary(child, depth + 1, allow_plain_body=allow_plain_body) for child in value[:20]]
     if isinstance(value, (str, int, float, bool)) or value is None:
         return _payload_text_summary(value, 500)
     return _payload_text_summary(type(value).__name__, 80)
@@ -5251,7 +5253,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         )
         space = read_space_detail(result["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
-        return {"ok": True, "action": name, **result, "space": space}
+        progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="space.duplicate")
+        return {
+            "ok": True,
+            "action": name,
+            **result,
+            "space": space,
+            "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "progress_event": progress_event,
+        }
     if name in {"space.spaces.savespacemeta", "space.current.savemeta"}:
         if not name.startswith("space.current."):
             _space_tool_reject_ambient_current_selectors(data)
@@ -7242,10 +7252,12 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
         if safe_key == "layout":
             widget["layout"] = _normalize_widget_layout(value)
         elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "refresh", "prompt", "interaction", "audio_policy", "status", "weather", "market_data", "watchlist", "chart", "table", "notes", "attachments", "browser", "kanban", "markdown", "export"}:
+            widget_kind = str(widget.get("kind") or "").strip().lower()
+            allow_plain_body = safe_key in {"notes", "markdown"} and widget_kind in {"markdown", "notes", "rich-text-editor"}
             if isinstance(value, dict):
-                widget[safe_key] = _widget_patch_payload_summary(value)
+                widget[safe_key] = _widget_patch_payload_summary(value, allow_plain_body=allow_plain_body)
             else:
-                widget[safe_key] = _widget_patch_payload_summary(value)
+                widget[safe_key] = _widget_patch_payload_summary(value, allow_plain_body=allow_plain_body)
         else:
             widget[safe_key] = _context_value(value, 500)
         changed_fields.append(safe_key)
@@ -8913,6 +8925,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "shared-slot.set",
         "shared-slot.delete",
         "space.delete",
+        "space.duplicate",
         "widget.delete",
         "widget.patch",
         "widget.upsert",

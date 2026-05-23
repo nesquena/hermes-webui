@@ -1378,6 +1378,11 @@ def test_space_tool_adapter_supports_source_current_patch_widget_alias_metadata_
             "activeSpaceId": created["space_id"],
             "widgetId": "notes-card",
             "title": "Renamed Notes",
+            "notes": {
+                "body": "Safe patch note metadata",
+                "format": "markdown",
+                "generatedWidgetBody": "<script>generated()</script>",
+            },
             "position": {"x": 5, "y": 4, "renderer": "<script>steal()</script>"},
             "size": {"w": 9, "h": 6, "api_key": "***"},
             "html": "<img src=x onerror=steal()>",
@@ -1403,6 +1408,9 @@ def test_space_tool_adapter_supports_source_current_patch_widget_alias_metadata_
     assert patched["widget"]["layout"] == {"x": 5, "y": 4, "w": 9, "h": 6, "minimized": False}
     assert persisted["title"] == "Renamed Notes"
     assert persisted["layout"] == patched["widget"]["layout"]
+    assert persisted["metadata"]["notes"] == {"body": "Safe patch note metadata", "format": "markdown"}
+    assert "generatedwidgetbody" not in serialized
+    assert "generated()" not in serialized
     assert "stored()" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
@@ -5737,7 +5745,7 @@ def test_space_tool_adapter_supports_source_space_duplicate_helper_metadata_only
     assert duplicated["revision_event_id"]
     assert spaces.read_widget_detail(duplicated_space["space_id"], "weather-card")["metadata"]["weather"]["location"] == "Prague"
     assert "steal" not in serialized
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
     assert "renderer" not in serialized
@@ -5747,6 +5755,39 @@ def test_space_tool_adapter_supports_source_space_duplicate_helper_metadata_only
     assert "secret" not in serialized
     assert '"source":' not in serialized
     assert '"data":' not in serialized
+
+
+@pytest.mark.parametrize("action", ["space.spaces.duplicateSpace", "space.spaces.cloneSpace"])
+def test_space_tool_adapter_duplicate_clone_returns_policy_and_progress_receipts_metadata_only(
+    monkeypatch, tmp_path, action
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-duplicate-policy-lab", "name": "Duplicate Policy Lab"})
+
+    result = spaces.run_space_tool(
+        action,
+        {
+            "spaceId": created["space_id"],
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(result).lower()
+
+    assert result["ok"] is True
+    assert result["space_id"] != created["space_id"]
+    assert result["autonomy_policy"]["action"] == action.lower()
+    assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert "creator_commit" in result["autonomy_policy"]["approval_gates"]
+    assert result["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert result["progress_event"]["event_type"] == "tool.completed"
+    assert result["progress_event"]["run_id"] == f"space.duplicate:{result['space_id']}"
+    assert result["progress_event"]["space_id"] == result["space_id"]
+    assert result["progress_event"]["redaction_status"] == "metadata_only"
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
 
 
 @pytest.mark.parametrize("action", ["space.spaces.duplicateSpace", "space.spaces.cloneSpace"])
