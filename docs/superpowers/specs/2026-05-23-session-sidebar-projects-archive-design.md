@@ -25,6 +25,8 @@ making startup or long-term usage progressively noisier.
 - The only session subsection inside a Project or Chats should be Archive.
 - Sessions untouched for 7 or more days should move into the Archive display
   subsection by default.
+- The age-Archive cutoff should be configurable from Preferences, defaulting to
+  7 days.
 - Archive must be collapsed by default and lazy-loaded so old histories remain
   reachable without loading every row at boot.
 - The UI should reuse existing WebUI assets, styles, avatars, and collapsible
@@ -76,7 +78,7 @@ information.
 `Age-archive row`
 
 : A session row hidden under the virtual Archive subsection because it has not
-  been interacted with for 7 or more days.
+  been interacted with for the configured Archive cutoff.
 
 ## Session Grouping Rules
 
@@ -132,12 +134,12 @@ Archive is a virtual age bucket:
 
 - Compute session activity from `last_message_at`, falling back to `updated_at`,
   then `created_at`.
-- A session is age-archived when its activity time is at least 7 days older than
-  server now.
+- A session is age-archived when its activity time is at least the configured
+  Archive cutoff older than server now.
 - The age cutoff is a display decision only. It must not write
   `session.archived=true`.
 - Pinned, unread, streaming/running, and currently open sessions stay visible in
-  the current list even when older than 7 days.
+  the current list even when older than the Archive cutoff.
 - Manual archived sessions keep existing manual archive semantics. They should
   remain outside the normal current/age-archive lists unless the UI explicitly
   asks to show manually archived sessions.
@@ -146,6 +148,72 @@ Archive collapse state should be keyed by group:
 
 - `workspace:<normalized path>` for Projects.
 - `chats` for Chats.
+
+## Settings Contract
+
+Keep settings changes narrow. This feature should not become a broad Preferences
+or Appearance redesign.
+
+Existing settings to preserve:
+
+- `show_cli_sessions`: the new session index should respect this before
+  grouping. When enabled, non-WebUI sessions should group by workspace if their
+  metadata provides one, otherwise under Chats.
+- `show_previous_messaging_sessions`: apply the existing messaging-session
+  replacement/dedupe behavior before grouping.
+- `pinned_sessions_limit`: keep the current global pin limit. Pinned sessions
+  remain current-list exceptions even when older than the Archive cutoff.
+- `sidebar_density`: keep controlling row metadata density. Compact rows show
+  avatar, title, and relative age. Detailed rows may show message count, model,
+  source, lineage, manual project label, or read-only state, but must not show
+  visible profile-name badges. Profile names may remain in tooltips,
+  accessibility labels, and diagnostic metadata.
+- `session_jump_buttons` and `session_endless_scroll`: keep these scoped to
+  reading a conversation transcript. They should not control sidebar Archive
+  lazy-loading.
+- `avatar_presence_layout`: keep scoped to where the active assistant avatar
+  appears in the chat/composer. Session rows should always use the existing
+  profile/avatar rendering path regardless of this setting.
+- `settingsWorkspacePanelOpen`: keep scoped to workspace/file-panel visibility
+  for newly opened sessions. It should not decide whether a session belongs to
+  Projects or Chats.
+
+Add one new Preferences setting:
+
+```text
+session_archive_after_days
+```
+
+UI label:
+
+```text
+Archive inactive sessions after
+```
+
+Allowed values:
+
+```text
+7, 14, 30, 90
+```
+
+Default:
+
+```text
+7
+```
+
+Recommended helper copy:
+
+```text
+Older sessions move into the collapsed Archive section in the sidebar. This
+does not manually archive or delete conversations.
+```
+
+Place this near the existing session/sidebar controls in Preferences, alongside
+Sidebar density, pinned conversations limit, and non-WebUI session visibility.
+Do not add settings for active-profile-only browsing, auto-loading Archive
+contents, hiding Projects, or replacing avatar identity with visible agent
+names.
 
 ## Sidebar Data Contract
 
@@ -199,6 +267,8 @@ enough data to render and open the row:
 - `message_count`
 - `pinned`
 - `archived`
+- effective `session_archive_after_days` or enough server-side classification
+  data for the UI to understand the current cutoff
 - runtime state needed for streaming/running indicators
 - unread state if currently available to the sidebar
 
@@ -326,10 +396,13 @@ Automated backend tests should cover:
 
 - session index groups rows across profiles,
 - sessions open with their saved profile data,
+- `session_archive_after_days` defaults to 7 and accepts only the supported
+  cutoff values,
 - workspace sessions group under Projects,
 - no-workspace sessions group under Chats,
 - manual `session.archived` is not used for age Archive,
-- 7-day cutoff uses `last_message_at`, then `updated_at`, then `created_at`,
+- the configured cutoff uses `last_message_at`, then `updated_at`, then
+  `created_at`,
 - pinned/unread/running/active exceptions remain in current rows,
 - archive counts are returned without archive row payloads,
 - archive pagination returns stable pages.
@@ -343,6 +416,8 @@ Automated frontend or source-level tests should cover:
 - Archive uses existing collapsible subsection classes/patterns,
 - avatar rendering uses existing profile avatar helpers,
 - cross-profile session rows do not render profile-name badges.
+- transcript settings such as `session_endless_scroll` do not affect sidebar
+  Archive lazy-loading.
 
 Manual/browser validation should cover:
 
