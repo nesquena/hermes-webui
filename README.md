@@ -132,7 +132,12 @@ The bootstrap will:
 > Native Windows is not supported for this bootstrap yet. Use Linux, macOS, or WSL2.
 > For Windows / WSL auto-start at login, see [`docs/wsl-autostart.md`](docs/wsl-autostart.md).
 
-A community-maintained native Windows setup (no Docker, no WSL2) is documented at [@markwang2658/hermes-windows-native-guide](https://github.com/markwang2658/hermes-windows-native-guide) (companion setup repo: [@markwang2658/hermes-windows-native](https://github.com/markwang2658/hermes-windows-native)). The community report in [#1952](https://github.com/nesquena/hermes-webui/issues/1952) measured substantially lower memory use vs containerized setups (~330 MB native vs ~1080 MB with WSL2+Docker). Chat, workspace browser, session management, and all themes work; some POSIX-style file paths appear in the workspace browser, and bash-assuming agent tools may not work natively. A PowerShell launcher (`start.ps1`) at the repo root reproduces `start.sh`'s discovery on native Windows by invoking `server.py` directly (skipping `bootstrap.py`'s platform refusal).
+A community-maintained native Windows setup is documented at [@markwang2658/hermes-windows-native-guide](https://github.com/markwang2658/hermes-windows-native-guide) (companion setup repo: [@markwang2658/hermes-windows-native](https://github.com/markwang2658/hermes-windows-native)). Notes from the community report in [#1952](https://github.com/nesquena/hermes-webui/issues/1952):
+
+- **Memory:** community-measured ~330 MB native vs ~1080 MB with WSL2+Docker (varies by configuration).
+- **What works:** chat, workspace browser, session management, all themes.
+- **Known limitations:** some POSIX-style file paths surface in the workspace browser; bash-assuming agent tools may not work natively.
+- **WSL2 relationship:** WSL2 is recommended *once* for first-time venv creation (since `bootstrap.py` currently refuses on native Windows). After the venv exists, `start.ps1` at the repo root runs the WebUI natively by invoking `server.py` directly — no WSL2 needed for day-to-day use.
 
 If provider setup is still incomplete after install, the onboarding wizard will point you to finish it with `hermes model` instead of trying to replicate the full CLI setup in-browser.
 For a step-by-step walkthrough of the wizard, provider choices, local model server Base URLs, and safe re-runs, see [`docs/onboarding.md`](docs/onboarding.md).

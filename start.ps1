@@ -60,7 +60,10 @@ if (Test-Path $envFile) {
         # Filter out shell-readonly vars (UID, GID, EUID, EGID, PPID) per start.sh
         if ($key -in @('UID', 'GID', 'EUID', 'EGID', 'PPID')) { continue }
         if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
-        if ([Environment]::GetEnvironmentVariable($key)) { continue }
+        # Explicit $null check — an env var explicitly set to '' should still
+        # be considered "set" and NOT overridden by .env (empty string is
+        # falsey in PowerShell, so a plain truthy check would mis-skip).
+        if ($null -ne [Environment]::GetEnvironmentVariable($key)) { continue }
         $val = $kv[1]
         if ($val -match '^"(.*)"$') { $val = $Matches[1] }
         elseif ($val -match "^'(.*)'$") { $val = $Matches[1] }
@@ -93,7 +96,9 @@ if (-not $AgentDir) {
     }
 }
 if (-not $AgentDir) {
-    Write-Error 'hermes-agent not found at $env:USERPROFILE\.hermes\hermes-agent or ../hermes-agent. Set HERMES_WEBUI_AGENT_DIR explicitly.'
+    $expectedPrimary = Join-Path $env:USERPROFILE '.hermes\hermes-agent'
+    $expectedSibling = Join-Path (Split-Path -Parent $RepoRoot) 'hermes-agent'
+    Write-Error "hermes-agent not found at $expectedPrimary or $expectedSibling. Set HERMES_WEBUI_AGENT_DIR explicitly."
     exit 1
 }
 
