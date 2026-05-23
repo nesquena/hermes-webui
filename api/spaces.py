@@ -1449,13 +1449,20 @@ def _space_layout_prompt_preflight_receipt(layout: dict[str, Any]) -> dict[str, 
 
 
 
-def _space_widget_patch_prompt_preflight_receipt(patch: Any) -> dict[str, Any]:
-    """Preflight sanitized widget patch metadata before tool-route mutation."""
+def _space_widget_patch_prompt_preflight_receipt(patch: Any, raw_patch: Any | None = None) -> dict[str, Any]:
+    """Preflight widget patch metadata and raw prompt-bearing patch fields before mutation."""
     from api.capy_policy import prompt_preflight
 
     safe_patch = _widget_patch_payload_summary(patch if isinstance(patch, dict) else {})
+    prompt_fragments: list[str] = []
+    if isinstance(raw_patch, dict):
+        prompt_fragments.extend(_space_widget_upsert_prompt_fragments(raw_patch))
+    preflight_payload: dict[str, Any] = {"widget_patch": safe_patch}
+    if prompt_fragments:
+        preflight_payload["prompt_fragment_count"] = len(prompt_fragments)
+        preflight_payload["prompt_fragments"] = prompt_fragments
     preflight_text = json.dumps(
-        {"widget_patch": safe_patch},
+        preflight_payload,
         ensure_ascii=True,
         sort_keys=True,
         default=str,
@@ -5539,7 +5546,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         raw_patch = data.get("patch")
         patch_payload: dict[str, Any] = raw_patch if isinstance(raw_patch, dict) else data
         safe_patch = _space_tool_widget_patch_payload(patch_payload)
-        prompt_preflight = _space_widget_patch_prompt_preflight_receipt(safe_patch)
+        prompt_preflight = _space_widget_patch_prompt_preflight_receipt(safe_patch, raw_patch=patch_payload)
         if prompt_preflight.get("status") != "pass":
             raise ValueError("Widget patch prompt preflight blocked")
         result = patch_widget(space_id, widget_id, safe_patch)
@@ -6060,7 +6067,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         widget_id = validate_widget_id(_space_tool_widget_id_alias(data))
         raw_patch = data.get("patch")
         patch_payload: dict[str, Any] = raw_patch if isinstance(raw_patch, dict) else {}
-        prompt_preflight = _space_widget_patch_prompt_preflight_receipt(patch_payload)
+        prompt_preflight = _space_widget_patch_prompt_preflight_receipt(patch_payload, raw_patch=patch_payload)
         if prompt_preflight.get("status") != "pass":
             raise ValueError("Widget patch prompt preflight blocked")
         result = patch_widget(space_id, widget_id, patch_payload)
