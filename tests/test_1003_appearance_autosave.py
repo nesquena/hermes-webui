@@ -136,3 +136,25 @@ def test_settings_api_accepts_appearance_only_payload_without_overwriting_other_
             "skin": snapshot["skin"],
             "font_size": snapshot["font_size"],
         })
+
+
+def test_settings_api_accepts_avatar_presence_layout_enum_and_ignores_invalid_values():
+    original, status = _get("/api/settings")
+    assert status == 200
+    original_layout = original.get("avatar_presence_layout", "thread")
+    try:
+        d, status = _post("/api/settings", {"avatar_presence_layout": "composer"})
+        assert status == 200
+        assert d.get("avatar_presence_layout") == "composer"
+        reloaded, status = _get("/api/settings")
+        assert status == 200
+        assert reloaded.get("avatar_presence_layout") == "composer"
+
+        d, status = _post("/api/settings", {"avatar_presence_layout": "giant"})
+        assert status == 200
+        assert d.get("avatar_presence_layout") == "composer"
+        reloaded, status = _get("/api/settings")
+        assert status == 200
+        assert reloaded.get("avatar_presence_layout") == "composer"
+    finally:
+        _post("/api/settings", {"avatar_presence_layout": original_layout})

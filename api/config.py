@@ -4476,6 +4476,7 @@ _SETTINGS_DEFAULTS = {
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
     "font_size": "default",  # small | default | large | xlarge
+    "avatar_presence_layout": "thread",  # thread | composer
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "pinned_sessions_limit": 3,  # maximum active pinned sessions shown in the sidebar
@@ -4609,6 +4610,7 @@ _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter"},
     "sidebar_density": {"compact", "detailed"},
     "font_size": {"small", "default", "large", "xlarge"},
+    "avatar_presence_layout": {"thread", "composer"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
     "busy_input_mode": {"queue", "interrupt", "steer"},
 }
