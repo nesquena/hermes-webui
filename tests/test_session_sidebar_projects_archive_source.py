@@ -105,3 +105,17 @@ def test_virtual_scroll_flat_rows_contract_is_preserved():
     assert "flatSessionRows.push({group,session:s})" in body
     assert "_sessionVirtualWindow" in body
     assert "_sessionVirtualSpacer" in body
+
+
+def test_archive_rows_are_not_synced_into_current_groups():
+    js = _js()
+    sync_body = _function_body(js, "_syncSessionIndexGroupsWithRows")
+    apply_body = _function_body(js, "_applySessionIndexPayload")
+
+    assert "function _syncSessionIndexGroupsWithRows(rows,currentRows=null)" in sync_body
+    assert "const currentRows=_sessionIndexCurrentRows()" in apply_body
+    assert "_syncSessionIndexGroupsWithRows(_allSessions,currentRows)" in apply_body
+    assert "_sessionIndexLoadedArchiveRows()" in sync_body
+    assert "archiveIds.has(row.session_id)" in sync_body
+    assert "row.archived||row.age_archived" in sync_body
+    assert "_isOptimisticFirstTurnSessionRow(row)" in sync_body

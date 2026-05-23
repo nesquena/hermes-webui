@@ -1652,10 +1652,14 @@ function _sessionIndexEnsureGroup(groupId,row){
   _sessionIndexGroups.push(group);
   return group;
 }
-function _syncSessionIndexGroupsWithRows(rows){
-  const currentIds=new Set(_sessionIndexCurrentRows().map(s=>s&&s.session_id).filter(Boolean));
+function _syncSessionIndexGroupsWithRows(rows,currentRows=null){
+  const baseRows=Array.isArray(currentRows)?currentRows:_sessionIndexCurrentRows();
+  const currentIds=new Set(baseRows.map(s=>s&&s.session_id).filter(Boolean));
+  const archiveIds=new Set(_sessionIndexLoadedArchiveRows().map(s=>s&&s.session_id).filter(Boolean));
   for(const row of Array.isArray(rows)?rows:[]){
     if(!row||!row.session_id||currentIds.has(row.session_id)) continue;
+    if(archiveIds.has(row.session_id)||row.archived||row.age_archived) continue;
+    if(!_isOptimisticFirstTurnSessionRow(row)) continue;
     const groupId=_sessionIndexGroupIdForRow(row);
     const group=_sessionIndexEnsureGroup(groupId,row);
     group.sessions=Array.isArray(group.sessions)?group.sessions:[];
@@ -2294,10 +2298,12 @@ function _applySessionIndexPayload(indexData){
   if (typeof indexData.server_tz === 'string') {
     _serverTz = indexData.server_tz;
   }
-  const sessionRows=_sessionIndexAllRowsForState();
+  const currentRows=_sessionIndexCurrentRows();
+  const archiveRows=_sessionIndexLoadedArchiveRows();
+  const sessionRows=[...currentRows,...archiveRows];
   _reconcileActiveSessionIdleStateFromList(sessionRows);
   _allSessions = _mergeOptimisticFirstTurnSessions(sessionRows);
-  _syncSessionIndexGroupsWithRows(_allSessions);
+  _syncSessionIndexGroupsWithRows(_allSessions,currentRows);
   _clearLineageReportCache();
   _allProjects = Array.isArray(indexData.projects)?indexData.projects:[];
   _markPollingCompletionUnreadTransitions(_allSessions);
