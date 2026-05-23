@@ -1707,10 +1707,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               }
             }
           }
-          if(d.session.tool_calls&&d.session.tool_calls.length){
+          const hasMessageToolMetadata=S.messages.some(m=>{
+            if(!m||m.role!=='assistant') return false;
+            const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+            const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+            const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+            return hasTc||hasPartialTc||hasTu;
+          });
+          if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
             S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
           } else {
-            S.toolCalls=S.toolCalls.map(tc=>({...tc,done:true}));
+            S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
           }
           if(typeof _copyActivityDisclosureState==='function'&&lastAsst){
             const assistantIdx=S.messages.indexOf(lastAsst);
