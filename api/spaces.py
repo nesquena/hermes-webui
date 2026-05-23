@@ -2867,6 +2867,51 @@ def _research_note_items(notes: Any) -> list[str]:
     return [_payload_text_summary(item, 300) for item in raw_items]
 
 
+def _research_progress_prompt_preflight_receipt(
+    *, phase: str, message: str, source_rows: list[dict[str, str]], note_items: list[str]
+) -> dict[str, Any]:
+    """Preflight Research Harness progress summaries before widget mutation.
+
+    Research progress can become agent-visible status and source context. The
+    preflight payload is built from already-redacted metadata summaries, not raw
+    fetched documents, renderer fields, credentials, or generated bodies.
+    """
+    from api.capy_policy import prompt_preflight
+
+    preflight_text = json.dumps(
+        {
+            "research_progress": {
+                "phase": phase,
+                "message": message,
+                "source_count": len(source_rows),
+                "sources": source_rows[:10],
+                "note_count": len(note_items),
+                "notes": note_items[:10],
+            }
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    receipt = prompt_preflight(preflight_text, boundary="creator_commit")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+def _research_progress_action_policy_receipt(preflight_receipt: dict[str, Any] | None) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
+    return action_policy_receipt(
+        "space.research.progress",
+        approval_gates=["creator_commit"],
+        prompt_preflight_status=status,
+        model_route_hint="hint:summarize",
+    )
+
+
 def _record_research_progress_event(space_id: str, *, source_count: int, note_count: int) -> dict[str, Any]:
     """Best-effort metadata-only producer event for Research Harness progress."""
     run_id = f"research:{space_id}"
@@ -2941,18 +2986,28 @@ def set_research_progress(
     if not safe_message:
         safe_message = "Research progress updated."
 
+    source_rows = _research_source_rows(sources)
+    note_items = _research_note_items(notes)
+    prompt_preflight = _research_progress_prompt_preflight_receipt(
+        phase=safe_phase,
+        message=safe_message,
+        source_rows=source_rows,
+        note_items=note_items,
+    )
+    if prompt_preflight.get("status") != "pass":
+        raise ValueError("Research progress prompt preflight blocked")
+    autonomy_policy = _research_progress_action_policy_receipt(prompt_preflight)
+
     plan_result = patch_widget(
         sid,
         "research-plan",
         {"status": {"phase": safe_phase, "message": safe_message, "progress": "updated"}},
     )
-    source_rows = _research_source_rows(sources)
     sources_result = patch_widget(
         sid,
         "research-sources",
         {"table": {"columns": ["title", "url", "notes"], "rows": source_rows, "source_count": len(source_rows)}},
     )
-    note_items = _research_note_items(notes)
     notes_result = patch_widget(
         sid,
         "research-notes",
@@ -2977,6 +3032,8 @@ def set_research_progress(
             notes_result["revision_event_id"],
         ],
         "progress_event": progress_event,
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
     }
 
 
