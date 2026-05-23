@@ -85,7 +85,16 @@ if (-not $Python) {
 }
 
 # === Find Hermes Agent dir (server.py imports from it) =================
+# When HERMES_WEBUI_AGENT_DIR is set we still validate it on disk —
+# an explicit override pointing at a missing dir should fail FAST
+# with a clear message, not silently progress into a python3 launch
+# that's about to crash on missing imports. Smoke-test feedback on
+# PR #2783: nesquena/hermes-webui requested this guard.
 $AgentDir = $env:HERMES_WEBUI_AGENT_DIR
+if ($AgentDir -and -not (Test-Path (Join-Path $AgentDir 'hermes_cli'))) {
+    Write-Error "HERMES_WEBUI_AGENT_DIR is set to '$AgentDir' but no hermes_cli/ folder exists there. Unset the variable to fall back to auto-discovery, or fix the path."
+    exit 1
+}
 if (-not $AgentDir) {
     $candidates = @(
         (Join-Path $env:USERPROFILE '.hermes\hermes-agent'),
