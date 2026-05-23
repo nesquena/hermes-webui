@@ -2798,6 +2798,55 @@ def test_widget_recovery_enable_disable_tools_record_metadata_only_progress_even
     assert "renderer" not in serialized
 
 
+def test_recovery_module_enable_disable_tools_record_metadata_only_progress_events(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "module-progress-lab",
+            "name": "Module Progress Lab",
+            "source": "SECRET_VALUE_DO_NOT_LEAK",
+            "renderer": "<script>stored()</script>",
+        }
+    )
+
+    disabled = spaces.disable_module_for_recovery(
+        "module-progress-lab",
+        reason="broken renderer <script>bad()</script> with SECRET_VALUE_DO_NOT_LEAK",
+    )
+    enabled = spaces.enable_module_for_recovery(
+        "module-progress-lab",
+        reason="safe recovery complete after SECRET_VALUE_DO_NOT_LEAK renderer cleanup",
+    )
+
+    from api.capy_progress import progress_status
+
+    scoped_progress = progress_status(space_id="recovery-modules")
+    serialized = json.dumps({"disabled": disabled, "enabled": enabled, "progress": scoped_progress}, sort_keys=True).lower()
+
+    assert disabled["progress_event"]["event_type"] == "tool.completed"
+    assert disabled["progress_event"]["family"] == "tool"
+    assert disabled["progress_event"]["run_id"] == "recovery.module.disable:recovery-modules"
+    assert disabled["progress_event"]["space_id"] == "recovery-modules"
+    assert enabled["progress_event"]["event_type"] == "tool.completed"
+    assert enabled["progress_event"]["family"] == "tool"
+    assert enabled["progress_event"]["run_id"] == "recovery.module.enable:recovery-modules"
+    assert enabled["progress_event"]["space_id"] == "recovery-modules"
+    assert disabled["progress_event"].get("event_id") != enabled["progress_event"].get("event_id")
+    assert scoped_progress["recent_event_count"] == 2
+    assert scoped_progress["recent_family_counts"] == {"tool": 2}
+    assert [event["run_id"] for event in scoped_progress["recent_events"]] == [
+        "recovery.module.enable:recovery-modules",
+        "recovery.module.disable:recovery-modules",
+    ]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"source":' not in serialized
+    assert '"body":' not in serialized
+    assert "credential" not in serialized
+
+
 def test_recovery_enable_disable_primitives_return_metadata_only_action_policy_receipts(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "recovery-policy-lab", "name": "Recovery Policy Lab"})
@@ -12799,11 +12848,11 @@ def test_recovery_module_tools_record_metadata_only_progress_events(monkeypatch,
 
     assert disabled["progress_event"]["event_type"] == "tool.completed"
     assert disabled["progress_event"]["family"] == "tool"
-    assert disabled["progress_event"]["run_id"] == "recovery.disable:recovery-modules"
+    assert disabled["progress_event"]["run_id"] == "recovery.module.disable:recovery-modules"
     assert disabled["progress_event"]["space_id"] == "recovery-modules"
     assert enabled["progress_event"]["event_type"] == "tool.completed"
     assert enabled["progress_event"]["family"] == "tool"
-    assert enabled["progress_event"]["run_id"] == "recovery.enable:recovery-modules"
+    assert enabled["progress_event"]["run_id"] == "recovery.module.enable:recovery-modules"
     assert enabled["progress_event"]["space_id"] == "recovery-modules"
     assert queued["progress_event"]["event_type"] == "tool.completed"
     assert queued["progress_event"]["family"] == "tool"
@@ -12820,8 +12869,8 @@ def test_recovery_module_tools_record_metadata_only_progress_events(monkeypatch,
     assert scoped_progress["recent_family_counts"] == {"tool": 3}
     assert [event["run_id"] for event in scoped_progress["recent_events"]] == [
         "repair:recovery-modules",
-        "recovery.enable:recovery-modules",
-        "recovery.disable:recovery-modules",
+        "recovery.module.enable:recovery-modules",
+        "recovery.module.disable:recovery-modules",
     ]
     assert "source" not in serialized
     assert "renderer" not in serialized

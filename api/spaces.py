@@ -8898,7 +8898,7 @@ def disable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str
     summary["prompt_preflight"] = _recovery_required_prompt_preflight_receipt(action)
     summary["progress_event"] = _record_space_recovery_progress_event(
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
-        action="disable",
+        action="module.disable",
     )
     summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt(action)
     return summary
@@ -8927,7 +8927,7 @@ def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str,
     summary["prompt_preflight"] = _recovery_required_prompt_preflight_receipt(action)
     summary["progress_event"] = _record_space_recovery_progress_event(
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
-        action="enable",
+        action="module.enable",
     )
     summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt(action)
     return summary
@@ -9409,6 +9409,8 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "recovery.disable",
         "recovery.enable",
         "recovery.restore",
+        "recovery.module.disable",
+        "recovery.module.enable",
         "recovery.widget.disable",
         "recovery.widget.enable",
         "recovery.widget.restore",
@@ -9460,7 +9462,16 @@ def _record_space_repair_progress_event(space_id: str) -> dict[str, Any]:
 def _record_space_recovery_progress_event(space_id: str, *, action: str) -> dict[str, Any]:
     """Best-effort metadata-only progress producer for recovery admin actions."""
     safe_action = str(action or "").strip().lower()
-    if safe_action not in {"disable", "enable", "restore", "widget.disable", "widget.enable", "widget.restore"}:
+    if safe_action not in {
+        "disable",
+        "enable",
+        "restore",
+        "module.disable",
+        "module.enable",
+        "widget.disable",
+        "widget.enable",
+        "widget.restore",
+    }:
         safe_action = "toggle"
     return _record_space_tool_progress_event(space_id, run_prefix=f"recovery.{safe_action}")
 
