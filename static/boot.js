@@ -1666,7 +1666,9 @@ function _deferBootHydration(fn){
   // Kick model dropdown hydration off eagerly but non-blocking — first call
   // materializes the promise so subsequent `_ensureModelDropdownReady()` callers
   // de-dup against the in-flight fetch.
-  _startBootModelDropdown();
+  setTimeout(()=>{
+    try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+  },0);
   // Hydrate non-critical metadata after the chat surface has had a paint.
   // Completed setups should not wait for workspace/onboarding status before
   // the composer can accept input.
