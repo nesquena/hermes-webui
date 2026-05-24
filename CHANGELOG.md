@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **CI: native-Windows-startup path-discovery workflow** — `.github/workflows/native-windows-startup.yml` runs on `windows-latest` against PRs that touch `start.ps1`. Catches WOW64-redirect, venv-discovery, and PowerShell-parse regressions in the launcher before merge — the bug class that PR #2805 caught only via post-filing manual smoke. **Scope:** path discovery only (per the maintainer's mock-only scoping on #2811). The workflow creates the README's Windows venv, stubs a `hermes_cli/` directory next to a sibling `hermes-agent/` folder so `start.ps1`'s `Test-Path hermes_cli -PathType Container` guard passes, runs the launcher for 8 seconds, then asserts that none of `start.ps1`'s own `Write-Error` guards (no Python, no agent dir, bad port, missing `hermes_cli`, missing `server.py`) appeared in stderr. The server itself is not booted — `hermes-agent` is not on PyPI and a full install would require a deploy token. Server-boot regressions remain covered by the Linux jobs and `docker-smoke.yml`.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added

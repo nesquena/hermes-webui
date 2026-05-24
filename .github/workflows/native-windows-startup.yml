@@ -1,0 +1,132 @@
+name: Native Windows startup
+
+# Runs on PRs that touch start.ps1 (or this workflow). Validates the
+# native-Windows launch script catches the bug classes the recent
+# Windows-only batch caught manually (#2805 WOW64 ProgramFiles redirect,
+# #2806 venv-portability claim, #2807 port-parse + finally-cleanup).
+#
+# Scope (per nesquena-hermes comment on #2811 — option 1, mock-only):
+# hermes-agent is not published to PyPI, so we cannot pip-install it on
+# the runner. Instead we stub a hermes_cli/ directory next to a sibling
+# hermes-agent/ folder — just enough for start.ps1's existence guard to
+# pass. The workflow then runs start.ps1 for a few seconds and asserts
+# that none of start.ps1's own Write-Error guards fired. Server-boot
+# regressions remain covered by the Linux jobs and docker-smoke.yml.
+
+on:
+  pull_request:
+    paths:
+      - 'start.ps1'
+      - '.github/workflows/native-windows-startup.yml'
+  workflow_dispatch:
+
+jobs:
+  native-windows-startup:
+    name: start.ps1 path discovery (mock hermes-agent)
+    runs-on: windows-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Create the WebUI venv. start.ps1 prefers $AgentDir\venv if it
+      # exists, then falls back to the python on PATH. We create a
+      # WebUI-local venv to mirror the README's documented native path
+      # and to give start.ps1 a real python.exe to invoke.
+      - name: Create venv (README path)
+        shell: pwsh
+        run: |
+          python -m venv venv
+          if (-not (Test-Path venv\Scripts\python.exe)) {
+            throw "venv\Scripts\python.exe missing after venv create"
+          }
+
+      # Mock-only hermes-agent provisioning. We can't pip-install
+      # hermes-agent (not on PyPI), so we stub the minimum that
+      # start.ps1's `Test-Path hermes_cli -PathType Container` guard
+      # needs to pass. server.py would crash on this stub at import
+      # time — we deliberately do NOT probe /health below.
+      - name: Stub hermes-agent (mock hermes_cli only)
+        shell: pwsh
+        run: |
+          $agentDir = Join-Path (Split-Path -Parent $PWD) 'hermes-agent'
+          $cliDir = Join-Path $agentDir 'hermes_cli'
+          New-Item -ItemType Directory -Force -Path $cliDir | Out-Null
+          Set-Content -Path (Join-Path $cliDir '__init__.py') -Value '# stub for CI path-discovery test only'
+          "HERMES_WEBUI_AGENT_DIR=$agentDir" >> $env:GITHUB_ENV
+          Write-Host "Stub hermes-agent provisioned at $agentDir"
+
+      # Run start.ps1 and verify it passes its own discovery guards
+      # without erroring out. server.py will exit non-zero on the stub
+      # (no real CLI code) — that's expected and not asserted against.
+      # We only fail if start.ps1's own Write-Error guards fire.
+      - name: Run start.ps1 + verify path discovery
+        shell: pwsh
+        run: |
+          $stdout = Join-Path $env:RUNNER_TEMP 'start-ps1.out'
+          $stderr = Join-Path $env:RUNNER_TEMP 'start-ps1.err'
+          $proc = Start-Process -FilePath 'pwsh' `
+            -ArgumentList '-NoLogo','-File','.\start.ps1' `
+            -WorkingDirectory $PWD `
+            -PassThru `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError  $stderr
+          "SERVER_PID=$($proc.Id)" >> $env:GITHUB_ENV
+          Write-Host "Spawned start.ps1 wrapper PID $($proc.Id)"
+
+          # Path discovery is sub-second; the 8s buffer lets the python
+          # launch land in the logs (and immediately exit on the stub).
+          Start-Sleep -Seconds 8
+
+          Write-Host "===== start.ps1 stdout ====="
+          $stdoutContent = if (Test-Path $stdout) { Get-Content $stdout -Raw } else { '<empty>' }
+          Write-Host $stdoutContent
+          Write-Host "===== start.ps1 stderr ====="
+          $stderrContent = if (Test-Path $stderr) { Get-Content $stderr -Raw } else { '<empty>' }
+          Write-Host $stderrContent
+
+          # Pattern set: every Write-Error message start.ps1 can emit on
+          # its own discovery path. If any of these appear in stderr,
+          # path discovery regressed and the job must fail.
+          $guardErrors = @(
+            'Python 3 is required',
+            'hermes-agent not found',
+            'HERMES_WEBUI_AGENT_DIR is set to',
+            'is not a valid integer port',
+            'is out of TCP-port range',
+            'server.py not found'
+          )
+          foreach ($msg in $guardErrors) {
+            if ($stderrContent -and $stderrContent -match [regex]::Escape($msg)) {
+              throw "REGRESSION: start.ps1 errored on guard '$msg' - path discovery failed."
+            }
+          }
+          Write-Host "OK: start.ps1 path discovery - all guards passed."
+
+      # taskkill /T walks the process tree, /F forces. taskkill exits
+      # non-zero if the PID is already gone (server.py crashed on the
+      # stub) — that's expected, not a failure.
+      - name: Stop background server (tree-kill)
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:SERVER_PID) {
+            try {
+              & taskkill /PID $env:SERVER_PID /T /F 2>&1 | Out-Host
+            } catch {
+              Write-Host "taskkill: PID $env:SERVER_PID already exited (expected with mock stub)"
+            }
+          }
+          # Belt-and-suspenders: kill anything still bound to 8787.
+          $hanging = Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue
+          if ($hanging) {
+            foreach ($c in $hanging) {
+              try { Stop-Process -Id $c.OwningProcess -Force -ErrorAction Stop } catch {}
+            }
+          }
