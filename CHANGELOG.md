@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Embedded terminal closes immediately on Linux** (regression from #2363) — fixes #2853. The `_terminal_shell_preexec_fn` introduced in commit `71d8a8fb` set `PR_SET_PDEATHSIG=SIGTERM` to reap orphaned PTY shells when the WebUI process crashed, but that signal is *per-thread*. WebUI runs `ThreadingHTTPServer`, so `subprocess.Popen` ran on a short-lived per-request thread; the PTY shell registered the request thread as its parent and was killed within ~10 ms of the response being sent. The frontend correctly surfaced this as `[terminal closed]`. Fix: drop the `preexec_fn` entirely — `atexit.register(close_all_terminals)` plus the explicit `close_terminal` paths already cover graceful shutdown, and orphaned shells after a hard server crash are rare for self-hosted single-user installs (the tradeoff the original PR was navigating). Empirically reproduced and verified: with `preexec_fn` the shell exits with code `-15` (SIGTERM) right after the spawning thread joins; without it, the shell stays alive indefinitely. macOS users were unaffected because `libc.prctl` doesn't exist and the `except Exception: pass` swallowed the `AttributeError` silently. Adds `test_pty_shell_survives_when_spawning_thread_exits` (real PTY + worker thread, asserts shell is still alive after the worker joins), inverts the existing `test_terminal_shell_uses_parent_death_signal_preexec` to lock in the no-preexec contract, and updates the module-source guard to refuse re-introduction.
+
 ## [v0.51.126] — 2026-05-24 — Release CX (stage-batch8 — 2-PR low-risk batch — kanban markdown + live activity timeline)
 
 ### Added
