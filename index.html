@@ -3,507 +3,1318 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hermes Web UI - Windows Native Edition</title>
+    <title>Hermes Agent — Windows Native Edition | Ã̶ḧ̶Ḿ̶ĕ̶đ̶ Å̶ḱ̶ṝ̶à̶ḿ̶</title>
+    
+    <!-- Meta Tags for SEO -->
+    <meta name="description" content="An open-source native Windows fork of Hermes Agent by Nous Research. Runs directly on Windows with zero Docker or WSL2 overhead. Rebuilt by Ã̶ḧ̶Ḿ̶ĕ̶đ̶ Å̶ḱ̶ṝ̶à̶ḿ̶.">
+    <meta property="og:title" content="Hermes Agent — Windows Native Edition">
+    <meta property="og:description" content="A premium native Windows fork of Nous Research's Hermes Agent with zero Docker/WSL2 overhead. Features 12 live-switchable skins.">
+    <meta property="og:type" content="website">
+    
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;700&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
     
     <style>
-        :root {
-            --bg-color: #0d0f14;
-            --card-bg: rgba(20, 24, 33, 0.6);
-            --border-color: rgba(255, 255, 255, 0.08);
-            --text-primary: #f3f4f6;
-            --text-secondary: #9ca3af;
-            --primary-accent: #7c3aed; /* Violet */
-            --secondary-accent: #06b6d4; /* Cyan */
-            --gradient-accent: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
-            --glow-color: rgba(124, 58, 237, 0.35);
-        }
-
+        /* CSS RESET & CORE VARIABLES */
         * {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
         }
 
+        :root {
+            --foreground: #FFFFFF;
+            --midground: #ffe6cb;
+            --background: #041C1C;
+            --glow-color: rgba(255, 189, 56, 0.35);
+            --accent: #FFD700;
+            --border-color: rgba(255, 230, 203, 0.2);
+            --font-display: 'Space Grotesk', 'Outfit', sans-serif;
+            --font-mono: 'JetBrains Mono', 'Courier Prime', monospace;
+            --border-style: solid;
+            --radius: 0px;
+        }
+
+        /* 12 SKIN DEFINITIONS (DARK MODE DEFAULT) */
+        
+        /* Default Gold */
+        html[data-skin="default"] {
+            --midground: #ffe6cb;
+            --background: #041C1C;
+            --accent: #FFD700;
+            --glow-color: rgba(255, 189, 56, 0.35);
+            --border-color: rgba(255, 230, 203, 0.2);
+        }
+        
+        /* Ares - Red */
+        html[data-skin="ares"] {
+            --midground: #FF4444;
+            --background: #1a0808;
+            --accent: #FF4444;
+            --glow-color: rgba(255, 68, 68, 0.35);
+            --border-color: rgba(255, 68, 68, 0.2);
+        }
+        
+        /* Mono - Gray */
+        html[data-skin="mono"] {
+            --midground: #CCCCCC;
+            --background: #121212;
+            --accent: #888888;
+            --glow-color: rgba(204, 204, 204, 0.2);
+            --border-color: rgba(204, 204, 204, 0.2);
+        }
+        
+        /* Slate - Blue-Gray */
+        html[data-skin="slate"] {
+            --midground: #94A3B8;
+            --background: #0f172a;
+            --accent: #38bdf8;
+            --glow-color: rgba(148, 163, 184, 0.25);
+            --border-color: rgba(148, 163, 184, 0.2);
+        }
+        
+        /* Poseidon - Ocean Blue */
+        html[data-skin="poseidon"] {
+            --midground: #0EA5E9;
+            --background: #022a3a;
+            --accent: #38bdf8;
+            --glow-color: rgba(14, 165, 233, 0.3);
+            --border-color: rgba(14, 165, 233, 0.2);
+        }
+        
+        /* Sisyphus - Purple */
+        html[data-skin="sisyphus"] {
+            --midground: #A78BFA;
+            --background: #1e1b4b;
+            --accent: #c084fc;
+            --glow-color: rgba(167, 139, 250, 0.3);
+            --border-color: rgba(167, 139, 250, 0.2);
+        }
+        
+        /* Charizard - Orange */
+        html[data-skin="charizard"] {
+            --midground: #FB923C;
+            --background: #2a1103;
+            --accent: #f97316;
+            --glow-color: rgba(251, 146, 60, 0.35);
+            --border-color: rgba(251, 146, 60, 0.2);
+        }
+        
+        /* Sienna - Clay & Earth */
+        html[data-skin="sienna"] {
+            --midground: #E0896D;
+            --background: #1F1E1C;
+            --accent: #D97757;
+            --glow-color: rgba(224, 137, 109, 0.3);
+            --border-color: rgba(224, 137, 109, 0.2);
+        }
+        
+        /* Catppuccin - Mauve Mocha */
+        html[data-skin="catppuccin"] {
+            --midground: #CBA6F7;
+            --background: #1E1E2E;
+            --accent: #f5c2e7;
+            --glow-color: rgba(203, 166, 247, 0.3);
+            --border-color: rgba(203, 166, 247, 0.2);
+        }
+        
+        /* Hepburn - Magenta-Rose */
+        html[data-skin="hepburn"] {
+            --midground: #f278ad;
+            --background: #110a0f;
+            --accent: #ec5597;
+            --glow-color: rgba(242, 120, 173, 0.3);
+            --border-color: rgba(242, 120, 173, 0.2);
+        }
+        
+        /* Nous - Technical Steel */
+        html[data-skin="nous"] {
+            --midground: #7EB6E0;
+            --background: #0A0E14;
+            --accent: #4682B4;
+            --glow-color: rgba(70, 130, 180, 0.3);
+            --border-color: rgba(70, 130, 180, 0.25);
+            --border-style: dashed;
+            --font-display: 'Courier Prime', 'JetBrains Mono', monospace;
+        }
+        
+        /* Geist Contrast - Yellow Accent */
+        html[data-skin="geist-contrast"] {
+            --midground: #FFF175;
+            --background: #000000;
+            --accent: #ffffff;
+            --glow-color: rgba(255, 241, 117, 0.3);
+            --border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        /* LIGHT MODE PALETTES */
+        
+        html.light {
+            --midground: #1F1E1C;
+            --background: #FAF9F5;
+            --accent: #A55237;
+            --glow-color: rgba(0, 0, 0, 0.08);
+            --border-color: rgba(31, 30, 28, 0.18);
+        }
+
+        html.light[data-skin="ares"] {
+            --midground: #C0392B;
+            --background: #FAF5F5;
+            --accent: #A93226;
+            --glow-color: rgba(192, 57, 43, 0.1);
+            --border-color: rgba(192, 57, 43, 0.18);
+        }
+
+        html.light[data-skin="mono"] {
+            --midground: #555555;
+            --background: #FAFAFA;
+            --accent: #222222;
+            --glow-color: rgba(0, 0, 0, 0.05);
+            --border-color: rgba(0, 0, 0, 0.12);
+        }
+
+        html.light[data-skin="slate"] {
+            --midground: #475569;
+            --background: #F1F5F9;
+            --accent: #0f172a;
+            --glow-color: rgba(71, 85, 105, 0.08);
+            --border-color: rgba(71, 85, 105, 0.18);
+        }
+
+        html.light[data-skin="poseidon"] {
+            --midground: #0369A1;
+            --background: #F0F9FF;
+            --accent: #0284C7;
+            --glow-color: rgba(3, 105, 161, 0.08);
+            --border-color: rgba(3, 105, 161, 0.18);
+        }
+
+        html.light[data-skin="sisyphus"] {
+            --midground: #7C3AED;
+            --background: #F5F3FF;
+            --accent: #6D28D9;
+            --glow-color: rgba(124, 58, 237, 0.08);
+            --border-color: rgba(124, 58, 237, 0.18);
+        }
+
+        html.light[data-skin="charizard"] {
+            --midground: #EA580C;
+            --background: #FFF7ED;
+            --accent: #C2410C;
+            --glow-color: rgba(234, 88, 12, 0.08);
+            --border-color: rgba(234, 88, 12, 0.18);
+        }
+
+        html.light[data-skin="sienna"] {
+            --midground: #D97757;
+            --background: #FAF9F5;
+            --accent: #BF6545;
+            --glow-color: rgba(217, 119, 87, 0.08);
+            --border-color: rgba(217, 119, 87, 0.18);
+        }
+
+        html.light[data-skin="catppuccin"] {
+            --midground: #8839EF;
+            --background: #EFF1F5;
+            --accent: #4C4F69;
+            --glow-color: rgba(136, 57, 239, 0.08);
+            --border-color: rgba(136, 57, 239, 0.18);
+        }
+
+        html.light[data-skin="hepburn"] {
+            --midground: #d44a7a;
+            --background: #fff3f7;
+            --accent: #c6246a;
+            --glow-color: rgba(242, 120, 173, 0.08);
+            --border-color: rgba(242, 120, 173, 0.18);
+        }
+
+        html.light[data-skin="nous"] {
+            --midground: #2C5F88;
+            --background: #FFFFFF;
+            --accent: #1A2A3A;
+            --glow-color: rgba(70, 130, 180, 0.08);
+            --border-color: rgba(70, 130, 180, 0.22);
+            --border-style: dashed;
+            --font-display: 'Courier Prime', 'JetBrains Mono', monospace;
+        }
+
+        html.light[data-skin="geist-contrast"] {
+            --midground: #0070f3;
+            --background: #ffffff;
+            --accent: #111111;
+            --glow-color: rgba(0, 112, 243, 0.08);
+            --border-color: rgba(0, 0, 0, 0.15);
+        }
+
+        /* GENERAL STYLING */
         body {
-            background-color: var(--bg-color);
-            color: var(--text-primary);
-            font-family: 'Outfit', sans-serif;
+            background-color: var(--background);
+            color: var(--midground);
+            font-family: var(--font-display);
+            text-transform: uppercase;
             overflow-x: hidden;
-            line-height: 1.6;
+            line-height: 1.5;
+            transition: background-color 0.4s ease, color 0.4s ease;
+            letter-spacing: 0.05em;
         }
 
-        /* Decorative background glow */
-        .bg-glow-1 {
-            position: absolute;
-            width: 600px;
-            height: 600px;
-            border-radius: 50%;
-            background: radial-gradient(circle, var(--glow-color) 0%, rgba(13, 15, 20, 0) 70%);
-            top: -200px;
-            left: -200px;
-            z-index: -1;
-            filter: blur(80px);
-            animation: pulse 10s infinite alternate;
-        }
-
-        .bg-glow-2 {
-            position: absolute;
-            width: 500px;
-            height: 500px;
-            border-radius: 50%;
-            background: radial-gradient(circle, rgba(6, 182, 212, 0.2) 0%, rgba(13, 15, 20, 0) 70%);
-            bottom: 10%;
-            right: -100px;
-            z-index: -1;
-            filter: blur(80px);
-            animation: pulse 8s infinite alternate-reverse;
-        }
-
-        @keyframes pulse {
-            0% { transform: scale(1) translate(0, 0); }
-            100% { transform: scale(1.1) translate(30px, 30px); }
-        }
-
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 0 24px;
-        }
-
-        /* Header / Navbar */
-        header {
-            padding: 24px 0;
-            border-bottom: 1px solid var(--border-color);
-            backdrop-filter: blur(12px);
-            position: sticky;
-            top: 0;
-            z-index: 100;
-            background-color: rgba(13, 15, 20, 0.85);
-        }
-
-        .header-content {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .logo {
-            font-size: 24px;
-            font-weight: 700;
-            background: var(--gradient-accent);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        .btn-github {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            padding: 10px 20px;
-            background-color: rgba(255, 255, 255, 0.05);
-            border: 1px solid var(--border-color);
-            border-radius: 30px;
-            color: var(--text-primary);
+        a {
+            color: inherit;
             text-decoration: none;
-            font-weight: 600;
-            transition: all 0.3s ease;
+            transition: opacity 0.2s ease, color 0.2s ease;
         }
 
-        .btn-github:hover {
-            background-color: var(--text-primary);
-            color: var(--bg-color);
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
+        /* BACKGROUND EFFECTS */
+        .bg-overlay-1 {
+            pointer-events: none;
+            position: fixed;
+            inset: 0;
+            background-color: color-mix(in srgb, #FFFFFF 0%, transparent);
+            mix-blend-mode: difference;
+            z-index: 100;
         }
 
-        /* Hero Section */
-        .hero {
-            padding: 80px 0 60px 0;
-            text-align: center;
+        .bg-overlay-2 {
+            pointer-events: none;
+            position: fixed;
+            inset: 0;
+            background-color: var(--background);
+            mix-blend-mode: difference;
+            z-index: 1;
+            opacity: 0.15;
+            transition: background-color 0.4s ease;
+        }
+
+        .radial-glow {
+            pointer-events: none;
+            position: fixed;
+            inset: 0;
+            background: radial-gradient(ellipse at 100% 100%, rgba(255,189,56,0) 40%, var(--glow-color) 100%);
+            mix-blend-mode: lighten;
+            opacity: 0.25;
+            z-index: 99;
+            transition: background 0.4s ease;
+        }
+
+        #grain-canvas {
+            pointer-events: none;
+            position: fixed;
+            inset: 0;
+            mix-blend-mode: color-dodge;
+            z-index: 101;
+            width: 100%;
+            height: 100%;
+            opacity: 0.45;
+        }
+
+        /* CONTAINER & GRIDS */
+        main {
             position: relative;
+            z-index: 2;
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .g {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            border-left: 1px var(--border-style) var(--border-color);
+            border-right: 1px var(--border-style) var(--border-color);
+            transition: border-color 0.4s ease;
+        }
+
+        .gc {
+            border-right: 1px var(--border-style) var(--border-color);
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            position: relative;
+            transition: border-color 0.4s ease;
+        }
+
+        .gc:last-child {
+            border-right: none;
+        }
+
+        .border-t {
+            border-top: 1px var(--border-style) var(--border-color);
+        }
+
+        .border-b {
+            border-bottom: 1px var(--border-style) var(--border-color);
+        }
+
+        .col-span-full {
+            grid-column: 1 / -1;
+        }
+
+        .col-span-3 {
+            grid-column: span 3;
+        }
+
+        .col-span-2 {
+            grid-column: span 2;
+        }
+
+        /* HOVER GLOWS */
+        .group {
+            cursor: pointer;
+            overflow: hidden;
+        }
+
+        .group-hover-overlay {
+            position: absolute;
+            inset: 1px;
+            background-color: var(--midground);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.25s ease;
+        }
+
+        .group:hover .group-hover-overlay {
+            opacity: 0.04;
+        }
+
+        /* HEADER */
+        header .g {
+            border-top: 1px var(--border-style) var(--border-color);
+        }
+
+        .logo h2 {
+            font-size: 2.25rem;
+            font-weight: 800;
+            line-height: 1.05;
+            letter-spacing: -0.02em;
+            color: var(--midground);
+            transition: color 0.4s ease;
+        }
+
+        .logo span {
+            color: var(--accent);
+            font-size: 0.8rem;
+            display: block;
+            margin-top: 0.25rem;
+            letter-spacing: 0.2em;
+        }
+
+        .nav-label {
+            font-size: 0.65rem;
+            opacity: 0.5;
+            margin-bottom: 0.5rem;
+        }
+
+        .nav-link {
+            font-size: 1.15rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .social-icons {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+            margin-top: 0.5rem;
+        }
+
+        .social-icons a:hover {
+            color: var(--accent);
+            transform: scale(1.1);
+        }
+
+        /* TOGGLES */
+        .toggle-btn {
+            background: transparent;
+            border: 1px var(--border-style) var(--midground);
+            color: var(--midground);
+            cursor: pointer;
+            padding: 0.5rem 1rem;
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .toggle-btn:hover {
+            background-color: var(--midground);
+            color: var(--background);
+        }
+
+        /* HERO SECTION */
+        .hero-cell {
+            padding: 5rem 3rem;
+            text-align: center;
+            align-items: center;
+            gap: 1.75rem;
         }
 
         .badge {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            border: 1px var(--border-style) var(--accent);
+            color: var(--accent);
+            padding: 0.25rem 0.75rem;
             display: inline-block;
-            padding: 6px 16px;
-            background: rgba(124, 58, 237, 0.15);
-            border: 1px solid rgba(124, 58, 237, 0.3);
-            border-radius: 30px;
-            font-size: 14px;
-            font-weight: 600;
-            color: #c084fc;
-            margin-bottom: 24px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
+            margin-bottom: 1rem;
         }
 
-        .hero h1 {
-            font-size: 56px;
+        .hero-title {
+            font-size: 4rem;
             font-weight: 800;
-            line-height: 1.15;
-            letter-spacing: -1px;
-            margin-bottom: 24px;
-            background: linear-gradient(180deg, #ffffff 0%, #a1a1aa 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            line-height: 1.05;
+            letter-spacing: -0.03em;
+            max-width: 900px;
         }
 
-        .hero h1 span {
-            background: var(--gradient-accent);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+        .hero-desc {
+            font-size: 1.15rem;
+            text-transform: none;
+            opacity: 0.7;
+            max-width: 650px;
+            font-family: var(--font-display);
+            font-weight: 400;
+            line-height: 1.6;
         }
 
-        .hero p {
-            font-size: 20px;
-            color: var(--text-secondary);
-            max-width: 700px;
-            margin: 0 auto 40px auto;
+        .author-tag {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            color: var(--accent);
+            margin-top: 1rem;
         }
 
-        /* Installer Box */
-        .installer-container {
-            max-width: 800px;
-            margin: 0 auto 60px auto;
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 24px;
-            backdrop-filter: blur(16px);
-            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+        /* COMMAND BOXES */
+        .command-wrapper {
+            width: 100%;
+            max-width: 600px;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
             text-align: left;
+            margin-top: 1rem;
         }
 
-        .installer-header {
+        .command-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 16px;
+            font-size: 0.65rem;
+            opacity: 0.6;
         }
 
-        .installer-title {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-weight: 600;
-            color: var(--text-secondary);
-            font-size: 14px;
-        }
-
-        .dot {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            display: inline-block;
-        }
-        .dot-red { background-color: #ef4444; }
-        .dot-yellow { background-color: #eab308; }
-        .dot-green { background-color: #22c55e; }
-
-        .installer-body {
-            position: relative;
-            background-color: rgba(0, 0, 0, 0.4);
-            border-radius: 8px;
-            padding: 16px 20px;
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 15px;
-            overflow-x: auto;
-            white-space: nowrap;
+        .command-box {
+            background-color: rgba(0, 0, 0, 0.3);
+            border: 1px var(--border-style) var(--border-color);
+            padding: 0.75rem 1rem;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            color: var(--midground);
+            text-transform: none;
+            transition: border-color 0.4s ease;
         }
 
-        .command-text {
-            color: #22c55e;
-            user-select: all;
-        }
-
-        .btn-copy {
-            background: var(--gradient-accent);
+        .copy-btn {
+            background: transparent;
             border: none;
-            border-radius: 6px;
-            color: white;
-            padding: 8px 16px;
-            font-family: 'Outfit', sans-serif;
-            font-weight: 600;
-            font-size: 14px;
+            color: var(--midground);
+            font-family: var(--font-mono);
+            font-size: 0.65rem;
             cursor: pointer;
-            transition: all 0.2s ease;
-            box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);
-            margin-left: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            opacity: 0.6;
+            padding: 0.25rem 0.5rem;
+            border: 1px var(--border-style) transparent;
         }
 
-        .btn-copy:hover {
-            opacity: 0.9;
-            transform: scale(1.02);
+        .copy-btn:hover {
+            opacity: 1;
+            border-color: var(--border-color);
         }
 
-        .btn-copy:active {
-            transform: scale(0.98);
+        /* TERMINAL & SHOWCASE */
+        .demo-section {
+            border-top: 1px var(--border-style) var(--border-color);
         }
 
-        /* Features Section */
-        .features {
-            padding: 80px 0;
-            border-top: 1px solid var(--border-color);
+        .terminal-container {
+            border: 1px var(--border-style) var(--border-color);
+            background: rgba(0, 0, 0, 0.4);
+            font-family: var(--font-mono);
+            text-transform: none;
+            margin-top: 1rem;
         }
 
-        .section-header {
-            text-align: center;
-            margin-bottom: 60px;
+        .terminal-header {
+            border-bottom: 1px var(--border-style) var(--border-color);
+            padding: 0.5rem 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
         }
 
-        .section-header h2 {
-            font-size: 36px;
-            font-weight: 700;
-            margin-bottom: 16px;
+        .terminal-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: var(--midground);
+            opacity: 0.5;
         }
 
-        .section-header p {
-            color: var(--text-secondary);
-            font-size: 18px;
+        .terminal-title {
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            opacity: 0.6;
         }
 
-        .grid {
+        .terminal-body {
+            padding: 1.25rem;
+            font-size: 0.8rem;
+            min-height: 280px;
+            line-height: 1.6;
+            color: var(--midground);
+        }
+
+        .terminal-cursor {
+            display: inline-block;
+            width: 8px;
+            height: 15px;
+            background-color: var(--midground);
+            animation: blink 1s infinite;
+            vertical-align: middle;
+            margin-left: 2px;
+        }
+
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+
+        /* SKINS GRID */
+        .skins-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 32px;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 0.75rem;
+            margin-top: 1rem;
         }
 
-        .card {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 32px;
+        .skin-card {
+            border: 1px var(--border-style) var(--border-color);
+            padding: 0.75rem 1rem;
+            cursor: pointer;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            min-height: 90px;
+            position: relative;
+            background-color: rgba(255, 255, 255, 0.01);
             transition: all 0.3s ease;
         }
 
-        .card:hover {
-            transform: translateY(-5px);
-            border-color: rgba(124, 58, 237, 0.3);
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        .skin-card:hover {
+            border-color: var(--midground);
+            background-color: rgba(255, 255, 255, 0.03);
         }
 
-        .card-icon {
-            font-size: 32px;
-            margin-bottom: 20px;
-            display: inline-block;
+        .skin-card.active {
+            background-color: var(--midground);
+            color: var(--background);
+            border-color: var(--midground);
         }
 
-        .card h3 {
-            font-size: 20px;
-            font-weight: 600;
-            margin-bottom: 12px;
+        .skin-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
 
-        .card p {
-            color: var(--text-secondary);
-            font-size: 16px;
+        .skin-card-name {
+            font-size: 0.75rem;
+            font-weight: 700;
         }
 
-        /* Installation Options Section */
-        .installation-options {
-            padding: 80px 0;
-            border-top: 1px solid var(--border-color);
-            background-color: rgba(20, 24, 33, 0.2);
+        .skin-indicator {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background-color: var(--accent);
         }
 
-        .terminal-block {
-            background-color: #07090e;
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            padding: 24px;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 14px;
-            margin-top: 24px;
-            box-shadow: inset 0 4px 12px rgba(0,0,0,0.8);
+        .skin-card.active .skin-indicator {
+            background-color: var(--background);
         }
 
-        .terminal-line {
-            margin-bottom: 8px;
-            color: #d1d5db;
+        .skin-colors {
+            display: flex;
+            gap: 0.25rem;
+            margin-top: 0.5rem;
         }
 
-        .terminal-comment {
-            color: #6b7280;
+        .color-dot {
+            width: 12px;
+            height: 12px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 50%;
         }
 
-        .terminal-command {
-            color: #06b6d4;
+        /* FEATURES SECTION */
+        .features-grid {
+            grid-template-columns: repeat(3, 1fr);
+            border-top: 1px var(--border-style) var(--border-color);
         }
 
-        /* Footer */
-        footer {
-            padding: 60px 0 40px 0;
-            border-top: 1px solid var(--border-color);
-            text-align: center;
-            color: var(--text-secondary);
-            font-size: 15px;
+        .feature-card {
+            border-bottom: 1px var(--border-style) var(--border-color);
+            min-height: 220px;
         }
 
-        footer p {
-            margin-bottom: 16px;
+        .features-grid:last-child .feature-card {
+            border-bottom: none;
         }
 
-        footer a {
-            color: var(--text-primary);
-            text-decoration: none;
-            font-weight: 600;
-            transition: color 0.2s ease;
+        .feature-title {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: var(--midground);
+            margin-bottom: 0.75rem;
         }
 
-        footer a:hover {
-            color: var(--primary-accent);
+        .feature-desc {
+            font-size: 0.9rem;
+            text-transform: none;
+            opacity: 0.65;
+            line-height: 1.6;
         }
 
-        /* Responsive adjustments */
-        @media (max-width: 768px) {
-            .hero h1 { font-size: 40px; }
-            .hero p { font-size: 18px; }
-            .installer-body { font-size: 13px; }
-            .btn-copy { padding: 6px 12px; font-size: 13px; }
+        /* FOOTER */
+        footer .g {
+            border-top: 1px var(--border-style) var(--border-color);
+            border-bottom: 1px var(--border-style) var(--border-color);
+        }
+
+        .footer-cell {
+            padding: 3rem 1.5rem;
+        }
+
+        .footer-text {
+            font-size: 0.75rem;
+            opacity: 0.6;
+        }
+
+        .footer-link {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .footer-link:hover {
+            color: var(--accent);
+        }
+
+        /* RESPONSIVE LAYOUT */
+        @media (max-width: 1024px) {
+            .g {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .col-span-3, .col-span-2 {
+                grid-column: span 2;
+            }
+            .features-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .hero-title {
+                font-size: 2.75rem;
+            }
+            .skins-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 640px) {
+            .g {
+                grid-template-columns: 1fr;
+            }
+            .gc {
+                border-right: none;
+                border-bottom: 1px var(--border-style) var(--border-color);
+            }
+            .gc:last-child {
+                border-bottom: none;
+            }
+            .col-span-3, .col-span-2 {
+                grid-column: span 1;
+            }
+            .features-grid {
+                grid-template-columns: 1fr;
+            }
+            .hero-title {
+                font-size: 2.25rem;
+            }
+            .skins-grid {
+                grid-template-columns: 1fr;
+            }
+            main {
+                padding: 1rem;
+            }
         }
     </style>
 </head>
-<body>
-    <div class="bg-glow-1"></div>
-    <div class="bg-glow-2"></div>
+<body class="antialiased">
 
-    <!-- Header -->
-    <header>
-        <div class="container header-content">
-            <div class="logo">
-                👑 Hermes WebUI <span>Windows Native</span>
-            </div>
-            <a href="https://github.com/1PROO/hermes-webui" class="btn-github" target="_blank">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                    <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.579.688.481C19.137 20.162 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
-                </svg>
-                GitHub Repo
-            </a>
-        </div>
-    </header>
+    <!-- Ambient Overlays -->
+    <div class="bg-overlay-1"></div>
+    <div class="bg-overlay-2"></div>
+    <div class="radial-glow" id="glow-layer"></div>
+    <canvas id="grain-canvas"></canvas>
 
-    <!-- Hero Section -->
-    <section class="hero container">
-        <div class="badge">🔥 Native Windows Fork</div>
-        <h1>Hermes Web UI<br><span>Windows Native Edition</span></h1>
-        <p>A customized, lightweight, and ultra-fast fork of Nous Research's Hermes WebUI optimized to run directly on Windows with 0 Docker or WSL2 overhead.</p>
-
-        <!-- One-Step Installer Console -->
-        <div class="installer-container">
-            <div class="installer-header">
-                <div class="installer-title">
-                    <span class="dot dot-red"></span>
-                    <span class="dot dot-yellow"></span>
-                    <span class="dot dot-green"></span>
-                    <span style="margin-left: 8px;">PowerShell One-Liner Installer</span>
+    <main>
+        <!-- Header -->
+        <header>
+            <div class="g">
+                <!-- Column 1: Logo -->
+                <div class="gc col-span-2">
+                    <a href="#" class="logo">
+                        <h2>HERMES<br>AGENT</h2>
+                        <span>👑 WINDOWS NATIVE EDITION</span>
+                    </a>
                 </div>
-            </div>
-            <div class="installer-body">
-                <span class="command-text" id="cmd-install">powershell -ExecutionPolicy Bypass -c "irm https://1proo.github.io/hermes-webui/install_windows.ps1 | iex"</span>
-                <button class="btn-copy" onclick="copyCommand()">Copy</button>
-            </div>
-        </div>
-    </section>
-
-    <!-- Features Section -->
-    <section class="features container">
-        <div class="section-header">
-            <h2>Key Modifications & Features</h2>
-            <p>Why choose the Windows Native Edition?</p>
-        </div>
-        <div class="grid">
-            <div class="card">
-                <div class="card-icon">⚡</div>
-                <h3>Zero Overhead</h3>
-                <p>Run directly on your native Windows operating system. No WSL2 virtual machines to start, no Docker container configuration issues. Save up to 1GB of RAM!</p>
-            </div>
-            <div class="card">
-                <div class="card-icon">🛠️</div>
-                <h3>UAC & Path Fixes</h3>
-                <p>Features specific fixes for Windows file locking, path formats (escaped backslashes), and security inheritance exceptions that usually break server.py on Windows.</p>
-            </div>
-            <div class="card">
-                <div class="card-icon">🤖</div>
-                <h3>Smart Auto-Installer</h3>
-                <p>Our PowerShell script sets up the interpreter, clones, creates environment configurations (.env), and generates local start shortcuts automatically.</p>
-            </div>
-        </div>
-    </section>
-
-    <!-- Installation Details -->
-    <section class="installation-options">
-        <div class="container" style="max-width: 800px;">
-            <div class="section-header">
-                <h2>Alternative Setup</h2>
-                <p>If you prefer a manual setup over the one-liner command</p>
-            </div>
-
-            <div class="card">
-                <h3>Manual Installation Steps</h3>
-                <p style="margin-bottom: 16px;">Run the following commands in your command line:</p>
                 
-                <div class="terminal-block">
-                    <div class="terminal-line"><span class="terminal-comment"># 1. Clone the repository</span></div>
-                    <div class="terminal-line"><span class="terminal-command">git clone https://github.com/1PROO/hermes-webui.git</span></div>
-                    <div class="terminal-line"><span class="terminal-command">cd hermes-webui</span></div>
-                    <div class="terminal-line"></div>
-                    <div class="terminal-line"><span class="terminal-comment"># 2. Configure .env (pointing to your agent venv)</span></div>
-                    <div class="terminal-line"><span class="terminal-comment"># Create a .env file and set these paths:</span></div>
-                    <div class="terminal-line">HERMES_WEBUI_AGENT_DIR=C:/Users/YOUR_USER/AppData/Local/hermes/hermes-agent</div>
-                    <div class="terminal-line">HERMES_WEBUI_PYTHON=C:/Users/YOUR_USER/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe</div>
-                    <div class="terminal-line">HERMES_WEBUI_HOST=127.0.0.1</div>
-                    <div class="terminal-line">HERMES_WEBUI_PORT=8787</div>
-                    <div class="terminal-line"></div>
-                    <div class="terminal-line"><span class="terminal-comment"># 3. Start the Web UI natively</span></div>
-                    <div class="terminal-line"><span class="terminal-command">.\start.bat</span></div>
+                <!-- Column 2: Docs -->
+                <div class="gc group">
+                    <div class="group-hover-overlay"></div>
+                    <span class="nav-label">01 // RESOURCES</span>
+                    <a href="https://github.com/1PROO/hermes-webui/blob/main/README.md" target="_blank" class="nav-link">
+                        DOCS ↗
+                    </a>
+                </div>
+
+                <!-- Column 3: Portal / Repo -->
+                <div class="gc group">
+                    <div class="group-hover-overlay"></div>
+                    <span class="nav-label">02 // WEBUI PORTAL</span>
+                    <a href="https://github.com/1PROO/hermes-webui" target="_blank" class="nav-link">
+                        GITHUB ↗
+                    </a>
+                </div>
+
+                <!-- Column 4: Socials & Theme Toggle -->
+                <div class="gc flex-row items-center justify-between" style="gap: 1rem;">
+                    <div style="display: flex; flex-direction: column; gap: 0.5rem; width: 100%;">
+                        <span class="nav-label">03 // APP STYLING</span>
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <div class="social-icons">
+                                <a href="https://github.com/1PROO/hermes-webui" target="_blank" title="GitHub">
+                                    <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"></path></svg>
+                                </a>
+                                <a href="https://fb.com/1PROO" target="_blank" title="Facebook Dev Profile">
+                                    <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"></path></svg>
+                                </a>
+                            </div>
+                            <button class="toggle-btn" id="theme-toggle" onclick="toggleTheme()">DARK</button>
+                        </div>
+                    </div>
                 </div>
             </div>
-        </div>
-    </section>
+        </header>
 
-    <!-- Footer -->
-    <footer>
-        <div class="container">
-            <p>Made with 💖. Forked from the original <a href="https://github.com/nesquena/hermes-webui" target="_blank">nesquena/hermes-webui</a>.</p>
-            <p>Special thanks to <strong>Nathan Esquenazi</strong> and <strong>Adel</strong> for their incredible efforts!</p>
-            <p style="font-size: 13px; margin-top: 24px; color: rgba(255,255,255,0.2);">This is an independent community fork and is not officially affiliated with Nous Research.</p>
-        </div>
-    </footer>
+        <!-- Hero Section -->
+        <section>
+            <div class="g border-t">
+                <div class="gc col-span-full hero-cell">
+                    <span class="badge">OPEN SOURCE · MIT LICENSE</span>
+                    <h1 class="hero-title">THE AGENT THAT GROWS WITH YOU.</h1>
+                    <p class="hero-desc">
+                        A lightweight, ultra-optimized Windows fork of the Hermes Agent WebUI. 
+                        Run directly on native Windows architecture with zero Docker virtual machine overhead, zero WSL2 resource latency, and smooth, persistent file execution.
+                    </p>
+                    
+                    <span class="author-tag">MAINTAINED & OPTIMIZED BY: Ã̶ḧ̶Ḿ̶ĕ̶đ̶ Å̶ḱ̶ṝ̶à̶ḿ̶</span>
 
+                    <!-- Installer Command boxes -->
+                    <div class="command-wrapper">
+                        <div class="command-header">
+                            <span>POWERSHELL ONE-LINER INSTALLER</span>
+                            <span>FAST SYSTEM INITIALIZATION</span>
+                        </div>
+                        <div class="command-box">
+                            <span style="font-family: var(--font-mono); font-size: 0.72rem; word-break: break-all;" id="install-cmd">powershell -ExecutionPolicy Bypass -c "irm https://1proo.github.io/hermes-webui/install_windows.ps1 | iex"</span>
+                            <button class="copy-btn" onclick="copyText('install-cmd', this)">COPY</button>
+                        </div>
+                        
+                        <div class="command-header" style="margin-top: 0.5rem;">
+                            <span>MANUAL CLONE COMMANDS</span>
+                            <span>GIT SETUP</span>
+                        </div>
+                        <div class="command-box">
+                            <span style="font-family: var(--font-mono); font-size: 0.72rem; word-break: break-all;" id="manual-cmd">git clone https://github.com/1PROO/hermes-webui.git &amp;&amp; cd hermes-webui &amp;&amp; .\start.bat</span>
+                            <button class="copy-btn" onclick="copyText('manual-cmd', this)">COPY</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Terminal & Theme Swapping Interface -->
+        <section class="demo-section">
+            <div class="g border-t">
+                <!-- Terminal Column -->
+                <div class="gc col-span-3">
+                    <span class="nav-label">04 // INTERACTIVE TERMINAL</span>
+                    <div class="terminal-container">
+                        <div class="terminal-header">
+                            <span class="terminal-dot" style="background-color: #ef4444;"></span>
+                            <span class="terminal-dot" style="background-color: #eab308;"></span>
+                            <span class="terminal-dot" style="background-color: #22c55e;"></span>
+                            <span class="terminal-title">powershell.exe</span>
+                        </div>
+                        <div class="terminal-body" id="terminal-content">
+                            <span class="terminal-line">> </span><span class="terminal-cursor"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Theme swapper Column -->
+                <div class="gc col-span-2">
+                    <span class="nav-label">05 // LIVE ACCENT PREVIEWS</span>
+                    <h3 style="font-size: 1.1rem; font-weight: 700; margin-bottom: 0.5rem;">SELECT PAGE SKIN</h3>
+                    <p style="font-size: 0.8rem; text-transform: none; opacity: 0.7; line-height: 1.4;">
+                        Hermes WebUI ships with 12 distinct built-in skins. Click any palette card below to instantly transform this entire landing page's theme.
+                    </p>
+                    
+                    <div class="skins-grid">
+                        <!-- Skin cards -->
+                        <div class="skin-card active" id="card-default" onclick="setSkin('default')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">DEFAULT</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #041C1C;"></span>
+                                <span class="color-dot" style="background-color: #ffe6cb;"></span>
+                                <span class="color-dot" style="background-color: #FFD700;"></span>
+                            </div>
+                        </div>
+
+                        <div class="skin-card" id="card-ares" onclick="setSkin('ares')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">ARES</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #1a0808;"></span>
+                                <span class="color-dot" style="background-color: #FF4444;"></span>
+                                <span class="color-dot" style="background-color: #FF4444;"></span>
+                            </div>
+                        </div>
+
+                        <div class="skin-card" id="card-mono" onclick="setSkin('mono')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">MONO</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #121212;"></span>
+                                <span class="color-dot" style="background-color: #CCCCCC;"></span>
+                                <span class="color-dot" style="background-color: #888888;"></span>
+                            </div>
+                        </div>
+
+                        <div class="skin-card" id="card-slate" onclick="setSkin('slate')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">SLATE</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #0f172a;"></span>
+                                <span class="color-dot" style="background-color: #94A3B8;"></span>
+                                <span class="color-dot" style="background-color: #38bdf8;"></span>
+                            </div>
+                        </div>
+
+                        <div class="skin-card" id="card-poseidon" onclick="setSkin('poseidon')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">POSEIDON</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #022a3a;"></span>
+                                <span class="color-dot" style="background-color: #0EA5E9;"></span>
+                                <span class="color-dot" style="background-color: #38bdf8;"></span>
+                            </div>
+                        </div>
+
+                        <div class="skin-card" id="card-sisyphus" onclick="setSkin('sisyphus')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">SISYPHUS</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #1e1b4b;"></span>
+                                <span class="color-dot" style="background-color: #A78BFA;"></span>
+                                <span class="color-dot" style="background-color: #c084fc;"></span>
+                            </div>
+                        </div>
+
+                        <div class="skin-card" id="card-charizard" onclick="setSkin('charizard')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">CHARIZARD</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #2a1103;"></span>
+                                <span class="color-dot" style="background-color: #FB923C;"></span>
+                                <span class="color-dot" style="background-color: #f97316;"></span>
+                            </div>
+                        </div>
+
+                        <div class="skin-card" id="card-sienna" onclick="setSkin('sienna')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">SIENNA</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #1F1E1C;"></span>
+                                <span class="color-dot" style="background-color: #E0896D;"></span>
+                                <span class="color-dot" style="background-color: #D97757;"></span>
+                            </div>
+                        </div>
+
+                        <div class="skin-card" id="card-catppuccin" onclick="setSkin('catppuccin')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">CATPPUCCIN</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #1E1E2E;"></span>
+                                <span class="color-dot" style="background-color: #CBA6F7;"></span>
+                                <span class="color-dot" style="background-color: #f5c2e7;"></span>
+                            </div>
+                        </div>
+
+                        <div class="skin-card" id="card-hepburn" onclick="setSkin('hepburn')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">HEPBURN</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #110a0f;"></span>
+                                <span class="color-dot" style="background-color: #f278ad;"></span>
+                                <span class="color-dot" style="background-color: #ec5597;"></span>
+                            </div>
+                        </div>
+
+                        <div class="skin-card" id="card-nous" onclick="setSkin('nous')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">NOUS</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #0A0E14;"></span>
+                                <span class="color-dot" style="background-color: #7EB6E0;"></span>
+                                <span class="color-dot" style="background-color: #4682B4;"></span>
+                            </div>
+                        </div>
+
+                        <div class="skin-card" id="card-geist-contrast" onclick="setSkin('geist-contrast')">
+                            <div class="skin-card-header">
+                                <span class="skin-card-name">GEIST</span>
+                                <span class="skin-indicator"></span>
+                            </div>
+                            <div class="skin-colors">
+                                <span class="color-dot" style="background-color: #000000;"></span>
+                                <span class="color-dot" style="background-color: #FFF175;"></span>
+                                <span class="color-dot" style="background-color: #ffffff;"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Features Grid -->
+        <section>
+            <div class="g border-t features-grid">
+                <!-- Feature 1 -->
+                <div class="gc feature-card group">
+                    <div class="group-hover-overlay"></div>
+                    <span class="nav-label">MODIFICATION // 01</span>
+                    <h3 class="feature-title">ZERO OVERHEAD</h3>
+                    <p class="feature-desc">
+                        Runs natively on Windows kernels without container overhead. Save up to 1.2 GB of RAM compared to standard Docker environments.
+                    </p>
+                </div>
+
+                <!-- Feature 2 -->
+                <div class="gc feature-card group">
+                    <div class="group-hover-overlay"></div>
+                    <span class="nav-label">MODIFICATION // 02</span>
+                    <h3 class="feature-title">FILE LOCKING FIXES</h3>
+                    <p class="feature-desc">
+                        Custom execution patterns tailored to handle Windows filesystem file locks (UAC) and path structures directly in python scripts.
+                    </p>
+                </div>
+
+                <!-- Feature 3 -->
+                <div class="gc feature-card group">
+                    <div class="group-hover-overlay"></div>
+                    <span class="nav-label">MODIFICATION // 03</span>
+                    <h3 class="feature-title">SMART INSTALLER</h3>
+                    <p class="feature-desc">
+                        PowerShell automation script that automatically configures python virtual environments, creates custom local configurations, and manages dependency resolution.
+                    </p>
+                </div>
+            </div>
+
+            <div class="g features-grid">
+                <!-- Feature 4 -->
+                <div class="gc feature-card group">
+                    <div class="group-hover-overlay"></div>
+                    <span class="nav-label">ARCHITECTURE // 04</span>
+                    <h3 class="feature-title">PERSISTENT GROWTH</h3>
+                    <p class="feature-desc">
+                        The agent remembers past runs, retains local database logs, and saves custom scripts to its native database cache.
+                    </p>
+                </div>
+
+                <!-- Feature 5 -->
+                <div class="gc feature-card group">
+                    <div class="group-hover-overlay"></div>
+                    <span class="nav-label">INTEGRATION // 05</span>
+                    <h3 class="feature-title">CRON AUTOMATIONS</h3>
+                    <p class="feature-desc">
+                        Schedule natural-language script tasks to execute automatically via background powershell jobs and notifications.
+                    </p>
+                </div>
+
+                <!-- Feature 6 -->
+                <div class="gc feature-card group">
+                    <div class="group-hover-overlay"></div>
+                    <span class="nav-label">CONTROL // 06</span>
+                    <h3 class="feature-title">BROWSER ISOLATION</h3>
+                    <p class="feature-desc">
+                        Control full browser execution sessions natively on Windows. Includes complete vision models, web scraping, and file editing.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer>
+            <div class="g border-t">
+                <div class="gc col-span-2 footer-cell">
+                    <span class="footer-text">HERMES WINDOWS NATIVE EDITION</span>
+                    <span class="footer-text" style="margin-top: 0.5rem; display: block; opacity: 0.4;">
+                        MAINTAINED BY Ã̶ḧ̶Ḿ̶ĕ̶đ̶ Å̶ḱ̶ṝ̶à̶ḿ̶
+                    </span>
+                </div>
+
+                <div class="gc footer-cell group">
+                    <div class="group-hover-overlay"></div>
+                    <span class="nav-label">06 // COMMUNITY</span>
+                    <a href="https://fb.com/1PROO" target="_blank" class="footer-link">FACEBOOK DEV PROFILE ↗</a>
+                </div>
+
+                <div class="gc footer-cell group">
+                    <div class="group-hover-overlay"></div>
+                    <span class="nav-label">07 // NOUS SYSTEM</span>
+                    <a href="https://nousresearch.com" target="_blank" class="footer-link">NOUS RESEARCH ↗</a>
+                </div>
+
+                <div class="gc footer-cell">
+                    <span class="footer-text">MIT LICENSE · 2026</span>
+                    <span class="footer-text" style="margin-top: 0.5rem; display: block; opacity: 0.4; font-family: var(--font-mono); font-size: 0.65rem;">
+                        V0.51.119 - BUILD OK
+                    </span>
+                </div>
+            </div>
+        </footer>
+    </main>
+
+    <!-- JS IMPLEMENTATION -->
     <script>
-        function copyCommand() {
-            const commandEl = document.getElementById('cmd-install');
-            const range = document.createRange();
-            range.selectNode(commandEl);
-            window.getSelection().removeAllRanges();
-            window.getSelection().addRange(range);
-            
-            try {
-                document.execCommand('copy');
-                const btn = document.querySelector('.btn-copy');
-                btn.textContent = 'Copied!';
-                btn.style.background = 'linear-gradient(135deg, #22c55e, #10b981)';
-                
-                setTimeout(() => {
-                    btn.textContent = 'Copy';
-                    btn.style.background = 'var(--gradient-accent)';
-                }, 2000);
-            } catch (err) {
-                console.error('Failed to copy', err);
+        // High-Performance Background Noise Loop
+        const canvas = document.getElementById('grain-canvas');
+        const ctx = canvas.getContext('2d');
+        let width = canvas.width = window.innerWidth;
+        let height = canvas.height = window.innerHeight;
+
+        const noisePatterns = [];
+        const patternSize = 256;
+        for (let i = 0; i < 6; i++) {
+            const pCanvas = document.createElement('canvas');
+            pCanvas.width = patternSize;
+            pCanvas.height = patternSize;
+            const pCtx = pCanvas.getContext('2d');
+            const imgData = pCtx.createImageData(patternSize, patternSize);
+            const data = imgData.data;
+            for (let j = 0; j < data.length; j += 4) {
+                const val = Math.floor(Math.random() * 255);
+                data[j] = val;
+                data[j + 1] = val;
+                data[j + 2] = val;
+                data[j + 3] = 14; // Subtle grain opacity
             }
-            window.getSelection().removeAllRanges();
+            pCtx.putImageData(imgData, 0, 0);
+            noisePatterns.push(pCanvas);
         }
+
+        let frame = 0;
+        let fpsInterval = 1000 / 24; // Limit to 24fps for filmic look and performance
+        let lastFrameTime = Date.now();
+
+        function drawNoise() {
+            requestAnimationFrame(drawNoise);
+
+            const now = Date.now();
+            const elapsed = now - lastFrameTime;
+
+            if (elapsed > fpsInterval) {
+                lastFrameTime = now - (elapsed % fpsInterval);
+                ctx.clearRect(0, 0, width, height);
+                const pattern = noisePatterns[frame % noisePatterns.length];
+                ctx.fillStyle = ctx.createPattern(pattern, 'repeat');
+                ctx.fillRect(0, 0, width, height);
+                frame++;
+            }
+        }
+
+        window.addEventListener('resize', () => {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        });
+
+        drawNoise();
+
+        // Theme Management
+        function toggleTheme() {
+            const html = document.documentElement;
+            const themeToggle = document.getElementById('theme-toggle');
+            if (html.classList.contains('light')) {
+                html.classList.remove('light');
+                themeToggle.textContent = 'DARK';
+                localStorage.setItem('hermes-theme', 'dark');
+            } else {
+                html.classList.add('light');
+                themeToggle.textContent = 'LIGHT';
+                localStorage.setItem('hermes-theme', 'light');
+            }
+        }
+
+        function setSkin(skinName) {
+            document.documentElement.setAttribute('data-skin', skinName);
+            localStorage.setItem('hermes-skin', skinName);
+
+            // Update active state in UI
+            document.querySelectorAll('.skin-card').forEach(card => {
+                card.classList.remove('active');
+            });
+            const activeCard = document.getElementById('card-' + skinName);
+            if (activeCard) {
+                activeCard.classList.add('active');
+            }
+        }
+
+        // Initialize saved settings
+        (function() {
+            const savedTheme = localStorage.getItem('hermes-theme') || 'dark';
+            const savedSkin = localStorage.getItem('hermes-skin') || 'default';
+            
+            if (savedTheme === 'light') {
+                document.documentElement.classList.add('light');
+                document.getElementById('theme-toggle').textContent = 'LIGHT';
+            }
+            
+            setSkin(savedSkin);
+        })();
+
+        // Copy functionality
+        function copyText(elementId, btn) {
+            const text = document.getElementById(elementId).textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                const originalText = btn.textContent;
+                btn.textContent = 'COPIED!';
+                btn.style.color = 'var(--accent)';
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                    btn.style.color = '';
+                }, 2000);
+            }).catch(err => {
+                console.error('Could not copy text: ', err);
+            });
+        }
+
+        // Interactive Terminal Typing Script
+        const terminalContent = document.getElementById('terminal-content');
+        const terminalCommands = [
+            { text: 'powershell -ExecutionPolicy Bypass -c "irm https://1proo.github.io/hermes-webui/install_windows.ps1 | iex"', isCmd: true },
+            { text: '\n[SYS] INITIALIZING NATIVE WINDOWS DEPLOYMENT SEQUENCE...\n', isSys: true },
+            { text: '[SYS] TESTING PYTHON INTERPRETER COMPATIBILITY...\n', isSys: true },
+            { text: '[SYS] FOUND VERSION 3.11.2 - SUCCESS\n', isSys: true },
+            { text: '[SYS] DEPLOYING ISOLATED VIRTUAL ENVIRONMENT (VENV)...\n', isSys: true },
+            { text: '[SYS] INSTALLING CORE LIBRARIES AND WINDOWS API HOOKS...\n', isSys: true },
+            { text: '[SYS] ATTACHING LOCAL STATE DATABASE AND GATEWAYS...\n', isSys: true },
+            { text: '[SYS] CONFIGURING PORT 8787 BINDING...\n', isSys: true },
+            { text: '\n[OK] HERMES WEBUI ONLINE AND LISTENING AT:\n     ==> HTTP://127.0.0.1:8787/\n\n', isSuccess: true }
+        ];
+
+        let currentCommandIndex = 0;
+        let currentCharIndex = 0;
+
+        function typeTerminal() {
+            if (currentCommandIndex >= terminalCommands.length) {
+                // Keep terminal active with blinking cursor
+                return;
+            }
+
+            const current = terminalCommands[currentCommandIndex];
+            
+            if (current.isCmd) {
+                if (currentCharIndex < current.text.length) {
+                    // Type command characters one by one
+                    const cursor = terminalContent.querySelector('.terminal-cursor');
+                    const char = current.text[currentCharIndex];
+                    const charNode = document.createTextNode(char);
+                    terminalContent.insertBefore(charNode, cursor);
+                    currentCharIndex++;
+                    setTimeout(typeTerminal, 15 + Math.random() * 25);
+                } else {
+                    // Command finished typing, execute (show system response)
+                    currentCharIndex = 0;
+                    currentCommandIndex++;
+                    setTimeout(typeTerminal, 400);
+                }
+            } else {
+                // System message - display instantly or in quick blocks
+                const cursor = terminalContent.querySelector('.terminal-cursor');
+                const lineDiv = document.createElement('div');
+                
+                if (current.isSys) {
+                    lineDiv.style.opacity = '0.7';
+                } else if (current.isSuccess) {
+                    lineDiv.style.color = 'var(--accent)';
+                    lineDiv.style.fontWeight = 'bold';
+                }
+                
+                lineDiv.textContent = current.text;
+                terminalContent.insertBefore(lineDiv, cursor);
+                currentCommandIndex++;
+                setTimeout(typeTerminal, 150 + Math.random() * 100);
+            }
+        }
+
+        // Start terminal typing with delay
+        setTimeout(typeTerminal, 800);
     </script>
 </body>
 </html>
