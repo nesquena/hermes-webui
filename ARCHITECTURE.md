@@ -122,9 +122,11 @@ Environment variables controlling behavior:
     HERMES_WEBUI_DEFAULT_MODEL     Optional model override; unset means provider default
     HERMES_WEBUI_PASSWORD          Optional: enable password auth (off by default)
     HERMES_WEBUI_SKIP_ONBOARDING   Optional: bypass the first-run onboarding wizard
-    HERMES_WEBUI_CHAT_BACKEND      Optional: set to `gateway` to delegate chat execution
-                                   through Hermes Gateway/API Server instead of the
-                                   direct in-process WebUI agent path
+    HERMES_WEBUI_CHAT_BACKEND      Optional / default-off: unset or any value other than
+                                   `gateway`, `api_server`, or `api-server` keeps the
+                                   direct in-process WebUI agent path. Set to `gateway`
+                                   only to delegate chat execution through Hermes
+                                   Gateway/API Server.
     HERMES_WEBUI_GATEWAY_BASE_URL  Gateway/API Server base URL for gateway chat mode
                                    (default: http://127.0.0.1:8642)
     HERMES_WEBUI_GATEWAY_API_KEY   Optional bearer key for gateway chat mode; falls
@@ -133,6 +135,10 @@ Environment variables controlling behavior:
 
 Gateway-backed chat session semantics:
 
+- The gateway-backed chat bridge is an experimental, default-off path: unset or
+  unrecognized `HERMES_WEBUI_CHAT_BACKEND` values continue to use direct WebUI
+  chat, and only an explicit `gateway` / `api_server` opt-in delegates execution
+  to Hermes Gateway/API Server.
 - This mode delegates model/tool execution to the Hermes Gateway/API Server, but
   WebUI still owns the browser display transcript and session JSON.
 - A new WebUI session is not the same live transcript as a Telegram/Discord/etc.

@@ -15,6 +15,31 @@ def test_gateway_chat_mode_is_opt_in_and_default_safe():
     assert "else:\n            response = _start_chat_stream_for_session" in ROUTES
 
 
+def test_gateway_chat_mode_helper_is_default_off(monkeypatch):
+    from api.routes import _webui_gateway_chat_enabled
+
+    monkeypatch.delenv("HERMES_WEBUI_CHAT_BACKEND", raising=False)
+    assert _webui_gateway_chat_enabled() is False
+
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "")
+    assert _webui_gateway_chat_enabled() is False
+
+    monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "direct")
+    assert _webui_gateway_chat_enabled() is False
+
+
+def test_gateway_chat_mode_helper_accepts_only_explicit_gateway_opt_in(monkeypatch):
+    from api.routes import _webui_gateway_chat_enabled
+
+    for value in ("gateway", "api_server", "api-server", " Gateway "):
+        monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", value)
+        assert _webui_gateway_chat_enabled() is True
+
+    for value in ("1", "true", "yes", "enabled", "gateway-experimental"):
+        monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", value)
+        assert _webui_gateway_chat_enabled() is False
+
+
 def test_gateway_chat_mode_uses_gateway_api_server_streaming_contract():
     assert "def _run_gateway_chat_streaming" in ROUTES
     assert 'url = f"{_webui_gateway_base_url()}/v1/chat/completions"' in ROUTES

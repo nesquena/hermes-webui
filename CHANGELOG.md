@@ -11,6 +11,7 @@
 
 - Avoid sending the current user prompt twice to the gateway API server when gateway-backed chat runs with eager session saving enabled.
 - Document gateway-backed chat session semantics and keep session-continuity headers gated behind configured API-key auth.
+- Tighten the gateway-backed WebUI chat opt-in contract with runtime regression coverage that keeps unset or unrecognized `HERMES_WEBUI_CHAT_BACKEND` values on the direct WebUI chat path.
 
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
