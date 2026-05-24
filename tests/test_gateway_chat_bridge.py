@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,3 +29,20 @@ def test_gateway_chat_mode_env_vars_are_documented():
     assert "HERMES_WEBUI_CHAT_BACKEND" in ARCHITECTURE
     assert "HERMES_WEBUI_GATEWAY_BASE_URL" in ARCHITECTURE
     assert "HERMES_WEBUI_GATEWAY_API_KEY" in ARCHITECTURE
+
+
+def test_gateway_message_builder_dedupes_eager_saved_current_prompt():
+    from api.routes import _gateway_messages_for_webui_session
+
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "previous question"},
+            {"role": "assistant", "content": "previous answer"},
+            {"role": "user", "content": "current prompt"},
+        ]
+    )
+
+    messages = _gateway_messages_for_webui_session(session, "current prompt", "/tmp/workspace")
+
+    user_contents = [m["content"] for m in messages if m["role"] == "user"]
+    assert user_contents == ["previous question", "current prompt"]

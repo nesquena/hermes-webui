@@ -8365,7 +8365,9 @@ def _gateway_messages_for_webui_session(s, msg: str, workspace: str) -> list[dic
         f"Active WebUI workspace: {workspace}."
     )
     messages = [{"role": "system", "content": system}]
-    for entry in list(getattr(s, "messages", None) or [])[-40:]:
+    current_prompt = str(msg or "").strip()
+    transcript = list(getattr(s, "messages", None) or [])[-40:]
+    for index, entry in enumerate(transcript):
         if not isinstance(entry, dict):
             continue
         role = str(entry.get("role") or "").strip().lower()
@@ -8384,8 +8386,16 @@ def _gateway_messages_for_webui_session(s, msg: str, workspace: str) -> list[dic
             content = "\n".join(parts)
         else:
             content = str(content or "")
-        if content.strip():
-            messages.append({"role": role, "content": content})
+        content = content.strip()
+        if not content:
+            continue
+        # Eager session-save mode writes the submitted prompt into the sidecar
+        # before the worker builds the gateway payload. Do not send that same
+        # prompt twice to the API server; append the current prompt exactly once
+        # after historical context below.
+        if index == len(transcript) - 1 and role == "user" and content == current_prompt:
+            continue
+        messages.append({"role": role, "content": content})
     messages.append({"role": "user", "content": msg})
     return messages
 

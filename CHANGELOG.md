@@ -7,6 +7,10 @@
 
 - Add an opt-in gateway-backed WebUI chat mode behind `HERMES_WEBUI_CHAT_BACKEND=gateway`, letting browser chat delegate model/tool execution to the Hermes Gateway/API Server while preserving the existing direct WebUI path as the default.
 
+### Fixed
+
+- Avoid sending the current user prompt twice to the gateway API server when gateway-backed chat runs with eager session saving enabled.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added
