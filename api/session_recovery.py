@@ -542,6 +542,53 @@ def audit_session_recovery(session_dir: Path, state_db_path: Path | None = None)
     return {"status": overall, "summary": summary, "items": items}
 
 
+def _session_recovery_required_prompt_preflight_receipt() -> dict:
+    return {
+        "available": True,
+        "action": "session.recovery.repair_safe",
+        "boundary": "recovery_action",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["shared_confirmation_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _session_recovery_action_policy_receipt() -> dict:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        "session.recovery.repair_safe",
+        approval_gates=["destructive_external_action"],
+        prompt_preflight_status="required",
+        model_route_hint="hint:reasoning",
+    )
+
+
+def _session_recovery_progress_event(clean: bool) -> dict:
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event(
+            {
+                "event_type": "tool.completed" if clean else "tool.failed",
+                "run_id": "session.recovery.repair_safe",
+            }
+        )
+    except Exception:  # noqa: BLE001 - recovery should still return if telemetry is unavailable.
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed" if clean else "tool.failed",
+            "family": "tool",
+            "run_id": "session.recovery.repair_safe",
+            "redaction_status": "metadata_only",
+        }
+
+
 def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None = None) -> dict:
     """Run safe, deterministic session recovery repairs.
 
@@ -574,6 +621,9 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
         "backup_repair": backup_repair,
         "sidecar_repair": sidecar_repair,
         "after": after,
+        "prompt_preflight": _session_recovery_required_prompt_preflight_receipt(),
+        "autonomy_policy": _session_recovery_action_policy_receipt(),
+        "progress_event": _session_recovery_progress_event(clean),
     }
 
 
