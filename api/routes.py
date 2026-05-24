@@ -5773,9 +5773,19 @@ def handle_post(handler, parsed) -> bool:
         if pin_requested and not getattr(s, "pinned", False):
             # Pre-snapshot from persisted index (acquires LOCK internally,
             # so must run outside our own LOCK acquire below).
+            #
+            # all_sessions() returns list[dict] (each entry is a
+            # Session.compact() result), NOT a list of Session objects.
+            # Using getattr(d, key, default) on a dict always returns the
+            # default — the dict's key is invisible to getattr. That
+            # silently emptied persisted_pinned_ids on every call, killed
+            # the entire pre-snapshot path, and left the pin-limit check
+            # leaning only on the in-memory SESSIONS LRU. Once a pinned
+            # session got evicted from the cache it stopped being counted
+            # — pins/unpins then drifted from disk and #2821 reproduces.
             persisted_pinned_ids = {
-                getattr(existing, "session_id", None) for existing in all_sessions()
-                if getattr(existing, "pinned", False) and not getattr(existing, "archived", False)
+                existing.get("session_id") for existing in all_sessions()
+                if existing.get("pinned", False) and not existing.get("archived", False)
             }
             with LOCK:
                 # Final authoritative count: merge persisted-pinned with the

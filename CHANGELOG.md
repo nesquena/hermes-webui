@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Pin/unpin pre-snapshot dropped every persisted pinned id** (#2821 Bug A) — `api/routes.py` POST `/api/session/pin` built `persisted_pinned_ids` via `getattr(existing, "session_id", None)` over `all_sessions()`, but `all_sessions()` returns `list[dict]` (each entry is `Session.compact()`'s dict, not a Session object). `getattr(d, key, default)` always returns the default for a dict, so the set collapsed to empty on every call. The entire pre-snapshot path went dead and the pin-limit check leaned only on the in-memory `SESSIONS` LRU — once a pinned session got evicted from the cache its pin status stopped counting, the limit miscounted, and the bug zunami reported reproduces: GUI shows unpinned, server file still has `pinned: true`, subsequent pin attempts hit the "Only N can be pinned" error against a phantom count. Fix is two lines: switch to `existing.get(...)` for the dict access. Two regression tests in `tests/test_issue2821_pin_persisted_count.py` pin the bug shape and the fix shape so the same regression can't slip back in.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added
