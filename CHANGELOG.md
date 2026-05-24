@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Session pin and unpin actions now use the server as the pin-limit source of truth and refresh the sidebar after failed pin requests so stale client state does not block or misrepresent the action.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added

@@ -77,6 +77,12 @@ _CSP_REPORT_RATE_LIMIT_MAX = 100
 _CSP_REPORT_MAX_BODY_BYTES = 64 * 1024
 
 
+def _session_field(session, field, default=None):
+    if isinstance(session, dict):
+        return session.get(field, default)
+    return getattr(session, field, default)
+
+
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
 #
 # Sessions and projects are stored in the WebUI sidecar without per-row
@@ -5774,8 +5780,8 @@ def handle_post(handler, parsed) -> bool:
             # Pre-snapshot from persisted index (acquires LOCK internally,
             # so must run outside our own LOCK acquire below).
             persisted_pinned_ids = {
-                getattr(existing, "session_id", None) for existing in all_sessions()
-                if getattr(existing, "pinned", False) and not getattr(existing, "archived", False)
+                _session_field(existing, "session_id", None) for existing in all_sessions()
+                if _session_field(existing, "pinned", False) and not _session_field(existing, "archived", False)
             }
             with LOCK:
                 # Final authoritative count: merge persisted-pinned with the
