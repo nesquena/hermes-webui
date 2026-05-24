@@ -1572,7 +1572,10 @@
     return '<div class="capy-spaces-card"><h3>Checkpoint saved</h3>' +
       '<div class="capy-spaces-muted">Metadata-only rollback anchor recorded. Widget execution remains disabled.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
-      '<div class="capy-spaces-muted">metadata-only rollback anchor'+(eventId ? ' · '+escapeHtml(eventId) : '')+'</div></div></div></div></div>';
+      '<div class="capy-spaces-muted">metadata-only rollback anchor'+(eventId ? ' · '+escapeHtml(eventId) : '')+'</div></div></div></div>' +
+      renderActionPolicyEvidence(data && data.autonomy_policy) +
+      renderPackageProgressEvidence(data && data.progress_event, 'Checkpoint progress') +
+      '</div>';
   }
 
   function renderSpaceCheckpointBlockedStatus(){

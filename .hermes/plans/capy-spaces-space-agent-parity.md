@@ -26,16 +26,20 @@ Decision summary:
 
 Roadmap priority for upcoming autonomous sprints:
 
-1. Remaining prompt-preflight + advisory memory enforcement for high-risk browser/development/recovery/tool boundaries; creator preview/commit, active-space instruction/context, save-meta instruction writes, repair prompt, widget-runtime prompt queue/status UI, source-style widget blueprint preview/source helpers, source-refresh worker/manual refresh paths, camera streams, package export, and recovery revision restore now have initial metadata-only receipts.
+1. Remaining prompt-preflight + advisory memory enforcement for high-risk browser/development/recovery/tool boundaries; creator preview/commit, active-space instruction/context, save-meta instruction writes, repair prompt, widget-runtime prompt queue/status UI, source-style widget blueprint preview/source helpers, source-refresh worker/manual refresh paths, camera streams, package export, Space checkpoint receipts, and recovery revision restore now have initial metadata-only receipts.
 2. Product-visible compaction evidence for remaining long tool/subagent/browser/development/recovery outputs; run-all, individual demos, creator preview/commit, active context, and scoped progress already use the first receipt pattern.
 3. Broaden safe source-refresh scheduler/cron coverage and source-specific fetchers now that the metadata-only refresh worker, manual trigger path, and local knowledge bridge exist.
-4. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, the demo smoke suite, individual browser demo smokes, source-style layout-repair progress events with companion action-policy receipts, active-context tool calls, shared data slot set/delete actions, source-style widget upsert/renderWidget/blueprint preview actions, source-style Space deletions, recovery widget enable/disable toggles, recovery revision restores, and Space Agent package import/export operations now emit the first workflow/gate/ingest/run/repair/browser/cooperation/construction/recovery/package events, and Space detail can inspect Space-scoped streams.
+4. Progress producer expansion across real long-running browser/development/repair tasks; Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, the demo smoke suite, individual browser demo smokes, source-style layout-repair progress events with companion action-policy receipts, active-context tool calls, shared data slot set/delete actions, source-style widget upsert/renderWidget/blueprint preview actions, source-style Space deletions, Space checkpoint receipts, recovery widget enable/disable toggles, recovery revision restores, and Space Agent package import/export operations now emit the first workflow/gate/ingest/run/repair/browser/cooperation/construction/recovery/package events, and Space detail can inspect Space-scoped streams.
 5. Model-route invocation plumbing; action-policy receipts now include safe metadata-only `model_route_resolution` decisions and fallback reasons, while actual Capy/Hermes invocation selection still needs wiring.
 6. Optional connector catalog/sidecar exploration only after the remaining integration slices above are proven end-to-end.
 
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
 
 Recent completed slices:
+
+- `feat(spaces): show checkpoint safety receipts`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving confirmed Space detail checkpoint actions render the backend-returned Action policy and Checkpoint progress receipts beside the rollback anchor.
+  - Reused the existing action-policy and structured-progress renderers so checkpoint evidence shows supervised mode, model-route hint, safe `checkpoint:<space_id>` run id, and metadata-only progress status without exposing hostile reason text, raw prompts, generated widget bodies, renderer/source/API-auth fields, scripts, or secret-looking values.
 
 - `feat(spaces): gate widget preview blueprints`
   - Added RED/GREEN backend coverage proving `space.spaces.previewWidgetRecord` now returns metadata-only prompt-preflight, autonomy-policy, and structured progress receipts before exposing a non-persisted widget blueprint preview.

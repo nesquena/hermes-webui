@@ -1400,6 +1400,32 @@ global.fetch = async function(path, opts = {}) {
       metadata_only: true,
       generated_widgets_rendered: false,
       revision_event_id: '0123456789abcdef0123456789abcdef',
+      autonomy_policy: {
+        available: true,
+        action: 'space.checkpoint',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['creator_commit'],
+        prompt_preflight_status: 'pass',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'progress-checkpoint',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'checkpoint:lab',
+        redaction_status: 'metadata-only',
+        metadata_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       reason: 'renderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK',
       renderer: '<script>bad()</script>',
       api_key: 'SECRET_VALUE_DO_NOT_LEAK',
@@ -6778,6 +6804,13 @@ def test_spaces_ui_space_detail_checkpoints_explicit_space_with_shared_prompt_me
     assert "space.checkpointed" in out["rootHtml"]
     assert "metadata-only rollback anchor" in out["rootHtml"]
     assert "0123456789abcdef0123456789abcdef" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Action: space.checkpoint" in out["rootHtml"]
+    assert "Model route hint: hint:reasoning" in out["rootHtml"]
+    assert "Checkpoint progress" in out["rootHtml"]
+    assert "tool.completed" in out["rootHtml"]
+    assert "run checkpoint:lab" in out["rootHtml"]
+    assert "metadata-only progress receipt" in out["rootHtml"]
     assert "before rollback" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"].lower()
