@@ -1543,6 +1543,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       S.toolCalls=INFLIGHT[activeSid].toolCalls;
       persistInflightState();
 
+      if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
       // NOTE: don't removeThinking() here — keep the thinking card visible
       // above the tool card so the turn reads top-to-bottom as:
@@ -1589,6 +1590,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(d.duration!==undefined) tc.duration=d.duration;
       S.toolCalls=inflight.toolCalls;
       persistInflightState();
+      if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
       appendLiveToolCard(tc);
       snapshotLiveTurn();
@@ -1682,6 +1684,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('done',e=>{
+      if(_streamFinalized) return;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       const _doneData=JSON.parse(e.data);
@@ -1804,6 +1807,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           } else {
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
           }
+          if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
           if(typeof _copyActivityDisclosureState==='function'&&lastAsst){
             const assistantIdx=S.messages.indexOf(lastAsst);
             if(assistantIdx>=0) _copyActivityDisclosureState('live:'+streamId, 'assistant:'+assistantIdx);
@@ -1859,12 +1863,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _finishDone();
     });
 
-    source.addEventListener('stream_end',e=>{
+    source.addEventListener('stream_end',async e=>{
+      if(_streamFinalized){
+        source.close();
+        return;
+      }
       _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
       }catch(_){}
+      // Some replay/journal paths can deliver stream_end without a preceding
+      // done event. In that case closing the EventSource is not enough: the
+      // live DOM/inflight state remains projected and can duplicate Thinking or
+      // assistant content until a later session switch. Settle from the persisted
+      // session before closing so the pane converges on canonical state.
+      if(await _restoreSettledSession()){
+        source.close();
+        return;
+      }
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _streamFinalized=true;
+      _cancelAnimationFramePendingStreamRender();
+      _streamFadeCleanupReduceMotionListener();
+      _smdEndParser();
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       source.close();
     });
 
@@ -2132,9 +2155,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   async function _restoreSettledSession(){
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      // Opus #2852 race-fix: if a late `done` event ran the finalize path while
+      // we were awaiting the network roundtrip, bail out — done already settled.
+      if(_streamFinalized) return true;
       const session=data&&data.session;
       if(!session) return false;
       if(session.active_stream_id||session.pending_user_message) return false;
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _streamFinalized=true;
+      _cancelAnimationFramePendingStreamRender();
+      _streamFadeCleanupReduceMotionListener();
+      _smdEndParser();
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       _clearOwnerInflightState();
       _closeSource();
       _clearApprovalForOwner();

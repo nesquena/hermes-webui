@@ -24,7 +24,8 @@ def test_mcp_panel_renders_status_badges_tool_counts_and_empty_error_states():
     assert "mcp-tool-count" in js
     assert "mcp-empty-state" in js
     assert "mcp-error-state" in js
-    assert "mcp_toggle_followup" in js
+    assert "toggleMcpServer" in js
+    assert "mcp-toggle-btn" in js
     assert "api('/api/mcp/servers')" in js
     assert "mcp-delete-btn" not in js
     assert "showMcpAddForm" not in js

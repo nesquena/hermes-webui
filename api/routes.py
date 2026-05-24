@@ -77,6 +77,12 @@ _CSP_REPORT_RATE_LIMIT_MAX = 100
 _CSP_REPORT_MAX_BODY_BYTES = 64 * 1024
 
 
+def _session_field(session, field, default=None):
+    if isinstance(session, dict):
+        return session.get(field, default)
+    return getattr(session, field, default)
+
+
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
 #
 # Sessions and projects are stored in the WebUI sidecar without per-row
@@ -2041,6 +2047,37 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     return sidecar_messages
 
 
+def _message_summary(messages) -> dict:
+    messages = list(messages or [])
+    last_message_at = 0.0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        try:
+            last_message_at = max(last_message_at, float(msg.get("timestamp") or 0))
+        except (TypeError, ValueError):
+            pass
+    return {"message_count": len(messages), "last_message_at": last_message_at}
+
+
+def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict:
+    """Return the reconciled message summary used by metadata-only session loads.
+
+    Threads ``profile=`` through to ``get_state_db_session_messages`` so
+    background-thread reads land on the correct profile's state.db (per the
+    cookie-bound profile selector — fixes the same TLS-vs-thread race the
+    #2762 fix addressed for write paths).
+    """
+    sidecar_session = Session.load(sid)
+    sidecar_messages = []
+    if sidecar_session:
+        sidecar_messages = getattr(sidecar_session, "messages", []) or []
+    state_db_messages = get_state_db_session_messages(sid, profile=profile)
+    return _message_summary(
+        merge_session_messages_append_only(sidecar_messages, state_db_messages)
+    )
+
+
 def _session_requires_cli_metadata_lookup(session) -> bool:
     """Return True when a sidecar/session row still needs CLI metadata.
 
@@ -2565,6 +2602,15 @@ _LOGIN_LOCALE = {
         "btn": "\ub85c\uadf8\uc778",
         "invalid_pw": "\ube44\ubc00\ubc88\ud638\uac00 \uc62c\ubc14\ub974\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4",
         "conn_failed": "\uc5f0\uacb0 \uc2e4\ud328",
+    },
+    "tr": {
+        "lang": "tr-TR",
+        "title": "Oturum a\u00e7",
+        "subtitle": "Devam etmek i\u00e7in \u015fifrenizi girin",
+        "placeholder": "\u015eifre",
+        "btn": "Oturum a\u00e7",
+        "invalid_pw": "Ge\u00e7ersiz \u015fifre",
+        "conn_failed": "Ba\u011flant\u0131 ba\u015far\u0131s\u0131z",
     },
 }
 
@@ -3659,6 +3705,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/models/live":
         return _handle_live_models(handler, parsed)
 
+    # ── Auxiliary models (GET/POST) ──
+    if parsed.path == "/api/model/auxiliary":
+        from api.config import get_auxiliary_models
+        return j(handler, get_auxiliary_models())
+
     if parsed.path == "/api/dashboard/status":
         from api import dashboard_probe
 
@@ -3801,7 +3852,7 @@ def handle_get(handler, parsed) -> bool:
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             state_db_messages = []
-            sidecar_metadata_messages = None
+            metadata_summary = None
             _session_profile = getattr(s, 'profile', None) or None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
@@ -3809,17 +3860,11 @@ def handle_get(handler, parsed) -> bool:
                 state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
-                # reconciliation contract as full loads. A raw state.db summary
-                # can count stale rows that the merge intentionally filters out,
-                # which makes sidebar polling think the transcript is always
-                # newer than the loaded conversation.
-                state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
-                sidecar_metadata_session = Session.load(sid)
-                sidecar_metadata_messages = (
-                    getattr(sidecar_metadata_session, "messages", []) or []
-                    if sidecar_metadata_session
-                    else []
-                )
+                # reconciliation contract as full loads so stale/replayed
+                # state.db rows do not make sidebar polling think the
+                # transcript is always newer. Helper threads profile= to
+                # honor #2827's TLS-vs-thread fix.
+                metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
             _t2 = _time.monotonic()
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
@@ -3849,12 +3894,16 @@ def handle_get(handler, parsed) -> bool:
                     sidecar_messages = getattr(s, "messages", []) or []
                     _all_msgs = merge_session_messages_append_only(cli_messages, sidecar_messages)
                 else:
-                    _metadata_sidecar = sidecar_metadata_messages
-                    if _metadata_sidecar is None:
-                        _metadata_sidecar = getattr(s, "messages", []) or []
-                    _all_msgs = merge_session_messages_append_only(_metadata_sidecar, state_db_messages)
+                    if metadata_summary is None:
+                        metadata_summary = _message_summary(getattr(s, "messages", []) or [])
+                    _summary_message_count = metadata_summary["message_count"]
+                    _summary_last_message_at = metadata_summary["last_message_at"]
+                    _all_msgs = []
             if not load_messages:
-                _summary_message_count = len(_all_msgs)
+                if metadata_summary is None:
+                    metadata_summary = _message_summary(_all_msgs)
+                    _summary_message_count = metadata_summary["message_count"]
+                    _summary_last_message_at = metadata_summary["last_message_at"]
                 if _summary_message_count == 0:
                     # Legacy session with no loaded sidecar and no state.db summary —
                     # fall back to the persisted metadata count from session JSON.
@@ -3867,14 +3916,6 @@ def handle_get(handler, parsed) -> bool:
                             _summary_message_count = max(0, int(metadata_count))
                     except (TypeError, ValueError):
                         pass
-                try:
-                    _summary_last_message_at = max(
-                        float((m or {}).get("timestamp") or 0)
-                        for m in _all_msgs
-                        if isinstance(m, dict)
-                    ) if _all_msgs else 0
-                except (TypeError, ValueError):
-                    _summary_last_message_at = 0
             else:
                 _summary_message_count = None
                 _summary_last_message_at = None
@@ -4838,6 +4879,25 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
+
+    # ── Auxiliary model set (POST) ──
+    if parsed.path == "/api/model/set":
+        scope = str(body.get("scope") or "").strip()
+        task = str(body.get("task") or "").strip()
+        provider = str(body.get("provider") or "auto").strip()
+        model = str(body.get("model") or "").strip()
+        if scope == "auxiliary":
+            from api.config import set_auxiliary_model
+            try:
+                return j(handler, set_auxiliary_model(task, provider, model))
+            except Exception as exc:
+                return bad(handler, str(exc), status=400)
+        if scope == "main":
+            try:
+                return j(handler, set_hermes_default_model(model))
+            except ValueError as exc:
+                return bad(handler, str(exc), status=400)
+        return bad(handler, f"unknown scope: {scope}", status=400)
 
     # ── Providers (POST) ──
     if parsed.path == "/api/providers":
@@ -5837,8 +5897,8 @@ def handle_post(handler, parsed) -> bool:
             # Pre-snapshot from persisted index (acquires LOCK internally,
             # so must run outside our own LOCK acquire below).
             persisted_pinned_ids = {
-                getattr(existing, "session_id", None) for existing in all_sessions()
-                if getattr(existing, "pinned", False) and not getattr(existing, "archived", False)
+                _session_field(existing, "session_id", None) for existing in all_sessions()
+                if _session_field(existing, "pinned", False) and not _session_field(existing, "archived", False)
             }
             with LOCK:
                 # Final authoritative count: merge persisted-pinned with the
@@ -6210,13 +6270,15 @@ def handle_post(handler, parsed) -> bool:
             _record_login_attempt(client_ip)
             return bad(handler, "Invalid password", 401)
         cookie_val = create_session()
+        body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         set_auth_cookie(handler, cookie_val)
         handler.end_headers()
-        handler.wfile.write(json.dumps({"ok": True}).encode())
+        handler.wfile.write(body)
         return True
 
     if parsed.path == "/api/auth/passkey/options":
@@ -6290,13 +6352,15 @@ def handle_post(handler, parsed) -> bool:
         cookie_val = parse_cookie(handler)
         if cookie_val:
             invalidate_session(cookie_val)
+        body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         clear_auth_cookie(handler)
         handler.end_headers()
-        handler.wfile.write(json.dumps({"ok": True}).encode())
+        handler.wfile.write(body)
         return True
 
     # ── Checkpoints / Rollback (POST) ──
@@ -6324,6 +6388,9 @@ def handle_patch(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
+    if parsed.path.startswith("/api/mcp/servers/"):
+        name = parsed.path[len("/api/mcp/servers/"):]
+        return _handle_mcp_server_toggle(handler, name, body)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
 
@@ -6339,6 +6406,9 @@ def handle_delete(handler, parsed) -> bool:
     if not _check_csrf(handler):
         return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
+    if parsed.path.startswith("/api/mcp/servers/"):
+        name = parsed.path[len("/api/mcp/servers/"):]
+        return _handle_mcp_server_delete(handler, name)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
 
@@ -6346,6 +6416,17 @@ def handle_delete(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "DELETE")
         return True
+    return False
+
+
+def handle_put(handler, parsed) -> bool:
+    """Handle all PUT routes. Returns True if handled, False for 404."""
+    if not _check_csrf(handler):
+        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+    body = read_body(handler)
+    if parsed.path.startswith("/api/mcp/servers/"):
+        name = parsed.path[len("/api/mcp/servers/"):]
+        return _handle_mcp_server_update(handler, name, body)
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────
@@ -6619,7 +6700,7 @@ def _handle_sse_stream(handler, parsed):
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
         handler.send_header("Cache-Control", "no-cache")
         handler.send_header("X-Accel-Buffering", "no")
-        handler.send_header("Connection", "keep-alive")
+        handler.send_header("Connection", "close")
         handler.end_headers()
         try:
             _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs))
@@ -6631,7 +6712,7 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "keep-alive")
+    handler.send_header("Connection", "close")
     handler.end_headers()
     try:
         while True:
@@ -6762,7 +6843,7 @@ def _handle_terminal_output(handler, parsed):
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "keep-alive")
+    handler.send_header("Connection", "close")
     handler.end_headers()
     try:
         while True:
@@ -6840,7 +6921,7 @@ def _handle_gateway_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     q = watcher.subscribe()
@@ -6873,7 +6954,7 @@ def _handle_session_events_stream(handler):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     q = subscribe_session_events()
@@ -6959,6 +7040,7 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         handler.send_response(416)
         handler.send_header("Content-Range", f"bytes */{file_size}")
         handler.send_header("Accept-Ranges", "bytes")
+        handler.send_header("Content-Length", "0")
         _security_headers(handler)
         handler.end_headers()
         return True
@@ -7069,10 +7151,12 @@ def _handle_media(handler, parsed):
     if is_auth_enabled():
         cv = parse_cookie(handler)
         if not (cv and verify_session(cv)):
+            body = b'{"error":"Authentication required"}'
             handler.send_response(401)
             handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(body)))
             handler.end_headers()
-            handler.wfile.write(b'{"error":"Authentication required"}')
+            handler.wfile.write(body)
             return
 
     qs = parse_qs(parsed.query)
@@ -7306,6 +7390,15 @@ def _handle_folder_download(handler, parsed):
         _content_disposition_value("attachment", zip_name),
     )
     handler.send_header("Cache-Control", "no-store")
+    # Under HTTP/1.1 (Handler.protocol_version, see server.py post-#2836)
+    # a response with no Content-Length and no Transfer-Encoding requires
+    # Connection: close so the client knows the body ends at FIN. The ZIP
+    # is built on-the-fly so we cannot send Content-Length up front; mirror
+    # the SSE-endpoint pattern #2836 uses. Without this header the client
+    # hangs waiting for the next pipelined response after the central
+    # directory bytes finish. Caught by Opus pre-release advisor on
+    # stage-batch11.
+    handler.send_header("Connection", "close")
     handler.end_headers()
 
     written = 0
@@ -7431,7 +7524,7 @@ def _handle_approval_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     from api.streaming import _sse
@@ -7532,7 +7625,7 @@ def _handle_clarify_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     from api.streaming import _sse
@@ -8505,6 +8598,41 @@ def _start_chat_stream_for_session(
     return response
 
 
+def _runtime_runner_client_factory():
+    """Return the runner-local client when a supervised backend exists.
+
+    Slice 4d wires the `/api/chat/start` selection point without silently falling
+    back to the legacy in-process runtime when `runner-local` is explicitly
+    requested. The supervised runner backend itself is intentionally not created
+    in this helper yet; a later slice can replace this factory with the concrete
+    client while keeping the route contract stable.
+    """
+    raise NotImplementedError("runner-local chat backend is not configured")
+
+
+def _chat_start_response_from_run_start(result):
+    """Expose only the legacy browser-facing chat-start response fields."""
+    payload = dict(getattr(result, "payload", {}) or {})
+    response = {}
+    for key in (
+        "stream_id",
+        "session_id",
+        "pending_started_at",
+        "turn_id",
+        "title",
+        "effective_model",
+        "effective_model_provider",
+        "error",
+        "active_stream_id",
+        "_status",
+    ):
+        if key in payload:
+            response[key] = payload[key]
+    response.setdefault("stream_id", result.stream_id)
+    response.setdefault("session_id", result.session_id)
+    return response
+
+
 def _runtime_adapter_goal_action(goal_args: str) -> str:
     """Return the bounded RuntimeAdapter goal action for WebUI /goal args."""
     action = str(goal_args or "").strip().lower()
@@ -8714,10 +8842,12 @@ def _handle_chat_start(handler, body, diag=None):
         from api.runtime_adapter import (
             LegacyJournalRuntimeAdapter,
             StartRunRequest,
+            build_runtime_adapter,
             runtime_adapter_enabled,
+            runtime_adapter_runner_enabled,
         )
 
-        if runtime_adapter_enabled():
+        if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
             def _legacy_start_run(request: StartRunRequest) -> dict:
                 return _start_chat_stream_for_session(
                     s,
@@ -8730,23 +8860,32 @@ def _handle_chat_start(handler, body, diag=None):
                     diag=diag,
                 )
 
-            adapter = LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
-            result = adapter.start_run(
-                StartRunRequest(
-                    session_id=s.session_id,
-                    message=msg,
-                    attachments=attachments,
-                    workspace=workspace,
-                    profile=getattr(s, "profile", None),
-                    provider=model_provider,
-                    model=model,
-                    source="webui",
-                    metadata={"route": "/api/chat/start"},
+            def _legacy_adapter_factory():
+                return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
+
+            try:
+                adapter = build_runtime_adapter(
+                    legacy_adapter_factory=_legacy_adapter_factory,
+                    runner_client_factory=_runtime_runner_client_factory,
                 )
-            )
-            response = dict(result.payload)
-            response.setdefault("stream_id", result.stream_id)
-            response.setdefault("session_id", result.session_id)
+                if adapter is None:
+                    raise NotImplementedError("runtime adapter selection returned no adapter")
+                result = adapter.start_run(
+                    StartRunRequest(
+                        session_id=s.session_id,
+                        message=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        profile=getattr(s, "profile", None),
+                        provider=model_provider,
+                        model=model,
+                        source="webui",
+                        metadata={"route": "/api/chat/start"},
+                    )
+                )
+            except NotImplementedError as exc:
+                return j(handler, {"error": str(exc)}, status=501)
+            response = _chat_start_response_from_run_start(result)
         else:
             response = _start_chat_stream_for_session(
                 s,
@@ -8968,6 +9107,12 @@ def _handle_chat_sync(handler, body):
                 model=s.model,
                 title=s.title,
                 message_count=len(s.messages),
+                # #2762 / #2827 parity with api/streaming.py:5078: pass the
+                # session's profile explicitly so a future refactor that
+                # backgrounds this handler doesn't silently leak writes to
+                # the wrong profile's state.db. HTTP thread today, but
+                # defense-in-depth. Opus pre-release advisor MUST-FIX.
+                profile=getattr(s, 'profile', None),
             )
     except Exception:
         logger.debug("Failed to update session cost tracking")
@@ -11983,7 +12128,7 @@ def _handle_mcp_servers_list(handler):
     ]
     return j(handler, {
         "servers": result,
-        "toggle_supported": False,
+        "toggle_supported": True,
         "reload_required": True,
     })
 
@@ -12005,6 +12150,30 @@ def _handle_mcp_server_delete(handler, name):
     _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "deleted": name})
+
+
+def _handle_mcp_server_toggle(handler, name, body):
+    """Toggle enabled state for an MCP server (PATCH /api/mcp/servers/{name})."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    if "enabled" not in body:
+        return bad(handler, "enabled field is required")
+    enabled = bool(body["enabled"])
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    if name not in servers:
+        return bad(handler, f"MCP server '{name}' not found", 404)
+    if not isinstance(servers[name], dict):
+        return bad(handler, f"MCP server '{name}' has invalid config", 400)
+    servers[name]["enabled"] = enabled
+    cfg["mcp_servers"] = servers
+    _save_yaml_config_file(_get_config_path(), cfg)
+    reload_config()
+    return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
 
 _MASKED_PLACEHOLDER = "••••••"

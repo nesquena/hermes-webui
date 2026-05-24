@@ -779,6 +779,33 @@ function _modelStateForSelect(sel, modelId){
   const provider=String(_getOptionProviderId(opt)||'').trim();
   return {model:value,model_provider:(provider&&provider!=='default')?provider:null};
 }
+function _captureModelDropdownSelection(sel){
+  if(!sel||!sel.value) return null;
+  try{
+    const state=_modelStateForSelect(sel,sel.value);
+    if(state&&state.model) return state;
+  }catch(_){}
+  return {model:String(sel.value||''),model_provider:null};
+}
+function _reconcileModelDropdownSelection(sel,data,previousState,opts){
+  if(!sel) return null;
+  const activeSession=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
+  // Fresh boot is the only path where the profile/server default intentionally
+  // beats a browser-persisted or static fallback value. Every other model-list
+  // rebuild should preserve the loaded session model or the user's current
+  // in-page selection when it still exists in the refreshed catalog.
+  const shouldApplyBootDefault=!!(opts&&opts.preferProfileDefaultOnFreshBoot);
+  if(shouldApplyBootDefault && data&&data.default_model && !(activeSession&&activeSession.model)){
+    return _applyModelToDropdown(data.default_model,sel,data.active_provider||null);
+  }
+  if(activeSession&&activeSession.model){
+    return _applyModelToDropdown(activeSession.model,sel,activeSession.model_provider||null);
+  }
+  if(previousState&&previousState.model){
+    return _applyModelToDropdown(previousState.model,sel,previousState.model_provider||null);
+  }
+  return null;
+}
 function _providerQualifiedModelValueForSelect(sel, modelId){
   return _modelStateForSelect(sel,modelId).model;
 }
@@ -988,7 +1015,7 @@ function _applySessionModelFallback(sel){
   return null;
 }
 
-async function populateModelDropdown(){
+async function populateModelDropdown(opts={}){
   const sel=$('modelSelect');
   if(!sel) return;
   try{
@@ -1046,6 +1073,7 @@ async function populateModelDropdown(){
       : _synthGroupsFromConfigured();
 
     if(!groups.length) return; // no server groups and no configured fallback
+    const previousSelection=_captureModelDropdownSelection(sel);
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -1078,12 +1106,7 @@ async function populateModelDropdown(){
       }
       sel.appendChild(og);
     }
-    // Set default model from server on fresh/blank boot. Loaded sessions keep
-    // their own persisted model and apply it via loadSession(). Do not let stale
-    // browser localStorage suppress the profile default.
-    if(data.default_model && !(S.session&&S.session.model)){
-      _applyModelToDropdown(data.default_model, sel, data.active_provider||null);
-    }
+    _reconcileModelDropdownSelection(sel,data,previousSelection,opts);
     if(typeof syncModelChip==='function') syncModelChip();
     const dd=$('composerModelDropdown');
     if(dd&&dd.classList.contains('open')&&typeof renderModelDropdown==='function'){
@@ -5992,7 +6015,7 @@ function renderMessages(options){
   const msgCount=S.messages.length;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
   const renderWindowSize=_currentMessageRenderWindowSize();
-  const renderSignature=_messageRenderCacheSignature();
+  let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
     (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
@@ -6007,6 +6030,8 @@ function renderMessages(options){
   // cross-channel handoff summaries; otherwise the cached transcript returns
   // before those cards can be inserted.
   if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
+    const renderSignature=_messageRenderCacheSignature();
+    cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
     if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
@@ -6128,6 +6153,13 @@ function renderMessages(options){
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
+  const toolCallAssistantIdxs=new Set();
+  if(Array.isArray(S.toolCalls)){
+    for(const tc of S.toolCalls){
+      if(!tc) continue;
+      toolCallAssistantIdxs.add(tc.assistant_msg_idx!==undefined?tc.assistant_msg_idx:-1);
+    }
+  }
   // Windowed render loop replaces the legacy full loop:
   // for(let vi=0;vi<visWithIdx.length;vi++)
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
@@ -6374,11 +6406,12 @@ function renderMessages(options){
   // a display list from per-message tool_calls (OpenAI format) stored in each
   // assistant message. This covers the reload case described in issue #140.
   if(!S.busy && (!S.toolCalls||!S.toolCalls.length)){
-    // Pass 1: index tool outputs by tool_call_id / tool_use_id so the
+    // Index tool outputs by tool_call_id / tool_use_id so the
     // fallback-built cards carry their result snippet (not just the command).
     // Without this step CLI-origin sessions reload with empty tool cards.
     const resultsByTid={};
-    S.messages.forEach(m=>{
+    const fallbackToolSources=[];
+    S.messages.forEach((m,rawIdx)=>{
       if(!m) return;
       // OpenAI / Hermes CLI format: role=tool with tool_call_id
       if(m.role==='tool'){
@@ -6398,10 +6431,14 @@ function renderMessages(options){
           resultsByTid[tid]=_cliToolResultSnippet(raw);
         });
       }
+      if(m.role==='assistant'){
+        const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+        const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
+        if(hasTopLevelToolCalls||hasContentToolUse) fallbackToolSources.push({m,rawIdx});
+      }
     });
     const derived=[];
-    S.messages.forEach((m,rawIdx)=>{
-      if(m.role!=='assistant') return;
+    fallbackToolSources.forEach(({m,rawIdx})=>{
       // OpenAI format: top-level tool_calls field on the assistant message
       (m.tool_calls||[]).forEach(tc=>{
         if(!tc||typeof tc!=='object') return;
@@ -6548,7 +6585,7 @@ function renderMessages(options){
       const hasTurnUsage=!!msg._turnUsage;
       const compactActivityForMessage=isSimplifiedToolCalling()&&(
         assistantThinking.has(mi)||
-        (S.toolCalls||[]).some(tc=>tc&&(tc.assistant_msg_idx!==undefined?tc.assistant_msg_idx:-1)===mi)
+        toolCallAssistantIdxs.has(mi)
       );
       const durationText=compactActivityForMessage?'':_formatTurnDuration(msg._turnDuration);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;
@@ -6615,10 +6652,11 @@ function renderMessages(options){
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
-  if(sid&&!hasTransientTranscriptUi){
+  if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
+      const renderSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;
       _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize,signature:renderSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }

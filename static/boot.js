@@ -1477,12 +1477,8 @@ function applyBotName(){
       if(sel&&typeof _applyModelToDropdown==='function'){
         // Fresh page boot must prefer the profile/server default over stale
         // browser-persisted model state. A restored session can still apply its
-        // own persisted model later through loadSession().
-        if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-        else {
-          localStorage.removeItem('hermes-webui-model');
-          localStorage.removeItem('hermes-webui-model-state');
-        }
+        // own persisted model later through loadSession(). Preserve the browser
+        // keys for legacy/no-default fallback paths instead of deleting them.
         const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);
         if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
           existingDefaultOpt.dataset.provider=window._activeProvider;
@@ -1590,7 +1586,7 @@ function applyBotName(){
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
-  const _hydrateBootModelDropdown=()=>populateModelDropdown().then(()=>{
+  const _hydrateBootModelDropdown=()=>populateModelDropdown({preferProfileDefaultOnFreshBoot:true}).then(()=>{
     const sessionModelState=S.session&&S.session.model
       ? {model:S.session.model,model_provider:S.session.model_provider||null}
       : null;
@@ -1624,7 +1620,10 @@ function applyBotName(){
       else if(typeof syncModelChip==='function') syncModelChip();
     }
     if(S.session) syncTopbar();
-  }).catch(()=>{});
+  }).catch(e=>{
+    window._modelDropdownReady=null;
+    throw e;
+  });
   const _startBootModelDropdown=()=>{
     const ready=window._modelDropdownReady;
     if(ready&&typeof ready.then==='function') return ready;
@@ -1634,6 +1633,9 @@ function applyBotName(){
   };
   window._modelDropdownReady=null;
   window._ensureModelDropdownReady=_startBootModelDropdown;
+  setTimeout(()=>{
+    try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+  },0);
   // Start independent boot fetches without holding the conversation list behind
   // them. The sidebar can render from /api/sessions while workspace/onboarding
   // metadata settles in parallel.
@@ -1656,6 +1658,17 @@ function applyBotName(){
   if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
+  const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
+    ? window.HermesPWA.launchAction()
+    : null;
+  if(pwaLaunchAction==='new-chat'){
+    try{
+      await newSession(true);
+      if(S.session) await _startBootModelDropdown();
+      S._bootReady=true;
+      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();return;
+    }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
+  }
   const savedLocal=localStorage.getItem('hermes-webui-session');
   const saved=urlSession||savedLocal;
   if(saved){

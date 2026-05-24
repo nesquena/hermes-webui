@@ -50,6 +50,13 @@ def test_load_dir_keeps_workspace_panel_open_when_clearing_preview():
     )
 
 
+def test_load_dir_ignores_stale_session_results():
+    block = _function_block(WORKSPACE_JS, "loadDir")
+    assert "const sessionId=S.session.session_id" in block
+    assert "encodeURIComponent(sessionId)" in block
+    assert "if(!S.session||S.session.session_id!==sessionId)return;" in block
+
+
 def test_file_preview_breadcrumb_uses_directory_navigation_for_root():
     block = _function_block(WORKSPACE_JS, "renderFileBreadcrumb")
     assert "loadDir('.')" in block, "The preview root breadcrumb should navigate to the workspace root."

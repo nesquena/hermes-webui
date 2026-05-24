@@ -5920,6 +5920,8 @@ async function loadSettingsPanel(){
       }
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
     }
+    // Auxiliary models — load task assignments and provider/model options
+    _loadAuxiliaryModels();
     // Send key preference
     const sendKeySel=$('settingsSendKey');
     if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -6739,10 +6741,13 @@ function _refreshModelDropdownsAfterProviderChange(){
     if(typeof window._invalidateSlashModelCache==='function'){
       window._invalidateSlashModelCache();
     }
-    if(typeof populateModelDropdown==='function'){
-      // Fire-and-forget: don't block the providers panel refresh on a
-      // dropdown rebuild. The composer/Settings dropdowns will catch up
-      // on the very next paint frame.
+    // Fire-and-forget: don't block the providers panel refresh on a
+    // dropdown rebuild. The composer/Settings dropdowns will catch up
+    // on the very next paint frame.
+    if(typeof window._ensureModelDropdownReady==='function'){
+      window._modelDropdownReady=null;
+      Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
+    }else if(typeof populateModelDropdown==='function'){
       Promise.resolve(populateModelDropdown()).catch(()=>{});
     }
   }catch(_e){
@@ -6946,6 +6951,223 @@ async function checkUpdatesNow(){
     if(spinner) spinner.style.display='none';
     if(label) label.textContent=t('settings_check_now');
   }
+}
+
+// ── Auxiliary Models ──────────────────────────────────────────────────────────
+
+// Canonical auxiliary task slots with display names.
+// Keep in sync with hermes_cli/main.py _AUX_TASKS and hermes_cli/web_server.py _AUX_TASK_SLOTS.
+const _AUX_TASK_SLOTS=[
+ {key:'vision',name:'Vision',desc:'image/screenshot analysis'},
+ {key:'compression',name:'Compression',desc:'context summarization'},
+ {key:'web_extract',name:'Web extract',desc:'web page summarization'},
+ {key:'session_search',name:'Session search',desc:'past-conversation recall'},
+ {key:'approval',name:'Approval',desc:'smart command approval'},
+ {key:'mcp',name:'MCP',desc:'MCP tool reasoning'},
+ {key:'title_generation',name:'Title generation',desc:'session titles'},
+ {key:'skills_hub',name:'Skills hub',desc:'skills search/install'},
+ {key:'curator',name:'Curator',desc:'skill-usage review pass'},
+];
+
+let _auxProviders=[];       // cached provider list from /api/model/options
+let _auxOriginalConfig=null; // snapshot of initial config for dirty detection
+
+function _auxSelectStyle(){
+ return 'width:100%;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;box-sizing:border-box';
+}
+
+function _buildAuxProviderOptions(sel,providers,currentProvider){
+ sel.innerHTML='';
+ // "auto" = use main model
+ const autoOpt=document.createElement('option');
+ autoOpt.value='auto';autoOpt.textContent='auto ('+t('settings_aux_provider_auto')+')';
+ if(currentProvider==='auto'||!currentProvider) autoOpt.selected=true;
+ sel.appendChild(autoOpt);
+ for(const p of providers){
+  const opt=document.createElement('option');
+  opt.value=p.slug;opt.textContent=p.name;
+  if(p.slug===currentProvider) opt.selected=true;
+  sel.appendChild(opt);
+ }
+}
+
+function _buildAuxModelOptions(sel,provider,providers,currentModel){
+ sel.innerHTML='';
+ const emptyOpt=document.createElement('option');
+ emptyOpt.value='';emptyOpt.textContent=t('settings_aux_model_auto')||'auto (use provider default)';
+ sel.appendChild(emptyOpt);
+ if(!provider||provider==='auto'){
+  sel.value=currentModel||'';
+  return;
+ }
+ // Find matching provider in cached list
+ const pData=providers.find(p=>p.slug===provider);
+ if(pData&&pData.models){
+  for(const mId of pData.models){
+   const opt=document.createElement('option');
+   opt.value=mId;opt.textContent=mId;
+   if(mId===currentModel) opt.selected=true;
+   sel.appendChild(opt);
+  }
+ }
+ // Always allow custom model — add a text input option hint
+ const customOpt=document.createElement('option');
+ customOpt.value='__custom__';customOpt.textContent=t('settings_aux_model_custom')||'Custom model…';
+ sel.appendChild(customOpt);
+ // If currentModel not in list and not empty, add it as a custom option
+ if(currentModel&&!pData?.models?.includes(currentModel)){
+  const existingOpt=document.createElement('option');
+  existingOpt.value=currentModel;existingOpt.textContent=currentModel+' (configured)';
+  existingOpt.selected=true;
+  sel.insertBefore(existingOpt,customOpt);
+ }
+}
+
+function _onAuxProviderChange(taskKey,providers){
+ const provSel=$('aux-prov-'+taskKey);
+ const modelSel=$('aux-model-'+taskKey);
+ if(!provSel||!modelSel) return;
+ const provider=provSel.value;
+ _buildAuxModelOptions(modelSel,provider,providers,'');
+ _markAuxDirty();
+}
+
+async function _onAuxModelChange(taskKey){
+ const modelSel=$('aux-model-'+taskKey);
+ if(!modelSel) return;
+ if(modelSel.value==='__custom__'){
+  const customModel=await showPromptDialog({title:t('settings_aux_model_custom')||'Custom model',message:t('settings_aux_model_custom_prompt')||'Enter model ID:',placeholder:'model/provider:model-id',confirmLabel:t('settings_btn_apply_aux_models')||'Apply'});
+  if(customModel&&customModel.trim()){
+   // Insert custom model option before the __custom__ option
+   const opt=document.createElement('option');
+   opt.value=customModel.trim();opt.textContent=customModel.trim();
+   // Remove __custom__ selection
+   const customIdx=[...modelSel.options].findIndex(o=>o.value==='__custom__');
+   if(customIdx>=0) modelSel.insertBefore(opt,modelSel.options[customIdx]);
+   modelSel.value=customModel.trim();
+  }else{
+   modelSel.value='';
+  }
+ }
+ _markAuxDirty();
+}
+
+function _markAuxDirty(){
+ const applyBtn=$('btnApplyAuxModels');
+ if(applyBtn) applyBtn.style.display='';
+ _markSettingsDirty();
+}
+
+async function _loadAuxiliaryModels(){
+ const container=$('auxModelsContainer');
+ if(!container) return;
+ container.innerHTML='<div style="color:var(--muted);font-size:12px">'+(t('settings_aux_loading')||'Loading…')+'</div>';
+
+ try{
+ // Fetch auxiliary config AND the WebUI's own /api/models for provider/model lists
+ const [auxData,modelsData]=await Promise.all([
+ api('/api/model/auxiliary').catch(()=>null),
+ api('/api/models').catch(()=>null),
+ ]);
+ // Build provider list from /api/models groups
+ // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
+ const groups=(modelsData&&modelsData.groups)||[];
+ _auxProviders=groups.filter(g=>g.provider&&g.models&&g.models.length>0).map(g=>({
+ slug:g.provider_id||g.provider,
+ name:g.provider,
+ models:g.models.map(m=>m.id),
+ }));
+ const tasks=(auxData&&auxData.tasks)||[];
+  // Build a quick lookup: taskKey → {provider, model}
+  const taskMap={};
+  for(const t of tasks) taskMap[t.task]=t;
+  _auxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
+
+  container.innerHTML='';
+  for(const slot of _AUX_TASK_SLOTS){
+   const cfg=taskMap[slot.key]||{provider:'auto',model:''};
+   const row=document.createElement('div');
+   row.style.cssText='display:grid;grid-template-columns:120px 1fr 1fr;gap:8px;align-items:center;margin-bottom:8px';
+
+   // Task name + description
+   const label=document.createElement('div');
+   label.style.cssText='font-size:12px;font-weight:500;color:var(--text);line-height:1.3';
+   label.innerHTML=esc(slot.name)+'<div style="font-size:10px;color:var(--muted);font-weight:400">'+esc(slot.desc)+'</div>';
+   row.appendChild(label);
+
+   // Provider select
+   const provSel=document.createElement('select');
+   provSel.id='aux-prov-'+slot.key;
+   provSel.style.cssText=_auxSelectStyle();
+   _buildAuxProviderOptions(provSel,_auxProviders,cfg.provider);
+   provSel.addEventListener('change',()=>_onAuxProviderChange(slot.key,_auxProviders));
+   row.appendChild(provSel);
+
+   // Model select
+   const modelSel=document.createElement('select');
+   modelSel.id='aux-model-'+slot.key;
+   modelSel.style.cssText=_auxSelectStyle();
+   _buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
+   modelSel.addEventListener('change',()=>_onAuxModelChange(slot.key));
+   row.appendChild(modelSel);
+
+   container.appendChild(row);
+  }
+  // Hide apply button (no changes yet)
+  const applyBtn=$('btnApplyAuxModels');
+  if(applyBtn) applyBtn.style.display='none';
+
+  // Reset button
+  const resetBtn=$('btnResetAuxModels');
+  if(resetBtn&&!resetBtn._bound){
+   resetBtn._bound=true;
+   resetBtn.addEventListener('click',async()=>{
+    if(!(await showConfirmDialog({title:t('settings_aux_reset_confirm_title')||'Reset auxiliary models?',message:t('settings_aux_reset_confirm_msg')||'This will set all auxiliary tasks to auto (use main model).',confirmLabel:t('settings_btn_reset_aux_models')||'Reset',danger:true}))) return;
+    try{
+     await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:'__reset__',provider:'auto',model:''})});
+     if(typeof showToast==='function') showToast(t('settings_aux_reset_done')||'Auxiliary models reset to auto');
+     _loadAuxiliaryModels();
+    }catch(e){
+     if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to reset auxiliary models');
+    }
+   });
+  }
+
+  // Apply button
+  if(applyBtn&&!applyBtn._bound){
+   applyBtn._bound=true;
+   applyBtn.addEventListener('click',_applyAuxModels);
+  }
+ }catch(e){
+  console.warn('[settings] auxiliary models load failed',e);
+  container.innerHTML='<div style="color:var(--muted);font-size:12px">'+(t('settings_aux_load_failed')||'Could not load auxiliary model settings. Make sure the agent API is available.')+'</div>';
+ }
+}
+
+async function _applyAuxModels(){
+ let saved=0;
+ for(const slot of _AUX_TASK_SLOTS){
+  const provSel=$('aux-prov-'+slot.key);
+  const modelSel=$('aux-model-'+slot.key);
+  if(!provSel) continue;
+  const provider=provSel.value;
+  const model=(modelSel&&modelSel.value!=='__custom__')?(modelSel.value||''):'';
+  const orig=_auxOriginalConfig?.[slot.key]||{provider:'auto',model:''};
+  // Only save if changed
+  if(provider!==orig.provider||model!==orig.model){
+   try{
+    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:slot.key,provider,model})});
+    saved++;
+   }catch(e){
+    console.warn('[settings] failed to save aux task',slot.key,e);
+    if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to save auxiliary model for '+slot.name);
+    return;
+   }
+  }
+ }
+ if(typeof showToast==='function') showToast(saved?(t('settings_aux_saved')||'Auxiliary models updated'):(t('settings_aux_no_changes')||'No changes to apply'));
+ // Reload to refresh state
+ _loadAuxiliaryModels();
 }
 
 async function saveSettings(andClose){
@@ -7204,6 +7426,16 @@ function _mcpStatusLabel(status){
   }[status]||'mcp_status_unknown';
   return t(key);
 }
+function toggleMcpServer(name, enabled){
+  api('/api/mcp/servers/'+encodeURIComponent(name),{
+    method:'PATCH',
+    body:JSON.stringify({enabled:enabled}),
+  }).then(r=>{
+    if(r&&r.ok) showToast(t(enabled?'mcp_enabled_toast':'mcp_disabled_toast',name));
+    else showToast(t('mcp_toggle_failed'),'error');
+    loadMcpServers();
+  }).catch(()=>{showToast(t('mcp_toggle_failed'),'error');loadMcpServers();});
+}
 function loadMcpServers(){
   const list=$('mcpServerList');
   if(!list) return;
@@ -7214,7 +7446,6 @@ function loadMcpServers(){
       list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_no_servers'))}</div>`;
       return;
     }
-    const toggleNote=r.toggle_supported?'':'<div class="mcp-readonly-note">'+esc(t('mcp_toggle_followup'))+'</div>';
     list.innerHTML=r.servers.map(s=>{
       const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+(s.transport||'unknown'));
       const transportClass=s.transport==='http'?'mcp-http':s.transport==='stdio'?'mcp-stdio':'mcp-unknown';
@@ -7228,6 +7459,11 @@ function loadMcpServers(){
       const envInfo=s.env?Object.entries(s.env).map(([k,v])=>`${k}=${v}`).join(', '):'';
       const headersInfo=s.headers?Object.entries(s.headers).map(([k,v])=>`${k}=${v}`).join(', '):'';
       const secretInfo=[envInfo,headersInfo].filter(Boolean).join(' | ');
+      const isEnabled=s.enabled!==false;
+      const encodedName=encodeURIComponent(s.name).replace(/'/g,"\\'");
+      const toggleBtn=r.toggle_supported
+        ?`<button type="button" class="mcp-toggle-btn ${isEnabled?'mcp-toggle-enabled':'mcp-toggle-disabled'}" title="${esc(t(isEnabled?'mcp_disable_server':'mcp_enable_server'))}" onclick="toggleMcpServer('${encodedName}',${!isEnabled})">${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</button>`
+        :`<span>${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</span>`;
       return `<div class="mcp-server-row">
         <div class="mcp-server-row-head">
           <span class="mcp-server-name">${esc(s.name)}</span>
@@ -7235,9 +7471,9 @@ function loadMcpServers(){
           ${statusBadge}
         </div>
         <div class="mcp-server-detail">${esc(detail)}${secretInfo?' | '+esc(secretInfo):''}</div>
-        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span><span>${esc(t(s.enabled===false?'mcp_enabled_no':'mcp_enabled_yes'))}</span></div>
+        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span>${toggleBtn}</div>
       </div>`;
-    }).join('')+toggleNote;
+    }).join('');
   }).catch(()=>{list.innerHTML=`<div class="mcp-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_load_failed'))}</div>`});
 }
 let _mcpToolsCache=[];

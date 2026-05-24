@@ -23,6 +23,7 @@ const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
 const VQ = '?v=__WEBUI_VERSION__';
 const SHELL_ASSETS = [
   './static/style.css' + VQ,
+  './static/pwa-startup.js' + VQ,
   './static/boot.js' + VQ,
   './static/ui.js' + VQ,
   './static/messages.js' + VQ,
@@ -115,7 +116,7 @@ self.addEventListener('fetch', (event) => {
   // freshly set login cookie until the user manually refreshes.
   if (event.request.mode === 'navigate') {
     event.respondWith(
-      fetch(event.request).then((response) => {
+      fetch(new Request(event.request, { cache: 'no-store' })).then((response) => {
         if (
           event.request.method === 'GET' &&
           response.status === 200 &&
@@ -152,7 +153,7 @@ self.addEventListener('fetch', (event) => {
   // but avoids executing stale JS/CSS after a local hotfix when WEBUI_VERSION
   // has not changed yet (e.g. before a guarded restart updates the ?v token).
   event.respondWith(
-    fetch(event.request).then((response) => {
+    fetch(new Request(event.request, { cache: 'no-store' })).then((response) => {
       if (
         event.request.method === 'GET' &&
         response.status === 200
