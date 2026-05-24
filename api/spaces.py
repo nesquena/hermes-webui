@@ -5501,11 +5501,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, "active_space_id": space_id, "contract": _widget_runtime_contract_summary(widget)}
     if name in {"space.template.install", "space.templates.install", "template.install", "space.spaces.installexamplespace", "space.spaces.installtemplate"}:
         template_name = _space_tool_template_name(data, "weather")
-        result = install_template(template_name, space_id=_space_tool_space_id_alias(data) or None)
+        result = install_template(template_name, space_id=_space_tool_space_id_alias(data) or None, record_progress=True)
         return {"ok": True, "action": name, **result}
     if name in {"space.template.reset", "space.templates.reset", "template.reset"}:
         template_name = _space_tool_template_name(data, "big-bang")
-        result = reset_template(template_name, space_id=_space_tool_space_id_alias(data) or None)
+        result = reset_template(template_name, space_id=_space_tool_space_id_alias(data) or None, record_progress=True)
         return {"ok": True, "action": name, **result}
     if name in {"space.import", "space.package.import", "space.agent.import"}:
         result = import_space_agent_package(
@@ -8354,7 +8354,7 @@ def _big_bang_onboarding_widgets() -> list[dict[str, Any]]:
     ]
 
 
-def install_template(template: str, *, space_id: str | None = None) -> dict[str, Any]:
+def install_template(template: str, *, space_id: str | None = None, record_progress: bool = False) -> dict[str, Any]:
     """Install a safe Capy Spaces demo template.
 
     Templates are early demo-parity seeds. They create/update persistent spaces
@@ -8583,6 +8583,8 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
         "space": read_space_detail(space["space_id"]),
         "installed_widgets": list_widgets(space["space_id"]),
     }
+    if record_progress:
+        result["progress_event"] = _record_space_tool_progress_event(space["space_id"], run_prefix="template.install")
     if response_template == "browser":
         preflight_receipt = _browser_surface_template_prompt_preflight_receipt()
         result["prompt_preflight"] = preflight_receipt
@@ -8590,7 +8592,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     return result
 
 
-def reset_template(template: str, *, space_id: str | None = None) -> dict[str, Any]:
+def reset_template(template: str, *, space_id: str | None = None, record_progress: bool = False) -> dict[str, Any]:
     """Reset an installed demo template to its canonical metadata-only state.
 
     This is intentionally narrower than install_template: reset replaces the
@@ -8635,12 +8637,15 @@ def reset_template(template: str, *, space_id: str | None = None) -> dict[str, A
         str(rev) for rev in (existing.get("revision_events") or []) if _event_id_is_safe(rev)
     ]
     _write_manifest(space, "template.reset", {"template": "big-bang"})
-    return {
+    result = {
         "template": "big-bang",
         "reset": True,
         "space": read_space_detail(sid),
         "installed_widgets": list_widgets(sid),
     }
+    if record_progress:
+        result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="template.reset")
+    return result
 
 
 def disable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, Any]:
@@ -9421,6 +9426,8 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "space.create",
         "space.delete",
         "space.duplicate",
+        "template.install",
+        "template.reset",
         "widget.delete",
         "widget.patch",
         "widget.blueprint.create",

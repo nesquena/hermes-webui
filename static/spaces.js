@@ -100,6 +100,7 @@
       (widgetItems ? '<ul>'+widgetItems+'</ul>' : '') + actions +
       renderPromptPreflightEvidence(result && result.prompt_preflight) +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
+      renderPackageProgressEvidence(result && result.progress_event, 'Template install progress') +
       '</div>';
   }
 
@@ -114,6 +115,7 @@
     return '<div class="capy-spaces-card" role="status"><h3>Big Bang onboarding reset</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(space.name || 'Big Bang Onboarding')+' restored to safe canonical metadata · '+escapeHtml(widgetLabel)+'</div>' +
       (widgetItems ? '<ul>'+widgetItems+'</ul>' : '') +
+      renderPackageProgressEvidence(result && result.progress_event, 'Template reset progress') +
       '</div>';
   }
 

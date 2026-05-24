@@ -1926,6 +1926,7 @@ global.fetch = async function(path, opts = {}) {
       template: 'weather',
       space: { space_id: 'weather-demo', name: 'Weather Demo', description: 'Prague weather starter', widget_count: 1, revision_event_id: 'rev-weather' },
       installed_widgets: [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', layout: { x: 0, y: 0, w: 8, h: 5, minimized: false }, renderer: '<script>bad()</script>' }],
+      progress_event: { event_id: 'evt-template-install', event_type: 'tool.completed', family: 'tool', run_id: 'template.install:weather-demo', redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
     });
   }
   if (path === 'api/spaces/templates/reset') {
@@ -1940,6 +1941,7 @@ global.fetch = async function(path, opts = {}) {
         { id: 'bigbang-safety', kind: 'status', title: 'Safety guardrails' },
         { id: 'bigbang-next-steps', kind: 'checklist', title: 'Next steps' },
       ],
+      progress_event: { event_id: 'evt-template-reset', event_type: 'tool.completed', family: 'tool', run_id: 'template.reset:' + (body.space_id || 'big-bang-onboarding'), redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
     });
   }
   if (path === 'api/spaces/revision/restore') {
@@ -5113,6 +5115,10 @@ def test_spaces_ui_install_weather_demo_posts_template_and_shows_safe_open_manag
 
     assert "Install weather demo" in out["rootHtml"]
     assert "Weather demo installed" in out["rootHtml"]
+    assert "Template install progress" in out["rootHtml"]
+    assert "tool.completed" in out["rootHtml"]
+    assert "run template.install:weather-demo" in out["rootHtml"]
+    assert "metadata-only progress receipt" in out["rootHtml"]
     assert "Weather Demo" in out["rootHtml"]
     assert "1 widget" in out["rootHtml"]
     assert "Open weather demo" in out["rootHtml"]
@@ -7071,6 +7077,10 @@ def test_spaces_ui_reset_big_bang_uses_shared_confirm_and_renders_metadata_only(
     assert json.loads(post["body"]) == {"template": "big-bang", "space_id": "big-bang-onboarding"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "Big Bang Onboarding" in out["rootHtml"]
+    assert "Template reset progress" in out["rootHtml"]
+    assert "tool.completed" in out["rootHtml"]
+    assert "run template.reset:big-bang-onboarding" in out["rootHtml"]
+    assert "metadata-only progress receipt" in out["rootHtml"]
     assert "Welcome to Capy Spaces" in out["rootHtml"]
     assert "4 widgets" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]

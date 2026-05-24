@@ -9220,6 +9220,11 @@ def test_space_tool_adapter_installs_templates_as_safe_metadata(monkeypatch, tmp
         "game-controls",
         "game-repair-notes",
     ]
+    assert result["progress_event"]["event_type"] == "tool.completed"
+    assert result["progress_event"]["family"] == "tool"
+    assert result["progress_event"]["run_id"] == "template.install:tool-game-demo"
+    assert result["progress_event"]["space_id"] == "tool-game-demo"
+    assert result["progress_event"]["redaction_status"] == "metadata_only"
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
@@ -9284,6 +9289,11 @@ def test_space_tool_template_reset_accepts_camelcase_space_id_metadata_only(monk
         "bigbang-safety",
         "bigbang-next-steps",
     ]
+    assert result["progress_event"]["event_type"] == "tool.completed"
+    assert result["progress_event"]["family"] == "tool"
+    assert result["progress_event"]["run_id"] == "template.reset:tool-reset-camel"
+    assert result["progress_event"]["space_id"] == "tool-reset-camel"
+    assert result["progress_event"]["redaction_status"] == "metadata_only"
     assert "unsafe-extra" not in serialized
     assert "renderer" not in serialized
     assert "<script" not in serialized
@@ -14380,6 +14390,9 @@ def test_weather_template_install_route_returns_safe_metadata(monkeypatch, tmp_p
     assert body["template"] == "weather"
     assert body["space"]["name"] == "Weather Demo"
     assert body["installed_widgets"][0]["id"] == "weather-current"
+    assert body["progress_event"]["event_type"] == "tool.completed"
+    assert body["progress_event"]["run_id"] == "template.install:weather-demo"
+    assert body["progress_event"]["redaction_status"] == "metadata_only"
     serialized = json.dumps(body).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized
@@ -15003,6 +15016,9 @@ def test_big_bang_template_reset_route_returns_safe_metadata(monkeypatch, tmp_pa
     assert body["template"] == "big-bang"
     assert body["reset"] is True
     assert body["space"]["name"] == "Big Bang Onboarding"
+    assert body["progress_event"]["event_type"] == "tool.completed"
+    assert body["progress_event"]["run_id"] == f"template.reset:{space_id}"
+    assert body["progress_event"]["redaction_status"] == "metadata_only"
     assert [widget["id"] for widget in body["installed_widgets"]] == [
         "bigbang-welcome",
         "bigbang-demo-launcher",
