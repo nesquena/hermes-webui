@@ -1,15 +1,19 @@
-# Hermes Web UI (Windows Native Edition)
+# 👑 Hermes Web UI (Windows Native Edition) 👑
 
-> 🚀 **Windows Native Edition**: This is a modified version of the original [Hermes WebUI](https://github.com/nesquena/hermes-webui) optimized to run natively on Windows without requiring Docker or WSL2.
-> Special thanks to the original creator Nathan Esquenazi (@nesquena) and Adel for this amazing project and their incredible effort! This fork was created to make native Windows deployment seamless.
+> [!IMPORTANT]
+> 🚀 **Windows Native Edition**: This is a modified, high-performance edition of the original [Hermes WebUI](https://github.com/nesquena/hermes-webui) optimized to run **natively on Windows** without the need for Docker, VM, or WSL2!
+>
+> 💖 **Credits & Gratitude**: Special thanks and huge respect to the original creator **Nathan Esquenazi** ([@nesquena](https://github.com/nesquena)) and **Adel** for developing the outstanding Hermes WebUI project. We created this fork to bring the seamless native Windows experience to everyone!
 
-### ⚡ One-Step Windows Installation
+### ⚡ One-Step Ultra-Fast Windows Installation
 
-Open PowerShell and run the following command to automatically install and configure:
+To install and launch natively on Windows, simply open **PowerShell** and run this command:
 
 ```powershell
-Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12; iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/1PROO/hermes-webui/main/install_windows.ps1'))
+powershell -ExecutionPolicy Bypass -c "irm https://1proo.github.io/hermes-webui/install_windows.ps1 | iex"
 ```
+
+*This command automatically clones the repository, configures the environment variables, points to your local agent python venv, and sets up startup shortcuts!*
 
 ---
 
