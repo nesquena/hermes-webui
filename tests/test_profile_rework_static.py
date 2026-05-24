@@ -1024,12 +1024,9 @@ def test_new_chat_and_no_session_send_do_not_wait_for_sidebar_refresh():
 
 def test_session_list_includes_current_non_active_profile_session():
     fn = _extract_function(SESSIONS_JS, "renderSessionList")
-    assert "needsCurrentProfile" in fn
-    assert "sessionProfile!==S.activeProfile" in fn
-    assert (
-        "(_showAllProfiles||needsCurrentProfile) ? '?all_profiles=1' : ''" in fn
-        or "needsCurrentProfile ? '?all_profiles=1' : allProfilesToggleQS" in fn
-    )
+    assert "const activeSidForSidebar=_activeSessionIdForSidebar();" in fn
+    assert "params.set('current_session_id',activeSidForSidebar);" in fn
+    assert "api('/api/session-index' + (qs?('?'+qs):''))" in fn
 
 
 def test_response_mode_and_default_space_live_in_hero_not_separate_tile():
