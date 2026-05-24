@@ -1862,6 +1862,96 @@ def test_space_tool_adapter_supports_source_current_space_meta_and_layout_helper
 
 
 
+def test_space_tool_reposition_current_space_returns_metadata_only_policy_and_progress_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    from api.capy_progress import progress_status
+
+    created = spaces.create_space({"space_id": "reposition-policy-lab", "name": "Reposition Policy Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "status-card",
+            "kind": "status",
+            "title": "Status Card",
+            "renderer": "<script>stored()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    repositioned = spaces.run_space_tool(
+        "space.spaces.repositionCurrentSpace",
+        {
+            "currentSpaceId": created["space_id"],
+            "resetCamera": True,
+            "viewport": {
+                "x": 10,
+                "y": 20,
+                "zoom": 0.8,
+                "renderer": "<script>steal()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "source": "SECRET_SOURCE",
+        },
+    )
+    status = progress_status(space_id=created["space_id"])
+    serialized = json.dumps({"repositioned": repositioned, "status": status}, sort_keys=True).lower()
+
+    assert repositioned["ok"] is True
+    assert repositioned["action"] == "space.spaces.repositioncurrentspace"
+    assert repositioned["space_id"] == created["space_id"]
+    assert repositioned["prompt_preflight"]["boundary"] == "creator_commit"
+    assert repositioned["prompt_preflight"]["status"] == "pass"
+    assert repositioned["prompt_preflight"]["metadata_only"] is True
+    assert repositioned["prompt_preflight"]["raw_prompt_stored"] is False
+    assert repositioned["autonomy_policy"]["action"] == "space.spaces.repositioncurrentspace"
+    assert repositioned["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert repositioned["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert repositioned["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert repositioned["autonomy_policy"]["metadata_only"] is True
+    assert repositioned["progress_event"]["stored"] is True
+    assert repositioned["progress_event"]["queued"] is True
+    assert repositioned["progress_event"]["event_type"] == "tool.completed"
+    assert repositioned["progress_event"]["family"] == "tool"
+    assert repositioned["progress_event"]["run_id"] == "layout.reposition:reposition-policy-lab"
+    assert repositioned["progress_event"]["space_id"] == created["space_id"]
+    assert repositioned["progress_event"]["redaction_status"] == "metadata_only"
+    assert any(event.get("run_id") == "layout.reposition:reposition-policy-lab" for event in status["recent_events"])
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert '"source":' not in serialized
+
+
+
+def test_space_tool_reposition_current_space_missing_space_does_not_emit_false_completion(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    from api.capy_progress import progress_status
+
+    with pytest.raises(FileNotFoundError):
+        spaces.run_space_tool(
+            "space.spaces.repositionCurrentSpace",
+            {
+                "spaceId": "missing-reposition-space",
+                "resetCamera": True,
+                "viewport": {"x": 10, "renderer": "<script>steal()</script>", "api_key": "SECRET...LEAK"},
+                "source": "SECRET_SOURCE",
+            },
+        )
+
+    status = progress_status(space_id="missing-reposition-space")
+    recent_serialized = json.dumps(status["recent_events"], sort_keys=True).lower()
+
+    assert not any(event.get("run_id") == "layout.reposition:missing-reposition-space" for event in status["recent_events"])
+    assert "tool.completed" not in recent_serialized
+    assert "steal" not in recent_serialized
+    assert "<script" not in recent_serialized
+    assert "renderer" not in recent_serialized
+    assert "api_key" not in recent_serialized
+    assert "secret" not in recent_serialized
+
+
+
 def test_space_tool_save_layout_returns_metadata_only_action_policy_receipt(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "layout-policy-lab", "name": "Layout Policy Lab"})
@@ -2525,7 +2615,15 @@ def test_space_tool_adapter_supports_source_reposition_current_space_metadata_on
         "request": {"resetCamera": True, "viewport": {"x": "42", "y": "-7", "zoom": "1.25"}},
     }
     assert persisted["layout"] == {}
-    assert "stored" not in serialized
+    assert repositioned["prompt_preflight"]["boundary"] == "creator_commit"
+    assert repositioned["prompt_preflight"]["metadata_only"] is True
+    assert repositioned["prompt_preflight"]["raw_prompt_stored"] is False
+    assert repositioned["autonomy_policy"]["action"] == "space.spaces.repositioncurrentspace"
+    assert repositioned["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert repositioned["progress_event"]["run_id"] == "layout.reposition:source-reposition-lab"
+    assert repositioned["progress_event"]["redaction_status"] == "metadata_only"
+    assert "stored()" not in serialized
+    assert "stored(" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized

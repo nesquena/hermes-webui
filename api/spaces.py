@@ -5819,12 +5819,18 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "resetCamera": bool(data.get("resetCamera") or data.get("reset_camera")),
             "viewport": _payload_summary(data.get("viewport") if isinstance(data.get("viewport"), dict) else {}),
         }
+        prompt_preflight = _space_layout_prompt_preflight_receipt(request)
+        space_detail = read_space_detail(space_id)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.reposition")
         return {
             "ok": True,
             "action": name,
             "space_id": space_id,
-            "space": read_space_detail(space_id),
+            "space": space_detail,
             "reposition": {"mode": "metadata-only", "applied": False, "request": request},
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "progress_event": progress_event,
         }
     if name in {"space.spaces.duplicatespace", "space.spaces.clonespace"}:
         _space_tool_reject_ambient_current_selectors(data)
@@ -9636,6 +9642,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "package.import",
         "repair",
         "layout.rearrange",
+        "layout.reposition",
         "layout.toggle",
         "recovery.disable",
         "recovery.enable",
