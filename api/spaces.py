@@ -1652,12 +1652,18 @@ def _space_widget_upsert_prompt_preflight_receipt(
 
 
 def _space_widget_render_prompt_preflight_receipt(
-    widget: dict[str, Any], raw_widget: dict[str, Any] | None, *, omitted_count: int
+    widget: dict[str, Any],
+    raw_widget: dict[str, Any] | None,
+    *,
+    omitted_count: int,
+    extra_prompt_fragments: list[str] | None = None,
 ) -> dict[str, Any]:
     """Preflight a metadata-only renderWidget mutation before persistence."""
     from api.capy_policy import prompt_preflight
 
     prompt_fragments = _space_widget_upsert_prompt_fragments(raw_widget or widget)
+    if extra_prompt_fragments:
+        prompt_fragments.extend(fragment for fragment in extra_prompt_fragments if fragment)
     public_widget = _widget_summary(widget)
     metadata = widget.get("metadata") if isinstance(widget.get("metadata"), dict) else None
     if metadata:
@@ -3993,6 +3999,104 @@ def _space_tool_render_key_is_omitted(key: str, omitted_keys: set[str]) -> bool:
     )
 
 
+_DEFINE_WIDGET_SAFE_COMPACT_KEYS = {
+    "col",
+    "cols",
+    "definition",
+    "description",
+    "id",
+    "kind",
+    "label",
+    "layout",
+    "metadata",
+    "minimized",
+    "name",
+    "position",
+    "row",
+    "rows",
+    "size",
+    "spaceid",
+    "summary",
+    "tags",
+    "title",
+    "type",
+    "widget",
+    "widgetid",
+    "widget_id",
+}
+_DEFINE_WIDGET_UNSAFE_COMPACT_KEY_MARKERS = (
+    "apikey",
+    "apiauth",
+    "auth",
+    "bearer",
+    "body",
+    "cookie",
+    "credential",
+    "data",
+    "generatedcode",
+    "generatedwidgetbody",
+    "html",
+    "password",
+    "rawcode",
+    "rawprompt",
+    "renderer",
+    "script",
+    "secret",
+    "source",
+    "token",
+)
+
+
+def _space_tool_define_widget_key_is_unsafe(key: str) -> bool:
+    key_text = str(key or "").strip()
+    compact = re.sub(r"[^a-z0-9]+", "", key_text.lower())
+    if not compact or compact in _DEFINE_WIDGET_SAFE_COMPACT_KEYS:
+        return False
+    render_omitted_keys = _OMITTED_PAYLOAD_KEYS | {"body", "generated_body", "generatedcode", "generated_code", "raw_prompt"}
+    return (
+        _payload_key_is_prompt_bearing(key_text)
+        or _space_tool_render_key_is_omitted(key_text, render_omitted_keys)
+        or bool(_SPACE_REPAIR_UNSAFE_TEXT_RE.search(key_text))
+        or any(marker in compact for marker in _DEFINE_WIDGET_UNSAFE_COMPACT_KEY_MARKERS)
+    )
+
+
+def _space_tool_define_widget_value_is_unsafe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    lowered = text.lower()
+    return (
+        bool(_SECRET_LIKE_VALUE_RE.search(text))
+        or any(marker in lowered for marker in _EXECUTABLE_VALUE_MARKERS)
+        or bool(re.search(r"\bon[a-z]+\s*=", text, re.IGNORECASE))
+        or bool(re.search(r"<\s*/?\s*[a-z][^>]*>", text, re.IGNORECASE))
+    )
+
+
+def _space_tool_define_widget_unsafe_fragments(value: Any, *, path: str = "", depth: int = 0) -> list[str]:
+    if depth > 20:
+        return []
+    fragments: list[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key or "")
+            child_path = f"{path}.{key_text}" if path else key_text
+            if _space_tool_define_widget_key_is_unsafe(key_text):
+                fragments.append("raw_prompt unsafe defineWidget field omitted")
+                continue
+            fragments.extend(_space_tool_define_widget_unsafe_fragments(child, path=child_path, depth=depth + 1))
+        return fragments
+    if isinstance(value, list):
+        for idx, child in enumerate(value[:20]):
+            fragments.extend(_space_tool_define_widget_unsafe_fragments(child, path=f"{path}[{idx}]", depth=depth + 1))
+        return fragments
+    if _space_tool_define_widget_value_is_unsafe(value):
+        fragments.append("raw_prompt unsafe defineWidget value omitted")
+    return fragments
+
+
+
 def _space_tool_render_safe_payload(
     value: Any,
     *,
@@ -5815,6 +5919,17 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         read_space_detail(space_id)
         definition = data.get("definition") if isinstance(data.get("definition"), dict) else data
         widget_payload, omitted_count = _space_tool_render_widget_payload({"widget": definition})
+        raw_preflight_payload = data if isinstance(data.get("definition"), dict) else definition
+        unsafe_fragments = _space_tool_define_widget_unsafe_fragments(data)
+        prompt_preflight = _space_widget_render_prompt_preflight_receipt(
+            widget_payload,
+            raw_preflight_payload if isinstance(raw_preflight_payload, dict) else None,
+            omitted_count=omitted_count,
+            extra_prompt_fragments=unsafe_fragments,
+        )
+        if unsafe_fragments or prompt_preflight.get("status") != "pass":
+            raise ValueError("Widget define prompt preflight blocked")
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.blueprint.define")
         return {
             "ok": True,
             "action": name,
@@ -5826,6 +5941,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 "executed": False,
                 "omitted_field_count": omitted_count,
             },
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_widget_mutation_action_policy_receipt("space.widget.blueprint", prompt_preflight),
+            "progress_event": progress_event,
         }
     if name == "space.spaces.createwidgetsource":
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -9490,6 +9608,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "widget.delete",
         "widget.patch",
         "widget.blueprint.create",
+        "widget.blueprint.define",
         "widget.blueprint.preview",
         "widget.render",
         "widget.upsert",
