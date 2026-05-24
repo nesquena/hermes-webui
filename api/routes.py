@@ -1257,7 +1257,12 @@ def _is_browser_unsafe_request(handler) -> bool:
 
 def _csrf_exempt_path(path: str) -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
-    return path in {"/api/auth/login", "/api/csp-report"}
+    return path in {
+        "/api/auth/login",
+        "/api/auth/passkey/options",
+        "/api/auth/passkey/login",
+        "/api/csp-report",
+    }
 
 
 _CSRF_FAILURE_ATTR = "_hermes_csrf_failure_reason"
@@ -2618,6 +2623,7 @@ button{width:100%;padding:10px;border-radius:10px;border:none;background:rgba(12
   border:1px solid rgba(124,185,255,.3);color:#7cb9ff;font-size:14px;font-weight:600;cursor:pointer;
   transition:all .15s}
 button:hover{background:rgba(124,185,255,.25)}
+.passkey-login{margin-top:10px;background:rgba(255,255,255,.04);border-color:rgba(232,160,48,.35);color:#e8a030}
 .err{color:#e94560;font-size:12px;margin-top:10px;display:none}
 </style></head><body>
 <div class="card">
@@ -2627,6 +2633,7 @@ button:hover{background:rgba(124,185,255,.25)}
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
     <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
     <button type="submit">{{LOGIN_BTN}}</button>
+    <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
   </form>
   <div class="err" id="err"></div>
 </div>
@@ -3557,12 +3564,19 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/auth/status":
         from api.auth import is_auth_enabled, parse_cookie, verify_session
+        from api.passkeys import registered_credentials
 
         logged_in = False
         if is_auth_enabled():
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
-        return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
+        passkeys = registered_credentials()
+        return j(handler, {
+            "auth_enabled": is_auth_enabled(),
+            "logged_in": logged_in,
+            "passkeys_enabled": bool(passkeys),
+            "passkeys_count": len(passkeys),
+        })
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         return _serve_manifest(handler)
@@ -6188,6 +6202,66 @@ def handle_post(handler, parsed) -> bool:
         handler.end_headers()
         handler.wfile.write(json.dumps({"ok": True}).encode())
         return True
+
+    if parsed.path == "/api/auth/passkey/options":
+        from api.auth import is_auth_enabled
+        from api.passkeys import PasskeyError, authentication_options
+
+        if not is_auth_enabled():
+            return j(handler, {"error": "Auth not enabled"}, status=400)
+        try:
+            return j(handler, {"ok": True, "publicKey": authentication_options(handler)})
+        except PasskeyError as e:
+            return bad(handler, str(e), status=400)
+
+    if parsed.path == "/api/auth/passkey/login":
+        from api.auth import create_session, is_auth_enabled, set_auth_cookie
+        from api.auth import _check_login_rate, _record_login_attempt
+        from api.passkeys import PasskeyError, finish_login
+
+        if not is_auth_enabled():
+            return j(handler, {"error": "Auth not enabled"}, status=400)
+        client_ip = handler.client_address[0]
+        if not _check_login_rate(client_ip):
+            return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)
+        try:
+            finish_login(body, handler)
+        except PasskeyError as e:
+            _record_login_attempt(client_ip)
+            return bad(handler, str(e), status=401)
+        cookie_val = create_session()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Cache-Control", "no-store")
+        _security_headers(handler)
+        set_auth_cookie(handler, cookie_val)
+        handler.end_headers()
+        handler.wfile.write(json.dumps({"ok": True}).encode())
+        return True
+
+    if parsed.path == "/api/auth/passkey/register/options":
+        from api.passkeys import registration_options
+        return j(handler, {"ok": True, "publicKey": registration_options(handler)})
+
+    if parsed.path == "/api/auth/passkey/register":
+        from api.passkeys import PasskeyError, finish_registration, registered_credentials
+        try:
+            result = finish_registration(body, handler)
+            result["credentials"] = registered_credentials()
+            return j(handler, result)
+        except PasskeyError as e:
+            return bad(handler, str(e), status=400)
+
+    if parsed.path == "/api/auth/passkey/delete":
+        from api.passkeys import PasskeyError, delete_credential
+        try:
+            return j(handler, delete_credential(str(body.get("id") or "")))
+        except PasskeyError as e:
+            return bad(handler, str(e), status=404)
+
+    if parsed.path == "/api/auth/passkeys":
+        from api.passkeys import registered_credentials
+        return j(handler, {"credentials": registered_credentials()})
 
     if parsed.path == "/api/auth/logout":
         from api.auth import clear_auth_cookie, invalidate_session, parse_cookie

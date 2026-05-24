@@ -1,4 +1,5 @@
 # Hermes Web UI -- minimal Python dependencies
-# The server uses only stdlib + pyyaml.
+# The server uses PyYAML plus cryptography for optional local passkey/WebAuthn support.
 # All heavy ML/agent deps live in the Hermes agent venv.
 pyyaml>=6.0
+cryptography>=42.0

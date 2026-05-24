@@ -467,6 +467,8 @@ Production data and real cron jobs are never touched. Current snapshot:
 ### Authentication and security
 - Optional password auth -- off by default, zero friction for localhost
 - Enable via `HERMES_WEBUI_PASSWORD` env var or Settings panel
+- Optional passkeys/WebAuthn -- register from Settings -> System after signing in with a password; the login page only shows passkey sign-in after at least one passkey exists
+- Password auth remains the bootstrap/recovery path; passkeys are same-origin and stored locally in the WebUI state directory
 - Signed HMAC HTTP-only cookie with 24h TTL
 - Minimal dark-themed login page at `/login`
 - Security headers on all responses (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)

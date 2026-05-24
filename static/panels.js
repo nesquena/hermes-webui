@@ -6109,6 +6109,7 @@ async function loadSettingsPanel(){
       const authStatus=await api('/api/auth/status');
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
     }catch(e){}
+    loadPasskeys();
     // #1560: env-var-locked password also disables the Disable Auth button —
     // clearing settings.password_hash is silent no-op when the env var is set,
     // and the backend now returns 409 anyway, so don't offer the action.
@@ -6771,6 +6772,64 @@ function _setSettingsAuthButtonsVisible(active){
   if(signOutBtn) signOutBtn.style.display=active?'':'none';
   const disableBtn=$('btnDisableAuth');
   if(disableBtn) disableBtn.style.display=active?'':'none';
+  const passkeyBtn=$('btnRegisterPasskey');
+  if(passkeyBtn) passkeyBtn.disabled=!active||!window.PublicKeyCredential||!navigator.credentials;
+}
+
+function _b64uToBytes(s){
+  s=String(s||'').replace(/-/g,'+').replace(/_/g,'/');
+  while(s.length%4) s+='=';
+  const bin=atob(s), out=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i);
+  return out;
+}
+function _bytesToB64u(buf){
+  const bytes=new Uint8Array(buf);let bin='';
+  for(let i=0;i<bytes.length;i++) bin+=String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/g,'');
+}
+
+async function loadPasskeys(){
+  const list=$('passkeyList');
+  if(!list) return;
+  if(!window.PublicKeyCredential||!navigator.credentials){
+    list.textContent='Passkeys are not supported by this browser/context.';
+    const btn=$('btnRegisterPasskey'); if(btn) btn.disabled=true;
+    return;
+  }
+  try{
+    const data=await api('/api/auth/passkeys',{method:'POST',body:'{}'});
+    const creds=(data&&data.credentials)||[];
+    if(!creds.length){list.textContent='No passkeys registered.';return;}
+    list.innerHTML=creds.map(c=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px"><span>${esc(c.label||'Passkey')}</span><button class="btn-tiny" onclick="deletePasskey('${esc(c.id)}')">Remove</button></div>`).join('');
+  }catch(e){list.textContent='Failed to load passkeys: '+e.message;}
+}
+
+async function registerPasskey(){
+  if(!window.PublicKeyCredential||!navigator.credentials){showToast('Passkeys require a supported browser and secure context.');return;}
+  const label=(window.prompt('Name this passkey', 'This device')||'Passkey').trim();
+  try{
+    const optData=await api('/api/auth/passkey/register/options',{method:'POST',body:'{}'});
+    const pk=optData.publicKey;
+    pk.challenge=_b64uToBytes(pk.challenge);
+    pk.user=Object.assign({},pk.user,{id:_b64uToBytes(pk.user.id)});
+    if(Array.isArray(pk.excludeCredentials)) pk.excludeCredentials=pk.excludeCredentials.map(c=>Object.assign({},c,{id:_b64uToBytes(c.id)}));
+    const cred=await navigator.credentials.create({publicKey:pk});
+    if(!cred) throw new Error('Passkey registration cancelled');
+    await api('/api/auth/passkey/register',{method:'POST',body:JSON.stringify({
+      id:cred.id,rawId:_bytesToB64u(cred.rawId),type:cred.type,label,
+      response:{clientDataJSON:_bytesToB64u(cred.response.clientDataJSON),attestationObject:_bytesToB64u(cred.response.attestationObject)}
+    })});
+    showToast('Passkey registered');
+    loadPasskeys();
+  }catch(e){showToast('Passkey registration failed: '+e.message);}
+}
+
+async function deletePasskey(id){
+  const ok=await showConfirmDialog({title:'Remove passkey?',message:'This browser/device will no longer be able to sign in with that passkey.',confirmLabel:'Remove',danger:true,focusCancel:true});
+  if(!ok) return;
+  try{await api('/api/auth/passkey/delete',{method:'POST',body:JSON.stringify({id})});showToast('Passkey removed');loadPasskeys();}
+  catch(e){showToast('Failed to remove passkey: '+e.message);}
 }
 
 function _applySavedSettingsUi(saved, body, opts){
