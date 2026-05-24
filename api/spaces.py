@@ -8880,7 +8880,15 @@ def upsert_recovery_module(module: dict[str, Any]) -> dict[str, Any]:
     event_id = _record_module_event("module.quarantined", stored, {"module_id": mid})
     stored["revision_event_id"] = event_id
     _atomic_write_json(module_path, stored)
-    return _module_summary(stored)
+    summary = _module_summary(stored)
+    action = "space.module.recovery.quarantine"
+    summary["prompt_preflight"] = _recovery_required_prompt_preflight_receipt(action)
+    summary["progress_event"] = _record_space_recovery_progress_event(
+        _RECOVERY_MODULE_PROGRESS_SPACE_ID,
+        action="module.quarantine",
+    )
+    summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt(action)
+    return summary
 
 
 def read_recovery_module(module_id: str) -> dict[str, Any]:
@@ -9464,6 +9472,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "recovery.disable",
         "recovery.enable",
         "recovery.restore",
+        "recovery.module.quarantine",
         "recovery.module.disable",
         "recovery.module.enable",
         "recovery.widget.disable",
@@ -9523,6 +9532,7 @@ def _record_space_recovery_progress_event(space_id: str, *, action: str) -> dict
         "disable",
         "enable",
         "restore",
+        "module.quarantine",
         "module.disable",
         "module.enable",
         "widget.disable",
