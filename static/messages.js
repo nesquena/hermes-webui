@@ -2804,6 +2804,16 @@ async function respondClarify(response) {
         _clarifyId = null;
         _clearClarifyPendingForSession(sid);
         hideClarifyCard(true, 'sent');
+        // Echo the user's clarify choice as a visible message in the conversation
+        if (S.session && S.session.session_id === sid) {
+          S.messages.push({
+            role: 'user',
+            content: value,
+            _clarify_response: true,
+            _ts: Date.now() / 1000,
+          });
+          if (typeof renderMessages === 'function') renderMessages({preserveScroll: true});
+        }
       }
     } else {
       // Stale / expired / wrong session — keep the card and draft visible.
