@@ -1351,7 +1351,7 @@
   .suggestion:hover{background:var(--accent-bg);color:var(--text);border-color:var(--accent-bg);transform:translateX(2px);}
   /* ── Composer ── */
   .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
-  .composer-box{max-width:780px;margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
+  .composer-box{max-width:clamp(780px, 60vw, 1100px);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
   .composer-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   .composer-wrap.drag-over .composer-box{border-color:var(--accent-text);background:var(--accent-bg);}
   .drop-hint{display:none;position:absolute;inset:0;align-items:center;justify-content:center;background:var(--accent-bg);border:2px dashed var(--accent);border-radius:14px;font-size:14px;color:var(--accent-text);pointer-events:none;z-index:10;flex-direction:column;gap:8px;}
