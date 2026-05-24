@@ -1581,7 +1581,7 @@ def _space_widget_patch_prompt_preflight_receipt(patch: Any, raw_patch: Any | No
     """Preflight widget patch metadata and raw prompt-bearing patch fields before mutation."""
     from api.capy_policy import prompt_preflight
 
-    safe_patch = _widget_patch_payload_summary(patch if isinstance(patch, dict) else {})
+    safe_patch = _widget_patch_payload_summary(patch if isinstance(patch, dict) else {}, preflight_safe_values=True)
     prompt_fragments: list[str] = []
     if isinstance(raw_patch, dict):
         prompt_fragments.extend(_space_widget_upsert_prompt_fragments(raw_patch))
@@ -1630,19 +1630,109 @@ def _space_widget_upsert_prompt_fragments(value: Any, depth: int = 0) -> list[st
 
 
 
-def _space_widget_upsert_persistence_payload(value: Any, depth: int = 0) -> Any:
-    """Return upsert widget metadata with prompt-bearing fields stripped."""
+def _space_widget_persistence_value_summary(value: str) -> str:
+    raw_text = _context_value(value, 500)
+    if raw_text in {"generated-code-disabled", "generated code disabled pending sandbox review"}:
+        return raw_text
+    text = _public_display_text_summary(value, 500)
+    if text == "[REDACTED]":
+        return text
+    if re.search(r"api\s*key", text, re.IGNORECASE):
+        return "[REDACTED]"
+    if _SHARED_DATA_PREFLIGHT_SECRET_SHAPE_RE.search(text) or _SHARED_DATA_PREFLIGHT_HTML_RE.search(text):
+        return "[REDACTED]"
+    if re.search(
+        r"(?:generated[\s_-]*(?:(?:widget[\s_-]*)?(?:body|html|script|source)|code(?![\s_-]*disabled))|raw[\s_-]*(?:prompt|code|source|data|html|script)|api[\s_-]*auth)",
+        text,
+        re.IGNORECASE,
+    ):
+        return "[REDACTED]"
+    return text
+
+
+def _space_widget_identifier_value_summary(value: str) -> str:
+    text = str(value or "").strip()
+    if _SHARED_DATA_PREFLIGHT_SECRET_SHAPE_RE.search(text):
+        return "[REDACTED]"
+    if _WIDGET_ID_RE.fullmatch(text):
+        return text
+    return _space_widget_persistence_value_summary(text)
+
+
+def _space_widget_upsert_persistence_key_is_safe(key: str, *, allow_plain_body: bool = False) -> bool:
+    marker = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", _context_value(key, 80))
+    normalized = re.sub(r"[^a-z0-9]+", "", marker.lower())
+    if normalized == "body":
+        return allow_plain_body
+    if normalized == "marketdata":
+        return True
+    return _public_root_metadata_key_is_safe(key)
+
+
+def _space_widget_upsert_persistence_payload(value: Any, depth: int = 0, *, allow_plain_body: bool = False) -> Any:
+    """Return upsert widget metadata with prompt/source/secret fields stripped."""
     if depth > 12:
         return "[omitted]"
     if isinstance(value, dict):
-        return {
-            key: _space_widget_upsert_persistence_payload(child, depth + 1)
-            for key, child in value.items()
-            if not _payload_key_is_prompt_bearing(str(key or ""))
-        }
+        sanitized: dict[str, Any] = {}
+        for key, child in value.items():
+            key_text = str(key or "")
+            if not _space_widget_upsert_persistence_key_is_safe(key_text, allow_plain_body=allow_plain_body):
+                continue
+            normalized_key = re.sub(r"[^a-z0-9]+", "", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key_text).lower())
+            if normalized_key in {"id", "widgetid"} and isinstance(child, str):
+                sanitized[key] = _space_widget_identifier_value_summary(child)
+                continue
+            child_allow_plain_body = allow_plain_body or key_text.strip().lower() in {"notes", "markdown"}
+            sanitized[key] = _space_widget_upsert_persistence_payload(
+                child,
+                depth + 1,
+                allow_plain_body=child_allow_plain_body,
+            )
+        return sanitized
     if isinstance(value, list):
-        return [_space_widget_upsert_persistence_payload(child, depth + 1) for child in value[:20]]
+        return [
+            _space_widget_upsert_persistence_payload(child, depth + 1, allow_plain_body=allow_plain_body)
+            for child in value[:20]
+        ]
+    if isinstance(value, str):
+        return _space_widget_persistence_value_summary(value)
     return value
+
+
+
+def _space_widget_upsert_preflight_text_summary(value: Any) -> str:
+    text = _context_value(value, 500)
+    if text in {"generated-code-disabled", "generated code disabled pending sandbox review"}:
+        return "sandbox-disabled-status"
+    return _payload_text_summary(value, 500)
+
+
+
+def _space_widget_upsert_preflight_widget_summary(value: Any, depth: int = 0) -> Any:
+    """Return widget-upsert metadata for preflight without classifying validated IDs as content."""
+    if depth > 3:
+        return "[omitted]"
+    if isinstance(value, dict):
+        summary: dict[str, Any] = {}
+        for index, (key, child) in enumerate(value.items()):
+            if index >= 50:
+                break
+            safe_key = _context_value(key, 80)
+            if not _payload_key_is_safe(safe_key):
+                continue
+            normalized_key = re.sub(r"[^a-z0-9]+", "", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", safe_key).lower())
+            if normalized_key in {"id", "widgetid"} and isinstance(child, str):
+                child_text = str(child or "").strip()
+                summary[safe_key] = "[REDACTED]" if _SHARED_DATA_PREFLIGHT_SECRET_SHAPE_RE.search(child_text) else "[widget-id]"
+                continue
+            summary[safe_key] = _space_widget_upsert_preflight_widget_summary(child, depth + 1)
+        return summary
+    if isinstance(value, list):
+        return [_space_widget_upsert_preflight_widget_summary(child, depth + 1) for child in value[:20]]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return _space_widget_upsert_preflight_text_summary(value)
+    return _space_widget_upsert_preflight_text_summary(type(value).__name__)
 
 
 
@@ -1659,7 +1749,7 @@ def _space_widget_upsert_prompt_preflight_receipt(
         {
             "widget_upsert": {
                 "widget_count": len(widgets),
-                "widgets": [_payload_summary(widget) for widget in widgets],
+                "widgets": [_space_widget_upsert_preflight_widget_summary(widget) for widget in widgets],
                 "prompt_fragment_count": len(prompt_fragments),
                 "prompt_fragments": prompt_fragments,
             }
@@ -1954,6 +2044,8 @@ def _payload_key_is_safe(key: str) -> bool:
 def _payload_text_summary(value: Any, limit: int = 500) -> str:
     text = _context_value(value, limit)
     lowered = text.lower()
+    if text in {"generated-code-disabled", "generated code disabled pending sandbox review"}:
+        return text
     if text and (
         _SECRET_LIKE_VALUE_RE.search(text)
         or _SHARED_DATA_PREFLIGHT_SECRET_SHAPE_RE.search(text)
@@ -2179,10 +2271,19 @@ def _widget_patch_payload_key_is_safe(key: str, *, allow_plain_body: bool = Fals
     normalized = re.sub(r"[^a-z0-9]+", "", marker.lower())
     if normalized == "body":
         return allow_plain_body
+    if normalized in {"code", "generated", "raw"}:
+        return False
     return "body" not in normalized and "generatedcode" not in normalized and "rawcode" not in normalized
 
 
-def _widget_patch_payload_summary(value: Any, depth: int = 0, *, allow_plain_body: bool = False) -> Any:
+def _widget_patch_payload_summary(
+    value: Any,
+    depth: int = 0,
+    *,
+    allow_plain_body: bool = False,
+    strict_persistence_values: bool = False,
+    preflight_safe_values: bool = False,
+) -> Any:
     """Summarize widget.patch metadata without generated/raw body fields."""
     if depth > 3:
         return "[omitted]"
@@ -2194,11 +2295,30 @@ def _widget_patch_payload_summary(value: Any, depth: int = 0, *, allow_plain_bod
             safe_key = _context_value(key, 80)
             if not _widget_patch_payload_key_is_safe(safe_key, allow_plain_body=allow_plain_body):
                 continue
-            summary[safe_key] = _widget_patch_payload_summary(child, depth + 1, allow_plain_body=allow_plain_body)
+            summary[safe_key] = _widget_patch_payload_summary(
+                child,
+                depth + 1,
+                allow_plain_body=allow_plain_body,
+                strict_persistence_values=strict_persistence_values,
+                preflight_safe_values=preflight_safe_values,
+            )
         return summary
     if isinstance(value, list):
-        return [_widget_patch_payload_summary(child, depth + 1, allow_plain_body=allow_plain_body) for child in value[:20]]
+        return [
+            _widget_patch_payload_summary(
+                child,
+                depth + 1,
+                allow_plain_body=allow_plain_body,
+                strict_persistence_values=strict_persistence_values,
+                preflight_safe_values=preflight_safe_values,
+            )
+            for child in value[:20]
+        ]
     if isinstance(value, (str, int, float, bool)) or value is None:
+        if preflight_safe_values:
+            return _space_widget_upsert_preflight_text_summary(value)
+        if strict_persistence_values and isinstance(value, str):
+            return _space_widget_persistence_value_summary(value)
         return _payload_text_summary(value, 500)
     return _payload_text_summary(type(value).__name__, 80)
 
@@ -2231,12 +2351,24 @@ def _public_root_metadata_key_is_safe(key: str) -> bool:
     unsafe_compact_markers = (
         "apikey",
         "apiauth",
-        "rawprompt",
+        "datasource",
         "generatedbody",
         "generatedcode",
+        "generatedhtml",
+        "generatedrenderer",
+        "generatedscript",
+        "generatedsource",
+        "rawdata",
+        "rawhtml",
+        "rawprompt",
+        "rawrenderer",
+        "rawsource",
+        "rawscript",
         "widgetbody",
     )
     if any(token in unsafe_tokens for token in tokens):
+        return False
+    if compact in {"code", "generated", "raw"}:
         return False
     if len(tokens) > 1 and tokens[0] == "on":
         return False
@@ -7744,16 +7876,36 @@ def _preserve_admin_disabled_widget_recovery(existing: dict[str, Any], candidate
     return preserved
 
 
-def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:
+def upsert_widget(
+    space_id: str,
+    widget: dict[str, Any],
+    *,
+    include_safety_receipts: bool = False,
+    sanitize_unsafe_metadata: bool = False,
+) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     if not isinstance(widget, dict):
         raise ValueError("widget must be an object")
-    clean_widget = _normalize_widget(widget)
+    sid = validate_space_id(space_id)
+    raw_widget = copy.deepcopy(widget)
+    candidate_widget = (
+        _space_widget_upsert_persistence_payload(raw_widget)
+        if include_safety_receipts or sanitize_unsafe_metadata
+        else raw_widget
+    )
+    if not isinstance(candidate_widget, dict):
+        raise ValueError("widget must be an object")
+    clean_widget = _normalize_widget(candidate_widget)
     wid = clean_widget["id"]
+    prompt_preflight_receipt: dict[str, Any] | None = None
+    if include_safety_receipts:
+        prompt_preflight_receipt = _space_widget_upsert_prompt_preflight_receipt([clean_widget], [raw_widget])
+        if prompt_preflight_receipt.get("status") != "pass":
+            raise ValueError("Widget upsert prompt preflight blocked")
 
     with _SPACE_MANIFEST_LOCK:
-        space = read_space(space_id)
+        space = read_space(sid)
         widgets = space.get("widgets") or []
         if not isinstance(widgets, list):
             raise ValueError("widgets must be a list")
@@ -7769,11 +7921,19 @@ def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:
         space["widgets"] = widgets
         event_type = "widget.updated" if replaced else "widget.created"
         saved = _write_manifest(space, event_type, {"widget_id": wid})
-        return {
+        result = {
             "space_id": saved["space_id"],
             "widget": clean_widget,
             "revision_event_id": saved["revision_event_id"],
         }
+    if include_safety_receipts:
+        result["prompt_preflight"] = prompt_preflight_receipt
+        result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="widget.upsert")
+        result["autonomy_policy"] = _space_widget_mutation_action_policy_receipt(
+            "space.widget.upsert",
+            prompt_preflight_receipt,
+        )
+    return result
 
 
 def _stream_title(value: Any) -> str:
@@ -7904,7 +8064,14 @@ def upsert_system_widget(space_id: str, panel: str, layout: dict[str, Any] | Non
     }
 
 
-def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+def patch_widget(
+    space_id: str,
+    widget_id: str,
+    patch: dict[str, Any],
+    *,
+    include_safety_receipts: bool = False,
+    sanitize_unsafe_metadata: bool = False,
+) -> dict[str, Any]:
     """Patch safe widget metadata without rewriting generated/source bodies.
 
     This is the Capy-native equivalent of a small Space Agent widget patch: it
@@ -7916,8 +8083,15 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
         raise RuntimeError("Capy Spaces is disabled")
     if not isinstance(patch, dict):
         raise ValueError("patch must be an object")
+    sid = validate_space_id(space_id)
+    raw_patch = copy.deepcopy(patch)
     wid = validate_widget_id(widget_id)
-    space = read_space(space_id)
+    prompt_preflight_receipt: dict[str, Any] | None = None
+    if include_safety_receipts:
+        prompt_preflight_receipt = _space_widget_patch_prompt_preflight_receipt(patch, raw_patch)
+        if prompt_preflight_receipt.get("status") != "pass":
+            raise ValueError("Widget patch prompt preflight blocked")
+    space = read_space(sid)
     idx = _widget_index(space, wid)
     widgets = list(space.get("widgets") or [])
     widget = dict(widgets[idx])
@@ -7955,7 +8129,10 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
         safe_key = str(key or "")
         if safe_key not in allowed:
             continue
-        if safe_key != "market_data" and not _payload_key_is_safe(safe_key):
+        safe_key_allowed_by_mode = safe_key in {"description", "metadata"} and (
+            include_safety_receipts or sanitize_unsafe_metadata
+        )
+        if safe_key not in {"market_data", "description"} and not safe_key_allowed_by_mode and not _payload_key_is_safe(safe_key):
             continue
         if safe_key == "layout":
             widget["layout"] = _normalize_widget_layout(value)
@@ -7963,11 +8140,23 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
             widget_kind = str(widget.get("kind") or "").strip().lower()
             allow_plain_body = safe_key in {"notes", "markdown"} and widget_kind in {"markdown", "notes", "rich-text-editor"}
             if isinstance(value, dict):
-                widget[safe_key] = _widget_patch_payload_summary(value, allow_plain_body=allow_plain_body)
+                widget[safe_key] = _widget_patch_payload_summary(
+                    value,
+                    allow_plain_body=allow_plain_body,
+                    strict_persistence_values=include_safety_receipts or sanitize_unsafe_metadata,
+                )
             else:
-                widget[safe_key] = _widget_patch_payload_summary(value, allow_plain_body=allow_plain_body)
+                widget[safe_key] = _widget_patch_payload_summary(
+                    value,
+                    allow_plain_body=allow_plain_body,
+                    strict_persistence_values=include_safety_receipts or sanitize_unsafe_metadata,
+                )
         else:
-            widget[safe_key] = _context_value(value, 500)
+            widget[safe_key] = (
+                _space_widget_persistence_value_summary(value)
+                if include_safety_receipts or sanitize_unsafe_metadata
+                else _context_value(value, 500)
+            )
         changed_fields.append(safe_key)
 
     widget["id"] = wid
@@ -7976,30 +8165,52 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
     widgets[idx] = widget
     space["widgets"] = widgets
     saved = _write_manifest(space, "widget.patched", {"widget_id": wid, "fields": sorted(set(changed_fields))})
-    return {
+    result = {
         "space_id": saved["space_id"],
         "widget": _widget_summary(widget),
         "revision_event_id": saved["revision_event_id"],
     }
+    if include_safety_receipts:
+        result["prompt_preflight"] = prompt_preflight_receipt
+        result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="widget.patch")
+        result["autonomy_policy"] = _space_widget_mutation_action_policy_receipt(
+            "space.widget.patch",
+            prompt_preflight_receipt,
+        )
+    return result
 
 
 
-def delete_widget(space_id: str, widget_id: str) -> dict[str, Any]:
+def delete_widget(space_id: str, widget_id: str, *, include_safety_receipts: bool = False) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
     wid = validate_widget_id(widget_id)
-    space = read_space(space_id)
+    prompt_preflight_receipt: dict[str, Any] | None = None
+    if include_safety_receipts:
+        prompt_preflight_receipt = _space_widget_delete_prompt_preflight_receipt(1, delete_all=False)
+        if prompt_preflight_receipt.get("status") != "pass":
+            raise ValueError("Widget delete prompt preflight blocked")
+    space = read_space(sid)
     idx = _widget_index(space, wid)
     widgets = list(space.get("widgets") or [])
     widgets.pop(idx)
     space["widgets"] = widgets
     saved = _write_manifest(space, "widget.deleted", {"widget_id": wid})
-    return {
+    result = {
         "deleted": True,
         "space_id": saved["space_id"],
         "widget_id": wid,
         "revision_event_id": saved["revision_event_id"],
     }
+    if include_safety_receipts:
+        result["prompt_preflight"] = prompt_preflight_receipt
+        result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="widget.delete")
+        result["autonomy_policy"] = _space_widget_mutation_action_policy_receipt(
+            "space.widget.delete",
+            prompt_preflight_receipt,
+        )
+    return result
 
 
 def _weather_demo_widget() -> dict[str, Any]:

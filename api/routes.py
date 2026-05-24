@@ -4309,6 +4309,19 @@ def handle_post(handler, parsed) -> bool:
             raise ValueError("Conflicting Capy Spaces route selector aliases")
         return values[0] if values else ""
 
+    def _route_bool_value(*names) -> bool:
+        for name in names:
+            if name not in body:
+                continue
+            value = body.get(name)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
     def _route_reject_ambient_current_selectors():
         inspected = 0
         ambient_names = {"active_space_id", "activeSpaceId", "current_space_id", "currentSpaceId"}
@@ -5488,7 +5501,13 @@ def handle_post(handler, parsed) -> bool:
                     raise ValueError("Conflicting Capy Spaces route selector aliases")
             if not space_id:
                 return bad(handler, "Missing space_id")
-            result = capy_spaces.upsert_widget(space_id, widget)
+            include_safety_receipts = _route_bool_value("include_safety_receipts", "includeSafetyReceipts")
+            result = capy_spaces.upsert_widget(
+                space_id,
+                widget,
+                include_safety_receipts=include_safety_receipts,
+                sanitize_unsafe_metadata=True,
+            )
             result["widget"] = capy_spaces.read_widget_detail(space_id, result["widget"]["id"])
             return j(handler, result)
         except RuntimeError as e:
@@ -5523,7 +5542,17 @@ def handle_post(handler, parsed) -> bool:
             patch = body.get("patch") or body.get("fields") or {}
             if not space_id or not widget_id:
                 return bad(handler, "Missing space_id or widget_id")
-            return j(handler, capy_spaces.patch_widget(space_id, widget_id, patch))
+            include_safety_receipts = _route_bool_value("include_safety_receipts", "includeSafetyReceipts")
+            return j(
+                handler,
+                capy_spaces.patch_widget(
+                    space_id,
+                    widget_id,
+                    patch,
+                    include_safety_receipts=include_safety_receipts,
+                    sanitize_unsafe_metadata=True,
+                ),
+            )
         except RuntimeError as e:
             return bad(handler, str(e), 403)
         except ValueError as e:
@@ -5539,7 +5568,8 @@ def handle_post(handler, parsed) -> bool:
             widget_id = _route_alias_value("widget_id", "widgetId", "id")
             if not space_id or not widget_id:
                 return bad(handler, "Missing space_id or widget_id")
-            return j(handler, capy_spaces.delete_widget(space_id, widget_id))
+            include_safety_receipts = _route_bool_value("include_safety_receipts", "includeSafetyReceipts")
+            return j(handler, capy_spaces.delete_widget(space_id, widget_id, include_safety_receipts=include_safety_receipts))
         except RuntimeError as e:
             return bad(handler, str(e), 403)
         except ValueError as e:
