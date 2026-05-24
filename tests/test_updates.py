@@ -79,6 +79,54 @@ def test_check_repo_fetch_failure_without_tags_is_not_up_to_date(tmp_path):
     assert info['error'] == 'fetch failed: network unavailable'
 
 
+def test_check_for_updates_can_skip_agent_repo(tmp_path):
+    """Ignoring Agent updates should still check WebUI but avoid touching Agent git."""
+    webui_path = tmp_path / 'webui'
+    agent_path = tmp_path / 'agent'
+    webui_path.mkdir()
+    agent_path.mkdir()
+
+    seen = []
+
+    def fake_check_repo(path, name):
+        seen.append(name)
+        return {'name': name, 'behind': 2 if name == 'webui' else 9}
+
+    cache_defaults = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True}
+    with patch.dict(updates._update_cache, cache_defaults, clear=True), \
+         patch.object(updates, 'REPO_ROOT', webui_path), \
+         patch.object(updates, '_AGENT_DIR', agent_path), \
+         patch.object(updates, '_check_repo', side_effect=fake_check_repo):
+        result = updates.check_for_updates(force=True, include_agent=False)
+
+    assert seen == ['webui']
+    assert result['webui']['behind'] == 2
+    assert result['agent'] == {'name': 'agent', 'behind': 0, 'ignored': True}
+    assert result['include_agent'] is False
+
+
+def test_update_cache_is_scoped_by_agent_inclusion(tmp_path):
+    """Toggling Agent update checks must not reuse a stale opposite-mode cache."""
+    (tmp_path / '.git').mkdir()
+    calls = []
+
+    def fake_check_repo(path, name):
+        calls.append(name)
+        return {'name': name, 'behind': len(calls)}
+
+    with patch.dict(updates._update_cache, {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True}, clear=True), \
+         patch.object(updates, 'REPO_ROOT', tmp_path), \
+         patch.object(updates, '_AGENT_DIR', tmp_path), \
+         patch.object(updates, '_check_repo', side_effect=fake_check_repo):
+        ignored = updates.check_for_updates(force=True, include_agent=False)
+        included = updates.check_for_updates(force=False, include_agent=True)
+
+    assert ignored['agent']['ignored'] is True
+    assert included['agent']['name'] == 'agent'
+    assert included['agent'].get('ignored') is not True
+    assert calls == ['webui', 'webui', 'agent']
+
+
 def test_run_git_returns_stderr_on_failure(tmp_path):
     """When a git command fails, _run_git should return stderr (not empty string)."""
     with patch('subprocess.run') as mock_run:

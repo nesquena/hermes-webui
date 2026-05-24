@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a Settings preference to ignore Hermes Agent update notices while keeping WebUI update checks, banners, and update actions enabled for the WebUI itself.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added

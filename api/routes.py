@@ -4260,6 +4260,7 @@ def handle_get(handler, parsed) -> bool:
         settings = load_settings()
         if not settings.get("check_for_updates", True):
             return j(handler, {"disabled": True})
+        include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         qs = parse_qs(parsed.query)
         force = qs.get("force", ["0"])[0] == "1"
         # ?simulate=1 returns fake behind counts for UI testing (localhost only)
@@ -4281,7 +4282,8 @@ def handle_get(handler, parsed) -> bool:
                     },
                     "agent": {
                         "name": "agent",
-                        "behind": 1,
+                        "behind": 1 if include_agent_updates else 0,
+                        "ignored": not include_agent_updates,
                         "current_sha": "aaa0001",
                         "latest_sha": "bbb0002",
                         "branch": "master",
@@ -4293,7 +4295,7 @@ def handle_get(handler, parsed) -> bool:
             )
         from api.updates import check_for_updates
 
-        return j(handler, check_for_updates(force=force))
+        return j(handler, check_for_updates(force=force, include_agent=include_agent_updates))
 
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]

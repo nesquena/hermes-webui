@@ -29,7 +29,7 @@ try:
 except ImportError:
     _AGENT_DIR = None
 
-_update_cache = {'webui': None, 'agent': None, 'checked_at': 0}
+_update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True}
 _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
@@ -521,11 +521,21 @@ def _check_repo(path, name):
     return _check_repo_branch(path, name, fetch=False)
 
 
-def check_for_updates(force=False):
+def _ignored_agent_update_info() -> dict:
+    """Return a stable update-check payload for intentionally ignored Agent updates."""
+    return {'name': 'agent', 'behind': 0, 'ignored': True}
+
+
+def check_for_updates(force=False, *, include_agent=True):
     """Return cached update status for webui and agent repos."""
     global _check_in_progress
+    include_agent = bool(include_agent)
     with _cache_lock:
-        if not force and time.time() - _update_cache['checked_at'] < CACHE_TTL:
+        if (
+            not force
+            and _update_cache.get('include_agent') == include_agent
+            and time.time() - _update_cache['checked_at'] < CACHE_TTL
+        ):
             return dict(_update_cache)
         if _check_in_progress:
             return dict(_update_cache)  # another thread is already checking
@@ -534,12 +544,13 @@ def check_for_updates(force=False):
     try:
         # Run checks outside the lock (network I/O)
         webui_info = _check_repo(REPO_ROOT, 'webui')
-        agent_info = _check_repo(_AGENT_DIR, 'agent')
+        agent_info = _check_repo(_AGENT_DIR, 'agent') if include_agent else _ignored_agent_update_info()
 
         with _cache_lock:
             _update_cache['webui'] = webui_info
             _update_cache['agent'] = agent_info
             _update_cache['checked_at'] = time.time()
+            _update_cache['include_agent'] = include_agent
             return dict(_update_cache)
     finally:
         _check_in_progress = False

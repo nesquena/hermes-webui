@@ -4365,6 +4365,7 @@ _SETTINGS_DEFAULTS = {
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
+    "ignore_agent_updates": False,  # keep WebUI update notices but suppress Agent update checks
     "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
@@ -4524,6 +4525,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_previous_messaging_sessions",
     "sync_to_insights",
     "check_for_updates",
+    "ignore_agent_updates",
     "whats_new_summary_enabled",
     "sound_enabled",
     "rtl",
