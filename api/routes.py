@@ -3423,6 +3423,20 @@ def _serve_shell_unavailable(handler, exc: Exception) -> bool:
     return True
 
 
+def _handle_shutdown(handler) -> bool:
+    """Shut down the WebUI server process."""
+    j(handler, {"status": "shutting_down"})
+    import threading
+
+    def _do_shutdown():
+        import time
+        time.sleep(0.3)
+        os._exit(0)
+
+    threading.Thread(target=_do_shutdown, daemon=True).start()
+    return True
+
+
 def _serve_manifest(handler) -> bool:
     """Serve static/manifest.json with the correct PWA Content-Type.
 
@@ -4607,6 +4621,8 @@ def handle_post(handler, parsed) -> bool:
         finally:
             if diag:
                 diag.finish()
+    if parsed.path == "/api/shutdown":
+        return _handle_shutdown(handler)
     # CSRF: reject cross-origin or tokenless authenticated browser requests.
     # /api/auth/login has no authenticated session token yet, and /api/csp-report
     # is intentionally unauthenticated for browser-generated violation reports.

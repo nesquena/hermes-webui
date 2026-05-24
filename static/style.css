@@ -653,6 +653,8 @@
     /* Reload button — visible only in PWA standalone / fullscreen */
     .app-titlebar-reload{display:none;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0;background:none;border:none;color:var(--muted);border-radius:8px;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;transition:background-color .15s,color .15s;}
     .app-titlebar-reload:hover{background:var(--hover-bg);color:var(--text);}
+    .app-titlebar-shutdown{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0;background:transparent;border:none;color:var(--muted);border-radius:8px;cursor:pointer;padding:0;margin-left:auto;-webkit-tap-highlight-color:transparent;-webkit-app-region:no-drag;transition:background-color .15s,color .15s;}
+    .app-titlebar-shutdown:hover{background:var(--hover-bg);color:var(--danger,#e74c3c);}
     @media (display-mode: standalone), (display-mode: fullscreen){
       :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);}
       .app-titlebar-reload{display:inline-flex;}

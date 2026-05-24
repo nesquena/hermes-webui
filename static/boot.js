@@ -1,3 +1,13 @@
+(function(){
+  // Clear stale stop-server flag on successful page load (server is reachable)
+  localStorage.removeItem('hermes-webui-server-stopped');
+  // Listen for shutdown broadcast from other tabs
+  try {
+    var _stopChan = new BroadcastChannel('hermes-webui-shutdown');
+    _stopChan.onmessage = function() { _showServerStopped(); };
+  } catch(_) {}
+})();
+
 async function cancelStream(){
   const streamId = S.activeStreamId;
   if(!streamId) return;
@@ -1782,3 +1792,15 @@ window.addEventListener('pageshow', async (event) => {
     } catch (_) {}
   }
 });
+
+async function shutdownServer() {
+  if (!confirm('Stop the Hermes WebUI server?')) return;
+  localStorage.setItem('hermes-webui-server-stopped', '1');
+  try { var bc = new BroadcastChannel('hermes-webui-shutdown'); bc.postMessage('stop'); bc.close(); } catch(_) {}
+  _showServerStopped();
+  try { await fetch('/api/shutdown', { method: 'POST' }); } catch (_) {}
+}
+
+function _showServerStopped() {
+  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-family:system-ui,ui-sans-serif;font-size:14px"><p>Server stopped. You can close this tab.</p></div>';
+}
