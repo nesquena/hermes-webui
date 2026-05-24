@@ -5070,6 +5070,12 @@ def _run_agent_streaming(
                         model=model,
                         title=s.title,
                         message_count=len(s.messages),
+                        # #2762: pass the session's profile explicitly so the
+                        # background-thread state.db lookup doesn't fall
+                        # through to the process-global active profile and
+                        # write to the wrong DB (TLS profile is set on the
+                        # HTTP thread but not propagated to this worker).
+                        profile=getattr(s, 'profile', None),
                     )
             except Exception:
                 logger.debug("Failed to sync session to insights")

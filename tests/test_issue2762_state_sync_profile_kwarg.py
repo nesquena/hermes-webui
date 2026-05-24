@@ -1,0 +1,175 @@
+"""
+Regression test for #2762 — state_sync writes to wrong profile's state.db
+when profile is switched via WebUI cookie.
+
+Root cause: ``_get_state_db()`` relied on TLS-based
+``get_active_hermes_home()`` to pick the DB path. TLS gets set on the HTTP
+thread by the cookie middleware, but the agent streaming worker thread that
+calls ``sync_session_usage`` does NOT inherit that TLS, so the lookup falls
+through to the process-global active profile and writes to the wrong DB.
+
+Fix: ``_get_state_db(profile=...)`` accepts an explicit profile name and
+resolves *that* profile's home directly via
+``_resolve_profile_home_for_name``. Callers that know the session's profile
+(e.g. ``sync_session_usage`` after streaming completes) pass it explicitly,
+avoiding the TLS race.
+
+These tests pin:
+  1. ``_get_state_db(profile='X')`` resolves X's home, not the active profile's.
+  2. ``sync_session_usage(..., profile='X')`` writes to X's state.db only,
+     even when the global active profile is set to Y.
+  3. ``sync_session_usage`` with no profile kwarg falls back to the old
+     TLS behavior (so existing callers don't regress).
+"""
+from __future__ import annotations
+
+import os
+import sys
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+
+# Make sure we can import the api package the same way the server does.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+
+@pytest.fixture()
+def two_profile_homes(tmp_path, monkeypatch):
+    """Stand up two minimal profile homes with state.db schemas in place."""
+    hiyuki_home = tmp_path / 'hiyuki'
+    maiko_home = tmp_path / 'maiko'
+    for home in (hiyuki_home, maiko_home):
+        home.mkdir(parents=True)
+        # state.db must exist for _get_state_db() to return a connection
+        db = sqlite3.connect(home / 'state.db')
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS sessions ("
+            " session_id TEXT PRIMARY KEY, source TEXT, model TEXT, "
+            " title TEXT, input_tokens INTEGER DEFAULT 0, "
+            " output_tokens INTEGER DEFAULT 0, "
+            " estimated_cost_usd REAL DEFAULT 0)"
+        )
+        db.commit()
+        db.close()
+
+    # Stub api.profiles to return our temp paths
+    import api.profiles as profiles_mod
+
+    def fake_resolve(name):
+        if name == 'hiyuki':
+            return hiyuki_home
+        if name == 'maiko':
+            return maiko_home
+        raise LookupError(name)
+
+    monkeypatch.setattr(profiles_mod, '_resolve_profile_home_for_name', fake_resolve)
+    # Active profile is hiyuki — the WRONG one for tests that pass profile='maiko'
+    monkeypatch.setattr(profiles_mod, 'get_active_hermes_home', lambda: hiyuki_home)
+
+    return {'hiyuki': hiyuki_home, 'maiko': maiko_home}
+
+
+def _read_session(db_path: Path, session_id: str):
+    if not db_path.exists():
+        return None
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.execute(
+            "SELECT session_id, title, input_tokens, output_tokens "
+            "FROM sessions WHERE session_id = ?",
+            (session_id,),
+        )
+        row = cur.fetchone()
+        return row
+    finally:
+        conn.close()
+
+
+def test_get_state_db_honors_explicit_profile_kwarg(two_profile_homes):
+    """_get_state_db(profile='maiko') resolves to maiko's home, NOT
+    the active profile (hiyuki)."""
+    from api.state_sync import _get_state_db
+
+    # Some installs ship without the hermes_state package; the function
+    # returns None gracefully and there's nothing to assert.
+    try:
+        import hermes_state  # noqa: F401
+    except ImportError:
+        pytest.skip("hermes_state package not available in this test env")
+
+    db = _get_state_db(profile='maiko')
+    if db is None:
+        pytest.skip("SessionDB could not open the test db (env issue)")
+    # We don't have a public accessor for the underlying path on SessionDB,
+    # but writing through it and reading the raw file should work.
+    db.ensure_session(session_id='probe-2762', source='webui', model='test')
+    try:
+        db.close()
+    except Exception:
+        pass
+
+    # maiko's state.db should have the row; hiyuki's should not.
+    assert _read_session(two_profile_homes['maiko'] / 'state.db', 'probe-2762') is not None, \
+        "session was not written to maiko's state.db"
+    assert _read_session(two_profile_homes['hiyuki'] / 'state.db', 'probe-2762') is None, \
+        "session leaked into hiyuki's state.db — TLS-fallback regressed"
+
+
+def test_sync_session_usage_writes_only_to_named_profile(two_profile_homes):
+    """sync_session_usage(..., profile='maiko') is the actual scenario from
+    the streaming worker thread post-#2762. The write must land in maiko's
+    state.db only, regardless of what the global active profile is."""
+    try:
+        import hermes_state  # noqa: F401
+    except ImportError:
+        pytest.skip("hermes_state package not available in this test env")
+
+    from api.state_sync import sync_session_usage
+
+    sync_session_usage(
+        session_id='2762-regression',
+        input_tokens=42,
+        output_tokens=17,
+        estimated_cost=0.001,
+        model='test-model',
+        title='2762 regression test',
+        message_count=3,
+        profile='maiko',
+    )
+
+    maiko_row = _read_session(two_profile_homes['maiko'] / 'state.db', '2762-regression')
+    hiyuki_row = _read_session(two_profile_homes['hiyuki'] / 'state.db', '2762-regression')
+
+    assert maiko_row is not None, \
+        "sync_session_usage(profile='maiko') did not write to maiko's state.db"
+    assert hiyuki_row is None, \
+        "sync_session_usage(profile='maiko') leaked into hiyuki's state.db — #2762 regression"
+
+
+def test_sync_session_usage_without_profile_kwarg_uses_active(two_profile_homes):
+    """Backward compatibility: when called without a profile kwarg (the
+    pre-#2762 call shape), the function falls back to the active profile
+    (here: hiyuki). Existing callers should not regress."""
+    try:
+        import hermes_state  # noqa: F401
+    except ImportError:
+        pytest.skip("hermes_state package not available in this test env")
+
+    from api.state_sync import sync_session_usage
+
+    sync_session_usage(
+        session_id='legacy-call-shape',
+        input_tokens=1,
+        output_tokens=2,
+        model='legacy',
+        title='legacy',
+        message_count=1,
+    )
+
+    hiyuki_row = _read_session(two_profile_homes['hiyuki'] / 'state.db', 'legacy-call-shape')
+    assert hiyuki_row is not None, \
+        "sync_session_usage() without profile= regressed: did not write to active profile's state.db"

@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`state_sync` writes to the wrong profile's `state.db` after a WebUI cookie-driven profile switch** (#2762) — `_get_state_db()` resolved the target DB via the TLS-backed `get_active_hermes_home()` lookup. TLS gets set on the HTTP thread by the cookie middleware but is not propagated to the agent streaming worker thread that calls `sync_session_usage` after a turn completes, so the lookup falls through to the process-global active profile and the session's token usage + title land in the previously-active profile's `state.db` instead of the cookie's. `_get_state_db` now accepts an explicit `profile=` kwarg that resolves that profile's home directly via `_resolve_profile_home_for_name`; `sync_session_usage` + `sync_session_start` carry the same kwarg and the streaming caller passes `s.profile`. TLS lookup is preserved as the fallback when no profile is supplied, so existing call sites do not regress. Three regression tests in `tests/test_issue2762_state_sync_profile_kwarg.py` pin the explicit-kwarg path, the TLS-fallback path, and the cross-profile leak case.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added

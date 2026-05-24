@@ -20,8 +20,20 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _get_state_db():
-    """Get a SessionDB instance for the active profile's state.db.
+def _get_state_db(profile: str=None):
+    """Get a SessionDB instance for a profile's state.db.
+
+    When ``profile`` is provided the function resolves *that* profile's
+    home directory directly (via ``_resolve_profile_home_for_name``).
+    When ``profile`` is None it falls back to the TLS-based
+    ``get_active_hermes_home()`` lookup for backward compatibility —
+    but note that TLS may be unset in background/worker threads, in
+    which case the lookup falls through to the process-global active
+    profile and can write to the wrong DB. Callers that know the
+    session's profile (e.g. ``sync_session_usage`` after a stream
+    completes on a background thread) should pass it explicitly to
+    avoid that race. See #2762.
+
     Returns None if hermes_state is not importable or DB is unavailable.
     Each caller is responsible for calling db.close() when done.
     """
@@ -31,8 +43,12 @@ def _get_state_db():
         return None
 
     try:
-        from api.profiles import get_active_hermes_home
-        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+        if profile:
+            from api.profiles import _resolve_profile_home_for_name
+            hermes_home = _resolve_profile_home_for_name(profile).expanduser().resolve()
+        else:
+            from api.profiles import get_active_hermes_home
+            hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
     except Exception:
         logger.debug("Failed to resolve hermes home, using default")
         hermes_home = Path(os.getenv('HERMES_HOME', str(Path.home() / '.hermes')))
@@ -48,11 +64,16 @@ def _get_state_db():
         return None
 
 
-def sync_session_start(session_id: str, model=None) -> None:
+def sync_session_start(session_id: str, model=None, profile: str=None) -> None:
     """Register a WebUI session in state.db (idempotent).
     Called when a session's first message is sent.
+
+    ``profile`` lets the caller name the target state.db explicitly,
+    avoiding the TLS-vs-background-thread mismatch in #2762. When
+    omitted, the active profile is resolved from TLS (then process
+    globals) as before.
     """
-    db = _get_state_db()
+    db = _get_state_db(profile=profile)
     if not db:
         return
     try:
@@ -72,12 +93,20 @@ def sync_session_start(session_id: str, model=None) -> None:
 
 def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=0,
                        estimated_cost=None, model=None, title: str=None,
-                       message_count: int=None) -> None:
+                       message_count: int=None, profile: str=None) -> None:
     """Update token usage and title for a WebUI session in state.db.
     Called after each turn completes. Uses absolute=True to set totals
     (the WebUI Session already accumulates across turns).
+
+    ``profile`` lets the caller name the target state.db explicitly,
+    which is what fixes #2762: this function is invoked from the
+    agent streaming worker thread, where the request-thread's TLS
+    profile context has not been propagated. Without an explicit
+    profile, the TLS lookup falls back to the process-global active
+    profile and writes the session's usage to the wrong state.db
+    (e.g. ``hiyuki``'s instead of the cookie-switched ``maiko``'s).
     """
-    db = _get_state_db()
+    db = _get_state_db(profile=profile)
     if not db:
         return
     try:
