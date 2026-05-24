@@ -5,7 +5,7 @@
 
 ### Fixed
 
-- **Composer footer chip overlap at narrow widths** (#2740) — chip wraps (`.composer-profile-wrap`, `.composer-ws-wrap`, `.composer-model-wrap`, `.composer-reasoning-wrap`, `.composer-toolsets-wrap`) had `flex:0 1 auto`+`min-width:0` so they would compress past their content's natural width when the composer narrowed, causing the profile / workspace / model / context-usage chips to visually overlap. Switched to `flex:0 0 auto` so each chip keeps its natural width and the existing `overflow-x:auto` on `.composer-left` handles overflow via horizontal scroll. Default-width layout unchanged; only affects the overflow regime.
+- **Composer footer chip overlap at narrow widths** (#2740) — chip wraps (`.composer-profile-wrap`, `.composer-ws-wrap`, `.composer-model-wrap`, `.composer-reasoning-wrap`, `.composer-toolsets-wrap`) had `flex:0 1 auto`+`min-width:0` so they would compress past their content's natural width when the composer narrowed, causing the profile / workspace / model / reasoning chips to visually overlap. Switched to `flex:0 0 auto` for all five via a single grouped selector (no-op `min-width:0` dropped). Each chip now keeps its natural width and the existing `overflow-x:auto` on `.composer-left` handles overflow via horizontal scroll. Default-width layout unchanged; only affects the overflow regime.
 
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
