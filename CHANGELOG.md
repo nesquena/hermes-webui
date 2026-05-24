@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Workspace Markdown previews now fall back to the plain-text viewer for large `.md` files (>64 KB or >1500 lines) instead of synchronously running the full Markdown renderer on the browser main thread. The raw content remains available for Edit mode, while smaller Markdown files still render richly as before.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added

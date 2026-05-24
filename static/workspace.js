@@ -189,6 +189,8 @@ function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerC
 let _previewCurrentPath = '';  // relative path of currently previewed file
 let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
 let _previewDirty = false;     // true when edits are unsaved
+const LARGE_MARKDOWN_PREVIEW_BYTES = 64 * 1024;
+const LARGE_MARKDOWN_PREVIEW_LINES = 1500;
 
 function showPreview(mode){
   // mode: 'code' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
@@ -314,12 +316,23 @@ async function openFile(path){
       frame.title=`PDF preview: ${path.split('/').pop()||path}`;
     }
   } else if(MD_EXTS.has(ext)){
-    // Markdown: fetch text, render with renderMd, display as formatted HTML
+    // Markdown: fetch text, render with renderMd, display as formatted HTML.
+    // Large markdown files can make renderMd() block the main thread, so fall
+    // back to the plain text preview while keeping raw content available for Edit.
     try{
       const data=await api(`/api/file?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
+      const content = data.content || '';
+      _previewRawContent = content;
+      const sizeBytes = new Blob([content]).size;
+      const lineCount = content.split('\n').length;
+      if(sizeBytes > LARGE_MARKDOWN_PREVIEW_BYTES || lineCount > LARGE_MARKDOWN_PREVIEW_LINES){
+        showPreview('code');
+        $('previewCode').textContent = content;
+        setStatus(`Large markdown file (${Math.round(sizeBytes/1024)} KB, ${lineCount} lines) — showing as plain text to keep the preview responsive.`);
+        return;
+      }
       showPreview('md');
-      _previewRawContent = data.content;
-      $('previewMd').innerHTML=renderMd(data.content);
+      $('previewMd').innerHTML=renderMd(content);
       requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
     }catch(e){setStatus(t('file_open_failed'));}
   } else if(HTML_EXTS.has(ext)){

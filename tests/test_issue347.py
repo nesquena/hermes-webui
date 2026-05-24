@@ -360,21 +360,41 @@ def test_workspace_calls_render_katex_after_preview():
 
 
 def test_workspace_renders_katex_after_file_open():
-    """workspace.js renderKatexBlocks call must come after the renderMd(data.content) assignment."""
-    preview_md_pos = WORKSPACE_JS.find("renderMd(data.content)")
+    """workspace.js renderKatexBlocks call must come after the rich markdown render."""
+    preview_md_pos = WORKSPACE_JS.find("renderMd(content)")
     # Use the actual call string (not a stray regex match on 'M' characters)
     katex_call_str = "renderKatexBlocks==='function'"
     katex_call_pos = WORKSPACE_JS.find(katex_call_str)
-    assert preview_md_pos != -1, "renderMd(data.content) not found in workspace.js"
+    assert preview_md_pos != -1, "renderMd(content) not found in workspace.js"
     assert katex_call_pos != -1, (
         "renderKatexBlocks guard (typeof renderKatexBlocks==='function') not found in workspace.js"
     )
-    # The call after 'renderMd(data.content)' — find the LAST occurrence
+    # The call after 'renderMd(content)' — find the LAST occurrence
     # (there may be an earlier one in the save path at line ~153)
     last_katex_pos = WORKSPACE_JS.rfind(katex_call_str)
     assert last_katex_pos > preview_md_pos, (
-        "renderKatexBlocks must be called AFTER renderMd(data.content) in workspace.js "
+        "renderKatexBlocks must be called AFTER renderMd(content) in workspace.js "
         f"(renderMd at {preview_md_pos}, last renderKatexBlocks at {last_katex_pos})"
+    )
+
+
+def test_workspace_large_markdown_falls_back_to_plain_text_before_rendering():
+    """Large markdown files should use the plain text preview before renderMd()/KaTeX."""
+    assert "LARGE_MARKDOWN_PREVIEW_BYTES = 64 * 1024" in WORKSPACE_JS
+    assert "LARGE_MARKDOWN_PREVIEW_LINES = 1500" in WORKSPACE_JS
+    fallback_pos = WORKSPACE_JS.find("sizeBytes > LARGE_MARKDOWN_PREVIEW_BYTES")
+    code_preview_pos = WORKSPACE_JS.find("showPreview('code')", fallback_pos)
+    render_md_pos = WORKSPACE_JS.find("renderMd(content)", fallback_pos)
+    katex_call_pos = WORKSPACE_JS.find("renderKatexBlocks==='function'", fallback_pos)
+    assert fallback_pos != -1, "large markdown size guard not found"
+    assert code_preview_pos != -1, "large markdown fallback must show code/plain text preview"
+    assert render_md_pos != -1, "small markdown path must still rich-render markdown"
+    assert katex_call_pos != -1, "small markdown path must still render KaTeX"
+    assert code_preview_pos < render_md_pos < katex_call_pos, (
+        "large markdown fallback must return before rich render and KaTeX pass"
+    )
+    assert "return;" in WORKSPACE_JS[code_preview_pos:render_md_pos], (
+        "large markdown fallback must return before renderMd(content)"
     )
 
 
