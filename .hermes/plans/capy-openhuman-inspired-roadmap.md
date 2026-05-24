@@ -10,6 +10,8 @@
 
 **Primary evidence:** `/tmp/openhuman-review.md` and `.hermes/plans/2026-05-17_123717-openhuman-inspired-capy-roadmap.md` summarize the OpenHuman review at commit `f9de38d6f9bc252501ef79f772b96aedf3926a4d`. Treat those files as evidence and design input, not implementation source.
 
+**Latest competitive audit:** `.hermes/plans/2026-05-24_123241-capy-spaces-openhuman-space-agent-feature-audit.md` refreshes the OpenHuman + Space Agent feature matrix using current repo/docs/release evidence and should guide sprint ordering after the active widget-mutation safety receipt slice lands.
+
 ---
 
 ## Non-negotiables

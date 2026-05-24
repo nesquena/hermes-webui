@@ -620,6 +620,81 @@
   border-color: rgba(74, 222, 128, 0.24);
 }
 
+.capy-spaces-source-connectors {
+  background: rgba(11, 22, 42, 0.74);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 24px;
+  box-shadow: 0 18px 48px rgba(0,0,0,0.24);
+  color: #f8fbff;
+  margin: 18px auto 0;
+  max-width: 900px;
+  padding: 18px;
+}
+
+.capy-spaces-source-connectors-head {
+  align-items: start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.capy-spaces-source-connectors h3 {
+  margin: 4px 0 6px;
+}
+
+.capy-spaces-source-connectors p {
+  color: rgba(226,232,240,0.76);
+  margin: 0;
+}
+
+.capy-spaces-source-connectors-totals,
+.capy-spaces-source-connector-card > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.capy-spaces-source-connectors-totals span,
+.capy-spaces-source-connector-card span {
+  background: rgba(15, 23, 42, 0.68);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 999px;
+  color: rgba(226,232,240,0.88);
+  padding: 8px 11px;
+}
+
+.capy-spaces-source-connector-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  margin-top: 14px;
+}
+
+.capy-spaces-source-connector-card {
+  background: rgba(15, 23, 42, 0.58);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 18px;
+  padding: 14px;
+}
+
+.capy-spaces-source-connector-card ul {
+  color: rgba(226,232,240,0.78);
+  margin: 10px 0 0;
+  padding-left: 18px;
+}
+
+.capy-spaces-source-connector-card li {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.capy-spaces-source-refresh-btn {
+  font-size: 0.75rem;
+  padding: 5px 8px;
+}
+
 .capy-spaces-memory-freshness h3,
 .capy-spaces-autonomy-policy h3,
 .capy-spaces-progress-events h3 {

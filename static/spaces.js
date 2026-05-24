@@ -37,6 +37,12 @@
       } catch (memoryErr) {
         memoryStatus = {unavailable: true, local_only: true};
       }
+      let sourceCatalog = {unavailable: true, local_only: true, metadata_only: true, connectors: []};
+      try {
+        sourceCatalog = await fetchSpacesJson('api/capy-memory/source/catalog');
+      } catch (catalogErr) {
+        sourceCatalog = {unavailable: true, local_only: true, metadata_only: true, connectors: []};
+      }
       let policyStatus = {unavailable: true, local_only: true};
       try {
         policyStatus = await fetchSpacesJson('api/capy-policy/status');
@@ -56,7 +62,7 @@
       }
       root.dataset.editingSpaceId = '';
       const spaces = data.spaces || [];
-      root.innerHTML = renderSpacesList(spaces, demoData.demos || [], memoryStatus, policyStatus, progressStatus);
+      root.innerHTML = renderSpacesList(spaces, demoData.demos || [], memoryStatus, sourceCatalog, policyStatus, progressStatus);
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div></div>';
     }
@@ -133,14 +139,14 @@
       renderPackageProgressEvidence(result && result.progress_event, 'Widget event progress') + '</div>';
   }
 
-  function renderSpacesList(spaces, demos, memoryStatus, policyStatus, progressStatus){
+  function renderSpacesList(spaces, demos, memoryStatus, sourceCatalog, policyStatus, progressStatus){
     const activeSpaceId = safePathIdText(currentActiveSpaceId());
     const safeSpaces = Array.isArray(spaces) ? spaces : [];
-    return renderSpaceAgentHomeShell(safeSpaces, demos || [], activeSpaceId, memoryStatus || {}, policyStatus || {}, progressStatus || {}) +
+    return renderSpaceAgentHomeShell(safeSpaces, demos || [], activeSpaceId, memoryStatus || {}, sourceCatalog || {}, policyStatus || {}, progressStatus || {}) +
       renderCapySpacesControlPlane(safeSpaces, demos || [], activeSpaceId);
   }
 
-  function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId, memoryStatus, policyStatus, progressStatus){
+  function renderSpaceAgentHomeShell(spaces, demos, activeSpaceId, memoryStatus, sourceCatalog, policyStatus, progressStatus){
     return '<section class="capy-spaces-product-home" aria-label="Capy Spaces product home">' +
       '<div class="capy-spaces-product-starfield" aria-hidden="true"></div>' +
       '<div class="capy-spaces-product-topbar">' +
@@ -177,6 +183,7 @@
       '<div class="capy-spaces-section-heading"><span></span><strong>SPACES</strong><span></span></div>' +
       '<div class="capy-spaces-product-card-grid '+(spaces.length ? '' : 'capy-spaces-product-card-grid-empty')+'">' + renderSpaceAgentProductSpaceCards(spaces, activeSpaceId) + '</div>' +
       renderMemoryFreshnessCard(memoryStatus || {}) +
+      renderSourceConnectorCatalog(sourceCatalog || {}) +
       renderAutonomyPolicyCard(policyStatus || {}) +
       renderProgressEventsCard(progressStatus || {}) +
       '<div class="capy-spaces-section-heading"><span></span><strong>PANELS</strong><span></span></div>' +
@@ -210,6 +217,64 @@
       '<div class="capy-spaces-memory-freshness-state">'+escapeHtml(state)+'</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="refreshMemorySources">Refresh sources</button></div>' +
       '</section>';
+  }
+
+  function renderSourceConnectorCatalog(catalog){
+    const unavailable = catalog && catalog.unavailable === true;
+    const connectors = Array.isArray(catalog && catalog.connectors) ? catalog.connectors.slice(0, 6) : [];
+    const totalSources = safeNonNegativeCount(catalog && catalog.total_source_count);
+    const totalRefreshJobs = safeNonNegativeCount(catalog && catalog.total_refresh_job_count);
+    const subtitle = unavailable ? 'Connector catalog will appear when Memory Tree sources are available.' : 'Metadata-only connector freshness for auto-fetch, local knowledge, and Space memory.';
+    const connectorCards = connectors.map(renderSourceConnectorCard).join('');
+    return '<section class="capy-spaces-source-connectors" aria-label="Connector catalog">' +
+      '<div class="capy-spaces-source-connectors-head"><div><div class="capy-spaces-product-eyebrow">CONNECTORS</div><h3>Connector catalog</h3><p>'+escapeHtml(subtitle)+'</p></div>' +
+      '<div class="capy-spaces-source-connectors-totals"><span>'+escapeHtml(String(totalSources))+' '+escapeHtml(totalSources === 1 ? 'source' : 'sources')+'</span><span>'+escapeHtml(String(totalRefreshJobs))+' '+escapeHtml(totalRefreshJobs === 1 ? 'refresh job' : 'refresh jobs')+'</span></div></div>' +
+      '<div class="capy-spaces-source-connector-grid">' + (connectorCards || '<div class="capy-spaces-muted">No source connectors registered yet.</div>') + '</div>' +
+      '</section>';
+  }
+
+  function renderSourceConnectorCard(connector){
+    const label = safeDisplayMetadataText(connector && connector.label, 'Source connector') || 'Source connector';
+    const state = safeConnectorState(connector && connector.state);
+    const sourceCount = safeNonNegativeCount(connector && connector.source_count);
+    const staleCount = safeNonNegativeCount(connector && connector.stale_source_count);
+    const errorCount = safeNonNegativeCount(connector && connector.error_source_count);
+    const refreshJobCount = safeNonNegativeCount(connector && connector.refresh_job_count);
+    const sources = Array.isArray(connector && connector.sources) ? connector.sources.slice(0, 3) : [];
+    const sourceRows = sources.map(renderSourceConnectorSourceRow).join('');
+    return '<article class="capy-spaces-source-connector-card">' +
+      '<div><strong>'+escapeHtml(label)+'</strong><span>'+escapeHtml(titleCaseConnectorState(state))+'</span></div>' +
+      '<p>'+escapeHtml(sourceCount+' '+(sourceCount === 1 ? 'source' : 'sources'))+' · '+escapeHtml(staleCount+' stale')+' · '+escapeHtml(errorCount+' '+(errorCount === 1 ? 'error' : 'errors'))+' · '+escapeHtml(refreshJobCount+' '+(refreshJobCount === 1 ? 'refresh job' : 'refresh jobs'))+'</p>' +
+      (sourceRows ? '<ul>'+sourceRows+'</ul>' : '') +
+      '</article>';
+  }
+
+  function renderSourceConnectorSourceRow(source){
+    const sourceId = safePathIdText(source && source.source_id);
+    const name = safeDisplayMetadataText(source && source.display_name, 'source') || 'source';
+    const freshness = safeConnectorFreshness(source && source.freshness_status);
+    const lastSync = safeDisplayMetadataText((source && (source.last_checked_at || source.last_ingested_at)) || '', '') || '';
+    const origin = safeDisplayMetadataText(source && source.origin_uri, '') || '';
+    const parts = [name, freshness, lastSync ? 'Last sync: '+lastSync : '', origin].filter(Boolean);
+    const action = sourceId && /^https?:\/\//i.test(origin) ? '<button type="button" class="capy-spaces-btn capy-spaces-source-refresh-btn" data-capy-action="refreshMemorySource" data-source-id="'+escapeHtml(sourceId)+'">Refresh</button>' : '';
+    return '<li><span>'+parts.map(function(part){ return escapeHtml(part); }).join(' · ')+'</span>'+action+'</li>';
+  }
+
+  function safeConnectorFreshness(value){
+    const normalized = String(value == null ? '' : value).trim().toLowerCase().replace(/[\s_]+/g, '-');
+    const allowed = {'ok': 'ok', 'stale': 'stale', 'error': 'error', 'unknown': 'unknown'};
+    return allowed[normalized] || 'unknown';
+  }
+
+  function safeConnectorState(value){
+    const normalized = String(value == null ? '' : value).trim().toLowerCase().replace(/[\s_]+/g, '-');
+    const allowed = {'fresh': 'fresh', 'refresh-recommended': 'refresh recommended', 'needs-attention': 'needs attention', 'not-configured': 'not configured', 'unknown': 'unknown'};
+    return allowed[normalized] || 'unknown';
+  }
+
+  function titleCaseConnectorState(value){
+    const state = safeConnectorState(value);
+    return state.replace(/\b\w/g, function(ch){ return ch.toUpperCase(); });
   }
 
   function renderMemoryRefreshResult(result){
@@ -2647,6 +2712,15 @@
     const spaceId = button.dataset.spaceId || '';
     if (action === 'refreshMemorySources') {
       const data = await postSpacesJson('api/capy-memory/source/refresh', {limit: 5});
+      await loadCapySpaces();
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) refreshedRoot.innerHTML = renderMemoryRefreshResult(data || {}) + refreshedRoot.innerHTML;
+      return;
+    }
+    if (action === 'refreshMemorySource') {
+      const sourceId = safePathIdText(button.dataset.sourceId || '');
+      if (!sourceId) return;
+      const data = await postSpacesJson('api/capy-memory/source/refresh', {source_id: sourceId, limit: 1});
       await loadCapySpaces();
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) refreshedRoot.innerHTML = renderMemoryRefreshResult(data || {}) + refreshedRoot.innerHTML;

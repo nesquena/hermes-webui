@@ -3176,6 +3176,19 @@ def handle_get(handler, parsed) -> bool:
             logger.exception("capy memory status failed")
             return bad(handler, _sanitize_error(exc), status=500)
 
+    if parsed.path == "/api/capy-memory/source/catalog":
+        try:
+            from api.capy_memory import source_catalog
+
+            qs = parse_qs(parsed.query)
+            limit = int((qs.get("limit") or [10])[0] or 10)
+            return j(handler, source_catalog(limit=limit))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("capy memory source catalog failed")
+            return bad(handler, _sanitize_error(exc), status=500)
+
     if parsed.path == "/api/capy-memory/search":
         try:
             from api.capy_memory import search_memory
@@ -4384,14 +4397,21 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/capy-memory/source/refresh":
         try:
-            from api.capy_memory import run_source_refresh_jobs
+            from api.capy_memory import _safe_public_id, run_source_refresh_jobs
 
+            target_source_id = _safe_public_id(body.get("source_id"), fallback="") if body.get("source_id") is not None else ""
+            if body.get("source_id") is not None and not target_source_id:
+                return bad(handler, "invalid source_id", status=400)
             try:
                 limit = int(body.get("limit", 5))
             except (TypeError, ValueError):
                 limit = 5
             limit = max(1, min(limit, 25))
-            result = run_source_refresh_jobs(limit=limit)
+            if target_source_id:
+                limit = 1
+                result = run_source_refresh_jobs(limit=limit, source_id=target_source_id)
+            else:
+                result = run_source_refresh_jobs(limit=limit)
             import re as _capy_refresh_re
 
             safe_jobs = []
@@ -4416,7 +4436,7 @@ def handle_post(handler, parsed) -> bool:
                             "status": status,
                             "boundary": boundary,
                             "metadata_only": preflight.get("metadata_only") is True,
-                            "raw_prompt_stored": False,
+                            "source_text_stored": False,
                         }
                 if safe_job:
                     safe_jobs.append(safe_job)
@@ -4441,12 +4461,15 @@ def handle_post(handler, parsed) -> bool:
             from api.capy_policy import action_policy_receipt
 
             policy = action_policy_receipt(
-                "capy.memory.refresh",
+                "capy.memory.refresh_one" if target_source_id else "capy.memory.refresh",
                 approval_gates=["destructive_external_action"],
                 prompt_preflight_status=route_preflight_status,
                 model_route_hint="hint:summarize",
             )
-            j(handler, {"ok": True, "processed": processed, "jobs": safe_jobs, "autonomy_policy": policy})
+            response_payload = {"ok": True, "processed": processed, "jobs": safe_jobs, "autonomy_policy": policy}
+            if target_source_id:
+                response_payload["target_source_id"] = target_source_id
+            j(handler, response_payload)
             return True
         except ValueError as exc:
             return bad(handler, str(exc), status=400)

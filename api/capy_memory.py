@@ -272,12 +272,17 @@ def _lease_until_marker(seconds: int = 300) -> str:
 
 
 def _safe_origin_uri(value: Any, *, source_id: str) -> str:
+    source_id = _safe_public_id(source_id, fallback="source")
     raw = "" if value is None else str(value).strip()
     if not raw:
+        return f"capy-memory://{source_id}"
+    if raw.startswith(("/", "~", "\\\\")) or re.match(r"^[A-Za-z]:[\\/]", raw):
         return f"capy-memory://{source_id}"
     try:
         parts = urlsplit(raw)
     except ValueError:
+        return f"capy-memory://{source_id}"
+    if parts.scheme == "file":
         return f"capy-memory://{source_id}"
     if parts.scheme and parts.netloc and parts.scheme not in {"http", "https"} and (parts.username or parts.password or "@" in parts.netloc):
         return f"capy-memory://{source_id}"
@@ -309,6 +314,141 @@ def _safe_refresh_interval(value: Any) -> int:
     except (TypeError, ValueError):
         interval = 3600
     return max(60, min(interval, 604800))
+
+
+_SOURCE_CATALOG_LABELS = {
+    "auto_fetch": "Auto-fetch sources",
+    "local": "Spaces Memory",
+    "local_knowledge": "Local knowledge",
+}
+_SOURCE_CATALOG_ORDER = ("auto_fetch", "local", "local_knowledge")
+_SOURCE_CATALOG_ACTIVE_JOB_STATUSES = {"pending", "leased", "completing"}
+_SOURCE_CATALOG_FRESHNESS = {"ok", "stale", "error", "unknown"}
+
+
+def _empty_source_catalog_connector(connector_id: str) -> dict[str, Any]:
+    return {
+        "connector_id": connector_id,
+        "label": _SOURCE_CATALOG_LABELS.get(connector_id, "Source connector"),
+        "source_count": 0,
+        "ok_source_count": 0,
+        "stale_source_count": 0,
+        "error_source_count": 0,
+        "unknown_source_count": 0,
+        "refresh_job_count": 0,
+        "state": "not configured",
+        "sources": [],
+        "metadata_only": True,
+    }
+
+
+def _source_catalog_connector_id(origin_kind: Any, source_type: Any) -> str:
+    origin = _safe_public_text(origin_kind, limit=80).lower()
+    source = _safe_public_text(source_type, limit=80).lower()
+    if origin == "auto_fetch" or source in {"source_registry", "source_refresh_summary"}:
+        return "auto_fetch"
+    if origin == "local_knowledge" or source.startswith("local_knowledge"):
+        return "local_knowledge"
+    return "local"
+
+
+def _source_catalog_state(*, source_count: int, stale_count: int, error_count: int, refresh_job_count: int) -> str:
+    if error_count:
+        return "needs attention"
+    if stale_count or refresh_job_count:
+        return "refresh recommended"
+    if source_count:
+        return "fresh"
+    return "not configured"
+
+
+def _safe_source_catalog_freshness(value: Any) -> str:
+    text = _safe_public_text(value, limit=40).lower()
+    return text if text in _SOURCE_CATALOG_FRESHNESS else "unknown"
+
+
+def _safe_source_catalog_timestamp(value: Any) -> str:
+    return _safe_iso_timestamp(value)
+
+
+def source_catalog(*, limit: int = 10) -> dict[str, Any]:
+    """Return metadata-only source connector catalog and freshness summaries."""
+    limit = max(1, min(int(limit or 10), 25))
+    init_memory_tree()
+    with _connect() as conn:
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA_SQL)
+        rows = conn.execute(
+            """
+            SELECT
+                s.source_id, s.source_type, s.display_name, s.origin_uri, s.origin_kind,
+                s.freshness_status, s.last_ingested_at, s.last_checked_at, s.last_error,
+                COALESCE(j.refresh_job_count, 0) AS refresh_job_count
+            FROM sources s
+            LEFT JOIN (
+                SELECT dedupe_key, COUNT(*) AS refresh_job_count
+                FROM jobs
+                WHERE kind = 'source.refresh' AND status IN ('pending', 'leased', 'completing')
+                GROUP BY dedupe_key
+            ) j ON j.dedupe_key = s.source_id
+            ORDER BY s.origin_kind ASC, s.source_type ASC, s.updated_at DESC, s.source_id ASC
+            """
+        ).fetchall()
+        total_source_count = _count(conn, "SELECT COUNT(*) FROM sources")
+        total_refresh_job_count = _count(
+            conn,
+            "SELECT COUNT(*) FROM jobs WHERE kind = 'source.refresh' AND status IN ('pending', 'leased', 'completing')",
+        )
+
+    connectors: dict[str, dict[str, Any]] = {
+        connector_id: _empty_source_catalog_connector(connector_id)
+        for connector_id in _SOURCE_CATALOG_ORDER
+    }
+    for row in rows:
+        connector_id = _source_catalog_connector_id(row["origin_kind"], row["source_type"])
+        connector = connectors.setdefault(connector_id, _empty_source_catalog_connector(connector_id))
+        freshness = _safe_source_catalog_freshness(row["freshness_status"])
+        refresh_jobs = max(0, int(row["refresh_job_count"] or 0))
+        source = {
+            "source_id": _safe_public_id(row["source_id"], fallback="source"),
+            "display_name": _safe_public_text(row["display_name"], limit=200) or _safe_public_id(row["source_id"], fallback="source"),
+            "origin_kind": connector_id if connector_id in {"auto_fetch", "local_knowledge"} else "local",
+            "origin_uri": _safe_origin_uri(row["origin_uri"], source_id=_safe_public_id(row["source_id"], fallback="source")),
+            "freshness_status": freshness,
+            "last_checked_at": _safe_source_catalog_timestamp(row["last_checked_at"]),
+            "last_ingested_at": _safe_source_catalog_timestamp(row["last_ingested_at"]),
+            "metadata_only": True,
+        }
+        connector["source_count"] += 1
+        if freshness == "ok":
+            connector["ok_source_count"] += 1
+        elif freshness == "stale":
+            connector["stale_source_count"] += 1
+        elif freshness == "error":
+            connector["error_source_count"] += 1
+        else:
+            connector["unknown_source_count"] += 1
+        connector["refresh_job_count"] += refresh_jobs
+        if len(connector["sources"]) < limit:
+            connector["sources"].append(source)
+
+    ordered_connectors = [connectors[key] for key in sorted(connectors)]
+    for connector in ordered_connectors:
+        connector["state"] = _source_catalog_state(
+            source_count=connector["source_count"],
+            stale_count=connector["stale_source_count"],
+            error_count=connector["error_source_count"],
+            refresh_job_count=connector["refresh_job_count"],
+        )
+    return {
+        "available": True,
+        "local_only": True,
+        "metadata_only": True,
+        "limit": limit,
+        "total_source_count": total_source_count,
+        "total_refresh_job_count": total_refresh_job_count,
+        "connectors": ordered_connectors,
+    }
 
 
 def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
@@ -1166,21 +1306,53 @@ def _refresh_mark_completing_if_owned(job_id: str, lease_marker: str) -> bool:
         return cursor.rowcount == 1
 
 
-def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> dict[str, Any]:
+def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None, source_id: str | None = None) -> dict[str, Any]:
     """Lease queued source.refresh jobs and store sanitized advisory summaries only."""
-    limit = max(1, min(int(limit or 5), 25))
+    target_source_id = _safe_public_id(source_id, fallback="") if source_id is not None else ""
+    limit = 1 if target_source_id else max(1, min(int(limit or 5), 25))
     init_memory_tree()
     fetch = fetcher or _default_source_refresh_fetcher
-    queue_due_source_refresh_jobs(limit=limit)
+    if target_source_id:
+        force_queued_at = _now_iso()
+        with _connect() as conn:
+            conn.executescript(_SCHEMA_SQL)
+            cursor = conn.execute(
+                """
+                UPDATE jobs
+                SET status = 'pending', attempts = 0, leased_until = NULL, last_error = NULL, updated_at = ?
+                WHERE kind = 'source.refresh'
+                  AND dedupe_key = ?
+                  AND status NOT IN ('leased', 'completing')
+                """,
+                (force_queued_at, target_source_id),
+            )
+            if cursor.rowcount:
+                conn.execute(
+                    """
+                    UPDATE sources
+                    SET freshness_status = 'stale', last_error = NULL, updated_at = ?
+                    WHERE source_id = ?
+                    """,
+                    (force_queued_at, target_source_id),
+                )
+    else:
+        queue_due_source_refresh_jobs(limit=limit)
     now = _now_iso()
+    query_args: list[Any] = []
+    target_clause = ""
+    if target_source_id:
+        target_clause = " AND dedupe_key = ?"
+        query_args.append(target_source_id)
+    query_args.extend([now, limit])
     with _connect() as conn:
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA_SQL)
         rows = conn.execute(
-            """
+            f"""
             SELECT job_id, payload_json, attempts
             FROM jobs
             WHERE kind = 'source.refresh'
+              {target_clause}
               AND (
                 status = 'pending'
                 OR (status IN ('leased', 'completing') AND (leased_until IS NULL OR leased_until < ?))
@@ -1188,23 +1360,30 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
             ORDER BY attempts ASC, updated_at ASC, created_at ASC, job_id ASC
             LIMIT ?
             """,
-            (now, limit),
+            tuple(query_args),
         ).fetchall()
         lease_rows: list[dict[str, Any]] = []
         for row in rows:
             lease_marker = _lease_until_marker(300)
+            update_args: list[Any] = [lease_marker, now, row["job_id"]]
+            update_target_clause = ""
+            if target_source_id:
+                update_target_clause = " AND dedupe_key = ?"
+                update_args.append(target_source_id)
+            update_args.append(now)
             cursor = conn.execute(
-                """
+                f"""
                 UPDATE jobs
                 SET status = 'leased', attempts = attempts + 1, leased_until = ?, last_error = NULL, updated_at = ?
                 WHERE job_id = ?
                   AND kind = 'source.refresh'
+                  {update_target_clause}
                   AND (
                 status = 'pending'
                 OR (status IN ('leased', 'completing') AND (leased_until IS NULL OR leased_until < ?))
               )
                 """,
-                (lease_marker, now, row["job_id"], now),
+                tuple(update_args),
             )
             if cursor.rowcount != 1:
                 continue
@@ -1255,7 +1434,7 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None) -> di
                 conn.execute(
                     """
                     UPDATE sources
-                    SET origin_kind = 'metadata_only', freshness_status = 'ok', last_checked_at = ?, last_error = NULL, updated_at = ?
+                    SET origin_kind = 'auto_fetch', freshness_status = 'ok', last_checked_at = ?, last_error = NULL, updated_at = ?
                     WHERE source_id = ?
                     """,
                     (completed_at, completed_at, source_id),
@@ -1935,4 +2114,5 @@ __all__ = [
     "relevant_memory_for_space",
     "run_source_refresh_jobs",
     "search_memory",
+    "source_catalog",
 ]

@@ -17,6 +17,7 @@ Current latest known completed code slice: the OpenHuman-inspired Capy Memory Tr
 
 Canonical roadmap: `.hermes/plans/capy-openhuman-inspired-roadmap.md`.
 Implementation handoff/evidence: `.hermes/plans/2026-05-17_123717-openhuman-inspired-capy-roadmap.md` and `/tmp/openhuman-review.md`.
+Latest competitive audit: `.hermes/plans/2026-05-24_123241-capy-spaces-openhuman-space-agent-feature-audit.md`.
 
 Decision summary:
 
