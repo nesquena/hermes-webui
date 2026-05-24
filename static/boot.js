@@ -364,7 +364,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
 
   // Persist SR failure across reloads (e.g. Tailscale/network error)
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
-  let _forceMediaRecorder=!SpeechRecognition||localStorage.getItem(_micForceMediaRecorderKey)==='1';
+  let _forceMediaRecorder=true; // Enforce high-quality MediaRecorder to use backend Whisper STT
 
   const btn=$('btnMic');
   const status=$('micStatus');
@@ -387,7 +387,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     // pressing the button will do (#1488).
     _setButtonTooltip(btn, on ? t('voice_dictate_active') : t('voice_dictate'));
     status.style.display=on?'':'none';
-    if(statusText) statusText.textContent=on?'Listening':'Listening';
+    if(statusText) statusText.textContent=on?'심바가 귀 쫑긋 듣는 중🐾':'심바가 귀 쫑긋 듣는 중🐾';
     if(!on){ _finalText=''; _prefix=''; }
   }
 
@@ -410,7 +410,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
-    setComposerStatus('Transcribing…');
+    setComposerStatus('심바가 맛있는 데이터 전사 중...🍖');
     try{
       const res=await fetch('api/transcribe',{method:'POST',body:form});
       const data=await res.json().catch(()=>({}));
