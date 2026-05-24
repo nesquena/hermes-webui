@@ -357,3 +357,9 @@ def delete_credential(credential_id: str) -> dict[str, Any]:
         raise PasskeyError("Passkey not found")
     _save_credentials(kept)
     return {"ok": True, "credentials": registered_credentials()}
+
+
+def clear_credentials() -> None:
+    """Remove all registered passkeys when the user disables all auth."""
+    if _CREDENTIALS_FILE.exists():
+        _save_credentials([])

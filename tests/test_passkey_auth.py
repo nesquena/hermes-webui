@@ -137,6 +137,8 @@ def test_auth_status_reports_passkey_availability_source_contract():
     src = open("api/routes.py", encoding="utf-8").read()
     assert '"passkeys_enabled"' in src
     assert '"passkeys_count"' in src
+    assert '"password_auth_enabled"' in src
+    assert '"passwordless_enabled"' in src
     assert 'registered_credentials()' in src
 
 
@@ -147,3 +149,27 @@ def test_login_page_has_default_hidden_passkey_button_and_script_wiring():
     assert 'style="display:none"' in routes
     assert "api/auth/passkey/options" in login_js
     assert "navigator.credentials.get" in login_js
+
+
+def test_passwordless_mode_keeps_auth_enabled_with_passkeys(monkeypatch, tmp_path):
+    import api.auth as auth
+    passkeys = _set_paths(monkeypatch, tmp_path)
+    passkeys._save_credentials([{"id": "cred-1", "label": "This device"}])
+    monkeypatch.setattr(auth, "get_password_hash", lambda: None)
+
+    assert auth.are_passkeys_enabled() is True
+    assert auth.is_auth_enabled() is True
+
+
+def test_passwordless_settings_and_last_passkey_guard_are_wired():
+    routes = open("api/routes.py", encoding="utf-8").read()
+    panels = open("static/panels.js", encoding="utf-8").read()
+    index = open("static/index.html", encoding="utf-8").read()
+
+    assert "_passwordless" in routes
+    assert "Register a passkey before going passwordless." in routes
+    assert "Set a password or disable auth before removing the last passkey." in routes
+    assert "clear_credentials()" in routes
+    assert "id=\"btnGoPasswordless\"" in index
+    assert "async function goPasswordless" in panels
+    assert "prompt(" not in panels

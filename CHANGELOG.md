@@ -5,7 +5,7 @@
 
 ### Added
 
-- Optional passkey/WebAuthn sign-in for password-protected WebUI instances. Authenticated users can register/remove passkeys from Settings -> System, and `/login` shows a passwordless sign-in button only after a passkey exists. Password auth remains the default-off bootstrap and recovery path.
+- Optional passkey/WebAuthn sign-in for password-protected WebUI instances. Authenticated users can register/remove passkeys from Settings -> System, switch to passkey-only/passwordless sign-in after at least one passkey exists, and `/login` shows a passwordless sign-in button only after a passkey exists. Password auth remains the default-off bootstrap and recovery path until users choose to remove it.
 
 ## [v0.51.126] — 2026-05-24 — Release CX (stage-batch8 — 2-PR low-risk batch — kanban markdown + live activity timeline)
 

@@ -6095,6 +6095,7 @@ async function loadSettingsPanel(){
     // tells the truth before a user tries (and the backend now also returns
     // 409 as defense-in-depth).
     const pwEnvLocked=!!settings.password_env_var;
+    _settingsPasswordEnvLocked=pwEnvLocked;
     const pwLockBanner=$('settingsPasswordEnvLock');
     if(pwField){
       pwField.disabled=pwEnvLocked;
@@ -6108,6 +6109,7 @@ async function loadSettingsPanel(){
     try{
       const authStatus=await api('/api/auth/status');
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
+      _syncPasswordlessButton(authStatus);
     }catch(e){}
     loadPasskeys();
     // #1560: env-var-locked password also disables the Disable Auth button —
@@ -6767,6 +6769,7 @@ async function _refreshProviderModels(providerId, btn){
   }
 }
 
+let _settingsPasswordEnvLocked=false;
 function _setSettingsAuthButtonsVisible(active){
   const signOutBtn=$('btnSignOut');
   if(signOutBtn) signOutBtn.style.display=active?'':'none';
@@ -6774,6 +6777,13 @@ function _setSettingsAuthButtonsVisible(active){
   if(disableBtn) disableBtn.style.display=active?'':'none';
   const passkeyBtn=$('btnRegisterPasskey');
   if(passkeyBtn) passkeyBtn.disabled=!active||!window.PublicKeyCredential||!navigator.credentials;
+}
+function _syncPasswordlessButton(authStatus){
+  const btn=$('btnGoPasswordless');
+  if(!btn) return;
+  const can=!!(authStatus&&authStatus.auth_enabled&&authStatus.password_auth_enabled&&authStatus.passkeys_count>0&&!_settingsPasswordEnvLocked);
+  btn.style.display=can?'':'none';
+  btn.disabled=!can;
 }
 
 function _b64uToBytes(s){
@@ -6822,13 +6832,14 @@ async function registerPasskey(){
     })});
     showToast('Passkey registered');
     loadPasskeys();
+    try{_syncPasswordlessButton(await api('/api/auth/status'));}catch(_e){}
   }catch(e){showToast('Passkey registration failed: '+e.message);}
 }
 
 async function deletePasskey(id){
   const ok=await showConfirmDialog({title:'Remove passkey?',message:'This browser/device will no longer be able to sign in with that passkey.',confirmLabel:'Remove',danger:true,focusCancel:true});
   if(!ok) return;
-  try{await api('/api/auth/passkey/delete',{method:'POST',body:JSON.stringify({id})});showToast('Passkey removed');loadPasskeys();}
+  try{await api('/api/auth/passkey/delete',{method:'POST',body:JSON.stringify({id})});showToast('Passkey removed');loadPasskeys();try{_syncPasswordlessButton(await api('/api/auth/status'));}catch(_e){}}
   catch(e){showToast('Failed to remove passkey: '+e.message);}
 }
 
@@ -7037,17 +7048,31 @@ async function signOut(){
   }
 }
 
+async function goPasswordless(){
+  const ok=await showConfirmDialog({title:'Go passwordless?',message:'This removes the password and keeps passkey sign-in enabled. Keep at least one passkey registered or you could lose access.',confirmLabel:'Go passwordless',danger:false,focusCancel:true});
+  if(!ok) return;
+  try{
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({_passwordless:true})});
+    showToast('Password removed. Passkey sign-in remains enabled.');
+    _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
+    _syncPasswordlessButton({auth_enabled:saved.auth_enabled,password_auth_enabled:false,passkeys_count:1});
+    const pwField=$('settingsPassword'); if(pwField) pwField.value='';
+  }catch(e){showToast('Failed to go passwordless: '+e.message);}
+}
+
 async function disableAuth(){
   const _disAuth=await showConfirmDialog({title:t('disable_auth_confirm_title'),message:t('disable_auth_confirm_message'),confirmLabel:t('disable'),danger:true,focusCancel:true});
   if(!_disAuth) return;
   try{
     await api('/api/settings',{method:'POST',body:JSON.stringify({_clear_password:true})});
     showToast(t('auth_disabled'));
-    // Hide both auth buttons since auth is now off
+    // Hide auth controls since auth is now off
     const disableBtn=$('btnDisableAuth');
     if(disableBtn) disableBtn.style.display='none';
     const signOutBtn=$('btnSignOut');
     if(signOutBtn) signOutBtn.style.display='none';
+    _syncPasswordlessButton({auth_enabled:false,password_auth_enabled:false,passkeys_count:0});
+    loadPasskeys();
   }catch(e){
     showToast(t('disable_auth_failed')+e.message);
   }

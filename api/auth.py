@@ -1,7 +1,7 @@
 """
-Hermes Web UI -- Optional password authentication.
-Off by default. Enable by setting HERMES_WEBUI_PASSWORD env var
-or configuring a password in the Settings panel.
+Hermes Web UI -- optional authentication.
+Off by default. Enable by setting HERMES_WEBUI_PASSWORD, configuring a
+password in Settings, or registering passkeys and then going passwordless.
 """
 import hashlib
 import hmac
@@ -291,9 +291,25 @@ def get_password_hash() -> str | None:
         return result
 
 
-def is_auth_enabled() -> bool:
+def is_password_auth_enabled() -> bool:
     """True if a password is configured (env var or settings)."""
     return get_password_hash() is not None
+
+
+def are_passkeys_enabled() -> bool:
+    """True if at least one local passkey credential is registered."""
+    try:
+        from api.passkeys import passkeys_available
+
+        return passkeys_available()
+    except Exception as exc:
+        logger.debug("Failed to inspect passkey availability: %s", exc)
+        return False
+
+
+def is_auth_enabled() -> bool:
+    """True if password auth or passkey-only auth is configured."""
+    return is_password_auth_enabled() or are_passkeys_enabled()
 
 
 def verify_password(plain: str) -> bool:

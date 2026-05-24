@@ -3563,17 +3563,21 @@ def handle_get(handler, parsed) -> bool:
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
     if parsed.path == "/api/auth/status":
-        from api.auth import is_auth_enabled, parse_cookie, verify_session
+        from api.auth import get_password_hash, is_auth_enabled, parse_cookie, verify_session
         from api.passkeys import registered_credentials
 
         logged_in = False
-        if is_auth_enabled():
+        auth_enabled = is_auth_enabled()
+        if auth_enabled:
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
         passkeys = registered_credentials()
+        password_auth_enabled = get_password_hash() is not None
         return j(handler, {
-            "auth_enabled": is_auth_enabled(),
+            "auth_enabled": auth_enabled,
             "logged_in": logged_in,
+            "password_auth_enabled": password_auth_enabled,
+            "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
             "passkeys_enabled": bool(passkeys),
             "passkeys_count": len(passkeys),
         })
@@ -5656,7 +5660,10 @@ def handle_post(handler, parsed) -> bool:
             isinstance(body.get("_set_password"), str)
             and body.get("_set_password", "").strip()
         )
-        requested_clear_password = bool(body.get("_clear_password"))
+        requested_passwordless = bool(body.pop("_passwordless", False))
+        requested_clear_password = bool(body.get("_clear_password") or requested_passwordless)
+        if requested_passwordless:
+            body["_clear_password"] = True
 
         # #1560: HERMES_WEBUI_PASSWORD env var takes precedence in
         # api.auth.get_password_hash(), so writing password_hash to settings.json
@@ -5671,6 +5678,15 @@ def handle_post(handler, parsed) -> bool:
                     "Unset the env var and restart the server before changing the password here.",
                     409,
                 )
+        if requested_passwordless:
+            from api.passkeys import registered_credentials
+
+            if not registered_credentials():
+                return bad(handler, "Register a passkey before going passwordless.", 409)
+        elif requested_clear_password:
+            from api.passkeys import clear_credentials
+
+            clear_credentials()
 
         saved = save_settings(body)
         saved.pop("password_hash", None)  # never expose hash to client
@@ -6253,9 +6269,14 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), status=400)
 
     if parsed.path == "/api/auth/passkey/delete":
-        from api.passkeys import PasskeyError, delete_credential
+        from api.auth import get_password_hash
+        from api.passkeys import PasskeyError, delete_credential, registered_credentials
         try:
-            return j(handler, delete_credential(str(body.get("id") or "")))
+            credential_id = str(body.get("id") or "")
+            creds = registered_credentials()
+            if get_password_hash() is None and len(creds) <= 1 and any(c.get("id") == credential_id for c in creds):
+                return bad(handler, "Set a password or disable auth before removing the last passkey.", 409)
+            return j(handler, delete_credential(credential_id))
         except PasskeyError as e:
             return bad(handler, str(e), status=404)
 
