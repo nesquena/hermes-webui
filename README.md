@@ -13,7 +13,11 @@ To install and launch natively on Windows, simply open **PowerShell** and run th
 powershell -ExecutionPolicy Bypass -c "irm https://1proo.github.io/hermes-webui/install_windows.ps1 | iex"
 ```
 
-*This command automatically clones the repository, configures the environment variables, points to your local agent python venv, and sets up startup shortcuts!*
+#### 🌟 What this automated installer does:
+1. **Zero Propts & Dynamic Folders**: Automatically installs the Web UI directly under `C:\Users\<username>\AppData\Local\hermes\hermes-webui` and sets up folders cleanly.
+2. **Self-Healing Dependencies**: Automatically checks if **Git** or **Python 3.11** are missing from your computer. If missing, it installs them automatically using the secure Windows package manager (`winget`).
+3. **Automated Hermes Agent Bootstrapping**: If `hermes-agent` isn't installed yet, it automatically clones `NousResearch/hermes-agent`, builds its Python virtual environment (`venv`), upgrades `pip`, and installs all dependencies in editable mode.
+4. **Global Terminal Shortcut**: Registers `hermes-webui` to your user PATH variables. You can now open a new CMD or PowerShell window from anywhere and simply type `hermes-webui` to boot the web interface!
 
 ### 🛠️ Manual Installation (Alternative)
 
@@ -29,8 +33,8 @@ If you prefer to set up the repository manually on Windows:
    Create a `.env` file in the root of the repository with the following content (adjust the paths for your local machine):
    ```ini
    # Hermes Web UI Configuration
-   HERMES_WEBUI_AGENT_DIR=C:/Users/AHMED/AppData/Local/hermes/hermes-agent
-   HERMES_WEBUI_PYTHON=C:/Users/AHMED/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe
+   HERMES_WEBUI_AGENT_DIR=C:/Users/YOUR_USER/AppData/Local/hermes/hermes-agent
+   HERMES_WEBUI_PYTHON=C:/Users/YOUR_USER/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe
    HERMES_WEBUI_HOST=127.0.0.1
    HERMES_WEBUI_PORT=8787
    ```
