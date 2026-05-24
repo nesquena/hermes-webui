@@ -340,6 +340,246 @@ def test_exception_handoff_summary_persists_fallback_summary(monkeypatch):
     assert persisted[0]["rounds"] == models.CONVERSATION_ROUND_THRESHOLD
 
 
+def test_handoff_summary_uses_summarize_model_route_for_agent_invocation(monkeypatch):
+    """Handoff summaries should route actual model calls through the safe summarize hint."""
+    import api.routes as routes
+    import api.config as cfg
+    import api.models as models
+
+    monkeypatch.setattr(routes, "require", lambda body, *keys: None)
+    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:summarize": {
+            "provider": "openrouter",
+            "model": "summary/provider-model",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+        }
+    }))
+
+    persisted = []
+    monkeypatch.setattr(
+        routes,
+        "_persist_handoff_summary",
+        lambda sid, summary, channel, rounds, fallback=False: persisted.append({
+            "sid": sid,
+            "summary": summary,
+            "channel": channel,
+            "rounds": rounds,
+            "fallback": fallback,
+        }) or {"ok": True},
+    )
+    monkeypatch.setattr(models, "count_conversation_rounds", lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD)
+    monkeypatch.setattr(models, "get_session", lambda sid: types.SimpleNamespace(model="session-default-model"))
+    monkeypatch.setattr(
+        models,
+        "get_cli_session_messages",
+        lambda sid: [
+            {"role": "user", "content": "Please summarize next steps", "timestamp": 1.0},
+            {"role": "assistant", "content": "We need to finish the route wiring.", "timestamp": 2.0},
+        ],
+    )
+
+    resolve_calls = []
+
+    def _resolve_model_provider(model=None):
+        resolve_calls.append(model)
+        if model == "@openrouter:summary/provider-model":
+            return "summary/provider-model", "openrouter", "https://summary.example/v1"
+        return "session-default-model", "default-provider", None
+
+    monkeypatch.setattr(cfg, "resolve_model_provider", _resolve_model_provider)
+
+    runtime_requests = []
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+
+    def _resolve_runtime_provider(requested=None):
+        runtime_requests.append(requested)
+        return {"api_key": "x", "provider": requested or "openrouter", "base_url": None}
+
+    fake_runtime_module.resolve_runtime_provider = _resolve_runtime_provider
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__path__ = []
+    fake_hermes_cli.runtime_provider = fake_runtime_module
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+
+    created_agents = []
+
+    class _Client:
+        class completions:
+            @staticmethod
+            def create(*args, **kwargs):
+                return types.SimpleNamespace(choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="- You should finish model-route wiring."),
+                        finish_reason="stop",
+                    )
+                ])
+
+    class _Chat:
+        completions = _Client.completions
+
+    class _OpenAIClient:
+        chat = _Chat
+
+    class _RouteAwareAgent:
+        api_mode = ""
+
+        def __init__(self, *args, **kwargs):
+            created_agents.append(kwargs)
+            self.model = kwargs.get("model")
+            self.reasoning_config = None
+
+        def _build_api_kwargs(self, *args, **kwargs):
+            return {}
+
+        def _ensure_primary_openai_client(self, reason=None):
+            return _OpenAIClient()
+
+        def release_clients(self):
+            return None
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _RouteAwareAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    response = routes._handle_handoff_summary(object(), {"session_id": "session-model-route"})
+
+    assert response["ok"] is True
+    assert response["fallback"] is False
+    assert response["summary"] == "- You should finish model-route wiring."
+    assert resolve_calls[0] == "@openrouter:summary/provider-model"
+    assert runtime_requests == ["openrouter"]
+    assert created_agents == [{
+        "model": "summary/provider-model",
+        "provider": "openrouter",
+        "base_url": "https://summary.example/v1",
+        "api_key": "x",
+        "platform": "webui",
+        "quiet_mode": True,
+        "enabled_toolsets": [],
+        "session_id": "session-model-route",
+    }]
+    serialized = json.dumps({"response": response, "persisted": persisted, "agents": created_agents}, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in json.dumps(response, sort_keys=True).lower()
+
+
+def test_handoff_summary_preserves_custom_summarize_route_for_slash_model_ids(monkeypatch):
+    """Configured custom summarize routes with provider/model IDs must not fall through to defaults."""
+    import api.routes as routes
+    import api.config as cfg
+    import api.models as models
+
+    monkeypatch.setattr(routes, "require", lambda body, *keys: None)
+    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:summarize": {
+            "provider": "custom:summary-local",
+            "model": "org/summary-model",
+            "authorization": "bearer placeholder",
+            "source": "SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+        }
+    }))
+
+    monkeypatch.setattr(routes, "_persist_handoff_summary", lambda *args, **kwargs: {"ok": True})
+    monkeypatch.setattr(models, "count_conversation_rounds", lambda sid, since=None: models.CONVERSATION_ROUND_THRESHOLD)
+    monkeypatch.setattr(models, "get_session", lambda sid: types.SimpleNamespace(model="session-default-model"))
+    monkeypatch.setattr(
+        models,
+        "get_cli_session_messages",
+        lambda sid: [
+            {"role": "user", "content": "Summarize this", "timestamp": 1.0},
+            {"role": "assistant", "content": "Use the local summary route.", "timestamp": 2.0},
+        ],
+    )
+
+    resolve_calls = []
+
+    def _resolve_model_provider(model=None):
+        resolve_calls.append(model)
+        if model == "@custom:summary-local:org/summary-model":
+            return "org/summary-model", "custom:summary-local", "http://summary-local.test/v1"
+        return "session-default-model", "default-provider", None
+
+    monkeypatch.setattr(cfg, "resolve_model_provider", _resolve_model_provider)
+    monkeypatch.setattr(cfg, "resolve_custom_provider_connection", lambda provider: ("local-key", None))
+
+    runtime_requests = []
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    fake_runtime_module.resolve_runtime_provider = lambda requested=None: runtime_requests.append(requested) or {
+        "api_key": "",
+        "provider": requested,
+        "base_url": None,
+    }
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__path__ = []
+    fake_hermes_cli.runtime_provider = fake_runtime_module
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+
+    created_agents = []
+
+    class _Client:
+        class completions:
+            @staticmethod
+            def create(*args, **kwargs):
+                return types.SimpleNamespace(choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="- Custom summarize route stayed selected."),
+                        finish_reason="stop",
+                    )
+                ])
+
+    class _Chat:
+        completions = _Client.completions
+
+    class _OpenAIClient:
+        chat = _Chat
+
+    class _RouteAwareAgent:
+        api_mode = ""
+
+        def __init__(self, *args, **kwargs):
+            created_agents.append(kwargs)
+            self.model = kwargs.get("model")
+            self.reasoning_config = None
+
+        def _build_api_kwargs(self, *args, **kwargs):
+            return {}
+
+        def _ensure_primary_openai_client(self, reason=None):
+            return _OpenAIClient()
+
+        def release_clients(self):
+            return None
+
+    fake_run_agent = types.ModuleType("run_agent")
+    fake_run_agent.AIAgent = _RouteAwareAgent
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    response = routes._handle_handoff_summary(object(), {"session_id": "session-custom-model-route"})
+
+    assert response["ok"] is True
+    assert response["fallback"] is False
+    assert resolve_calls[0] == "@custom:summary-local:org/summary-model"
+    assert runtime_requests == ["custom:summary-local"]
+    assert created_agents[0]["model"] == "org/summary-model"
+    assert created_agents[0]["provider"] == "custom:summary-local"
+    assert created_agents[0]["base_url"] == "http://summary-local.test/v1"
+    assert created_agents[0]["api_key"] == "local-key"
+    serialized_response = json.dumps(response, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized_response
+    assert "<script" not in serialized_response
+    assert "authorization" not in serialized_response
+    assert "bearer placeholder" not in serialized_response
+
+
 def test_handoff_summary_retries_once_when_length_limit_reached(monkeypatch):
     """finish_reason='length' should trigger one retry with larger budget."""
     import api.routes as routes

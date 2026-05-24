@@ -10047,18 +10047,37 @@ def _handle_handoff_summary(handler, body):
         import hermes_cli.runtime_provider as _runtime_provider
         import run_agent as _run_agent
 
-        # Try to resolve model from an existing session, fall back to default.
+        # Try the configured Capy summarize route first, then fall back to the
+        # existing session model/default provider path. The Capy route resolver
+        # only returns sanitized provider/model labels, never raw config or
+        # credentials.
         resolved_model = None
         resolved_provider = None
         resolved_base_url = None
         try:
-            from api.models import get_session
-            s_obj = get_session(sid)
-            resolved_model = getattr(s_obj, "model", None)
-        except Exception:
-            pass
+            from api.capy_policy import resolve_model_route_hint
 
-        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(resolved_model)
+            summary_route = resolve_model_route_hint("hint:summarize")
+            if isinstance(summary_route, dict) and summary_route.get("resolution") == "configured":
+                route_model = str(summary_route.get("resolved_model") or "").strip()
+                route_provider = str(summary_route.get("resolved_provider") or "").strip()
+                if route_model:
+                    resolved_model = (
+                        f"@{route_provider}:{route_model}"
+                        if route_provider and route_provider != "current Hermes provider"
+                        else route_model
+                    )
+        except Exception as _e:
+            logger.warning("resolve_model_route_hint failed for handoff summary: %s", _e)
+        if not resolved_model:
+            try:
+                from api.models import get_session
+                s_obj = get_session(sid)
+                resolved_model = getattr(s_obj, "model", None)
+            except Exception:
+                pass
+
+        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(resolved_model or "")
 
         resolved_api_key = None
         try:
