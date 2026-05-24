@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- CSRF rejections now distinguish origin/proxy mismatches from expired session
+  tokens so provider-key removal and other protected requests show actionable
+  diagnostics instead of the generic cross-origin error.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added

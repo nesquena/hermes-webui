@@ -1260,8 +1260,37 @@ def _csrf_exempt_path(path: str) -> bool:
     return path in {"/api/auth/login", "/api/csp-report"}
 
 
+_CSRF_FAILURE_ATTR = "_hermes_csrf_failure_reason"
+
+
+def _set_csrf_failure_reason(handler, reason: str) -> bool:
+    try:
+        setattr(handler, _CSRF_FAILURE_ATTR, reason)
+    except Exception:
+        pass
+    return False
+
+
+def _clear_csrf_failure_reason(handler) -> None:
+    try:
+        if hasattr(handler, _CSRF_FAILURE_ATTR):
+            delattr(handler, _CSRF_FAILURE_ATTR)
+    except Exception:
+        pass
+
+
+def _csrf_rejection_error(handler) -> str:
+    reason = getattr(handler, _CSRF_FAILURE_ATTR, "")
+    if reason == "origin_mismatch":
+        return "Cross-origin mismatch - check reverse proxy headers"
+    if reason == "token_mismatch":
+        return "Session expired - reload the page"
+    return "Cross-origin request rejected"
+
+
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
+    _clear_csrf_failure_reason(handler)
     origin = handler.headers.get("Origin", "")
     referer = handler.headers.get("Referer", "")
     host = handler.headers.get("Host", "")
@@ -1271,7 +1300,7 @@ def _check_csrf(handler) -> bool:
     # Extract host:port from origin/referer
     m = _re.match(r"^https?://([^/]+)", target)
     if not m:
-        return False
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
     origin_host = m.group(1)
     origin_scheme = m.group(0).split('://')[0].lower()  # 'http' or 'https'
     origin_name, origin_port = _normalize_host_port(origin_host)
@@ -1299,7 +1328,7 @@ def _check_csrf(handler) -> bool:
                 origin_allowed = True
                 break
     if not origin_allowed:
-        return False
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
 
     from api.auth import CSRF_HEADER_NAME, is_auth_enabled, parse_cookie, verify_csrf_token
 
@@ -1307,7 +1336,9 @@ def _check_csrf(handler) -> bool:
         return True
     cookie_val = parse_cookie(handler)
     submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
-    return verify_csrf_token(cookie_val or "", submitted or "")
+    if verify_csrf_token(cookie_val or "", submitted or ""):
+        return True
+    return _set_csrf_failure_reason(handler, "token_mismatch")
 
 
 def _client_ip_for_rate_limit(handler) -> str:
@@ -4614,7 +4645,7 @@ def handle_post(handler, parsed) -> bool:
         diag.stage("csrf")
     if not _csrf_exempt_path(parsed.path) and not _check_csrf(handler):
         try:
-            return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+            return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
         finally:
             if diag:
                 diag.finish()
@@ -6194,7 +6225,7 @@ def handle_post(handler, parsed) -> bool:
 def handle_patch(handler, parsed) -> bool:
     """Handle all PATCH routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
-        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+        return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
@@ -6209,7 +6240,7 @@ def handle_patch(handler, parsed) -> bool:
 def handle_delete(handler, parsed) -> bool:
     """Handle all DELETE routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
-        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+        return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
