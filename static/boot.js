@@ -1238,6 +1238,7 @@ const _SKINS=[
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
   {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},
   {name:'Catppuccin',colors:['#CBA6F7','#B4BEFE','#8839EF']},
+  {name:'Hepburn',   colors:['#c6246a','#ec5597','#f2abca']},
   {name:'Nous',     colors:['#4682B4','#3A6E9A','#2C5F88']},
   {name:'Geist Contrast', value:'geist-contrast', colors:['#000000','#ffffff','#FFF175']},
 ];

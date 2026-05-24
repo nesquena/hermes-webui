@@ -57,11 +57,21 @@ def test_load_session_clears_saved_stale_404_and_rethrows_to_boot():
     """A missing saved session should be removed and let boot show the empty state."""
     block = _load_session_error_block()
     assert "e.status===404" in block, "loadSession must keep a 404-specific branch"
-    assert "localStorage.getItem('hermes-webui-session')===sid" in block, (
-        "loadSession must only clear the saved active session key"
+    # PR #2808 (#2798): boot-time 404 cleanup is now gated on `!currentSid` alone
+    # (the request was for the saved active session), not on the additional
+    # `localStorage.getItem('hermes-webui-session')===sid` equality check.
+    # The previous gate failed when the stale sid came from /session/{id} URL
+    # while localStorage was empty (post state-reset).
+    assert "!currentSid" in block, (
+        "loadSession must keep the !currentSid gate so click-into 404s don't "
+        "wipe the saved active-session key"
     )
     assert "localStorage.removeItem('hermes-webui-session')" in block, (
         "loadSession must clear stale saved session IDs on 404"
+    )
+    assert "history.replaceState" in block, (
+        "loadSession must strip stale /session/{id} from the URL so a refresh "
+        "doesn't re-trigger the 404 loop"
     )
     assert "_loadingSessionId = null" in block, (
         "loadSession must clear the in-flight load marker before rethrowing"

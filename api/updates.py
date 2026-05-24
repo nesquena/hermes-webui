@@ -381,6 +381,18 @@ def _check_repo_release(path, name):
     current_tag = _current_release_tag(path)
     behind = _release_gap(tags, current_tag, latest_tag)
 
+    # If behind == 0 but HEAD has moved past the tag (e.g. the agent repo
+    # keeps committing to master between tagged releases), the release check
+    # would report "Up to date" even though hundreds of commits are missing.
+    # Detect this by comparing the short describe output (which includes the
+    # -N-gSHA suffix when HEAD is past a tag) against the bare tag name.
+    # When HEAD is ahead of the latest tag, fall through to _check_repo_branch
+    # so the real commit count is reported instead.  See #2653.
+    if behind == 0:
+        full_desc, ok = _run_git(['describe', '--tags', '--always'], path)
+        if ok and full_desc and full_desc != current_tag:
+            return None
+
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
     remote_url = _normalize_remote_url(remote_url)
 
