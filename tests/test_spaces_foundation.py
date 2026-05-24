@@ -16341,7 +16341,7 @@ def test_camera_stream_tool_route_rejects_unapproved_url_with_403(monkeypatch, t
     assert "secret_value_do_not_leak" not in serialized
 
 
-def test_install_local_service_template_creates_safe_service_dashboard_widgets(monkeypatch, tmp_path):
+def test_local_service_template_install_creates_safe_service_dashboard_widgets(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
     installed = spaces.install_template("service")
@@ -16375,6 +16375,15 @@ def test_install_local_service_template_creates_safe_service_dashboard_widgets(m
         "inspection": "metadata-only",
         "bridge": "planned-cdp",
     }
+    assert installed["prompt_preflight"]["boundary"] == "local_service_template"
+    assert installed["prompt_preflight"]["status"] == "pass"
+    assert installed["prompt_preflight"]["metadata_only"] is True
+    assert installed["prompt_preflight"]["raw_prompt_stored"] is False
+    assert installed["autonomy_policy"]["action"] == "space.template.install.local_service"
+    assert installed["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    assert installed["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert installed["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert installed["autonomy_policy"]["metadata_only"] is True
     serialized = json.dumps(installed).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized
@@ -16398,11 +16407,81 @@ def test_local_service_template_install_route_returns_safe_metadata(monkeypatch,
     assert body["space"]["name"] == "Local Service Dashboard"
     assert body["installed_widgets"][0]["id"] == "service-api-chat"
     assert len(body["installed_widgets"]) == 4
+    assert body["prompt_preflight"]["boundary"] == "local_service_template"
+    assert body["prompt_preflight"]["status"] == "pass"
+    assert body["prompt_preflight"]["metadata_only"] is True
+    assert body["prompt_preflight"]["raw_prompt_stored"] is False
+    assert body["autonomy_policy"]["action"] == "space.template.install.local_service"
+    assert body["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    assert body["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert body["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert body["autonomy_policy"]["metadata_only"] is True
+    assert body["progress_event"]["event_type"] == "tool.completed"
+    assert body["progress_event"]["family"] == "tool"
+    assert body["progress_event"]["run_id"] == f"template.install:{body['space']['space_id']}"
+    assert body["progress_event"]["space_id"] == body["space"]["space_id"]
+    assert body["progress_event"]["redaction_status"] == "metadata_only"
     serialized = json.dumps(body).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized
     assert "<script" not in serialized
     assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "password" not in serialized
+    assert "secret" not in serialized
+
+
+def test_space_tool_adapter_local_service_template_install_returns_policy_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.run_space_tool(
+        "space.template.install",
+        {
+            "template": "service",
+            "space_id": "tool-service-demo",
+            "renderer": "<script>steal()</script>",
+            "source": "raw source should not leak",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "token": "TOKEN_VALUE_DO_NOT_LEAK",
+            "password": "PASSWORD_VALUE_DO_NOT_LEAK",
+            "widgets": [{"id": "unsafe", "html": "<img src=x onerror=steal()>"}],
+        },
+    )
+    serialized = json.dumps(result).lower()
+
+    assert result["ok"] is True
+    assert result["action"] == "space.template.install"
+    assert result["template"] == "service"
+    assert result["space"]["space_id"] == "tool-service-demo"
+    assert result["space"]["name"] == "Local Service Dashboard"
+    assert [widget["id"] for widget in result["installed_widgets"]] == [
+        "service-api-chat",
+        "service-browser-panel",
+        "service-health",
+        "service-settings-review",
+    ]
+    assert result["prompt_preflight"]["boundary"] == "local_service_template"
+    assert result["prompt_preflight"]["status"] == "pass"
+    assert result["prompt_preflight"]["metadata_only"] is True
+    assert result["prompt_preflight"]["raw_prompt_stored"] is False
+    assert result["autonomy_policy"]["action"] == "space.template.install.local_service"
+    assert result["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    assert result["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert result["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert result["autonomy_policy"]["metadata_only"] is True
+    assert result["progress_event"]["event_type"] == "tool.completed"
+    assert result["progress_event"]["family"] == "tool"
+    assert result["progress_event"]["run_id"] == "template.install:tool-service-demo"
+    assert result["progress_event"]["space_id"] == "tool-service-demo"
+    assert result["progress_event"]["redaction_status"] == "metadata_only"
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
     assert "token" not in serialized
     assert "password" not in serialized
     assert "secret" not in serialized

@@ -106,13 +106,15 @@ def test_allow_outbound_network_fixture_unswaps_the_wrappers(allow_outbound_netw
     under multiple roots (which produces two distinct function objects with
     the same __qualname__ but different `is` identity).
     """
-    # Inside the fixture, the symbol should NOT be the blocked wrapper.
-    assert "_hermes_blocked_create_connection" not in getattr(
-        socket.create_connection, "__qualname__", ""
-    ), "allow_outbound_network fixture did not restore the real create_connection"
-    assert "_hermes_blocked_socket_connect" not in getattr(
-        socket.socket.connect, "__qualname__", ""
-    ), "allow_outbound_network fixture did not restore the real socket.connect"
+    # Inside the fixture, the symbol should NOT be either test-mode blocked wrapper.
+    create_qname = getattr(socket.create_connection, "__qualname__", "")
+    connect_qname = getattr(socket.socket.connect, "__qualname__", "")
+    assert "blocked_create_connection" not in create_qname, (
+        "allow_outbound_network fixture did not restore the real create_connection"
+    )
+    assert "blocked_socket_connect" not in connect_qname, (
+        "allow_outbound_network fixture did not restore the real socket.connect"
+    )
 
 
 def test_block_is_active_outside_the_fixture():
@@ -122,9 +124,11 @@ def test_block_is_active_outside_the_fixture():
     Check by qname so this is robust against pytest re-importing conftest
     under multiple roots (which produces two distinct function objects with
     the same __qualname__ but different `is` identity)."""
-    assert "_hermes_blocked_create_connection" in getattr(
-        socket.create_connection, "__qualname__", ""
-    ), "default state should have the blocked wrapper installed on socket.create_connection"
-    assert "_hermes_blocked_socket_connect" in getattr(
-        socket.socket.connect, "__qualname__", ""
-    ), "default state should have the blocked wrapper installed on socket.socket.connect"
+    create_qname = getattr(socket.create_connection, "__qualname__", "")
+    connect_qname = getattr(socket.socket.connect, "__qualname__", "")
+    assert "blocked_create_connection" in create_qname, (
+        "default state should have a blocked wrapper installed on socket.create_connection"
+    )
+    assert "blocked_socket_connect" in connect_qname, (
+        "default state should have a blocked wrapper installed on socket.socket.connect"
+    )

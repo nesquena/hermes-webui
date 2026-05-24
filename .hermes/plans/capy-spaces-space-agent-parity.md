@@ -38,6 +38,9 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): add local service template policy receipts`
+  - Added RED/GREEN backend coverage proving the Local Service Dashboard template install boundary returns metadata-only prompt-preflight and `space.template.install.local_service` autonomy-policy receipts for direct, route, and tool-adapter installs while preserving redaction of renderer/html/source/API-key/token/password/secret fields.
+
 - `feat(spaces): add open navigation receipts`
   - Added RED/GREEN backend coverage proving Space Agent-style `space.spaces.open` / `openSpace` helpers now return metadata-only autonomy-policy receipts with destructive-external-action approval, required prompt-preflight status, `hint:fast` route evidence, and structured `space.open:<space_id>` progress receipts.
   - Added source-style current-space reload navigation receipts with safe `space.reload:<space_id>` progress telemetry while read/get aliases remain safe read-only responses and hostile renderer/html/source/API-auth/script/token/secret fixture values stay out of serialized responses.

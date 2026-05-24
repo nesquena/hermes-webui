@@ -40,6 +40,7 @@ def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
                 "active_space_instructions",
                 "shared_data_slot",
                 "browser_surface",
+                "local_service_template",
             ],
         },
         "model_routing": {

@@ -56,6 +56,7 @@ _PROTECTED_BOUNDARIES = [
     "active_space_instructions",
     "shared_data_slot",
     "browser_surface",
+    "local_service_template",
 ]
 
 _MODEL_HINT_ORDER = [

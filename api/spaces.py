@@ -651,6 +651,26 @@ def _browser_surface_template_action_policy_receipt(preflight_receipt: dict[str,
     )
 
 
+def _local_service_template_prompt_preflight_receipt() -> dict[str, Any]:
+    from api.capy_policy import prompt_preflight
+
+    return prompt_preflight(
+        "Install local service dashboard template with explicit approval required for network actions and browser review.",
+        boundary="local_service_template",
+    )
+
+
+def _local_service_template_action_policy_receipt(preflight_receipt: dict[str, Any]) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        "space.template.install.local_service",
+        approval_gates=["destructive_external_action"],
+        prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
+        model_route_hint="hint:reasoning",
+    )
+
+
 def _space_dir(space_id: str) -> Path:
     sid = validate_space_id(space_id)
     root = manifests_dir().resolve()
@@ -9065,6 +9085,10 @@ def install_template(template: str, *, space_id: str | None = None, record_progr
         preflight_receipt = _browser_surface_template_prompt_preflight_receipt()
         result["prompt_preflight"] = preflight_receipt
         result["autonomy_policy"] = _browser_surface_template_action_policy_receipt(preflight_receipt)
+    elif response_template == "service":
+        preflight_receipt = _local_service_template_prompt_preflight_receipt()
+        result["prompt_preflight"] = preflight_receipt
+        result["autonomy_policy"] = _local_service_template_action_policy_receipt(preflight_receipt)
     return result
 
 
