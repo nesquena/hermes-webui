@@ -70,20 +70,6 @@ _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
 
 
-def _terminal_shell_preexec_fn() -> None:
-    """Ask Linux to terminate the PTY shell when the WebUI parent dies."""
-    try:
-        import ctypes
-
-        libc = ctypes.CDLL(None)
-        libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG=1, SIGTERM=15
-    except Exception:
-        # Non-Linux platforms or restricted runtimes should still be able to
-        # open an embedded terminal; they just do not get the Linux pdeathsig
-        # hardening.
-        pass
-
-
 def _decode_terminal_output(decoder, data: bytes) -> str:
     """Decode PTY bytes without stripping terminal control sequences."""
     return decoder.decode(data)
@@ -149,7 +135,12 @@ def _set_size(term: TerminalSession, rows: int, cols: int) -> None:
 
 
 def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int = 80, restart: bool = False) -> TerminalSession:
-    """Start or return the embedded terminal for a WebUI session."""
+    """Start or return the embedded terminal for a WebUI session.
+
+    The PTY shell intentionally avoids ``preexec_fn``/PDEATHSIG: ThreadingHTTPServer
+    request threads are short-lived, and tying the shell to that lifecycle can
+    terminate it immediately after the start request returns.
+    """
     sid = str(session_id or "").strip()
     if not sid:
         raise ValueError("session_id is required")
@@ -185,6 +176,8 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             }
         )
         shell = _shell_path()
+        # Keep the shell in its own process group for explicit cleanup via
+        # close_terminal()/close_all_terminals(); do not use PDEATHSIG here.
         proc = subprocess.Popen(
             _shell_argv(shell),
             cwd=cwd,
@@ -193,7 +186,7 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             stdout=slave_fd,
             stderr=slave_fd,
             close_fds=True,
-            preexec_fn=_terminal_shell_preexec_fn,
+            # Required so cleanup can signal the whole interactive shell tree.
             start_new_session=True,
         )
         os.close(slave_fd)
@@ -237,6 +230,7 @@ def resize_terminal(session_id: str, rows: int, cols: int) -> None:
 
 
 def close_terminal(session_id: str) -> bool:
+    """Close one embedded terminal with process-group termination."""
     sid = str(session_id or "")
     with _LOCK:
         term = _TERMINALS.pop(sid, None)

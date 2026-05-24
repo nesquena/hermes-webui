@@ -27,7 +27,7 @@ class _FakeProc:
         return 0
 
 
-def test_terminal_shell_uses_parent_death_signal_preexec(monkeypatch, tmp_path):
+def test_terminal_shell_starts_new_session_without_preexec(monkeypatch, tmp_path):
     captured = {}
     proc = _FakeProc()
 
@@ -44,7 +44,7 @@ def test_terminal_shell_uses_parent_death_signal_preexec(monkeypatch, tmp_path):
 
     try:
         assert term.proc is proc
-        assert captured["kwargs"]["preexec_fn"] is terminal._terminal_shell_preexec_fn
+        assert "preexec_fn" not in captured["kwargs"]
         assert captured["kwargs"]["start_new_session"] is True
         assert captured["kwargs"]["stdin"] == captured["kwargs"]["stdout"] == captured["kwargs"]["stderr"]
     finally:
@@ -99,5 +99,5 @@ def test_terminal_module_registers_graceful_shutdown_reaper():
     src = terminal.Path(terminal.__file__).read_text()
 
     assert "atexit.register(close_all_terminals)" in src
-    assert "preexec_fn=_terminal_shell_preexec_fn" in src
-    assert "libc.prctl(1, signal.SIGTERM)" in src
+    assert "preexec_fn=" not in src
+    assert "PR_SET_PDEATHSIG" not in src
