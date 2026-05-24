@@ -589,11 +589,12 @@ async function loadSession(sid){
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
-        // If this 404 was for the saved active-session ID (not a click-into request),
-        // wipe the stale localStorage value and rethrow so boot can fall through to
-        // the empty-state instead of sticking to a broken "Session not available" view.
-        if(!currentSid&&localStorage.getItem('hermes-webui-session')===sid){
+        // Option A (#2798): for boot-time stale URL/localStorage session IDs,
+        // always clear persisted session, strip /session/{id} from URL, and
+        // rethrow so boot can deterministically fall through to empty-state.
+        if(!currentSid){
           localStorage.removeItem('hermes-webui-session');
+          try{ history.replaceState(null,'','/'); }catch(_){ }
           if (_loadingSessionId === sid) _loadingSessionId = null;
           throw e;
         }
