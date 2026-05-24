@@ -114,19 +114,31 @@ class TestReconnectAccumulatorPreservation:
     """
 
     def test_wire_sse_does_not_reset_accumulators(self):
-        """Regression guard: _wireSSE must not contain a literal
-        accumulator-reset statement.  Preserves pre-reconnect content so
-        the user sees the full response across a drop+reconnect."""
+        """Regression guard: the _wireSSE preamble (before any event
+        listeners are attached) must not contain a literal accumulator-
+        reset statement.  Preserves pre-reconnect content so the user
+        sees the full response across a drop+reconnect.
+
+        Turn-boundary resets inside event listeners (tool,
+        interim_assistant) are intentional (#2565) and not covered by
+        this guard — they prevent reasoning from accumulating across
+        multi-turn agent sessions."""
         src = read('static/messages.js')
         m = re.search(r'function _wireSSE\(source\)\{.*?\n  \}', src, re.DOTALL)
         assert m, "_wireSSE not found"
         fn = m.group(0)
-        assert "assistantText=''" not in fn and 'assistantText = ""' not in fn, (
-            "_wireSSE must NOT reset assistantText — the server does not replay "
-            "events on reconnect, so the reset would wipe valid pre-drop content"
+        # Check only the preamble before the first addEventListener — this is
+        # the reconnect path where resets would cause data loss.
+        first_listener = fn.find("source.addEventListener(")
+        assert first_listener > 0, "no addEventListener in _wireSSE"
+        preamble = fn[:first_listener]
+        assert "assistantText=''" not in preamble and 'assistantText = ""' not in preamble, (
+            "_wireSSE preamble must NOT reset assistantText — the server does "
+            "not replay events on reconnect, so the reset would wipe valid "
+            "pre-drop content"
         )
-        assert "reasoningText=''" not in fn and 'reasoningText = ""' not in fn, (
-            "_wireSSE must NOT reset reasoningText on reconnect"
+        assert "reasoningText=''" not in preamble and 'reasoningText = ""' not in preamble, (
+            "_wireSSE preamble must NOT reset reasoningText on reconnect"
         )
 
     def test_closure_initialises_accumulators_empty(self):

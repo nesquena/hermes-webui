@@ -132,6 +132,13 @@ def test_status_tries_default_loopback_targets_until_dashboard_found(monkeypatch
     assert attempts == [("127.0.0.1", 9119, 0.5, "http"), ("localhost", 9119, 0.5, "http")]
 
 
+def test_dashboard_browser_url_preserves_ipv6_host_brackets():
+    from api.dashboard_probe import normalize_dashboard_browser_url
+
+    assert normalize_dashboard_browser_url("http://[::1]:9119") == "http://[::1]:9119"
+    assert normalize_dashboard_browser_url("https://[2001:db8::1]") == "https://[2001:db8::1]"
+
+
 def test_status_honors_never_and_external_browser_link_without_probe(monkeypatch):
     from api import dashboard_probe
 

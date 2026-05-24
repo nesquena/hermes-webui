@@ -4,7 +4,8 @@ Regression coverage for shared compression-anchor visibility helpers (#2028).
 
 from pathlib import Path
 
-from api.compression_anchor import visible_messages_for_anchor
+from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
+from api.streaming import _compression_summary_from_messages, _is_context_compression_marker
 
 
 def test_legacy_duplicate_anchor_helpers_are_removed():
@@ -57,3 +58,42 @@ def test_visible_messages_for_anchor_keeps_manual_user_messages_simple():
         [user_tool_metadata, user_attachment, assistant_tool_metadata],
         auto_compression=True,
     ) == [user_tool_metadata, user_attachment, assistant_tool_metadata]
+
+
+def test_context_compression_marker_detection_is_prefix_and_role_scoped():
+    real_marker = {
+        "role": "assistant",
+        "content": "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted.",
+    }
+    preserved_tasks_marker = {
+        "role": "user",
+        "content": "[Your active task list was preserved across context compression] - [ ] follow up",
+    }
+    tool_noise = {
+        "role": "tool",
+        "content": "{\"description\": \"Troubleshoot frequent context compression indicators\"}",
+    }
+    user_discussion = {
+        "role": "user",
+        "content": "Why do I see context compression after every message?",
+    }
+
+    assert is_context_compression_marker(real_marker)
+    assert is_context_compression_marker(preserved_tasks_marker)
+    assert _is_context_compression_marker(real_marker)
+    assert not is_context_compression_marker(tool_noise)
+    assert not is_context_compression_marker(user_discussion)
+
+
+def test_compression_summary_ignores_tool_output_that_mentions_compression():
+    marker = {
+        "role": "assistant",
+        "content": "[CONTEXT COMPACTION — REFERENCE ONLY] Keep this handoff as reference.",
+    }
+    skill_tool_output = {
+        "role": "tool",
+        "content": "{\"name\": \"hermes-webui-operations\", \"content\": \"Troubleshooting frequent context compression indicators...\"}",
+    }
+
+    assert _compression_summary_from_messages([marker, skill_tool_output]) == marker["content"]
+    assert _compression_summary_from_messages([skill_tool_output]) is None

@@ -35,7 +35,7 @@ from api.config import (
     load_settings,
 )
 from api.helpers import redact_session_data, _redact_text
-from api.compression_anchor import visible_messages_for_anchor
+from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
@@ -1209,17 +1209,23 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
     return 'minimax' in text or 'minimaxi.com' in text
 
 
-def _aux_title_configured() -> bool:
-    """Return True when any auxiliary title_generation config field is meaningfully set."""
+def _get_aux_title_config() -> dict:
+    """Return title_generation auxiliary config, or an empty dict on errors."""
     try:
         from agent.auxiliary_client import _get_auxiliary_task_config
         tg = _get_auxiliary_task_config('title_generation')
-        provider = tg.get('provider', '') or ''
-        model = tg.get('model', '') or ''
-        base_url = tg.get('base_url', '') or ''
-        return bool(model or base_url or (provider and provider.lower() != 'auto'))
+        return tg if isinstance(tg, dict) else {}
     except Exception:
-        return False
+        return {}
+
+
+def _aux_title_configured() -> bool:
+    """Return True when any auxiliary title_generation config field is meaningfully set."""
+    tg = _get_aux_title_config()
+    provider = tg.get('provider', '') or ''
+    model = tg.get('model', '') or ''
+    base_url = tg.get('base_url', '') or ''
+    return bool(model or base_url or (provider and provider.lower() != 'auto'))
 
 def _aux_title_timeout(default: float = 15.0) -> float:
     """Return the configured timeout (seconds) for auxiliary title generation.
@@ -1229,8 +1235,7 @@ def _aux_title_timeout(default: float = 15.0) -> float:
     so mis-configurations are visible in server output.
     """
     try:
-        from agent.auxiliary_client import _get_auxiliary_task_config
-        tg = _get_auxiliary_task_config('title_generation')
+        tg = _get_aux_title_config()
         raw = tg.get('timeout')
         if raw is None:
             return default
@@ -1363,6 +1368,16 @@ def generate_title_raw_via_aux(
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
     qa, prompts = _title_prompts(user_text, assistant_text)
+    configured = _get_aux_title_config()
+    caller_supplied_route = bool(provider or model or base_url)
+    provider = provider or configured.get('provider', '') or ''
+    if str(provider).strip().lower() == 'auto':
+        provider = ''
+    model = model or configured.get('model', '') or ''
+    base_url = base_url or configured.get('base_url', '') or ''
+    api_key = ''
+    if not caller_supplied_route:
+        api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
     reasoning_extra = {"reasoning": {"enabled": False}}
     if _is_minimax_route(provider, model, base_url):
@@ -1384,6 +1399,7 @@ def generate_title_raw_via_aux(
                         provider=provider or None,
                         model=model or None,
                         base_url=base_url or None,
+                        api_key=api_key or None,
                         messages=messages,
                         max_tokens=max_tokens,
                         temperature=0.2,
@@ -2042,6 +2058,14 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
         # Skip persisted error markers — never send them to the LLM as prior context.
         if msg.get('_error'):
             continue
+        # Skip _partial markers with no visible content. Partial messages that
+        # carry actual text (e.g. "Python is a high-level…") are kept so the
+        # model can continue from the cut-off point (#893). But empty partials
+        # (reasoning-only or tool-only cancellations where thinking markup was
+        # stripped) have nothing for the model to continue from and cause
+        # API 400 errors on strict providers (empty assistant content).
+        if msg.get('_partial') and not str(msg.get('content') or '').strip():
+            continue
         role = msg.get('role')
         if role == 'tool':
             tid = msg.get('tool_call_id') or ''
@@ -2075,6 +2099,10 @@ def _api_safe_message_positions(messages):
             continue
         if _is_reasoning_only_assistant_message(msg):
             continue
+        if msg.get('_error'):
+            continue
+        if msg.get('_partial') and not str(msg.get('content') or '').strip():
+            continue
         role = msg.get('role')
         if role == 'tool':
             tid = msg.get('tool_call_id') or ''
@@ -2084,6 +2112,26 @@ def _api_safe_message_positions(messages):
         if sanitized.get('role'):
             out.append((idx, sanitized))
     return out
+
+
+def _deduplicate_context_messages(messages):
+    """Remove duplicate messages from context by identity, keeping first occurrence.
+
+    Prevents the agent from seeing the same message twice in conversation_history
+    when result_messages contain duplicates that weren't caught by display-merge.
+    """
+    if not messages:
+        return messages
+    seen = set()
+    deduped = []
+    for msg in messages:
+        key = _message_identity(msg)
+        if key is not None and key in seen:
+            continue
+        if key is not None:
+            seen.add(key)
+        deduped.append(msg)
+    return deduped
 
 
 def _restore_reasoning_metadata(previous_messages, updated_messages):
@@ -2170,6 +2218,22 @@ def _message_identity(msg):
         # render two adjacent user bubbles ("Ok" and "[Workspace...]\nOk").
         text = _strip_workspace_prefix(text, include_legacy=True)
     if not text and not msg.get('tool_call_id') and not msg.get('tool_calls'):
+        # Empty assistant messages (e.g. _partial markers with no visible
+        # content) previously returned None, making them invisible to the
+        # merge dedup in _merge_display_messages_after_agent_result. This
+        # caused exponential accumulation: each turn's merge copied ALL
+        # prior _partial messages because they had no identity to track.
+        # Now, _partial messages with empty text get a stable identity
+        # keyed on their role + _partial flag + reasoning/tool metadata,
+        # so the merge can dedup identical empty partials.
+        if msg.get('_partial'):
+            reasoning_key = " ".join(str(msg.get('reasoning') or '').split())[:200]
+            return (
+                role,
+                '',  # empty text
+                '',  # no tool_call_id
+                '__partial__' + reasoning_key,
+            )
         return None
     return (
         role,
@@ -2188,16 +2252,54 @@ def _messages_have_prefix(messages, prefix):
     return True
 
 
-def _is_context_compression_marker(msg):
+def _message_replay_key(msg):
+    """Return a stable comparison key for replay/overlap de-duplication."""
+    identity = _message_identity(msg)
+    if identity is not None:
+        return identity
     if not isinstance(msg, dict):
-        return False
-    text = _message_text(msg.get('content', '')).lower()
+        return None
     return (
-        'context compaction' in text
-        or 'context compression' in text
-        or 'context was auto-compressed' in text
-        or 'active task list was preserved across context compression' in text
+        str(msg.get('role') or ''),
+        _message_text(msg.get('content', '')),
+        str(msg.get('tool_call_id') or ''),
+        json.dumps(msg.get('tool_calls') or [], sort_keys=True, ensure_ascii=False),
     )
+
+
+def _strip_replayed_prefix(existing_messages, candidates):
+    """Drop a candidate prefix that is already the suffix of existing_messages.
+
+    Compression/continuation can replay the active tail from state.db after the
+    previous WebUI context/display already contains it. Prefix-only merge logic
+    then treats that replayed tail as a fresh delta and duplicates a whole turn.
+    Strip the largest exact suffix/prefix overlap before appending.
+    """
+    existing_messages = list(existing_messages or [])
+    candidates = list(candidates or [])
+    max_overlap = min(len(existing_messages), len(candidates))
+    for overlap in range(max_overlap, 0, -1):
+        left = [_message_replay_key(m) for m in existing_messages[-overlap:]]
+        right = [_message_replay_key(m) for m in candidates[:overlap]]
+        if left == right:
+            return candidates[overlap:]
+    return candidates
+
+
+def _dedupe_replayed_active_context(previous_context, result_messages):
+    """Keep model context append-only without re-appending a replayed tail."""
+    previous_context = list(previous_context or [])
+    result_messages = list(result_messages or [])
+    if not previous_context or not result_messages:
+        return result_messages
+    if not _messages_have_prefix(result_messages, previous_context):
+        return result_messages
+    candidates = result_messages[len(previous_context):]
+    return previous_context + _strip_replayed_prefix(previous_context, candidates)
+
+
+def _is_context_compression_marker(msg):
+    return is_context_compression_marker(msg)
 
 
 def _compact_summary_text(raw_text: str | None, limit: int = 320) -> str | None:
@@ -2425,6 +2527,30 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     only compaction marker messages plus the current user turn onward.
     """
     previous_display = list(previous_display or [])
+    # Deduplicate stale _partial messages that accumulated in previous_display.
+    # A bug in cancel_stream() could insert multiple identical _partial messages
+    # when _stripped was empty but _has_reasoning/_has_tools was True. The
+    # merge's _message_identity previously returned None for empty _partial
+    # messages, so the seen-set couldn't catch them — they doubled each turn.
+    # Scan backwards and keep only the LAST occurrence of each unique _partial
+    # identity, then reverse back to original order.
+    _partial_seen = set()
+    _deduped_rev = []
+    for m in reversed(previous_display):
+        if isinstance(m, dict) and m.get('_partial'):
+            key = _message_identity(m)
+            if key is not None:
+                if key in _partial_seen:
+                    continue
+                _partial_seen.add(key)
+        _deduped_rev.append(m)
+    _deduped = list(reversed(_deduped_rev))
+    if len(_deduped) < len(previous_display):
+        logger.debug(
+            "Deduplicated %d stale _partial messages from previous_display (was %d, now %d)",
+            len(previous_display) - len(_deduped), len(previous_display), len(_deduped),
+        )
+    previous_display = _deduped
     previous_context = list(previous_context or [])
     result_messages = list(result_messages or [])
     if not result_messages:
@@ -2432,6 +2558,8 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
 
     if _messages_have_prefix(result_messages, previous_context):
         candidates = result_messages[len(previous_context):]
+        candidates = _strip_replayed_prefix(previous_display, candidates)
+        candidates = _strip_replayed_prefix(previous_context, candidates)
     else:
         current_user_idx = _find_current_user_turn(result_messages, msg_text)
         marker_candidates = [
@@ -4152,6 +4280,10 @@ def _run_agent_streaming(
                 ),
                 msg_text,
             )
+            # Dedup before feeding to agent — merge_session_messages_append_only
+            # can produce duplicates when context_messages and state.db share
+            # messages with different timestamps.
+            _previous_context_messages = _deduplicate_context_messages(_previous_context_messages)
             _pre_compression_count = getattr(
                 getattr(agent, 'context_compressor', None),
                 'compression_count', 0,
@@ -4311,7 +4443,11 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _result_messages,
                 )
-                s.context_messages = _next_context_messages
+                _next_context_messages = _dedupe_replayed_active_context(
+                    _previous_context_messages,
+                    _next_context_messages,
+                )
+                s.context_messages = _deduplicate_context_messages(_next_context_messages)
                 s.messages = _merge_display_messages_after_agent_result(
                     _previous_messages,
                     _previous_context_messages,
@@ -4454,7 +4590,11 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _result_messages,
                                 )
-                                s.context_messages = _next_context_messages
+                                _next_context_messages = _dedupe_replayed_active_context(
+                                    _previous_context_messages,
+                                    _next_context_messages,
+                                )
+                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,
@@ -5270,7 +5410,11 @@ def _run_agent_streaming(
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages, _result_messages,
                                 )
-                                s.context_messages = _next_context_messages
+                                _next_context_messages = _dedupe_replayed_active_context(
+                                    _previous_context_messages,
+                                    _next_context_messages,
+                                )
+                                s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
                                     _previous_context_messages,

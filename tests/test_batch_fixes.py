@@ -245,7 +245,9 @@ class TestSystemTheme:
 
     def test_panels_hydrates_appearance_before_models_fetch(self):
         src = read("static/panels.js")
-        skin_idx = src.index("const skinVal=(settings.skin||'default').toLowerCase();")
+        # PR #2799 (v0.51.119): skin precedence now prefers localStorage over settings.skin
+        # so the inline-gate-resolved DOM skin survives the picker hydration.
+        skin_idx = src.index("const skinVal=(localStorage.getItem('hermes-skin')||settings.skin||'default').toLowerCase();")
         # models is now declared as let models=null before the try block
         models_idx = src.index("models=await api('/api/models');")
         assert skin_idx < models_idx, (

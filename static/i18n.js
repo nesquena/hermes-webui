@@ -402,10 +402,12 @@ const LOCALES = {
     rename_prompt: 'New name:',
     deleted: 'Deleted ',
     delete_failed: 'Delete failed: ',
-    reveal_in_finder: 'Reveal in File Manager',
-    reveal_failed: 'Failed to reveal: ',
-    copy_file_path: 'Copy file path',
-    download_folder: 'Download Folder',
+     reveal_in_finder: 'Reveal in File Manager',
+     reveal_failed: 'Failed to reveal: ',
+     copy_file_path: 'Copy file path',
+     open_in_vscode: 'Open in VS Code',
+     open_in_vscode_failed: 'Failed to open in VS Code: ',
+     download_folder: 'Download Folder',
     path_copied: 'File path copied to clipboard',
     path_copy_failed: 'Failed to copy path: ',
     session_rename: 'Rename conversation',
@@ -511,6 +513,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Load older messages while scrolling up',
 
     settings_desc_session_endless_scroll: 'When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.',
+
+    settings_label_tab_visibility: 'Sidebar tabs',
+    settings_desc_tab_visibility: 'Choose which tabs appear in the sidebar and rail. Chat and Settings are always visible.',
     open_in_browser: 'Open in browser',
     settings_dropdown_conversation: 'Conversation',
     settings_dropdown_appearance: 'Appearance',
@@ -531,6 +536,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',
     plugins_enabled: 'Enabled',
     plugins_disabled: 'Disabled',
+    plugins_active_provider: 'Active (provider)',
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',
     plugins_load_failed: 'Failed to load plugins: ',
     settings_tab_system: 'System',
     settings_title: 'Settings',
@@ -552,6 +559,8 @@ const LOCALES = {
     settings_label_language: 'Language',
     settings_label_quota_chip: 'Show provider quota chip in composer',
     settings_desc_quota_chip: 'Displays an ambient remaining-quota indicator (e.g. OpenRouter credit balance) in the composer footer. Default off. Only visible on wide displays (≥1400px) when enabled, to keep the composer uncluttered on laptop and standard desktop widths.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Show token usage',
     settings_label_sidebar_density: 'Sidebar density',
     cmd_reasoning: 'Toggle thinking visibility (show/hide), set effort level, or check current status',
@@ -1044,6 +1053,9 @@ const LOCALES = {
     clear_conversation_message: 'Clear all messages? This cannot be undone.',
     clear_failed: 'Clear failed: ',
     skills_no_match: 'No skills match.',
+    skill_enabled: 'Enabled',
+    skill_disabled: 'Disabled',
+    skill_toggle_failed: 'Failed to toggle skill: ',
     linked_files: 'Linked Files',
     skill_load_failed: 'Could not load skill: ',
     skill_file_load_failed: 'Could not load file: ',
@@ -1627,10 +1639,12 @@ const LOCALES = {
     rename_prompt: 'Nuovo nome:',
     deleted: 'Eliminato ',
     delete_failed: 'Eliminazione fallita: ',
-    reveal_in_finder: 'Mostra nel File Manager',
-    reveal_failed: 'Mostra fallito: ',
-    copy_file_path: 'Copia percorso file',
-    download_folder: 'Download Folder', // TODO: translate
+     reveal_in_finder: 'Mostra nel File Manager',
+     reveal_failed: 'Mostra fallito: ',
+     copy_file_path: 'Copia percorso file',
+     open_in_vscode: 'Apri in VS Code',
+     open_in_vscode_failed: 'Apertura in VS Code fallita: ',
+     download_folder: 'Download Folder', // TODO: translate
     path_copied: 'Percorso file copiato negli appunti',
     path_copy_failed: 'Copia percorso fallita: ',
     session_rename: 'Rinomina conversazione',
@@ -1736,6 +1750,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Carica messaggi precedenti scorrendo in alto',
 
     settings_desc_session_endless_scroll: 'Se abilitato, i messaggi precedenti si caricano automaticamente scorrendo in alto. Se disabilitato, usa il pulsante messaggi precedenti.',
+
+    settings_label_tab_visibility: 'Schede della barra laterale',
+    settings_desc_tab_visibility: 'Scegli quali schede mostrare nella barra laterale e nel rail. Chat e Impostazioni sono sempre visibili.',
     open_in_browser: 'Apri nel browser',
     settings_dropdown_conversation: 'Conversazione',
     settings_dropdown_appearance: 'Aspetto',
@@ -1755,6 +1772,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'Sistema',
     settings_title: 'Impostazioni',
@@ -1776,6 +1795,8 @@ const LOCALES = {
     settings_label_language: 'Lingua',
     settings_label_quota_chip: 'Mostra il chip della quota del provider nel compositore',
     settings_desc_quota_chip: "Mostra un indicatore di quota residua (es. saldo crediti OpenRouter) nel piè di pagina del compositore. Predefinito disattivato. Visibile solo su schermi larghi (≥1400px) quando attivato, per mantenere il compositore non affollato su laptop e desktop standard.",
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Mostra uso token',
     settings_label_sidebar_density: 'Densità sidebar',
     cmd_reasoning: 'Mostra/nascondi ragionamento, imposta livello sforzo o controlla stato attuale',
@@ -2260,6 +2281,9 @@ const LOCALES = {
     clear_conversation_message: 'Cancellare tutti i messaggi? Questa azione non può essere annullata.',
     clear_failed: 'Cancellazione fallita: ',
     skills_no_match: 'Nessuna skill corrispondente.',
+    skill_enabled: 'Abilitato',
+    skill_disabled: 'Disabilitato',
+    skill_toggle_failed: 'Errore nell\'attivare la skill: ',
     linked_files: 'File Collegati',
     skill_load_failed: 'Impossibile caricare la skill: ',
     skill_file_load_failed: 'Impossibile caricare il file: ',
@@ -2843,10 +2867,12 @@ const LOCALES = {
     rename_prompt: '新しい名前:',
     deleted: '削除しました: ',
     delete_failed: '削除失敗: ',
-    reveal_in_finder: 'ファイルマネージャーで表示',
-    reveal_failed: '表示に失敗しました: ',
-    copy_file_path: 'ファイルパスをコピー',
-    download_folder: 'Download Folder', // TODO: translate
+     reveal_in_finder: 'ファイルマネージャーで表示',
+     reveal_failed: '表示に失敗しました: ',
+     copy_file_path: 'ファイルパスをコピー',
+     open_in_vscode: 'VS Codeで開く',
+     open_in_vscode_failed: 'VS Codeで開けませんでした: ',
+     download_folder: 'Download Folder', // TODO: translate
     path_copied: 'ファイルパスをクリップボードにコピーしました',
     path_copy_failed: 'パスのコピーに失敗しました: ',
     session_rename: '会話の名前を変更',
@@ -2952,6 +2978,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: '上スクロールで古いメッセージを読み込む',
 
     settings_desc_session_endless_scroll: '有効にすると、上にスクロールしたとき古いメッセージを自動で読み込みます。無効の場合は古いメッセージボタンを使います。',
+
+    settings_label_tab_visibility: 'サイドバータブ',
+    settings_desc_tab_visibility: 'サイドバーとレールに表示するタブを選択します。チャットと設定は常に表示されます。',
     open_in_browser: 'ブラウザで開く',
     settings_dropdown_conversation: '会話',
     settings_dropdown_appearance: '外観',
@@ -2971,6 +3000,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'システム',
     settings_title: '設定',
@@ -2992,6 +3023,8 @@ const LOCALES = {
     settings_label_language: '言語',
     settings_label_quota_chip: 'コンポーザーにプロバイダーのクォータチップを表示',
     settings_desc_quota_chip: 'コンポーザーのフッターに残りクォータインジケーター（例: OpenRouter のクレジット残高）を表示します。デフォルトはオフ。有効にした場合、ラップトップや標準デスクトップの幅でコンポーザーが混雑しないよう、ワイドディスプレイ（≥1400px）でのみ表示されます。',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'トークン使用量を表示',
     settings_label_sidebar_density: 'サイドバー密度',
     cmd_reasoning: '思考表示の切り替え (表示/非表示)、努力レベル設定、現在状態の確認',
@@ -3481,6 +3514,9 @@ const LOCALES = {
     clear_conversation_message: 'すべてのメッセージをクリアしますか? この操作は取り消せません。',
     clear_failed: 'クリア失敗: ',
     skills_no_match: '一致するスキルがありません。',
+    skill_enabled: '有効',
+    skill_disabled: '無効',
+    skill_toggle_failed: 'スキルの切り替えに失敗しました: ',
     linked_files: 'リンクされたファイル',
     skill_load_failed: 'スキルを読み込めませんでした: ',
     skill_file_load_failed: 'ファイルを読み込めませんでした: ',
@@ -3985,10 +4021,12 @@ const LOCALES = {
     rename_prompt: 'Новое имя:',
     deleted: 'Удалено ',
     delete_failed: 'Не удалось удалить: ',
-    reveal_in_finder: 'Показать в файловом менеджере',
-    reveal_failed: 'Не удалось открыть: ',
-    copy_file_path: 'Копировать путь к файлу',
-    download_folder: 'Download Folder', // TODO: translate
+     reveal_in_finder: 'Показать в файловом менеджере',
+     reveal_failed: 'Не удалось открыть: ',
+     copy_file_path: 'Копировать путь к файлу',
+     open_in_vscode: 'Открыть в VS Code',
+     open_in_vscode_failed: 'Не удалось открыть в VS Code: ',
+     download_folder: 'Download Folder', // TODO: translate
     path_copied: 'Путь к файлу скопирован в буфер обмена',
     path_copy_failed: 'Не удалось скопировать путь: ',
     session_rename: 'Переименовать беседу',
@@ -4019,6 +4057,8 @@ const LOCALES = {
     settings_label_language: 'Язык',
     settings_label_quota_chip: 'Показывать чип квоты провайдера в композиторе',
     settings_desc_quota_chip: 'Отображает фоновый индикатор остатка квоты (например, баланс кредитов OpenRouter) в подвале композитора. По умолчанию отключено. Виден только на широких экранах (≥1400px) при включении, чтобы не загромождать композитор на ноутбуках и стандартных мониторах.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Показывать использование токенов',
     settings_label_sidebar_density: 'Плотность боковой панели',
     cmd_reasoning: 'Toggle thinking visibility (show/hide), set effort level, or check current status',
@@ -4453,6 +4493,9 @@ const LOCALES = {
     clear_conversation_message: 'Очистить все сообщения? Это действие нельзя отменить.',
     clear_failed: 'Не удалось очистить: ',
     skills_no_match: 'Подходящих навыков не найдено.',
+    skill_enabled: 'Включено',
+    skill_disabled: 'Отключено',
+    skill_toggle_failed: 'Не удалось переключить навык: ',
     linked_files: 'Связанные файлы',
     skill_load_failed: 'Не удалось загрузить навык: ',
     skill_file_load_failed: 'Не удалось загрузить файл: ',
@@ -4689,6 +4732,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Загружать старые сообщения при прокрутке вверх',
 
     settings_desc_session_endless_scroll: 'Если включено, старые сообщения загружаются автоматически при прокрутке вверх. Если выключено, используйте кнопку загрузки старых сообщений.',
+
+    settings_label_tab_visibility: 'Вкладки боковой панели',
+    settings_desc_tab_visibility: 'Выберите, какие вкладки отображаются на боковой панели и в рейле. Чат и настройки всегда видны.',
     open_in_browser: 'Открыть в браузере',
     settings_section_system_title: 'System',
     settings_tab_appearance: 'Appearance',
@@ -4704,6 +4750,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'System',
     status_updated: 'Updated',
@@ -5120,10 +5168,12 @@ const LOCALES = {
     rename_prompt: 'Nuevo nombre:',
     deleted: 'Eliminado ',
     delete_failed: 'Error al eliminar: ',
-    reveal_in_finder: 'Mostrar en el gestor de archivos',
-    reveal_failed: 'Error al mostrar: ',
-    copy_file_path: 'Copiar ruta del archivo',
-    download_folder: 'Download Folder', // TODO: translate
+     reveal_in_finder: 'Mostrar en el gestor de archivos',
+     reveal_failed: 'Error al mostrar: ',
+     copy_file_path: 'Copiar ruta del archivo',
+     open_in_vscode: 'Abrir en VS Code',
+     open_in_vscode_failed: 'Error al abrir en VS Code: ',
+     download_folder: 'Download Folder', // TODO: translate
     path_copied: 'Ruta del archivo copiada al portapapeles',
     path_copy_failed: 'Error al copiar la ruta: ',
     session_rename: 'Renombrar conversación',
@@ -5164,6 +5214,8 @@ const LOCALES = {
     settings_label_language: 'Idioma',
     settings_label_quota_chip: 'Mostrar el chip de cuota del proveedor en el compositor',
     settings_desc_quota_chip: 'Muestra un indicador ambiental de cuota restante (por ejemplo, saldo de crédito de OpenRouter) en el pie del compositor. Predeterminado: desactivado. Solo visible en pantallas anchas (≥1400px) cuando se activa, para mantener el compositor despejado en portátiles y monitores estándar.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Mostrar uso de tokens',
     settings_label_sidebar_density: 'Densidad de la barra lateral',
     cmd_reasoning: 'Toggle thinking visibility (show/hide), set effort level, or check current status',
@@ -5613,6 +5665,9 @@ const LOCALES = {
     clear_conversation_message: 'Clear all messages? This cannot be undone.',
     clear_failed: 'Clear failed: ',
     skills_no_match: 'No skills match.',
+    skill_enabled: 'Habilitado',
+    skill_disabled: 'Deshabilitado',
+    skill_toggle_failed: 'Error al cambiar skill: ',
     linked_files: 'Linked Files',
     skill_load_failed: 'Could not load skill: ',
     skill_file_load_failed: 'Could not load file: ',
@@ -5832,6 +5887,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Cargar mensajes antiguos al desplazarse hacia arriba',
 
     settings_desc_session_endless_scroll: 'Si está activado, los mensajes antiguos se cargan automáticamente al desplazarte hacia arriba. Si está desactivado, usa el botón de mensajes antiguos.',
+
+    settings_label_tab_visibility: 'Pestañas de la barra lateral',
+    settings_desc_tab_visibility: 'Elige qué pestañas aparecen en la barra lateral y el rail. Chat y Configuración siempre están visibles.',
     open_in_browser: 'Abrir en el navegador',
     settings_section_system_title: 'System',
     settings_tab_appearance: 'Appearance',
@@ -5847,6 +5905,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'System',
     status_updated: 'Updated',
@@ -6258,10 +6318,12 @@ const LOCALES = {
     rename_prompt: 'Neuer Name:',
     deleted: 'Gelöscht ',
     delete_failed: 'Löschen fehlgeschlagen: ',
-    reveal_in_finder: 'Im Dateimanager anzeigen',
-    reveal_failed: 'Anzeige fehlgeschlagen: ',
-    copy_file_path: 'Dateipfad kopieren',
-    download_folder: 'Download Folder', // TODO: translate
+     reveal_in_finder: 'Im Dateimanager anzeigen',
+     reveal_failed: 'Anzeige fehlgeschlagen: ',
+     copy_file_path: 'Dateipfad kopieren',
+     open_in_vscode: 'In VS Code öffnen',
+     open_in_vscode_failed: 'In VS Code öffnen fehlgeschlagen: ',
+     download_folder: 'Download Folder', // TODO: translate
     path_copied: 'Dateipfad in die Zwischenablage kopiert',
     path_copy_failed: 'Pfad konnte nicht kopiert werden: ',
     session_rename: 'Unterhaltung umbenennen',
@@ -6302,6 +6364,8 @@ const LOCALES = {
     settings_label_language: 'Sprache',
     settings_label_quota_chip: 'Anbieter-Kontingent-Chip im Editor anzeigen',
     settings_desc_quota_chip: 'Zeigt einen Hintergrund-Indikator des verbleibenden Kontingents (z. B. OpenRouter-Guthaben) in der Editor-Fußzeile an. Standardmäßig deaktiviert. Bei Aktivierung nur auf breiten Bildschirmen (≥1400px) sichtbar, damit der Editor auf Laptops und Standard-Desktops übersichtlich bleibt.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Token-Verbrauch anzeigen',
     settings_label_sidebar_density: 'Seitenleistendichte',
     cmd_reasoning: 'Toggle thinking visibility (show/hide), set effort level, or check current status',
@@ -6707,6 +6771,9 @@ const LOCALES = {
 
     settings_desc_session_endless_scroll: 'Wenn aktiviert, werden ältere Nachrichten beim Hochscrollen automatisch geladen. Wenn deaktiviert, nutzt du den Button für ältere Nachrichten.',
 
+    settings_label_tab_visibility: 'Seitenleiste-Tabs',
+    settings_desc_tab_visibility: 'Wähle, welche Tabs in der Seitenleiste und im Rail angezeigt werden. Chat und Einstellungen sind immer sichtbar.',
+
     workspace_drag_hint: 'Ziehen zum Neuordnen',
     workspace_reorder_failed: 'Neuordnen fehlgeschlagen',
     open_in_browser: 'Im Browser öffnen',
@@ -6724,6 +6791,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'System',
     status_updated: 'Updated',
@@ -6953,6 +7022,9 @@ const LOCALES = {
     clear_conversation_message: 'Alle Nachrichten werden gelöscht.',
     clear_failed: 'Löschen fehlgeschlagen.',
     skills_no_match: 'Keine passende Fähigkeit.',
+    skill_enabled: 'Aktiviert',
+    skill_disabled: 'Deaktiviert',
+    skill_toggle_failed: 'Fehler beim Umschalten der Fähigkeit: ',
     linked_files: 'Verknüpfte Dateien',
     skill_load_failed: 'Fähigkeit konnte nicht geladen werden.',
     skill_file_load_failed: 'Datei konnte nicht geladen werden.',
@@ -7387,6 +7459,8 @@ const LOCALES = {
     plugins_registered_hooks: '已注册的挂钩',
     plugins_enabled: '已启用',
     plugins_disabled: '已禁用',
+    plugins_active_provider: '激活（提供方）',
+    plugins_provider_no_hooks: '提供方插件 — 无代理可见挂钩',
     plugins_load_failed: '加载插件失败：',
     workspace_empty_no_path: '未选择工作区。请在 设置 → 工作区 中设置工作区以浏览文件。',
     workspace_empty_dir: '此工作区为空。',
@@ -7446,10 +7520,12 @@ const LOCALES = {
     rename_prompt: '新名称:',
     deleted: '已删除 ',
     delete_failed: '删除失败：',
-    reveal_in_finder: '在文件管理器中显示',
-    reveal_failed: '显示失败：',
-    copy_file_path: '\u590d\u5236\u6587\u4ef6\u8def\u5f84',
-    download_folder: 'Download Folder', // TODO: translate
+     reveal_in_finder: '在文件管理器中显示',
+     reveal_failed: '显示失败：',
+     copy_file_path: '\u590d\u5236\u6587\u4ef6\u8def\u5f84',
+     open_in_vscode: '在VS Code中打开',
+     open_in_vscode_failed: '在VS Code中打开失败：',
+     download_folder: 'Download Folder', // TODO: translate
     path_copied: '\u6587\u4ef6\u8def\u5f84\u5df2\u590d\u5236\u5230\u526a\u8d34\u677f',
     path_copy_failed: '\u590d\u5236\u8def\u5f84\u5931\u8d25\uff1a',
     session_rename: '\u91cd\u547d\u540d\u5bf9\u8bdd',
@@ -7490,6 +7566,8 @@ const LOCALES = {
     settings_label_language: '语言',
     settings_label_quota_chip: '在编辑器中显示供应商配额标签',
     settings_desc_quota_chip: '在编辑器底部显示剩余配额指示器（如 OpenRouter 信用余额）。默认关闭。启用时仅在宽屏（≥1400px）显示，以保持笔记本和标准桌面屏幕上编辑器的整洁。',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: '显示 token 用量',
     settings_label_sidebar_density: '侧边栏密度',
     cmd_reasoning: '切换思维可见性（显示/隐藏）、设置工作强度或查看当前状态',
@@ -7883,7 +7961,7 @@ const LOCALES = {
     cron_status_off: '关闭',
     cron_status_paused: '暂停',
     cron_status_error: '错误',
-    cron_status_active: '运行中',
+    cron_status_active: '已启用',
     cron_status_running: '执行中\u2026',
     cron_status_needs_attention: '需要处理',
     cron_attention_desc: '这个重复定时任务没有下次运行时间。调度器可能没能计算出下一次运行。',
@@ -7928,6 +8006,9 @@ const LOCALES = {
     clear_conversation_message: '要清空所有消息吗？此操作无法撤销。',
     clear_failed: '清空失败：',
     skills_no_match: '没有匹配的技能。',
+    skill_enabled: '已启用',
+    skill_disabled: '已禁用',
+    skill_toggle_failed: '切换技能失败：',
     linked_files: '关联文件',
     skill_load_failed: '加载技能失败：',
     skill_file_load_failed: '加载文件失败：',
@@ -8148,6 +8229,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: '向上滚动时加载更早的消息',
 
     settings_desc_session_endless_scroll: '启用后，向上滚动时会自动加载更早的消息。禁用时请使用加载更早消息按钮。',
+
+    settings_label_tab_visibility: '侧边栏标签',
+    settings_desc_tab_visibility: '选择在侧边栏和导航栏中显示哪些标签。聊天和设置始终可见。',
     open_in_browser: '在浏览器中打开',
     settings_section_system_title: '系统',
     settings_tab_appearance: '外观',
@@ -8507,10 +8591,12 @@ const LOCALES = {
     rename_prompt: '新名稱:',
     deleted: '\u5df2\u522a\u9664 ',
     delete_failed: '\u522a\u9664\u5931\u6557\uff1a',
-    reveal_in_finder: '\u5728\u6a94\u6848\u7ba1\u7406\u54e1\u4e2d\u986f\u793a',
-    reveal_failed: '\u986f\u793a\u5931\u6557\uff1a',
-    copy_file_path: '\u8907\u88fd\u6a94\u6848\u8def\u5f91',
-    download_folder: 'Download Folder', // TODO: translate
+     reveal_in_finder: '\u5728\u6a94\u6848\u7ba1\u7406\u54e1\u4e2d\u986f\u793a',
+     reveal_failed: '\u986f\u793a\u5931\u6557\uff1a',
+     copy_file_path: '\u8907\u88fd\u6a94\u6848\u8def\u5f91',
+     open_in_vscode: '在VS Code中開啟',
+     open_in_vscode_failed: '在VS Code中開啟失敗：',
+     download_folder: 'Download Folder', // TODO: translate
     path_copied: '\u6a94\u6848\u8def\u5f91\u5df2\u8907\u88fd\u5230\u526a\u8cbc\u7c3f',
     path_copy_failed: '\u8907\u88fd\u8def\u5f91\u5931\u6557\uff1a',
     session_rename: '\u91cd\u65b0\u547d\u540d\u5c0d\u8a71',
@@ -8614,6 +8700,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: '向上捲動時載入較早訊息',
 
     settings_desc_session_endless_scroll: '啟用後，向上捲動時會自動載入較早訊息。停用時請使用載入較早訊息按鈕。',
+
+    settings_label_tab_visibility: '側邊欄標籤',
+    settings_desc_tab_visibility: '選擇在側邊欄和導航列中顯示哪些標籤。聊天和設定始終可見。',
     open_in_browser: '在瀏覽器中開啓',
     settings_dropdown_conversation: '對話',
     settings_dropdown_appearance: '外觀',
@@ -8633,6 +8722,8 @@ const LOCALES = {
     plugins_registered_hooks: '已註冊的鉤子',
     plugins_enabled: '已啟用',
     plugins_disabled: '已停用',
+    plugins_active_provider: '啟用中（提供者）',
+    plugins_provider_no_hooks: '提供者外掛 — 無代理可見鉤子',
     plugins_load_failed: '載入外掛失敗：',
     settings_tab_system: '系統',
     settings_title: '\u8a2d\u5b9a',
@@ -8654,6 +8745,8 @@ const LOCALES = {
     settings_label_language: '\u8a9e\u8a00',
     settings_label_quota_chip: '在編輯器中顯示供應商配額標籤',
     settings_desc_quota_chip: '在編輯器底部顯示剩餘配額指示器（如 OpenRouter 點數餘額）。預設關閉。啟用時僅在寬螢幕（≥1400px）顯示，以保持筆記型電腦和標準桌面螢幕上編輯器的整潔。',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: '\u986f\u793a token \u7528\u91cf',
     settings_label_sidebar_density: '側邊欄密度',
     cmd_reasoning: '切換思考區塊可見性（顯示/隱藏）或設定努力等級',
@@ -9235,7 +9328,7 @@ const LOCALES = {
     cron_schedule_placeholder: '\u6392\u7a0b',
     cron_schedule_required: '\u9700\u8981\u6392\u7a0b',
     cron_schedule_required_example: '\u9700\u8981\u6392\u7a0b\uff08\u4f8b\u5982 "0 9 * * *" \u6216 "every 1h"\uff09',
-    cron_status_active: '\u6d3b\u8e8d\u4e2d',
+    cron_status_active: '已啟用',
     cron_status_running: '\u57f7\u884c\u4e2d\u2026',
     cron_status_error: '\u932f\u8aa4',
     cron_status_off: '\u672a\u555f\u7528',
@@ -9812,10 +9905,12 @@ const LOCALES = {
     delete_confirm: (name) => `Excluir ${name}?`,
     deleted: 'Excluído ',
     delete_failed: 'Falha ao excluir: ',
-    reveal_in_finder: 'Mostrar no gerenciador de arquivos',
-    reveal_failed: 'Falha ao mostrar: ',
-    copy_file_path: 'Copiar caminho do arquivo',
-    download_folder: 'Download Folder', // TODO: translate
+     reveal_in_finder: 'Mostrar no gerenciador de arquivos',
+     reveal_failed: 'Falha ao mostrar: ',
+     copy_file_path: 'Copiar caminho do arquivo',
+     open_in_vscode: 'Abrir no VS Code',
+     open_in_vscode_failed: 'Falha ao abrir no VS Code: ',
+     download_folder: 'Download Folder', // TODO: translate
     path_copied: 'Caminho do arquivo copiado para a área de transferência',
     path_copy_failed: 'Falha ao copiar caminho: ',
     session_rename: 'Renomear conversa',
@@ -9916,6 +10011,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Carregar mensagens antigas ao rolar para cima',
 
     settings_desc_session_endless_scroll: 'Quando ativado, mensagens antigas carregam automaticamente ao rolar para cima. Quando desativado, use o botão de mensagens antigas.',
+
+    settings_label_tab_visibility: 'Abas da barra lateral',
+    settings_desc_tab_visibility: 'Escolha quais abas aparecem na barra lateral e no rail. Chat e Configurações estão sempre visíveis.',
     open_in_browser: 'Abrir no navegador',
     settings_dropdown_conversation: 'Conversa',
     settings_dropdown_appearance: 'Aparência',
@@ -9935,6 +10033,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'Sistema',
     settings_title: 'Configurações',
@@ -9956,6 +10056,8 @@ const LOCALES = {
     settings_label_language: 'Idioma',
     settings_label_quota_chip: 'Mostrar o chip de cota do provedor no compositor',
     settings_desc_quota_chip: 'Exibe um indicador ambiente de cota restante (por exemplo, saldo de crédito do OpenRouter) no rodapé do compositor. Desativado por padrão. Visível apenas em telas largas (≥1400px) quando ativado, para manter o compositor livre em laptops e monitores padrão.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Mostrar uso de tokens',
     settings_label_sidebar_density: 'Densidade da sidebar',
     cmd_reasoning: 'Alternar visibilidade do pensamento (mostrar/ocultar)',
@@ -10396,6 +10498,9 @@ const LOCALES = {
     clear_conversation_message: 'Limpar todas mensagens? Isso não pode ser desfeito.',
     clear_failed: 'Falha ao limpar: ',
     skills_no_match: 'Nenhuma skill corresponde.',
+    skill_enabled: 'Habilitado',
+    skill_disabled: 'Desabilitado',
+    skill_toggle_failed: 'Falha ao alternar skill: ',
     linked_files: 'Arquivos vinculados',
     skill_load_failed: 'Não foi possível carregar skill: ',
     skill_file_load_failed: 'Não foi possível carregar arquivo: ',
@@ -10926,10 +11031,12 @@ const LOCALES = {
     rename_prompt: '새 이름:',
     deleted: '삭제됨: ',
     delete_failed: '삭제 실패: ',
-    reveal_in_finder: '파일 관리자에서 열기',
-    reveal_failed: '표시 실패: ',
-    copy_file_path: '파일 경로 복사',
-    download_folder: 'Download Folder', // TODO: translate
+     reveal_in_finder: '파일 관리자에서 열기',
+     reveal_failed: '표시 실패: ',
+     copy_file_path: '파일 경로 복사',
+     open_in_vscode: 'VS Code에서 열기',
+     open_in_vscode_failed: 'VS Code에서 열기 실패: ',
+     download_folder: 'Download Folder', // TODO: translate
     path_copied: '파일 경로가 클립보드에 복사되었습니다',
     path_copy_failed: '경로 복사 실패: ',
     session_rename: '대화 이름 변경',
@@ -11035,6 +11142,9 @@ const LOCALES = {
     settings_label_session_endless_scroll: '위로 스크롤할 때 이전 메시지 불러오기',
 
     settings_desc_session_endless_scroll: '활성화하면 위로 스크롤할 때 이전 메시지를 자동으로 불러옵니다. 비활성화하면 이전 메시지 버튼을 사용합니다.',
+
+    settings_label_tab_visibility: '사이드바 탭',
+    settings_desc_tab_visibility: '사이드바와 레일에 표시할 탭을 선택하세요. 채팅과 설정은 항상 표시됩니다.',
     open_in_browser: '브라우저에서 열기',
     settings_dropdown_conversation: '대화',
     settings_dropdown_appearance: '외형',
@@ -11054,6 +11164,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: '시스템',
     settings_title: '설정',
@@ -11075,6 +11187,8 @@ const LOCALES = {
     settings_label_language: '언어',
     settings_label_quota_chip: '작성기에 공급자 할당량 칩 표시',
     settings_desc_quota_chip: '작성기 푸터에 남은 할당량 표시기(예: OpenRouter 크레딧 잔액)를 표시합니다. 기본값은 끔. 활성화 시 노트북과 표준 데스크톱에서 작성기가 복잡해지지 않도록 와이드 디스플레이(≥1400px)에서만 표시됩니다.',
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: '토큰 사용량 표시',
     settings_label_sidebar_density: '사이드바 밀도',
     cmd_reasoning: 'Toggle thinking visibility (show/hide), set effort level, or check current status',
@@ -11516,6 +11630,9 @@ const LOCALES = {
     clear_conversation_message: 'Clear all messages? This cannot be undone.',
     clear_failed: 'Clear failed: ',
     skills_no_match: 'No skills match.',
+    skill_enabled: '활성화됨',
+    skill_disabled: '비활성화됨',
+    skill_toggle_failed: '스킬 전환 실패: ',
     linked_files: 'Linked Files',
     skill_load_failed: 'Could not load skill: ',
     skill_file_load_failed: 'Could not load file: ',
@@ -12169,6 +12286,9 @@ const LOCALES = {
     settings_desc_session_jump_buttons: 'Affichez les boutons flottants de début et de fin lors de la lecture de longs historiques de session.',
     settings_label_session_endless_scroll: 'Charger les anciens messages en faisant défiler vers le haut',
     settings_desc_session_endless_scroll: 'Lorsqu\'ils sont activés, les anciens messages se chargent automatiquement lorsque vous faites défiler vers le haut. Lorsqu\'il est désactivé, utilisez le bouton des messages plus anciens.',
+
+    settings_label_tab_visibility: 'Onglets de la barre latérale',
+    settings_desc_tab_visibility: 'Choisissez quels onglets apparaissent dans la barre latérale et le rail. Chat et Paramètres sont toujours visibles.',
     open_in_browser: 'Ouvrir dans le navigateur',
     settings_dropdown_conversation: 'Conversation',
     settings_dropdown_appearance: 'Apparence',
@@ -12188,6 +12308,8 @@ const LOCALES = {
     plugins_registered_hooks: 'Registered hooks',  // TODO: translate
     plugins_enabled: 'Enabled',  // TODO: translate
     plugins_disabled: 'Disabled',  // TODO: translate
+    plugins_active_provider: 'Active (provider)',  // TODO: translate
+    plugins_provider_no_hooks: 'Provider plugin — no agent-visibility hooks',  // TODO: translate
     plugins_load_failed: 'Failed to load plugins: ',  // TODO: translate
     settings_tab_system: 'Système',
     settings_title: 'Paramètres',
@@ -12209,6 +12331,8 @@ const LOCALES = {
     settings_label_language: 'Langue',
     settings_label_quota_chip: 'Afficher la pastille de quota du fournisseur dans le compositeur',
     settings_desc_quota_chip: "Affiche un indicateur ambiant de quota restant (par ex. solde de crédit OpenRouter) dans le pied du compositeur. Désactivé par défaut. Visible uniquement sur les écrans larges (≥1400px) lorsqu'activé, pour garder le compositeur dégagé sur les ordinateurs portables et les bureaux standard.",
+    settings_label_hide_suggestions: 'Hide new-chat suggestions',
+    settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Afficher l\'utilisation du jeton',
     settings_label_sidebar_density: 'Densité de la barre latérale',
     cmd_reasoning: 'Basculez la visibilité de la réflexion (afficher/masquer), définir le niveau d\'effort ou vérifier l\'état actuel',
@@ -12654,6 +12778,9 @@ const LOCALES = {
     clear_conversation_message: 'Effacer tous les messages ? Cela ne peut pas être annulé.',
     clear_failed: 'Échec de la suppression :',
     skills_no_match: 'Aucune compétence ne correspond.',
+    skill_enabled: 'Activé',
+    skill_disabled: 'Désactivé',
+    skill_toggle_failed: 'Échec du basculement de compétence: ',
     linked_files: 'Fichiers liés',
     skill_load_failed: 'Impossible de charger la compétence :',
     skill_file_load_failed: 'Impossible de charger le fichier :',
@@ -12817,6 +12944,101 @@ const LOCALES = {
     checkpoint_restored: 'Point de contrôle restauré',
     checkpoint_diff_title: 'Changements au point de contrôle',
     checkpoint_diff_no_changes: 'Aucune différence trouvée entre ce point de contrôle et l\'espace de travail actuel.',
+
+    // === Missing keys (FR translation completion) ===
+    bg_complete: 'Tâche en arrière-plan terminée',
+    bg_failed: 'Échec de la tâche en arrière-plan : ',
+    bg_label: 'Résultat en arrière-plan :',
+    bg_no_answer: '(aucune réponse)',
+    bg_running: 'Exécution en arrière-plan…',
+    branch_failed: 'Échec du fork : ',
+    branch_forked: 'Conversation forkée dans une nouvelle session',
+    btw_asking: 'Question annexe en cours…',
+    btw_done: 'Question annexe répondue',
+    btw_failed: 'Échec de la question annexe : ',
+    btw_label: 'Question annexe — hors historique',
+    btw_no_answer: 'Aucune réponse reçue.',
+    cancel_unavailable: 'Annulation indisponible.',
+    cmd_background: 'Exécuter une commande en arrière-plan',
+    cmd_background_usage: '/background <prompt> — exécute en parallèle sans bloquer',
+    cmd_branch: 'Forker cette conversation dans une nouvelle session',
+    cmd_branch_usage: '/branch [nom] — forke la conversation (avec un nom optionnel)',
+    cmd_btw: 'Poser une question annexe (éphémère)',
+    cmd_btw_usage: '/btw <question> — pose une question annexe en utilisant le contexte de la session',
+    cmd_retry: 'Renvoyer le dernier message',
+    cmd_status: 'Afficher les infos de la session',
+    cmd_stop: 'Arrêter la réponse en cours',
+    cmd_title: 'Obtenir ou définir le titre de la session',
+    cmd_undo: 'Supprimer le dernier échange',
+    cmd_voice: 'Activer/désactiver le micro',
+    cmd_voice_use_mic: 'Cliquez sur le bouton micro dans le composeur.',
+    cmd_webui_only_session: 'Cette commande n\'est pas disponible pour les sessions importées en CLI.',
+    folder_add_as_space_btn: 'Ajouter comme espace',
+    folder_add_as_space_msg: 'Ajouter ce dossier comme nouvel espace dans votre liste ?',
+    folder_add_as_space_title: 'Ajouter comme espace ?',
+    fork_from_here: 'Forker à partir d\'ici',
+    forked_from: 'Forké depuis',
+    kanban_archive_board: 'Archiver le tableau courant…',
+    kanban_archive_board_confirm: 'Archiver le tableau « {name} » ? Les tâches restent sur disque et le tableau peut être restauré depuis kanban/boards/_archived/.',
+    kanban_back_to_board: 'Retour au tableau',
+    kanban_block: 'Bloquer',
+    kanban_board_archived: 'Tableau archivé',
+    kanban_board_color: 'Couleur (optionnel)',
+    kanban_board_description: 'Description (optionnel)',
+    kanban_board_icon: 'Icône (emoji, optionnel)',
+    kanban_board_name: 'Nom',
+    kanban_board_name_required: 'Le nom est requis',
+    kanban_board_slug: 'Slug (minuscules, tirets)',
+    kanban_board_slug_required: 'Le slug est requis',
+    kanban_bulk_action: 'Action groupée',
+    kanban_card_archive: 'archiver',
+    kanban_card_complete: 'terminer',
+    kanban_lanes_by_profile: 'Colonnes par profil',
+    kanban_new_board: 'Nouveau tableau…',
+    kanban_nudge_dispatcher: 'Aperçu du dispatcher',
+    kanban_only_mine: 'Seulement les miennes',
+    kanban_rename_board: 'Renommer le tableau courant…',
+    kanban_stats: 'Statistiques',
+    kanban_unassigned: 'non assigné',
+    kanban_unblock: 'Débloquer',
+    kanban_worker_log: 'Journal du worker',
+    no_active_task: 'Aucune tâche active à arrêter.',
+    retrieval_context_label: 'Contexte indexé',
+    retrieval_context_preview: 'Les messages plus anciens sont stockés et récupérables via les outils de contexte',
+    retry_failed: 'Échec de la nouvelle tentative : ',
+    slash_skill_badge: 'Skill',
+    slash_skill_desc: 'Invoquer cette skill',
+    status_agent_running: 'Agent en cours d\'exécution',
+    status_heading: 'État de la session',
+    status_load_failed: 'Échec du chargement de l\'état : ',
+    status_messages: 'Messages',
+    status_model: 'Modèle',
+    status_no: 'Non',
+    status_personality: 'Personnalité',
+    status_provider: 'Fournisseur',
+    status_session_id: 'ID de session',
+    status_title: 'Titre',
+    status_workspace: 'Espace de travail',
+    status_yes: 'Oui',
+    stream_stopped: 'Réponse arrêtée.',
+    subagent_children: 'Sous-sessions de sous-agents',
+    title_change_hint: 'Utilisez `/title <nouveau nom>` pour renommer.',
+    title_current: 'Titre actuel',
+    title_set: 'Titre défini sur',
+    undid_messages_suffix: 'message(s).',
+    undid_n_messages: 'Supprimé',
+    undo_exchange: 'Annuler le dernier échange',
+    undo_failed: 'Échec de l\'annulation : ',
+    usage_default_model: 'par défaut',
+    usage_estimated_cost: 'Coût estimé',
+    usage_heading: 'Consommation de tokens',
+    usage_input_tokens: 'Tokens d\'entrée',
+    usage_load_failed: 'Échec du chargement de la consommation : ',
+    usage_output_tokens: 'Tokens de sortie',
+    usage_settings_tip: 'Note : les estimations de coût sont approximatives.',
+    usage_total: 'Total de tokens',
+    usage_unknown: 'inconnu',
+    workspace_auto_create_folder: 'Créer le dossier s\'il n\'existe pas',
   }
 };
 

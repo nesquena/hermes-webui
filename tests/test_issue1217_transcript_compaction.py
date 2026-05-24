@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from api.streaming import (
     _assistant_reply_added_after_current_turn,
     _context_messages_for_new_turn,
+    _dedupe_replayed_active_context,
     _merge_display_messages_after_agent_result,
     _new_turn_context_from_messages,
     _sanitize_messages_for_api,
@@ -225,6 +226,60 @@ def test_append_only_agent_result_preserves_normal_delta_behavior():
     )
 
     assert merged == result_messages
+
+
+def test_replayed_active_tail_after_compression_is_not_duplicated():
+    previous_display = [
+        {"role": "assistant", "content": "old visible transcript"},
+        {"role": "user", "content": "choose agent"},
+        {"role": "assistant", "content": "checking agents"},
+        {"role": "tool", "content": "agent list"},
+        {"role": "assistant", "content": "agent answer"},
+    ]
+    previous_context = [
+        {"role": "assistant", "content": "[Session Arc Summary] compacted history"},
+        {"role": "user", "content": "choose agent"},
+        {"role": "assistant", "content": "checking agents"},
+        {"role": "tool", "content": "agent list"},
+        {"role": "assistant", "content": "agent answer"},
+    ]
+    result_messages = previous_context + [
+        # The new compressed state.db segment can replay the already-visible
+        # active tail before adding the next turn.
+        {"role": "user", "content": "choose agent"},
+        {"role": "assistant", "content": "checking agents"},
+        {"role": "tool", "content": "agent list"},
+        {"role": "assistant", "content": "agent answer"},
+        {"role": "user", "content": "choose B"},
+        {"role": "assistant", "content": "using B"},
+    ]
+
+    merged = _merge_display_messages_after_agent_result(
+        previous_display,
+        previous_context,
+        result_messages,
+        "choose B",
+    )
+    next_context = _dedupe_replayed_active_context(previous_context, result_messages)
+
+    assert [m["content"] for m in merged] == [
+        "old visible transcript",
+        "choose agent",
+        "checking agents",
+        "agent list",
+        "agent answer",
+        "choose B",
+        "using B",
+    ]
+    assert [m["content"] for m in next_context] == [
+        "[Session Arc Summary] compacted history",
+        "choose agent",
+        "checking agents",
+        "agent list",
+        "agent answer",
+        "choose B",
+        "using B",
+    ]
 
 
 def test_repeated_user_text_after_compaction_is_not_dropped():

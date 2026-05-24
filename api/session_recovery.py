@@ -619,12 +619,13 @@ def recover_all_sessions_on_startup(
             "If you weren't expecting this, check the session list for missing "
             "messages — see #1558.", restored, scanned,
         )
-        if rebuild_index:
-            try:
-                from api.models import _write_session_index
+    if rebuild_index:
+        try:
+            from api.models import SESSION_INDEX_FILE, _write_session_index
+            if restored or not SESSION_INDEX_FILE.exists():
                 _write_session_index(updates=None)
-            except Exception as exc:
-                logger.warning("recover_all_sessions_on_startup: index rebuild failed: %s", exc)
+        except Exception as exc:
+            logger.warning("recover_all_sessions_on_startup: index rebuild failed: %s", exc)
     return {
         "scanned": scanned,
         "restored": restored,

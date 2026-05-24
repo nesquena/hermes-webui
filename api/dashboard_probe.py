@@ -88,7 +88,10 @@ def normalize_dashboard_browser_url(raw_url: str | None) -> str:
         port = parsed.port
     except ValueError as exc:
         raise ValueError("invalid dashboard URL port") from exc
-    netloc = parsed.hostname.lower()
+    host = parsed.hostname.lower()
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
     if port is not None:
         if not (1 <= port <= 65535):
             raise ValueError("invalid dashboard URL port")

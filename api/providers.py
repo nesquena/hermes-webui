@@ -1984,8 +1984,10 @@ def get_providers() -> dict[str, Any]:
                 "display_name": cp_name,
                 "has_key": cp_has_key,
                 "configurable": False,  # custom providers managed via config.yaml
+                "is_custom": True,
                 "key_source": "config_yaml" if cp_has_key else "none",
                 "models": cp_models,
+                "models_total": len(cp_models),
             })
 
     # Determine active provider
@@ -1993,6 +1995,18 @@ def get_providers() -> dict[str, Any]:
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
         active_provider = model_cfg.get("provider")
+
+    # Sort providers: active first, then custom:*, then has_key, then rest.
+    def _provider_sort_key(p):
+        pid = p.get("id") or ""
+        if pid == active_provider:
+            return (0, pid)
+        if pid.startswith("custom:"):
+            return (1, pid)
+        if p.get("has_key"):
+            return (2, pid)
+        return (3, pid)
+    providers.sort(key=_provider_sort_key)
 
     return {
         "providers": providers,

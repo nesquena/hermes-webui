@@ -1,11 +1,13 @@
 """RuntimeAdapter seam for WebUI-owned run execution.
 
-This is the #1925 Slice 2 seam only.  The default WebUI chat path remains the
+This is the #1925 RuntimeAdapter seam.  The default WebUI chat path remains the
 legacy direct route; enabling ``HERMES_WEBUI_RUNTIME_ADAPTER=legacy-journal``
 routes through this protocol-translator facade over the same legacy execution
-path plus the Slice 1 run journal.  This module intentionally does not own
-AIAgent instances, cancellation flags, approval callbacks, clarify callbacks, or
-new long-lived queues.
+path plus the Slice 1 run journal.  Slice 4 adds a default-off runner-local
+selection point for tests and future runner backends, but live chat routes still
+stay on the legacy path until a separate route-wiring slice is reviewed.  This
+module intentionally does not own AIAgent instances, cancellation flags,
+approval callbacks, clarify callbacks, or new long-lived queues.
 """
 from __future__ import annotations
 
@@ -17,7 +19,12 @@ from typing import Any, Callable, Iterable, Literal, Protocol
 _RUNTIME_ADAPTER_ENV = "HERMES_WEBUI_RUNTIME_ADAPTER"
 _RUNTIME_ADAPTER_DIRECT = "legacy-direct"
 _RUNTIME_ADAPTER_JOURNAL = "legacy-journal"
-_VALID_RUNTIME_ADAPTER_MODES = {_RUNTIME_ADAPTER_DIRECT, _RUNTIME_ADAPTER_JOURNAL}
+_RUNTIME_ADAPTER_RUNNER_LOCAL = "runner-local"
+_VALID_RUNTIME_ADAPTER_MODES = {
+    _RUNTIME_ADAPTER_DIRECT,
+    _RUNTIME_ADAPTER_JOURNAL,
+    _RUNTIME_ADAPTER_RUNNER_LOCAL,
+}
 
 
 @dataclass(frozen=True)
@@ -104,6 +111,36 @@ def runtime_adapter_mode(environ: dict[str, str] | None = None) -> str:
 
 def runtime_adapter_enabled(environ: dict[str, str] | None = None) -> bool:
     return runtime_adapter_mode(environ) == _RUNTIME_ADAPTER_JOURNAL
+
+
+def runtime_adapter_runner_enabled(environ: dict[str, str] | None = None) -> bool:
+    return runtime_adapter_mode(environ) == _RUNTIME_ADAPTER_RUNNER_LOCAL
+
+
+def build_runtime_adapter(
+    *,
+    environ: dict[str, str] | None = None,
+    legacy_adapter_factory: Callable[[], RuntimeAdapter] | None = None,
+    runner_client_factory: Callable[[], Any] | None = None,
+) -> RuntimeAdapter | None:
+    """Build the configured RuntimeAdapter without changing route behavior.
+
+    ``None`` means the safe default ``legacy-direct`` path should keep using the
+    existing direct route.  ``legacy-journal`` is opt-in and delegates to the
+    supplied legacy factory.  ``runner-local`` is also opt-in and only constructs
+    a ``RunnerRuntimeAdapter`` around an injected client; this function does not
+    create process-global runner state or wire live chat to the runner backend.
+    """
+    mode = runtime_adapter_mode(environ)
+    if mode == _RUNTIME_ADAPTER_DIRECT:
+        return None
+    if mode == _RUNTIME_ADAPTER_JOURNAL:
+        if legacy_adapter_factory is None:
+            raise NotImplementedError("legacy-journal mode requires a legacy adapter factory")
+        return legacy_adapter_factory()
+    if runner_client_factory is None:
+        raise NotImplementedError("runner-local mode requires a runner client factory")
+    return RunnerRuntimeAdapter(client=runner_client_factory())
 
 
 def _cursor_to_after_seq(cursor: str | None) -> int | None:

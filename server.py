@@ -289,6 +289,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:
         self._handle_write(handle_patch)
 
+    def do_OPTIONS(self) -> None:
+        """Handle CORS preflight requests."""
+        self._req_t0 = time.time()
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
+
     def do_DELETE(self) -> None:
         self._handle_write(handle_delete)
 

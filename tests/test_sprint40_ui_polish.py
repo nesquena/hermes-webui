@@ -219,12 +219,12 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         # Slice from that point to cover the relevant block
         block = PANELS_JS[idx:idx + 1000]
 
-        # newSession(false) must be called first
-        self.assertIn('await newSession(false)', block,
-                      "sessionInProgress branch must call await newSession(false)")
+        # newSession(false, ...) must be called first
+        self.assertIn('await newSession(false', block,
+                      "sessionInProgress branch must call await newSession(false, ...)")
 
-        # The fix: syncTopbar() must be called after newSession(false)
-        pos_new_session = block.find('await newSession(false)')
+        # The fix: syncTopbar() must be called after newSession(false, ...)
+        pos_new_session = block.find('await newSession(false')
         pos_sync_topbar = block.find('syncTopbar()')
         self.assertGreater(pos_sync_topbar, -1,
                            "syncTopbar() must be called in the sessionInProgress branch")
@@ -232,27 +232,25 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
                            "syncTopbar() must be called AFTER newSession(false)")
 
     def test_profile_default_workspace_applied_to_new_session(self):
-        """After newSession(false) the code must assign S._profileDefaultWorkspace
-        to S.session.workspace so the session is correctly tagged."""
+        """newSession(false) should apply the pending profile workspace itself."""
         idx = PANELS_JS.find('if (sessionInProgress)')
         self.assertGreater(idx, -1)
         block = PANELS_JS[idx:idx + 1000]
 
-        # The fix block must set S.session.workspace from S._profileDefaultWorkspace
-        self.assertIn('S.session.workspace = S._profileDefaultWorkspace', block,
-                      "S.session.workspace must be set from S._profileDefaultWorkspace "
-                      "in the sessionInProgress branch after newSession(false)")
+        self.assertIn('await newSession(false', block)
+        self.assertNotIn('/api/session/update', block,
+                         "sessionInProgress should not post a duplicate workspace update "
+                         "after newSession(false)")
 
     def test_api_session_update_called_for_new_session_workspace(self):
-        """The fix must call /api/session/update to persist the workspace on the server."""
+        """The profile switch path should avoid duplicate workspace persistence."""
         idx = PANELS_JS.find('if (sessionInProgress)')
         self.assertGreater(idx, -1)
         block = PANELS_JS[idx:idx + 1000]
 
-        # Must patch the session on the backend too
-        self.assertIn('/api/session/update', block,
-                      "The sessionInProgress branch must call /api/session/update "
-                      "to persist the new workspace after newSession(false)")
+        self.assertNotIn('/api/session/update', block,
+                         "newSession(false) receives S._profileSwitchWorkspace, so "
+                         "a second /api/session/update is unnecessary")
 
     def test_sync_topbar_before_render_session_list(self):
         """syncTopbar() should be called before renderSessionList()

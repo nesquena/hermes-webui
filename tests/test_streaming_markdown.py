@@ -450,6 +450,21 @@ class TestDoneEventSmd:
             "the possibly-stale _scrollPinned flag."
         )
 
+    def test_done_handler_prefers_message_tool_metadata_for_settled_render(self):
+        """If final messages already contain tool metadata, renderMessages()
+        should derive anchored settled cards from those messages.
+
+        Falling back to session-level tool_calls unconditionally can hide cards
+        after pagination/windowing because those anchors may not line up with
+        the active message array.
+        """
+        fn = self.get_fn()
+        assert fn, "'done' handler not found"
+        done_before_render = fn[:fn.index("renderMessages({preserveScroll:true})")]
+        assert "const hasMessageToolMetadata=S.messages.some" in done_before_render
+        assert "!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length" in done_before_render
+        assert "S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map" in done_before_render
+
 
 # ── 7. apperror event: smd parser ends cleanly ───────────────────────────────
 

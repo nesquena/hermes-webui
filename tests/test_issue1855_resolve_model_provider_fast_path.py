@@ -61,13 +61,12 @@ class TestFastPathInvocation:
         )
         assert result == ("gpt-5.5", "openai-codex", False)
 
-    def test_fast_path_with_slash_qualified_model_skips_catalog(self):
-        """Slash-qualified IDs (openrouter/...) still hit the fast path.
+    def test_fast_path_with_openrouter_slash_qualified_model_skips_catalog(self):
+        """OpenRouter slash-qualified IDs still hit the fast path.
 
-        The fast path only excludes @provider:model strings, not slash-
-        qualified ones — those are valid model IDs that the picker emits
-        for OpenRouter and custom-provider routing, and a stored
-        model_provider is the authoritative routing decision.
+        Slash-qualified IDs are valid picker output for OpenRouter and a stored
+        model_provider is the authoritative routing decision. This remains fast
+        for explicit OpenRouter selections.
         """
         from api.routes import _resolve_compatible_session_model_state
 
@@ -79,6 +78,33 @@ class TestFastPathInvocation:
 
         assert mock_catalog.call_count == 0
         assert result == ("anthropic/claude-opus-4.7", "openrouter", False)
+
+    def test_codex_with_stale_openai_slash_id_uses_catalog_repair(self):
+        """Codex must repair stale OpenRouter-shaped OpenAI IDs.
+
+        Browser/localStorage state can submit ``openai/gpt-...`` while the
+        session/provider is ``openai-codex``. If the fast path preserves that
+        pair, runtime resolution routes through OpenRouter instead of Codex.
+        The Codex + ``openai/...`` shape must therefore use the slow-path repair
+        and normalize back to the active Codex default.
+        """
+        from api.routes import _resolve_compatible_session_model_state
+
+        with patch("api.routes.get_available_models") as mock_catalog:
+            mock_catalog.return_value = {
+                "active_provider": "openai-codex",
+                "default_model": "gpt-5.5",
+                "groups": [
+                    {"provider_id": "openai-codex", "models": [{"id": "gpt-5.5"}]}
+                ],
+            }
+            result = _resolve_compatible_session_model_state(
+                "openai/gpt-5.4-mini",
+                "openai-codex",
+            )
+
+        assert mock_catalog.call_count == 1
+        assert result == ("gpt-5.5", "openai-codex", True)
 
     def test_fast_path_normalizes_provider_default_alias(self):
         """`'default'` is treated as None by _clean_session_model_provider.
