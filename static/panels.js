@@ -2388,8 +2388,7 @@ async function loadKanbanTask(taskId){
   if (!taskId) return;
   try {
     const data = await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + _kanbanBoardQuery());
-    const logEndpoint = '/api/kanban/tasks/' + encodeURIComponent(taskId) + '/log' + _kanbanBoardQuery();
-    try { data.log = await api(logEndpoint + '?tail=65536'); } catch(e) { data.log = {}; }
+    try { data.log = await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + '/log' + _kanbanBoardQuery({tail: 65536})); } catch(e) { data.log = {}; }
     _kanbanCurrentTaskId = taskId;
     const task = data.task || {};
     const title = _kanbanTaskTitle(task);
