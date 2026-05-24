@@ -53,8 +53,29 @@ def _get_state_db(profile: str=None):
         # silently fall back to HERMES_HOME or the caller's "write to
         # the named profile" contract is broken (the original #2762
         # symptom: writes leaking into the wrong profile's state.db).
+        #
+        # Defense-in-depth (per #2827 maintainer review): validate the
+        # name shape BEFORE handing it to ``_resolve_profile_home_for_name``.
+        # The resolver itself rarely raises — for an invalid-but-non-
+        # malicious name (e.g. one that fails ``_PROFILE_ID_RE``) it
+        # quietly returns ``_DEFAULT_HERMES_HOME``, which is the exact
+        # leak we're trying to prevent on the explicit-profile path.
+        # Validating up-front turns that quiet leak into an explicit
+        # "refuse + log + return None" so the contract is "write to
+        # the EXACT named profile, or write nowhere."
         try:
-            from api.profiles import _resolve_profile_home_for_name
+            from api.profiles import (
+                _resolve_profile_home_for_name,
+                _PROFILE_ID_RE,
+                _is_root_profile,
+            )
+            if not (_is_root_profile(profile) or _PROFILE_ID_RE.fullmatch(profile)):
+                logger.warning(
+                    "state_sync: refusing invalid profile name %r — skipping "
+                    "write rather than leaking to the default state.db (#2762).",
+                    profile,
+                )
+                return None
             hermes_home = Path(_resolve_profile_home_for_name(profile)).expanduser().resolve()
         except Exception:
             logger.warning(

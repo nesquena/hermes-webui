@@ -214,7 +214,71 @@ def test_unknown_explicit_profile_returns_none_not_falls_back(two_profile_homes)
     hiyuki_row = _read_session(two_profile_homes['hiyuki'] / 'state.db', 'unknown-profile-probe')
     maiko_row = _read_session(two_profile_homes['maiko'] / 'state.db', 'unknown-profile-probe')
 
-    assert hiyuki_row is None, \
+    assert hiyuki_row is None, (
         "unknown explicit profile leaked write into hiyuki's state.db — #2762 regression"
-    assert maiko_row is None, \
+    )
+    assert maiko_row is None, (
         "unknown explicit profile somehow ended up in maiko's state.db"
+    )
+
+
+@pytest.mark.parametrize("bad_name", [
+    "../etc",       # path traversal attempt
+    "Foo Bar",      # space — invalid chars
+    "FOO",          # uppercase — invalid per _PROFILE_ID_RE
+    "-leading-dash",  # leading dash — invalid per regex (must start [a-z0-9])
+    "_underscore",  # leading underscore — invalid per regex
+    "a" * 100,      # too long (> 64 chars)
+    "",             # empty string is handled by _is_root_profile, separate case
+])
+def test_invalid_profile_name_refused_not_falls_back(two_profile_homes, bad_name):
+    """Per PR #2827 maintainer review: an invalid-but-non-malicious
+    profile name on the explicit-profile path must be REFUSED, not
+    quietly routed to the default state.db.
+
+    Before this defense, ``_resolve_profile_home_for_name`` would return
+    ``_DEFAULT_HERMES_HOME`` for any name failing ``_PROFILE_ID_RE``
+    without raising — which is the exact #2762 leak symptom with a
+    different trigger. The new regex check up-front turns that quiet
+    leak into an explicit "refuse + log + return None" so the
+    explicit-path contract is "write to the EXACT named profile, or
+    write nowhere."
+
+    The empty string is intentionally in the parametrize set because
+    we want to confirm it's refused — ``_is_root_profile('')`` returns
+    False (per ``api/profiles.py:216-217`` it short-circuits on falsy
+    input), so an empty explicit profile fails both the
+    ``_is_root_profile`` check and the regex, and the contract refuses
+    the write. That's the expected behavior — an empty explicit name
+    is itself a bug at the caller, not "I want the default."
+    """
+    try:
+        import hermes_state  # noqa: F401
+    except ImportError:
+        pytest.skip("hermes_state package not available in this test env")
+
+    from api.state_sync import sync_session_usage
+
+    sync_session_usage(
+        session_id=f'invalid-name-probe-{abs(hash(bad_name))}',
+        input_tokens=99,
+        output_tokens=99,
+        model='probe',
+        title='probe',
+        message_count=1,
+        profile=bad_name,
+    )
+
+    sid = f'invalid-name-probe-{abs(hash(bad_name))}'
+    hiyuki_row = _read_session(two_profile_homes['hiyuki'] / 'state.db', sid)
+    maiko_row = _read_session(two_profile_homes['maiko'] / 'state.db', sid)
+
+    # All invalid names (including empty string) MUST be refused —
+    # no row should appear in either profile's state.db.
+    assert hiyuki_row is None, (
+        f"invalid profile name {bad_name!r} leaked write into hiyuki's "
+        "state.db — defense missed; #2762 regression"
+    )
+    assert maiko_row is None, (
+        f"invalid profile name {bad_name!r} somehow ended up in maiko's state.db"
+    )
