@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Malformed HTTP request logging now falls back to `"-"` for missing method or
+  path fields instead of raising an `AttributeError` traceback while handling
+  the 400 response.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added

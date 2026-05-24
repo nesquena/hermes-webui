@@ -232,8 +232,8 @@ class Handler(BaseHTTPRequestHandler):
         duration_ms = round((time.time() - getattr(self, '_req_t0', time.time())) * 1000, 1)
         record = _json.dumps({
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-            'method': self.command or '-',
-            'path': self.path or '-',
+            'method': getattr(self, 'command', None) or '-',
+            'path': getattr(self, 'path', None) or '-',
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
         })
