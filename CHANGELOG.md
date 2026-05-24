@@ -10,6 +10,7 @@
 ### Fixed
 
 - Avoid sending the current user prompt twice to the gateway API server when gateway-backed chat runs with eager session saving enabled.
+- Document gateway-backed chat session semantics and keep session-continuity headers gated behind configured API-key auth.
 
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 

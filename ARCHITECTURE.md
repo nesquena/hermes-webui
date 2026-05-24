@@ -131,6 +131,21 @@ Environment variables controlling behavior:
                                    back to API_SERVER_KEY when unset
     HERMES_HOME                    Base directory for Hermes state (~/.hermes by default)
 
+Gateway-backed chat session semantics:
+
+- This mode delegates model/tool execution to the Hermes Gateway/API Server, but
+  WebUI still owns the browser display transcript and session JSON.
+- A new WebUI session is not the same live transcript as a Telegram/Discord/etc.
+  chat. It is closer to starting a fresh messaging transcript (`/new`) on the
+  gateway runtime, with durable memory, tools, and configured recall available
+  through the gateway path.
+- WebUI sends `X-Hermes-Session-Id` and `X-Hermes-Session-Key` only when a
+  gateway API key is configured, because Hermes API Server treats session
+  continuation and stable memory scoping as authenticated features.
+- Sharing or attaching to an existing live messaging thread is intentionally not
+  implied by this opt-in mode; that would need explicit UX, locking/takeover,
+  and safety semantics.
+
 Test isolation environment variables (set by conftest.py):
 
     HERMES_WEBUI_TEST_PORT=...                         Optional pinned test port

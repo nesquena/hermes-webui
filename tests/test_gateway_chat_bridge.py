@@ -31,6 +31,35 @@ def test_gateway_chat_mode_env_vars_are_documented():
     assert "HERMES_WEBUI_GATEWAY_API_KEY" in ARCHITECTURE
 
 
+def test_gateway_api_key_prefers_webui_specific_env(monkeypatch):
+    from api.routes import _webui_gateway_api_key
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "webui-key")
+    monkeypatch.setenv("API_SERVER_KEY", "shared-key")
+
+    assert _webui_gateway_api_key() == "webui-key"
+
+
+def test_gateway_api_key_falls_back_to_api_server_key(monkeypatch):
+    from api.routes import _webui_gateway_api_key
+
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.setenv("API_SERVER_KEY", "shared-key")
+
+    assert _webui_gateway_api_key() == "shared-key"
+
+
+def test_gateway_session_headers_are_auth_gated_in_bridge_source():
+    header_block = (
+        'api_key = _webui_gateway_api_key()\n'
+        '        if api_key:\n'
+        '            headers["Authorization"] = f"Bearer {api_key}"\n'
+        '            headers["X-Hermes-Session-Id"] = session_id\n'
+        '            headers["X-Hermes-Session-Key"] = f"webui:{session_id}"'
+    )
+    assert header_block in ROUTES
+
+
 def test_gateway_message_builder_dedupes_eager_saved_current_prompt():
     from api.routes import _gateway_messages_for_webui_session
 
