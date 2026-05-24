@@ -59,3 +59,9 @@ graphify-out/
 .graphify_uncached.txt
 
 .venv/
+
+# Local Windows helper scripts and logs (never committed)
+push_to_github.bat
+sync_upstream.bat
+webui_server.log
+test_webui.log
