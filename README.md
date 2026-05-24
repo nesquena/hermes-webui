@@ -137,7 +137,8 @@ A community-maintained native Windows setup is documented at [@markwang2658/herm
 - **Memory:** community-measured ~330 MB native vs ~1080 MB with WSL2+Docker (varies by configuration).
 - **What works:** chat, workspace browser, session management, all themes.
 - **Known limitations:** some POSIX-style file paths surface in the workspace browser; bash-assuming agent tools may not work natively.
-- **WSL2 relationship:** `bootstrap.py` currently refuses to run on native Windows, but it isn't needed for the day-to-day loop. For first-time native Windows setup, install Python 3.11+ on Windows, create a venv (`python -m venv venv`) and `pip install -r requirements.txt` from the hermes-agent root in PowerShell, then run `start.ps1` — it auto-discovers `venv\Scripts\python.exe`. A venv created *inside* WSL2 won't work for this path: WSL2 produces a Linux venv (`venv/bin/python`) that native Windows Python can't invoke. WSL2 is still useful if you want the full `bootstrap.py` flow + Linux runtime, but it's a parallel setup, not a prerequisite for `start.ps1`.
+- **Native Windows setup:** install Python 3.11+, then from the hermes-agent root in PowerShell: `python -m venv venv` → `pip install -r requirements.txt` → `pwsh .\start.ps1` (it auto-discovers `venv\Scripts\python.exe`).
+- **WSL2 relationship:** not a prerequisite — a WSL2-built venv (`venv/bin/python`, ELF) isn't invokable by native Windows Python, so use the native setup above. WSL2 stays useful as a parallel install if you want the full `bootstrap.py` + Linux runtime.
 
 If provider setup is still incomplete after install, the onboarding wizard will point you to finish it with `hermes model` instead of trying to replicate the full CLI setup in-browser.
 For a step-by-step walkthrough of the wizard, provider choices, local model server Base URLs, and safe re-runs, see [`docs/onboarding.md`](docs/onboarding.md).
