@@ -193,7 +193,7 @@ class TestProfileSessionListFlip:
     def test_profile_refresh_captures_before_render_and_plays_after_rows_exist(self):
         capture = self.JS.index("const flipBefore=animateRefresh?_captureSessionListFlipPositions():null;")
         clear = self.JS.index("list.innerHTML='';", capture)
-        row_render = self.JS.index("body.appendChild(_renderOneSession", clear)
+        row_render = self.JS.index("body.appendChild(rowEl);", clear)
         play = self.JS.index("_playSessionListFlipAnimation(flipBefore);", row_render)
 
         assert capture < clear < row_render < play

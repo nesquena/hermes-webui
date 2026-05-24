@@ -5,7 +5,6 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 
 import html as _html
 import copy
-import hashlib
 import io
 import gzip
 import json
@@ -39,38 +38,6 @@ from api.session_events import (
 )
 
 logger = logging.getLogger(__name__)
-
-_SHELL_ASSET_VERSION_FILES = (
-    "style.css",
-    "boot.js",
-    "ui.js",
-    "messages.js",
-    "sessions.js",
-    "panels.js",
-    "commands.js",
-    "icons.js",
-    "i18n.js",
-    "workspace.js",
-    "terminal.js",
-    "onboarding.js",
-    "sw.js",
-)
-
-
-def _static_asset_version_token(base_version: str) -> str:
-    """Return a cache-bust token that changes when local shell assets change."""
-    static_root = (Path(__file__).parent.parent / "static").resolve()
-    parts = []
-    for rel in _SHELL_ASSET_VERSION_FILES:
-        try:
-            st = (static_root / rel).stat()
-        except OSError:
-            continue
-        parts.append(f"{rel}:{st.st_size}:{st.st_mtime_ns}")
-    if not parts:
-        return base_version
-    digest = hashlib.blake2s("|".join(parts).encode("utf-8"), digest_size=6).hexdigest()
-    return f"{base_version}-{digest}"
 
 # Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
 # connections often end this way when a browser tab sleeps, a phone switches
@@ -3802,7 +3769,6 @@ def handle_get(handler, parsed) -> bool:
             from urllib.parse import quote
             from api.updates import WEBUI_VERSION
             version_token = quote(WEBUI_VERSION, safe="")
-            asset_version_token = quote(_static_asset_version_token(WEBUI_VERSION), safe="")
             from api.extensions import inject_extension_tags
 
             csrf_token = ""
@@ -3819,7 +3785,6 @@ def handle_get(handler, parsed) -> bool:
             html = (
                 _INDEX_HTML_PATH.read_text(encoding="utf-8")
                 .replace("__WEBUI_VERSION__", version_token)
-                .replace("__HERMES_ASSET_VERSION__", asset_version_token)
                 .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
                 .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
             )
@@ -3880,11 +3845,8 @@ def handle_get(handler, parsed) -> bool:
             from urllib.parse import quote
             from api.updates import WEBUI_VERSION
             version_token = quote(WEBUI_VERSION, safe="")
-            asset_version_token = quote(_static_asset_version_token(WEBUI_VERSION), safe="")
             text = sw_path.read_text(encoding="utf-8").replace(
                 "__WEBUI_VERSION__", version_token
-            ).replace(
-                "__HERMES_ASSET_VERSION__", asset_version_token
             )
             data = text.encode("utf-8")
             handler.send_response(200)

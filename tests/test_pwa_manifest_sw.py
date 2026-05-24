@@ -126,21 +126,6 @@ class TestServiceWorker:
             "shell assets must not be cache-first; stale JS can survive hard refresh"
         )
 
-    def test_shell_asset_urls_include_local_asset_token(self):
-        """Local frontend edits need a second cache-bust token.
-
-        WEBUI_VERSION is fixed for a running process, so an existing browser tab
-        can keep an immutable JS response for the same ?v= URL after a local
-        hotfix. The asset token is replaced from static-file mtimes by routes.py.
-        """
-        index_src = INDEX.read_text(encoding="utf-8")
-        sw_src = SW.read_text(encoding="utf-8")
-        assert "__HERMES_ASSET_VERSION__" in index_src
-        assert "__HERMES_ASSET_VERSION__" in sw_src
-        assert "static/panels.js?v=__WEBUI_VERSION__&av=__HERMES_ASSET_VERSION__" in index_src
-        assert "'./static/panels.js' + VQ" in sw_src
-        assert "const VQ = '?v=__WEBUI_VERSION__&av=__HERMES_ASSET_VERSION__';" in sw_src
-
     def test_sw_never_caches_api_responses(self):
         """Defensive: the SW must not cache responses from /api/* paths.
         Currently enforced by early-return before the shell-asset cache block."""
@@ -184,10 +169,6 @@ class TestPWARoutes:
         assert "WEBUI_VERSION" in block, (
             "sw.js route must import and use WEBUI_VERSION for cache busting"
         )
-        assert "__HERMES_ASSET_VERSION__" in block, (
-            "sw.js route must replace the local static asset cache-bust token"
-        )
-        assert "_static_asset_version_token(WEBUI_VERSION)" in block
 
     def test_sw_route_url_encodes_cache_version(self):
         src = ROUTES.read_text(encoding="utf-8")
@@ -202,7 +183,7 @@ class TestPWARoutes:
     def test_sw_route_sets_service_worker_allowed(self):
         src = ROUTES.read_text(encoding="utf-8")
         idx = src.find('"/sw.js"')
-        block = src[idx:idx + 1400]
+        block = src[idx:idx + 1000]
         assert "Service-Worker-Allowed" in block, (
             "sw.js route must set Service-Worker-Allowed header so the SW can control "
             "the expected scope"
@@ -367,15 +348,11 @@ class TestIndexHtmlIntegration:
         if idx == -1:
             idx = src.find('parsed.path.startswith("/session/")')
         assert idx != -1, "routes.py must handle /, /index.html, and /session/<id>"
-        block = src[idx:idx + 1400]
+        block = src[idx:idx + 800]
         assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
             "index route must URL-encode the cache-busting version token before "
             "injecting it into script src attributes and service worker registration"
         )
-        assert "__HERMES_ASSET_VERSION__" in block, (
-            "index route must replace the local static asset cache-bust token"
-        )
-        assert "_static_asset_version_token(WEBUI_VERSION)" in block
 
     def test_index_sw_registration_uses_relative_path(self):
         """Regression: service worker registration MUST stay relative (no leading slash).
