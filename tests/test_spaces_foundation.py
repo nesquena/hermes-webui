@@ -277,6 +277,7 @@ def test_repair_events_return_metadata_only_preflight_and_policy_receipts(monkey
         (widget_repair, "space.widget.repair.queue"),
         (module_repair, "space.module.repair.queue"),
     ):
+        assert result["prompt_preview"] == "[REDACTED]"
         assert result["prompt_preflight"]["boundary"] == "space_repair_prompt"
         assert result["prompt_preflight"]["status"] == "pass"
         assert result["prompt_preflight"]["metadata_only"] is True
@@ -285,6 +286,70 @@ def test_repair_events_return_metadata_only_preflight_and_policy_receipts(monkey
         assert result["autonomy_policy"]["prompt_preflight_status"] == "pass"
         assert result["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
         assert result["autonomy_policy"]["metadata_only"] is True
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "html" not in serialized
+    assert "source" not in serialized
+    assert "repair the safe metadata-only layout" not in serialized
+    assert "repair the safe metadata-only widget" not in serialized
+    assert "repair the safe metadata-only module" not in serialized
+
+
+
+def test_repair_events_without_prompt_return_required_preflight_and_policy_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "repair-required-policy-lab", "name": "Repair Required Policy Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "broken-widget", "kind": "status", "title": "Broken Widget"})
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "repair-required-policy-module",
+            "name": "Repair Required Policy Module",
+            "description": "Metadata-only module repair target",
+            "scope": "space",
+            "source": "const token = 'SECRET_VALUE_DO_NOT_LEAK'",
+            "renderer": "<script>bad()</script>",
+        }
+    )
+
+    space_repair = spaces.queue_space_repair_event(
+        created["space_id"],
+        {"renderer": "<script>bad()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        session_id="session SECRET_VALUE_DO_NOT_LEAK",
+    )
+    widget_repair = spaces.queue_recovery_widget_repair_event(
+        created["space_id"],
+        "broken-widget",
+        {"source": "SECRET_VALUE_DO_NOT_LEAK", "html": "<script>bad()</script>"},
+        session_id="session SECRET_VALUE_DO_NOT_LEAK",
+    )
+    module_repair = spaces.queue_recovery_module_repair_event(
+        "repair-required-policy-module",
+        {"source": "SECRET_VALUE_DO_NOT_LEAK", "html": "<script>bad()</script>"},
+        session_id="session SECRET_VALUE_DO_NOT_LEAK",
+    )
+    serialized = json.dumps(
+        {"space_repair": space_repair, "widget_repair": widget_repair, "module_repair": module_repair},
+        sort_keys=True,
+    ).lower()
+
+    for result, action in (
+        (space_repair, "space.repair.queue"),
+        (widget_repair, "space.widget.repair.queue"),
+        (module_repair, "space.module.repair.queue"),
+    ):
+        assert result["prompt_preflight"]["action"] == action
+        assert result["prompt_preflight"]["boundary"] == "space_repair_prompt"
+        assert result["prompt_preflight"]["status"] == "required"
+        assert result["prompt_preflight"]["metadata_only"] is True
+        assert result["prompt_preflight"]["raw_prompt_stored"] is False
+        assert result["autonomy_policy"]["action"] == action
+        assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+        assert result["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+        assert result["autonomy_policy"]["metadata_only"] is True
+        assert result["progress_event"]["event_type"] == "tool.completed"
+        assert result["progress_event"]["redaction_status"] == "metadata_only"
     assert "secret_value_do_not_leak" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
@@ -13469,7 +13534,7 @@ def test_queue_recovery_module_repair_event_metadata_only(monkeypatch, tmp_path)
     assert queued["status"] == "queued"
     assert queued["module_id"] == "module-repair"
     assert queued["event_name"] == "agent.repair"
-    assert queued["prompt_preview"] == "Repair module using safe metadata summary."
+    assert queued["prompt_preview"] == "[REDACTED]"
     assert queued["prompt_preflight"]["boundary"] == "space_repair_prompt"
     assert queued["prompt_preflight"]["status"] == "pass"
     assert queued["autonomy_policy"]["action"] == "space.module.repair.queue"
@@ -13496,6 +13561,7 @@ def test_queue_recovery_module_repair_event_metadata_only(monkeypatch, tmp_path)
     assert "api_key" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "<script" not in serialized
+    assert "repair module using safe metadata summary" not in serialized
 
 
 def test_space_tool_adapter_recovery_module_repair_aliases_metadata_only(monkeypatch, tmp_path):
@@ -13531,7 +13597,7 @@ def test_space_tool_adapter_recovery_module_repair_aliases_metadata_only(monkeyp
     assert listed["action"] == "space.recovery.module_repair_events"
     assert listed["module_id"] == "module-repair-tool"
     assert listed["events"][0]["event_id"] == queued["event_id"]
-    assert listed["events"][0]["prompt_preview"] == "Repair module using safe metadata summary."
+    assert listed["events"][0]["prompt_preview"] == "[REDACTED]"
     assert listed["events"][0]["prompt_preflight"]["boundary"] == "space_repair_prompt"
     assert listed["events"][0]["prompt_preflight"]["status"] == "pass"
     assert listed["events"][0]["autonomy_policy"]["action"] == "space.module.repair.queue"
@@ -13546,6 +13612,7 @@ def test_space_tool_adapter_recovery_module_repair_aliases_metadata_only(monkeyp
     assert "bearer" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "<script" not in serialized
+    assert "repair module using safe metadata summary" not in serialized
 
 
 def test_space_tool_adapter_admin_recovery_module_aliases_accept_camelcase_metadata_only(monkeypatch, tmp_path):

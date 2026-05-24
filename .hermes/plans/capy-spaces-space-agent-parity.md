@@ -37,6 +37,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): require repair policy receipts`
+  - Added RED/GREEN backend coverage proving whole-Space, widget, and module repair queues without free-form prompts still return metadata-only prompt-preflight-required and autonomy-policy receipts alongside structured repair progress.
+  - Empty-prompt repair controls now expose the same visible safety envelope as prompted repairs; prompted repair queues also redact `prompt_preview`, so serialized responses/events/lists avoid raw prompts and hostile renderer/source/API-auth/script/secret fixture fields.
+  - Validation at completion: focused RED failed on raw module prompt echo, focused GREEN passed, spec/quality reviews approved, full Spaces foundation suite passed (`567 passed`), `py_compile`, `git diff --check`, and `/tmp` real-static Visual/UI QA passed with no rendered DOM leaks. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_9b373a74d0e04cf4a6ec273a82320add.png`.
+
 - `feat(spaces): gate widget definitions`
   - Added RED/GREEN backend coverage proving `space.spaces.defineWidget` blocks hostile prompt-injection definitions plus wrapper/direct/nested unsafe field variants before exposing non-persisted blueprint metadata, without echoing raw prompt/system-prompt/secret fixture text or emitting false progress completion.
   - Aligned successful `defineWidget` responses with sibling blueprint helpers by returning metadata-only prompt-preflight, autonomy-policy, and `widget.blueprint.define:<space_id>` progress receipts while keeping generated renderer/html/script/source/data/API-auth markers out of serialized output.

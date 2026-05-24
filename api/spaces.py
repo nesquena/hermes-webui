@@ -550,6 +550,29 @@ def _space_repair_prompt_preflight_receipt(prompt: str, *, error_prefix: str) ->
     return receipt
 
 
+def _space_repair_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only evidence that prompt preflight remains required.
+
+    Empty repair prompts are allowed so recovery/admin controls can queue a fixed
+    safe repair request without free-form text. They still cross the same
+    repair/autonomy boundary, so expose a required preflight receipt rather than
+    omitting policy evidence entirely.
+    """
+    safe_action = _context_value(action, 120) or "space.repair.queue"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "space_repair_prompt",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["shared_confirmation_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
 def _space_repair_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None) -> dict[str, Any] | None:
     if not preflight_receipt:
         return None
@@ -1948,6 +1971,11 @@ def _space_repair_text_summary(value: Any, limit: int = 500) -> str:
     if text and (_SPACE_REPAIR_UNSAFE_TEXT_RE.search(text) or re.search(r"<\s*/?\s*[a-z][^>]*>", text, re.IGNORECASE)):
         return "[REDACTED]"
     return text
+
+
+def _space_repair_prompt_preview(prompt: Any) -> str:
+    """Return a metadata-only prompt marker for repair queue receipts/events."""
+    return "[REDACTED]" if _context_value(prompt, 1) else ""
 
 
 def _space_repair_marker_text(value: Any, limit: int = 200) -> str:
@@ -9188,9 +9216,13 @@ def queue_recovery_module_repair_event(
         raise ValueError("payload must be an object")
     module = read_recovery_module(mid)
     name = "agent.repair"
-    preflight_receipt = _space_repair_prompt_preflight_receipt(prompt, error_prefix="Module repair")
-    autonomy_policy_receipt = _space_repair_action_policy_receipt("space.module.repair.queue", preflight_receipt)
-    prompt_preview = _space_repair_text_summary(prompt, 1000)
+    repair_action = "space.module.repair.queue"
+    preflight_receipt = _space_repair_prompt_preflight_receipt(
+        prompt,
+        error_prefix="Module repair",
+    ) or _space_repair_required_prompt_preflight_receipt(repair_action)
+    autonomy_policy_receipt = _space_repair_action_policy_receipt(repair_action, preflight_receipt)
+    prompt_preview = _space_repair_prompt_preview(prompt)
     payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
     event_details = {
         "module_id": _public_module_id_summary(mid),
@@ -9677,9 +9709,13 @@ def queue_space_repair_event(
         raise ValueError("payload must be an object")
     read_space(sid)
     name = "agent.repair"
-    preflight_receipt = _space_repair_prompt_preflight_receipt(prompt, error_prefix="Space repair")
-    autonomy_policy_receipt = _space_repair_action_policy_receipt("space.repair.queue", preflight_receipt)
-    prompt_preview = _space_repair_text_summary(prompt, 1000)
+    repair_action = "space.repair.queue"
+    preflight_receipt = _space_repair_prompt_preflight_receipt(
+        prompt,
+        error_prefix="Space repair",
+    ) or _space_repair_required_prompt_preflight_receipt(repair_action)
+    autonomy_policy_receipt = _space_repair_action_policy_receipt(repair_action, preflight_receipt)
+    prompt_preview = _space_repair_prompt_preview(prompt)
     payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
     event_details = {
         "event_name": name,
@@ -9736,9 +9772,13 @@ def queue_recovery_widget_repair_event(
     space = read_space(sid)
     _widget_index(space, wid)
     name = "agent.repair"
-    preflight_receipt = _space_repair_prompt_preflight_receipt(prompt, error_prefix="Widget repair")
-    autonomy_policy_receipt = _space_repair_action_policy_receipt("space.widget.repair.queue", preflight_receipt)
-    prompt_preview = _space_repair_text_summary(prompt, 1000)
+    repair_action = "space.widget.repair.queue"
+    preflight_receipt = _space_repair_prompt_preflight_receipt(
+        prompt,
+        error_prefix="Widget repair",
+    ) or _space_repair_required_prompt_preflight_receipt(repair_action)
+    autonomy_policy_receipt = _space_repair_action_policy_receipt(repair_action, preflight_receipt)
+    prompt_preview = _space_repair_prompt_preview(prompt)
     payload_summary = _space_repair_payload_summary(payload or {}, max_depth=0)
     event_details = {
         "widget_id": wid,
