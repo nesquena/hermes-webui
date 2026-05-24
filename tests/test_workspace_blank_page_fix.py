@@ -16,6 +16,31 @@ def read(rel):
     return (REPO / rel).read_text(encoding='utf-8')
 
 
+def function_body(source, name):
+    start = source.find(f'function {name}(')
+    assert start != -1, f"{name} not found"
+    paren_start = source.find('(', start)
+    paren_depth = 1
+    i = paren_start + 1
+    while i < len(source) and paren_depth:
+        if source[i] == '(':
+            paren_depth += 1
+        elif source[i] == ')':
+            paren_depth -= 1
+        i += 1
+    brace_start = source.find('{', i)
+    depth = 1
+    i = brace_start + 1
+    while i < len(source) and depth:
+        if source[i] == '{':
+            depth += 1
+        elif source[i] == '}':
+            depth -= 1
+        i += 1
+    assert depth == 0, f"{name} body did not terminate"
+    return source[start:i]
+
+
 class TestSyncWorkspaceDisplaysFallback:
     """syncWorkspaceDisplays must show default workspace when no session."""
 
@@ -69,6 +94,27 @@ class TestBootJsProfileDefaultWorkspace:
         # The assignment must be in the same settings-fetch block (within a few hundred chars)
         assert abs(ws_assign_idx - settings_idx) < 1000, (
             "S._profileDefaultWorkspace must be set in the same settings-fetch block"
+        )
+
+
+class TestNewSessionWorkspaceGrouping:
+    """New blank-page chats must keep the selected Space's sidebar grouping."""
+
+    def test_inherited_default_workspace_uses_project_group(self):
+        src = read('static/sessions.js')
+        fn = function_body(src, 'newSession')
+
+        assert "const hasWorkspaceBinding=!!inheritWs" in fn, (
+            "newSession must recognize that an inherited selected/default workspace "
+            "is still a workspace-bound chat"
+        )
+        assert "(hasWorkspaceBinding?'workspace':'chats')" in fn, (
+            "newSession must group blank-page chats under Projects when a selected "
+            "Space/default workspace is inherited"
+        )
+        assert "(explicitWorkspace?'workspace':'chats')" not in fn, (
+            "Regression: this only handled explicitly passed workspace options and "
+            "misfiled inherited selected Spaces under Chats"
         )
 
 

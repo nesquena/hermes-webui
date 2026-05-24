@@ -472,9 +472,11 @@ async function newSession(flash, options={}){
       ? (options.workspace||null)
       : (switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null));
     const targetProfile=String(hasOption('profile')?options.profile:(S.activeProfile||'default')).trim()||'default';
+    const inheritsChatsGroup=!!(S.session&&S.session.workspace_group==='chats'&&inheritWs===S.session.workspace);
+    const hasWorkspaceBinding=!!inheritWs&&!inheritsChatsGroup;
     let workspaceGroup=hasOption('workspace_group')
       ? String(options.workspace_group||'').trim().toLowerCase()
-      : (explicitWorkspace?'workspace':'chats');
+      : (hasWorkspaceBinding?'workspace':'chats');
     workspaceGroup=workspaceGroup==='workspace'?'workspace':'chats';
     if(options&&options.worktree) workspaceGroup='workspace';
     // Use the saved default model for new sessions (#872). The user's saved
