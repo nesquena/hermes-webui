@@ -3488,6 +3488,28 @@ def _space_demo_output_compaction(summary: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _space_demo_action_policy_receipt(demo: str) -> dict[str, Any]:
+    """Return metadata-only autonomy evidence for one individual demo smoke run."""
+    from api.capy_policy import action_policy_receipt
+
+    safe_demo = str(demo or "").strip()
+    safe_action = f"space.demo.run.{safe_demo}" if safe_demo else "space.demo.run"
+    receipt = action_policy_receipt(
+        safe_action,
+        approval_gates=["creator_commit", "generated_widget_execution"],
+        prompt_preflight_status="required",
+        model_route_hint="hint:reasoning",
+    )
+    hint = str(receipt.get("model_route_hint") or "hint:reasoning").strip() or "hint:reasoning"
+    receipt["model_route_resolution"] = {
+        "hint": hint,
+        "metadata_only": True,
+        "local_only": True,
+    }
+    receipt.pop("model_route", None)
+    return receipt
+
+
 def _record_space_demo_progress_event(demo: str, space_id: str, event_type: str) -> dict[str, Any]:
     """Best-effort metadata-only progress event for one demo smoke run."""
     safe_event_type = event_type if event_type in {"run.started", "run.completed", "run.failed"} else "run.failed"
@@ -3942,6 +3964,7 @@ def _space_demo_run_body(name: str) -> dict[str, Any]:
 
     summary = _space_demo_run_summary(demo, template, space_id, action=action)
     summary.update(extra)
+    summary["autonomy_policy"] = _space_demo_action_policy_receipt(demo)
     summary["output_compaction"] = _space_demo_output_compaction(summary)
     summary["context_status"] = _space_demo_context_status()
     return summary

@@ -549,6 +549,39 @@ global.fetch = async function(path, opts = {}) {
         autonomy_policy: { action: 'space.research.artifact', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit'], prompt_preflight_status: 'pass', model_route_hint: 'hint:summarize', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       } : undefined,
       research_rollback_check: isResearch ? { verified: true, restored_event_id: 'rev-before-export', restored_widget_count: 5, replayed_after_restore: true, renderer: '<script>bad()</script>', api_key: '***' } : undefined,
+      autonomy_policy: {
+        available: true,
+        action: 'space.demo.run.' + demo,
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['creator_commit', 'generated_widget_execution'],
+        prompt_preflight_status: 'required',
+        model_route_hint: 'hint:reasoning',
+        model_route_resolution: {
+          hint: 'hint:reasoning',
+          label: 'Reasoning',
+          resolved_provider: 'openai',
+          resolved_model: 'gpt-5',
+          resolution: 'configured',
+          metadata_only: true,
+          local_only: true,
+        },
+        model_route: {
+          hint: 'hint:reasoning',
+          label: 'Reasoning',
+          resolved_provider: 'openai',
+          resolved_model: 'gpt-5',
+          metadata_only: true,
+        },
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        source: 'SECRET_SOURCE',
+        html: '<img src=x onerror=bad()>',
+      },
       context_status: {
         available: true,
         metadata_only: true,
@@ -5891,6 +5924,16 @@ def test_spaces_ui_time_travel_walkthrough_is_visible_and_opens_widget_manager_m
     assert "demo_time_travel_restore" in out["rootHtml"]
     assert "Time Travel Restore Smoke" in out["rootHtml"]
     assert "Action: restored" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Action: space.demo.run.demo_time_travel_restore" in out["rootHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: required" in out["rootHtml"]
+    assert "Gates: Creator commit approval, Generated widget execution approval" in out["rootHtml"]
+    assert "Model route hint: hint:reasoning" in out["rootHtml"]
+    assert "metadata-only · local-only" in out["rootHtml"]
+    assert "openai" not in out["rootHtml"].lower()
+    assert "gpt-5" not in out["rootHtml"].lower()
+    assert "Model route: Reasoning" not in out["rootHtml"]
+    assert "Route resolution: configured" not in out["rootHtml"]
     assert "Rollback point: yes" in out["rootHtml"]
     assert "Widgets for demo-time-travel-restore" in out["rootHtml"]
     assert "weather-current" in out["rootHtml"]
@@ -5913,6 +5956,16 @@ def test_spaces_ui_admin_recovery_walkthrough_is_visible_and_opens_recovery_widg
     assert "demo_safe_admin_recovery" in out["rootHtml"]
     assert "Admin Recovery Smoke" in out["rootHtml"]
     assert "Action: recovery-disabled" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Action: space.demo.run.demo_safe_admin_recovery" in out["rootHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: required" in out["rootHtml"]
+    assert "Gates: Creator commit approval, Generated widget execution approval" in out["rootHtml"]
+    assert "Model route hint: hint:reasoning" in out["rootHtml"]
+    assert "metadata-only · local-only" in out["rootHtml"]
+    assert "openai" not in out["rootHtml"].lower()
+    assert "gpt-5" not in out["rootHtml"].lower()
+    assert "Model route: Reasoning" not in out["rootHtml"]
+    assert "Route resolution: configured" not in out["rootHtml"]
     assert "Widgets for demo-safe-admin-recovery" in out["rootHtml"]
     assert "weather-current" in out["rootHtml"]
     assert "Recovery: disabled" in out["rootHtml"]

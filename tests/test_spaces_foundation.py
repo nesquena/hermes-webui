@@ -17002,6 +17002,56 @@ def test_space_demo_run_exposes_safe_output_compaction_evidence_for_browser_smok
     assert "source code" not in serialized
 
 
+def test_space_demo_run_exposes_metadata_only_action_policy_for_restore_and_recovery_smokes(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    monkeypatch.setenv("CAPY_AUTONOMY_MODE", "semi_autonomous")
+    monkeypatch.setenv(
+        "CAPY_MODEL_ROUTING_HINTS",
+        json.dumps({"hint:reasoning": {"provider": "openai", "model": "gpt-5"}}),
+    )
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    for demo_name in ("demo_time_travel_restore", "demo_safe_admin_recovery"):
+        result = spaces.space_demo_run(demo_name)
+
+        assert result["ok"] is True
+        receipt = result["autonomy_policy"]
+        assert receipt["available"] is True
+        assert receipt["action"] == f"space.demo.run.{demo_name}"
+        assert receipt["mode"] == "semi_autonomous"
+        assert receipt["label"] == "Semi-autonomous"
+        assert receipt["approval_required"] is True
+        assert receipt["approval_gates"] == ["creator_commit", "generated_widget_execution"]
+        assert receipt["prompt_preflight_status"] == "required"
+        assert receipt["model_route_hint"] == "hint:reasoning"
+        assert receipt["metadata_only"] is True
+        assert receipt["local_only"] is True
+        assert receipt["model_route_resolution"]["metadata_only"] is True
+        assert receipt["model_route_resolution"]["hint"] == "hint:reasoning"
+        assert "model_route" not in receipt
+        assert "resolved_provider" not in receipt["model_route_resolution"]
+        assert "resolved_model" not in receipt["model_route_resolution"]
+
+        serialized = json.dumps(receipt, sort_keys=True).lower()
+        assert "openai" not in serialized
+        assert "gpt-5" not in serialized
+        assert "resolved_provider" not in serialized
+        assert "resolved_model" not in serialized
+        assert "secret_value_do_not_leak" not in serialized
+        assert "ignore previous" not in serialized
+        assert "<script" not in serialized
+        assert "renderer" not in serialized
+        assert "api_auth" not in serialized
+        assert "api_key" not in serialized
+        assert "bearer" not in serialized
+        assert "raw_prompt" not in serialized
+        assert "html" not in serialized
+        assert "source" not in serialized
+        assert "token" not in serialized
+        assert "generated body" not in serialized
+        assert "source code" not in serialized
+
+
 def test_space_demo_run_records_browser_smoke_progress(monkeypatch, tmp_path):
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)

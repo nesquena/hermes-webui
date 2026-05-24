@@ -916,6 +916,7 @@
       : {};
     const musicPreview = renderMusicSmokePreview(musicFlow);
     const researchPreview = demo === 'demo_research_harness_pdf_export' ? renderResearchHarnessSmokePreview(data) : '';
+    const actionPolicy = renderDemoSmokeActionPolicyEvidence(data && data.autonomy_policy);
     const compactionPreview = renderCompactionEvidence(data && (data.output_compaction || data.compaction));
     const contextStatus = renderContextLayerStatus(data && (data.context_status || data.contextStatus));
     const demoSpaceId = space.space_id ? String(space.space_id) : '';
@@ -935,7 +936,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+researchPreview+compactionPreview+contextStatus+'</div>';
+      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+researchPreview+actionPolicy+compactionPreview+contextStatus+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){
@@ -1225,6 +1226,24 @@
       '<div class="capy-spaces-muted">'+escapeHtml(details.join(' · '))+'</div>' +
       '<div class="capy-spaces-muted">Preflight receipt is metadata-only; raw prompt text remains omitted.</div>' +
       '</div></div></div>';
+  }
+
+  function renderDemoSmokeActionPolicyEvidence(policy){
+    const data = policy && typeof policy === 'object' && !Array.isArray(policy) ? policy : null;
+    if (!data || data.available !== true) return '';
+    const safePolicy = {
+      available: true,
+      action: data.action,
+      mode: data.mode,
+      label: data.label,
+      approval_required: data.approval_required,
+      approval_gates: data.approval_gates,
+      prompt_preflight_status: data.prompt_preflight_status,
+      model_route_hint: data.model_route_hint,
+      metadata_only: data.metadata_only,
+      local_only: data.local_only
+    };
+    return renderActionPolicyEvidence(safePolicy);
   }
 
   function renderActionPolicyEvidence(policy){
