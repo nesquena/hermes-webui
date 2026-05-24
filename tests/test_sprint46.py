@@ -48,9 +48,12 @@ class _FakeCompressor:
                 "focus_topic": focus_topic,
             }
         )
-        if len(messages) >= 2:
-            return [messages[0], messages[-1]]
-        return list(messages)
+        display_messages = list(messages)
+        if display_messages and display_messages[0].get("role") == "system":
+            display_messages = display_messages[1:]
+        if len(display_messages) >= 2:
+            return [display_messages[0], display_messages[-1]]
+        return display_messages
 
 
 class _FakeAgent:
@@ -160,6 +163,76 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
     assert _FakeAgent.last_instance.context_compressor.calls[0]["focus_topic"] == "database schema"
 
 
+
+def test_lcm_policy_helper_injects_model_facing_policy_for_summary_context():
+    import api.routes as routes
+
+    context = [
+        {"role": "assistant", "content": "[Recent Summary (d0, node 7)] compacted history"},
+        {"role": "user", "content": "latest"},
+    ]
+
+    out = routes._ensure_lcm_retrieval_policy_model_context(context, "lcm")
+
+    assert out[0]["role"] == "system"
+    assert "LCM retrieval policy" in out[0]["content"]
+    assert "lcm_grep" in out[0]["content"]
+    assert "store_id=0" in out[0]["content"]
+    assert out[1:] == context
+
+
+def test_lcm_policy_helper_is_idempotent_and_avoids_non_lcm_context():
+    import api.routes as routes
+
+    non_lcm = [{"role": "user", "content": "plain history"}]
+    assert routes._ensure_lcm_retrieval_policy_model_context(non_lcm, "builtin") == non_lcm
+
+    existing = [
+        {"role": "system", "content": "[LCM retrieval policy: Use lcm_grep.]"},
+        {"role": "assistant", "content": "[Recent Summary (d0, node 7)] compacted history"},
+    ]
+    assert routes._ensure_lcm_retrieval_policy_model_context(existing, "lcm") == existing
+
+
+def test_session_compress_keeps_engine_system_guidance_model_facing_only(monkeypatch, cleanup_test_sessions):
+    class GuidanceCompressor:
+        def compress(self, messages, current_tokens=None, focus_topic=None):
+            assert messages and messages[0]["role"] == "system"
+            assert "Active workspace at session start" in messages[0]["content"]
+            return [
+                {
+                    "role": "system",
+                    "content": messages[0]["content"]
+                    + "\n\n[LCM retrieval policy: Use lcm_grep before relying on compacted summaries.]",
+                },
+                {"role": "assistant", "content": "[Recent Summary (d0, node 7)] old context"},
+                messages[-1],
+            ]
+
+    class GuidanceAgent:
+        def __init__(self, **kwargs):
+            self.context_compressor = GuidanceCompressor()
+
+    created = cleanup_test_sessions
+    sid = _make_session()
+    created.append(sid)
+    _install_fake_compression_runtime(monkeypatch, GuidanceAgent)
+
+    handler = _FakeHandler()
+    _handle_session_compress(handler, {"session_id": sid})
+
+    assert handler.status == 200
+    loaded = get_session(sid)
+    assert loaded.messages == [
+        {"role": "assistant", "content": "[Recent Summary (d0, node 7)] old context"},
+        {"role": "assistant", "content": "four"},
+    ]
+    assert loaded.context_messages[0]["role"] == "system"
+    assert "LCM retrieval policy" in loaded.context_messages[0]["content"]
+    payload = handler.payload()
+    assert all(m.get("role") != "system" for m in payload["session"]["messages"])
+
+
 def test_session_compress_start_is_async_and_reuses_running_job(monkeypatch, cleanup_test_sessions):
     import api.routes as routes
 
@@ -175,7 +248,10 @@ def test_session_compress_start_is_async_and_reuses_running_job(monkeypatch, cle
             self.calls.append({"messages": list(messages), "focus_topic": focus_topic})
             self.entered.set()
             assert self.release.wait(timeout=5), "test timed out waiting to release compression"
-            return [messages[0], messages[-1]]
+            display_messages = list(messages)
+            if display_messages and display_messages[0].get("role") == "system":
+                display_messages = display_messages[1:]
+            return [display_messages[0], display_messages[-1]]
 
     class BlockingAgent:
         instances = []
