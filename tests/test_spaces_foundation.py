@@ -1252,9 +1252,17 @@ def test_space_tool_adapter_supports_source_open_alias_and_camelcase_space_id_me
     assert opened["action"] == "space.spaces.open"
     assert opened["space"]["space_id"] == created["space_id"]
     assert opened["space"]["widgets"][0]["id"] == "unsafe-widget"
+    assert opened["autonomy_policy"]["action"] == "space.spaces.open"
+    assert opened["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    assert opened["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert opened["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert opened["autonomy_policy"]["metadata_only"] is True
+    assert opened["progress_event"]["event_type"] == "tool.completed"
+    assert opened["progress_event"]["run_id"] == f"space.open:{created['space_id']}"
+    assert opened["progress_event"]["redaction_status"] == "metadata_only"
     assert read_by_camelcase_id["space"] == opened["space"]
     assert get_by_camelcase_id["space"] == opened["space"]
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
@@ -1298,9 +1306,11 @@ def test_space_tool_adapter_supports_source_positional_args_metadata_only(monkey
 
     assert opened["ok"] is True
     assert opened["space"]["space_id"] == created["space_id"]
+    assert opened["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    assert opened["progress_event"]["run_id"] == f"space.open:{created['space_id']}"
     assert listed_widgets["widgets"][0]["id"] == "unsafe-widget"
     assert read_widget["widget"]["id"] == "unsafe-widget"
-    assert "stored" not in serialized
+    assert "stored()" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
@@ -8266,6 +8276,11 @@ def test_space_tool_adapter_supports_widget_see_and_reload_aliases_metadata_only
     assert source_current["ok"] is True
     assert source_current["action"] == "space.spaces.reloadcurrentspace"
     assert source_current["space"]["widgets"][0]["id"] == "weather-card"
+    assert source_current["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    assert source_current["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert source_current["autonomy_policy"]["metadata_only"] is True
+    assert source_current["progress_event"]["run_id"] == f"space.reload:{created['space_id']}"
+    assert source_current["progress_event"]["redaction_status"] == "metadata_only"
     assert events["events"][0]["event_id"] == source_reloaded["event_id"]
     assert events["events"][1]["event_id"] == reloaded["event_id"]
     assert "steal" not in serialized

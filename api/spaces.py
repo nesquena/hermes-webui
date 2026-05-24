@@ -5482,6 +5482,18 @@ def repair_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 
+def _space_browser_navigation_action_policy_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only policy evidence for browser/canvas navigation helpers."""
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        action,
+        approval_gates=["destructive_external_action"],
+        prompt_preflight_status="required",
+        model_route_hint="hint:fast",
+    )
+
+
 def _space_resolve_app_url_action_policy_receipt(action: str) -> dict[str, Any]:
     """Return metadata-only policy evidence for browser-surface app URL resolution."""
     from api.capy_policy import action_policy_receipt
@@ -5774,10 +5786,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.spaces.openspace",
     }:
         space_id = validate_space_id(_space_tool_space_id(data))
-        return {"ok": True, "action": name, "space": read_space_detail(space_id)}
+        response: dict[str, Any] = {"ok": True, "action": name, "space": read_space_detail(space_id)}
+        if name in {"space.spaces.open", "space.spaces.openspace"}:
+            response["autonomy_policy"] = _space_browser_navigation_action_policy_receipt(name)
+            response["progress_event"] = _record_space_tool_progress_event(space_id, run_prefix="space.open")
+        return response
     if name in {"space.spaces.reloadcurrentspace", "space.spaces.reloadspace"}:
         space_id = validate_space_id(_space_tool_current_id(data))
-        return {"ok": True, "action": name, "space_id": space_id, "space": read_space_detail(space_id)}
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "space": read_space_detail(space_id),
+            "autonomy_policy": _space_browser_navigation_action_policy_receipt(name),
+            "progress_event": _record_space_tool_progress_event(space_id, run_prefix="space.reload"),
+        }
     if name in {
         "space.spaces.buildspacerootpath",
         "space.spaces.buildspacemanifestpath",
@@ -9683,6 +9706,8 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "space.create",
         "space.delete",
         "space.duplicate",
+        "space.open",
+        "space.reload",
         "template.install",
         "template.reset",
         "widget.delete",
