@@ -2243,7 +2243,7 @@ function _activityStatusNode({kind='info',label='',detail='',status='done',ts=nu
   if(id) row.setAttribute('data-activity-event-id',id);
   if(ts) row.setAttribute('data-activity-at',String(ts));
   const iconMap={run:li('play',13),model:li('bot',13),waiting:'<span class="tool-card-running-dot"></span>',thinking:li('lightbulb',13),tool:li('wrench',13),done:li('check',13),warning:li('alert-triangle',13)};
-  row.innerHTML=`<span class="agent-activity-status-icon">${iconMap[kind]||iconMap.info||li('circle',13)}</span><span class="agent-activity-status-copy"><span class="agent-activity-status-label">${esc(label)}</span>${detail?`<span class="agent-activity-status-detail">${esc(detail)}</span>`:''}</span><span class="agent-activity-status-time">${esc(_activityClockLabel(ts))}</span>`;
+  row.innerHTML=`<span class="agent-activity-status-icon">${iconMap[kind]||li('clock',13)}</span><span class="agent-activity-status-copy"><span class="agent-activity-status-label">${esc(label)}</span>${detail?`<span class="agent-activity-status-detail">${esc(detail)}</span>`:''}</span><span class="agent-activity-status-time">${esc(_activityClockLabel(ts))}</span>`;
   return row;
 }
 function _appendActivityEvent(group, event){
@@ -7684,11 +7684,11 @@ function appendThinking(text='', options){
     if(row) row.setAttribute('data-thinking-active','1');
   }
   if(!row){
-    row=_thinkingActivityNode(cleanThinking, false);
+    row=_thinkingActivityNode(thinkingText, false);
     row.setAttribute('data-thinking-active','1');
     body.appendChild(row);
   }else{
-    _renderThinkingInto(row,cleanThinking);
+    _renderThinkingInto(row,thinkingText);
   }
   _activityMarkObserved(group);
   _syncToolCallGroupSummary(group);

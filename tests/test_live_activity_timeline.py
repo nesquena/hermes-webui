@@ -26,7 +26,7 @@ def test_empty_thinking_placeholder_becomes_status_row_not_raw_thinking_card():
     assert "Waiting on model" in UI_JS
     assert "No tool activity has been reported yet." in UI_JS
     assert "Waiting on tool result" in UI_JS
-    assert "_thinkingActivityNode(cleanThinking, false)" in UI_JS
+    assert "_thinkingActivityNode(thinkingText, false)" in UI_JS
 
 
 def test_tool_events_update_activity_timeline_and_summary():
