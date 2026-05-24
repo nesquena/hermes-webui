@@ -1,0 +1,6 @@
+# Keep our local custom landing page and Windows native setup scripts during merges
+index.html merge=ours
+logo.png merge=ours
+install_windows.ps1 merge=ours
+start.bat merge=ours
+start.ps1 merge=ours

@@ -1,1320 +1,3260 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hermes Agent — Windows Native Edition | Ã̶ḧ̶Ḿ̶ĕ̶đ̶ Å̶ḱ̶ṝ̶à̶ḿ̶</title>
+  <script>
+    // Canonical URL: strip trailing index.html so links always show the clean path
+    (function(){
+      var p = window.location.pathname;
+      if (p.endsWith('/index.html')) {
+        var clean = p.slice(0, p.length - 'index.html'.length);
+        window.history.replaceState(null, '', clean + window.location.search + window.location.hash);
+      }
+    })();
+  </script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hermes — Community Web UI | Designed by Ahmed Akram</title>
+  <meta name="description" content="Persistent memory, autonomous scheduling, and multi-surface access — all on hardware you control. Open source, self-hosted AI agent optimized for native Windows." />
+  <meta property="og:title" content="Hermes — Community Web UI (Windows Native Edition)" />
+  <meta property="og:description" content="Persistent memory, autonomous scheduling, and multi-surface access — all on hardware you control." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://1proo.github.io/hermes-webui/" />
+  <meta property="og:image" content="https://nesquena.github.io/hermes-webui/images/ui-hero.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Hermes — The self-improving AI agent" />
+  <meta name="twitter:description" content="Persistent memory, autonomous scheduling, and multi-surface access — all on hardware you control." />
+  <meta name="twitter:image" content="https://nesquena.github.io/hermes-webui/images/ui-hero.png" />
+  <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+  <link rel="icon" type="image/png" href="logo.png" />
+  <link rel="canonical" href="https://1proo.github.io/hermes-webui/" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" id="hljs-theme" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+  <style>
+    /* ===== CSS VARIABLES ===== */
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --bg-card: #161b22;
+      --bg-card-hover: #1c2128;
+      --border: #30363d;
+      --border-hover: #484f58;
+      --text-primary: #e6edf3;
+      --text-secondary: #8b949e;
+      --text-muted: #6e7681;
+      --accent: #8b5cf6;
+      --accent-dim: #7c3aed;
+      --accent-glow: rgba(139, 92, 246, 0.15);
+      --accent-subtle: rgba(139, 92, 246, 0.08);
+      --green: #3fb950;
+      --red: #f85149;
+      --blue: #58a6ff;
+      --purple: #bc8cff;
+      --nav-height: 64px;
+      --radius: 8px;
+      --radius-lg: 12px;
+      --shadow: 0 1px 3px rgba(0,0,0,0.4), 0 4px 16px rgba(0,0,0,0.3);
+      --shadow-lg: 0 8px 32px rgba(0,0,0,0.5);
+      --shadow-screenshot: 0 8px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05);
+    }
+
+    [data-theme="light"] {
+      --bg-primary: #ffffff;
+      --bg-secondary: #f6f8fa;
+      --bg-tertiary: #eaeef2;
+      --bg-card: #ffffff;
+      --bg-card-hover: #f6f8fa;
+      --border: #d0d7de;
+      --border-hover: #9198a1;
+      --text-primary: #1f2328;
+      --text-secondary: #656d76;
+      --text-muted: #9198a1;
+      --accent: #7c3aed;
+      --accent-dim: #6d28d9;
+      --accent-glow: rgba(124, 58, 237, 0.12);
+      --accent-subtle: rgba(124, 58, 237, 0.06);
+      --green: #1a7f37;
+      --red: #cf222e;
+      --blue: #0969da;
+      --purple: #8b5cf6;
+      --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 4px 16px rgba(0,0,0,0.06);
+      --shadow-lg: 0 8px 32px rgba(0,0,0,0.12);
+      --shadow-screenshot: 0 8px 40px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.06);
+    }
+
+    /* ===== RESET & BASE ===== */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; font-size: 16px; overflow-x: hidden; }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+      transition: background 0.2s ease, color 0.2s ease;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: var(--accent); text-decoration: none; transition: color 0.15s; }
+    a:hover { color: var(--accent-dim); }
+    img { max-width: 100%; }
+
+    /* ===== SCROLLBAR ===== */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg-secondary); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--border-hover); }
+
+    /* ===== NAVIGATION ===== */
+    #nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: var(--nav-height);
+      background: rgba(13, 17, 23, 0.92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      z-index: 1000;
+      transition: background 0.2s;
+    }
+    [data-theme="light"] #nav {
+      background: rgba(255,255,255,0.92);
+    }
+    .nav-inner {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 24px;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 1.1rem;
+      color: var(--text-primary);
+      text-decoration: none;
+      flex-shrink: 0;
+    }
+    .nav-logo span {
+      background: linear-gradient(135deg, var(--accent), var(--accent-dim));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      font-weight: 300;
+      font-size: 0.85rem;
+      border-left: 1px solid var(--border);
+      padding-left: 10px;
+      margin-left: 8px;
+      color: var(--accent);
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      list-style: none;
+    }
+    .nav-links a {
+      color: var(--text-secondary);
+      font-size: 0.875rem;
+      font-weight: 500;
+      padding: 6px 12px;
+      border-radius: 6px;
+      transition: color 0.15s, background 0.15s;
+      white-space: nowrap;
+    }
+    .nav-links a:hover {
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+    /* ===== DROPDOWN NAV ===== */
+    .nav-links .has-dropdown { position: relative; }
+
+    .nav-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      font: inherit;
+      font-size: 0.875rem;
+      font-weight: 500;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: color 0.15s, background 0.15s;
+    }
+    .nav-trigger .caret {
+      font-size: 0.7rem;
+      opacity: 0.7;
+      transition: transform 0.15s;
+    }
+    .nav-trigger:hover,
+    .has-dropdown:focus-within .nav-trigger,
+    .has-dropdown:hover .nav-trigger {
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+    .has-dropdown:hover .caret,
+    .has-dropdown:focus-within .caret { transform: rotate(180deg); }
+
+    .dropdown {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      min-width: 200px;
+      padding: 6px;
+      list-style: none;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-lg);
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-4px);
+      transition: opacity 0.15s ease, transform 0.15s ease, visibility 0s linear 0.15s;
+      z-index: 1001;
+    }
+    .has-dropdown:hover > .dropdown,
+    .has-dropdown:focus-within > .dropdown {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+      transition: opacity 0.15s ease, transform 0.15s ease, visibility 0s;
+    }
+    .dropdown--right > .dropdown { left: auto; right: 0; }
+    .has-dropdown::after {
+      content: "";
+      position: absolute;
+      top: 100%; left: 0; right: 0;
+      height: 10px;
+    }
+    .dropdown a {
+      display: block;
+      padding: 8px 12px;
+      border-radius: 6px;
+      color: var(--text-secondary);
+      font-size: 0.875rem;
+      font-weight: 500;
+      white-space: nowrap;
+      transition: color 0.15s, background 0.15s;
+    }
+    .dropdown a:hover,
+    .dropdown a:focus-visible {
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+      outline: none;
+    }
+    .nav-trigger:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .dropdown, .nav-trigger .caret { transition: none; }
+    }
+    .dropdown .dropdown-section-label {
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      padding: 6px 12px 2px;
+    }
+    .dropdown .dropdown-divider {
+      height: 1px;
+      background: var(--border);
+      margin: 6px 8px;
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .btn-theme {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 7px 10px;
+      border-radius: 6px;
+      font-size: 15px;
+      line-height: 1;
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+    .btn-theme:hover {
+      border-color: var(--border-hover);
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+    .btn-nav-cta {
+      background: var(--accent);
+      color: #fff;
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 7px 14px;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-block;
+      transition: background 0.15s, transform 0.1s;
+      white-space: nowrap;
+    }
+    .btn-nav-cta:hover { background: var(--accent-dim); color: #fff; transform: translateY(-1px); }
+
+    /* Hamburger */
+    .hamburger {
+      display: none;
+      flex-direction: column;
+      gap: 5px;
+      cursor: pointer;
+      padding: 6px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: none;
+      transition: border-color 0.15s;
+    }
+    .hamburger:hover { border-color: var(--border-hover); }
+    .hamburger span {
+      display: block;
+      width: 20px; height: 2px;
+      background: var(--text-secondary);
+      border-radius: 2px;
+      transition: transform 0.2s, opacity 0.2s;
+    }
+    .hamburger.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+    .hamburger.open span:nth-child(2) { opacity: 0; }
+    .hamburger.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
+
+    /* Mobile menu */
+    #mobile-menu {
+      display: none;
+      position: fixed;
+      top: var(--nav-height);
+      left: 0; right: 0;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      z-index: 999;
+      flex-direction: column;
+      gap: 4px;
+    }
+    #mobile-menu.open { display: flex; }
+    #mobile-menu a {
+      color: var(--text-secondary);
+      font-size: 0.95rem;
+      font-weight: 500;
+      padding: 10px 12px;
+      border-radius: 6px;
+      transition: color 0.15s, background 0.15s;
+    }
+    #mobile-menu a:hover {
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+
+    /* ===== LAYOUT ===== */
+    main { padding-top: var(--nav-height); }
+    .section {
+      padding: 80px 24px;
+    }
+    .section-alt { background: var(--bg-secondary); }
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+    .section-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+    .section-title {
+      font-size: clamp(1.75rem, 4vw, 2.5rem);
+      font-weight: 700;
+      line-height: 1.2;
+      color: var(--text-primary);
+      margin-bottom: 16px;
+    }
+    .section-body {
+      font-size: 1.05rem;
+      color: var(--text-secondary);
+      max-width: 680px;
+      line-height: 1.7;
+    }
+
+    /* ===== HERO ===== */
+    #hero {
+      padding: 100px 24px 80px;
+      background: var(--bg-primary);
+      position: relative;
+      overflow: hidden;
+    }
+    #hero::before {
+      content: '';
+      position: absolute;
+      top: -200px; left: 50%;
+      transform: translateX(-50%);
+      width: 800px; height: 600px;
+      background: radial-gradient(ellipse at center, var(--accent-glow) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    /* Subtle grid pattern */
+    #hero::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image: radial-gradient(circle at 1px 1px, rgba(139, 92, 246, 0.04) 1px, transparent 0);
+      background-size: 32px 32px;
+      pointer-events: none;
+    }
+    [data-theme="light"] #hero::after {
+      background-image: radial-gradient(circle at 1px 1px, rgba(124, 58, 237, 0.06) 1px, transparent 0);
+    }
+    .hero-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+    .hero-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--accent-subtle);
+      border: 1px solid rgba(139, 92, 246, 0.25);
+      color: var(--accent);
+      font-size: 0.8rem;
+      font-weight: 600;
+      padding: 5px 12px;
+      border-radius: 100px;
+      margin-bottom: 24px;
+      letter-spacing: 0.02em;
+    }
+    .hero-title {
+      font-size: clamp(2.8rem, 7vw, 5rem);
+      font-weight: 800;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+      color: var(--text-primary);
+      margin-bottom: 24px;
+    }
+    .hero-title .accent {
+      background: linear-gradient(135deg, var(--accent) 0%, #a855f7 50%, #00f2fe 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .hero-sub {
+      font-size: clamp(1.05rem, 2.5vw, 1.25rem);
+      color: var(--text-secondary);
+      max-width: 620px;
+      line-height: 1.65;
+      margin-bottom: 40px;
+    }
+    .hero-ctas {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-bottom: 56px;
+    }
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      font-size: 1rem;
+      padding: 13px 24px;
+      border-radius: 8px;
+      transition: background 0.15s, transform 0.1s, box-shadow 0.15s;
+      box-shadow: 0 0 0 0 var(--accent-glow);
+    }
+    .btn-primary:hover {
+      background: var(--accent-dim);
+      color: #fff;
+      transform: translateY(-2px);
+      box-shadow: 0 0 24px var(--accent-glow);
+    }
+    .btn-secondary {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: transparent;
+      color: var(--text-primary);
+      font-weight: 600;
+      font-size: 1rem;
+      padding: 13px 24px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      transition: border-color 0.15s, background 0.15s, transform 0.1s;
+    }
+    .btn-secondary:hover {
+      border-color: var(--border-hover);
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      transform: translateY(-2px);
+    }
+    .hero-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .stat-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-size: 0.825rem;
+      font-weight: 500;
+      padding: 6px 14px;
+      border-radius: 100px;
+    }
+    .stat-badge .dot {
+      width: 6px; height: 6px;
+      background: var(--accent);
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .hero-credit {
+      margin-top: 20px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+    .hero-credit a { color: var(--text-muted); text-decoration: underline; text-underline-offset: 3px; }
+    .hero-credit a:hover { color: var(--text-secondary); }
+    .hero-community-note {
+      display: block;
+      margin-top: 12px;
+      font-size: 0.76rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+      opacity: 0.8;
+    }
+    .hero-community-note a { color: var(--text-muted); text-decoration: underline; text-underline-offset: 2px; }
+    .hero-community-note a:hover { color: var(--text-secondary); opacity: 1; }
+
+    /* ===== WHY HERMES ===== */
+    .why-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 40px;
+      align-items: start;
+      margin-top: 48px;
+    }
+    .why-text p {
+      color: var(--text-secondary);
+      margin-bottom: 16px;
+      font-size: 1rem;
+      line-height: 1.7;
+    }
+    .why-text p strong { color: var(--text-primary); }
+    .why-diagram {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 28px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      line-height: 1.8;
+      position: sticky;
+      top: calc(var(--nav-height) + 24px);
+    }
+    .why-diagram .label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+    .why-diagram .line { margin-bottom: 6px; }
+    .why-diagram .line .kw { color: var(--accent); font-weight: 500; }
+    .why-diagram .line .bracket { color: var(--blue); }
+    .why-diagram .line .paren { color: var(--purple); }
+    .why-diagram .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 18px 0;
+    }
+    .convergence-note {
+      margin-top: 24px;
+      padding: 20px;
+      background: var(--accent-subtle);
+      border: 1px solid rgba(139, 92, 246, 0.2);
+      border-left: 3px solid var(--accent);
+      border-radius: var(--radius);
+      font-size: 0.9rem;
+      color: var(--text-secondary);
+      line-height: 1.65;
+    }
+    .convergence-note strong { color: var(--text-primary); }
+
+    /* ===== PILLARS ===== */
+    .pillars-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+      margin-top: 48px;
+    }
+    .pillar-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 32px;
+      transition: border-color 0.2s, background 0.2s, transform 0.2s, box-shadow 0.2s;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      position: relative;
+      overflow: hidden;
+    }
+    .pillar-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-dim));
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .pillar-card:hover {
+      border-color: var(--accent);
+      background: var(--bg-card-hover);
+      transform: translateY(-4px);
+      box-shadow: 0 8px 32px rgba(139, 92, 246, 0.1);
+    }
+    .pillar-card:hover::before { opacity: 1; }
+    .pillar-icon {
+      font-size: 2.5rem;
+      margin-bottom: 16px;
+      line-height: 1;
+    }
+    .pillar-title {
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 12px;
+    }
+    .pillar-body {
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+      line-height: 1.65;
+      flex: 1;
+      margin-bottom: 20px;
+    }
+    .pillar-body ul {
+      margin: 10px 0 0 0;
+      padding-left: 18px;
+    }
+    .pillar-body li { margin-bottom: 4px; }
+    .pillar-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--accent);
+      font-size: 0.85rem;
+      font-weight: 500;
+      margin-top: auto;
+    }
+    .pillar-link:hover { gap: 8px; }
+
+    /* ===== FEATURE GRID ===== */
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-top: 48px;
+    }
+    .feature-tile {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      transition: border-color 0.2s, background 0.2s, transform 0.15s;
+    }
+    .feature-tile:hover {
+      border-color: var(--border-hover);
+      background: var(--bg-card-hover);
+      transform: translateY(-2px);
+    }
+    .feature-icon { font-size: 1.8rem; margin-bottom: 12px; line-height: 1; }
+    .feature-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 8px;
+    }
+    .feature-body {
+      color: var(--text-secondary);
+      font-size: 0.825rem;
+      line-height: 1.55;
+      margin-bottom: 12px;
+    }
+    .feature-link {
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 500;
+    }
+
+    /* ===== WEB UI SHOWCASE ===== */
+    .showcase-hero {
+      margin-top: 48px;
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      box-shadow: var(--shadow-screenshot);
+      border: 1px solid var(--border);
+      position: relative;
+    }
+    .showcase-hero img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    .showcase-hero-label {
+      position: absolute;
+      bottom: 16px;
+      left: 16px;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      color: #fff;
+      font-size: 0.8rem;
+      font-weight: 500;
+      padding: 6px 14px;
+      border-radius: 6px;
+    }
+    [data-theme="light"] .showcase-hero-label {
+      background: rgba(255, 255, 255, 0.85);
+      color: var(--text-primary);
+    }
+    .showcase-gallery {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-top: 24px;
+    }
+    .showcase-thumb {
+      border-radius: var(--radius);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+      transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+      cursor: pointer;
+      position: relative;
+    }
+    .showcase-thumb:hover {
+      transform: translateY(-4px);
+      border-color: var(--accent);
+      box-shadow: 0 8px 24px rgba(139, 92, 246, 0.12);
+    }
+    .showcase-thumb img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    .showcase-thumb-caption {
+      padding: 10px 12px;
+      background: var(--bg-card);
+      font-size: 0.78rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      border-top: 1px solid var(--border);
+    }
+
+    .webui-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 48px;
+      align-items: start;
+      margin-top: 48px;
+    }
+    .webui-layout > * { min-width: 0; }
+    .webui-features {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 24px;
+    }
+    .webui-feature-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 10px 12px;
+      background: var(--bg-tertiary);
+      border-radius: 6px;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+    .webui-feature-item::before {
+      content: '\2713';
+      color: var(--green);
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .webui-steps { display: flex; flex-direction: column; gap: 20px; }
+    .webui-steps-container { display: flex; flex-direction: column; gap: 20px; }
+    .step-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .step-num {
+      width: 26px; height: 26px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 0.75rem;
+      font-weight: 700;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .step-title {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    /* ===== WHO IS IT FOR ===== */
+    .persona-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 16px;
+      margin-top: 48px;
+    }
+    .persona-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 28px 24px;
+      transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+      text-align: center;
+    }
+    .persona-card:hover {
+      border-color: var(--accent);
+      transform: translateY(-3px);
+      box-shadow: 0 8px 24px rgba(139, 92, 246, 0.08);
+    }
+    .persona-icon {
+      font-size: 2.2rem;
+      margin-bottom: 14px;
+      line-height: 1;
+    }
+    .persona-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 10px;
+    }
+    .persona-body {
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      line-height: 1.55;
+    }
+
+    /* ===== CODE BLOCKS ===== */
+    .code-wrap {
+      position: relative;
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: #0d1117;
+      border: 1px solid var(--border);
+      margin: 8px 0;
+    }
+    /* Code blocks always LTR/dark */
+    [data-theme="light"] .code-wrap {
+      background: #0d1117;
+      border-color: #30363d;
+    }
+    .code-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 16px;
+      background: rgba(255,255,255,0.05);
+      border-bottom: 1px solid #30363d;
+    }
+    .code-lang {
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #8b949e;
+    }
+    .copy-btn {
+      background: none;
+      border: 1px solid #484f58;
+      color: #8b949e;
+      font-size: 0.7rem;
+      padding: 3px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+      font-family: inherit;
+    }
+    .copy-btn:hover { color: #e6edf3; border-color: #8b949e; }
+    .copy-btn.copied { color: #3fb950; border-color: #3fb950; }
+    .code-wrap pre {
+      margin: 0;
+      padding: 16px;
+      overflow-x: auto;
+    }
+    .code-wrap code {
+      font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: 0.82rem;
+      line-height: 1.6;
+    }
+
+    /* ===== COMPARISON ===== */
+    .compare-more {
+      margin-top: 40px;
+      padding-top: 32px;
+      border-top: 1px solid var(--border);
+    }
+    .compare-more-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+    .compare-more-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .compare-pill {
+      display: inline-block;
+      padding: 6px 14px;
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+    .compare-pill:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-subtle);
+    }
     
-    <!-- Meta Tags for SEO -->
-    <meta name="description" content="An open-source native Windows fork of Hermes Agent by Nous Research. Runs directly on Windows with zero Docker or WSL2 overhead. Rebuilt by Ã̶ḧ̶Ḿ̶ĕ̶đ̶ Å̶ḱ̶ṝ̶à̶ḿ̶.">
-    <meta property="og:title" content="Hermes Agent — Windows Native Edition">
-    <meta property="og:description" content="A premium native Windows fork of Nous Research's Hermes Agent with zero Docker/WSL2 overhead. Features 12 live-switchable skins.">
-    <meta property="og:type" content="website">
-    
-    <!-- Google Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;700&family=Courier+Prime:wght@400;700&display=swap" rel="stylesheet">
-    
-    <style>
-        /* CSS RESET & CORE VARIABLES */
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        :root {
-            --foreground: #FFFFFF;
-            --midground: #ffe6cb;
-            --background: #041C1C;
-            --glow-color: rgba(255, 189, 56, 0.35);
-            --accent: #FFD700;
-            --border-color: rgba(255, 230, 203, 0.2);
-            --font-display: 'Space Grotesk', 'Outfit', sans-serif;
-            --font-mono: 'JetBrains Mono', 'Courier Prime', monospace;
-            --border-style: solid;
-            --radius: 0px;
-        }
-
-        /* 12 SKIN DEFINITIONS (DARK MODE DEFAULT) */
-        
-        /* Default Gold */
-        html[data-skin="default"] {
-            --midground: #ffe6cb;
-            --background: #041C1C;
-            --accent: #FFD700;
-            --glow-color: rgba(255, 189, 56, 0.35);
-            --border-color: rgba(255, 230, 203, 0.2);
-        }
-        
-        /* Ares - Red */
-        html[data-skin="ares"] {
-            --midground: #FF4444;
-            --background: #1a0808;
-            --accent: #FF4444;
-            --glow-color: rgba(255, 68, 68, 0.35);
-            --border-color: rgba(255, 68, 68, 0.2);
-        }
-        
-        /* Mono - Gray */
-        html[data-skin="mono"] {
-            --midground: #CCCCCC;
-            --background: #121212;
-            --accent: #888888;
-            --glow-color: rgba(204, 204, 204, 0.2);
-            --border-color: rgba(204, 204, 204, 0.2);
-        }
-        
-        /* Slate - Blue-Gray */
-        html[data-skin="slate"] {
-            --midground: #94A3B8;
-            --background: #0f172a;
-            --accent: #38bdf8;
-            --glow-color: rgba(148, 163, 184, 0.25);
-            --border-color: rgba(148, 163, 184, 0.2);
-        }
-        
-        /* Poseidon - Ocean Blue */
-        html[data-skin="poseidon"] {
-            --midground: #0EA5E9;
-            --background: #022a3a;
-            --accent: #38bdf8;
-            --glow-color: rgba(14, 165, 233, 0.3);
-            --border-color: rgba(14, 165, 233, 0.2);
-        }
-        
-        /* Sisyphus - Purple */
-        html[data-skin="sisyphus"] {
-            --midground: #A78BFA;
-            --background: #1e1b4b;
-            --accent: #c084fc;
-            --glow-color: rgba(167, 139, 250, 0.3);
-            --border-color: rgba(167, 139, 250, 0.2);
-        }
-        
-        /* Charizard - Orange */
-        html[data-skin="charizard"] {
-            --midground: #FB923C;
-            --background: #2a1103;
-            --accent: #f97316;
-            --glow-color: rgba(251, 146, 60, 0.35);
-            --border-color: rgba(251, 146, 60, 0.2);
-        }
-        
-        /* Sienna - Clay & Earth */
-        html[data-skin="sienna"] {
-            --midground: #E0896D;
-            --background: #1F1E1C;
-            --accent: #D97757;
-            --glow-color: rgba(224, 137, 109, 0.3);
-            --border-color: rgba(224, 137, 109, 0.2);
-        }
-        
-        /* Catppuccin - Mauve Mocha */
-        html[data-skin="catppuccin"] {
-            --midground: #CBA6F7;
-            --background: #1E1E2E;
-            --accent: #f5c2e7;
-            --glow-color: rgba(203, 166, 247, 0.3);
-            --border-color: rgba(203, 166, 247, 0.2);
-        }
-        
-        /* Hepburn - Magenta-Rose */
-        html[data-skin="hepburn"] {
-            --midground: #f278ad;
-            --background: #110a0f;
-            --accent: #ec5597;
-            --glow-color: rgba(242, 120, 173, 0.3);
-            --border-color: rgba(242, 120, 173, 0.2);
-        }
-        
-        /* Nous - Technical Steel */
-        html[data-skin="nous"] {
-            --midground: #7EB6E0;
-            --background: #0A0E14;
-            --accent: #4682B4;
-            --glow-color: rgba(70, 130, 180, 0.3);
-            --border-color: rgba(70, 130, 180, 0.25);
-            --border-style: dashed;
-            --font-display: 'Courier Prime', 'JetBrains Mono', monospace;
-        }
-        
-        /* Geist Contrast - Yellow Accent */
-        html[data-skin="geist-contrast"] {
-            --midground: #FFF175;
-            --background: #000000;
-            --accent: #ffffff;
-            --glow-color: rgba(255, 241, 117, 0.3);
-            --border-color: rgba(255, 255, 255, 0.15);
-        }
-
-        /* LIGHT MODE PALETTES */
-        
-        html.light {
-            --midground: #1F1E1C;
-            --background: #FAF9F5;
-            --accent: #A55237;
-            --glow-color: rgba(0, 0, 0, 0.08);
-            --border-color: rgba(31, 30, 28, 0.18);
-        }
-
-        html.light[data-skin="ares"] {
-            --midground: #C0392B;
-            --background: #FAF5F5;
-            --accent: #A93226;
-            --glow-color: rgba(192, 57, 43, 0.1);
-            --border-color: rgba(192, 57, 43, 0.18);
-        }
-
-        html.light[data-skin="mono"] {
-            --midground: #555555;
-            --background: #FAFAFA;
-            --accent: #222222;
-            --glow-color: rgba(0, 0, 0, 0.05);
-            --border-color: rgba(0, 0, 0, 0.12);
-        }
-
-        html.light[data-skin="slate"] {
-            --midground: #475569;
-            --background: #F1F5F9;
-            --accent: #0f172a;
-            --glow-color: rgba(71, 85, 105, 0.08);
-            --border-color: rgba(71, 85, 105, 0.18);
-        }
-
-        html.light[data-skin="poseidon"] {
-            --midground: #0369A1;
-            --background: #F0F9FF;
-            --accent: #0284C7;
-            --glow-color: rgba(3, 105, 161, 0.08);
-            --border-color: rgba(3, 105, 161, 0.18);
-        }
-
-        html.light[data-skin="sisyphus"] {
-            --midground: #7C3AED;
-            --background: #F5F3FF;
-            --accent: #6D28D9;
-            --glow-color: rgba(124, 58, 237, 0.08);
-            --border-color: rgba(124, 58, 237, 0.18);
-        }
-
-        html.light[data-skin="charizard"] {
-            --midground: #EA580C;
-            --background: #FFF7ED;
-            --accent: #C2410C;
-            --glow-color: rgba(234, 88, 12, 0.08);
-            --border-color: rgba(234, 88, 12, 0.18);
-        }
-
-        html.light[data-skin="sienna"] {
-            --midground: #D97757;
-            --background: #FAF9F5;
-            --accent: #BF6545;
-            --glow-color: rgba(217, 119, 87, 0.08);
-            --border-color: rgba(217, 119, 87, 0.18);
-        }
-
-        html.light[data-skin="catppuccin"] {
-            --midground: #8839EF;
-            --background: #EFF1F5;
-            --accent: #4C4F69;
-            --glow-color: rgba(136, 57, 239, 0.08);
-            --border-color: rgba(136, 57, 239, 0.18);
-        }
-
-        html.light[data-skin="hepburn"] {
-            --midground: #d44a7a;
-            --background: #fff3f7;
-            --accent: #c6246a;
-            --glow-color: rgba(242, 120, 173, 0.08);
-            --border-color: rgba(242, 120, 173, 0.18);
-        }
-
-        html.light[data-skin="nous"] {
-            --midground: #2C5F88;
-            --background: #FFFFFF;
-            --accent: #1A2A3A;
-            --glow-color: rgba(70, 130, 180, 0.08);
-            --border-color: rgba(70, 130, 180, 0.22);
-            --border-style: dashed;
-            --font-display: 'Courier Prime', 'JetBrains Mono', monospace;
-        }
-
-        html.light[data-skin="geist-contrast"] {
-            --midground: #0070f3;
-            --background: #ffffff;
-            --accent: #111111;
-            --glow-color: rgba(0, 112, 243, 0.08);
-            --border-color: rgba(0, 0, 0, 0.15);
-        }
-
-        /* GENERAL STYLING */
-        body {
-            background-color: var(--background);
-            color: var(--midground);
-            font-family: var(--font-display);
-            text-transform: uppercase;
-            overflow-x: hidden;
-            line-height: 1.5;
-            transition: background-color 0.4s ease, color 0.4s ease;
-            letter-spacing: 0.05em;
-        }
-
-        a {
-            color: inherit;
-            text-decoration: none;
-            transition: opacity 0.2s ease, color 0.2s ease;
-        }
-
-        /* BACKGROUND EFFECTS */
-        .bg-overlay-1 {
-            pointer-events: none;
-            position: fixed;
-            inset: 0;
-            background-color: color-mix(in srgb, #FFFFFF 0%, transparent);
-            mix-blend-mode: difference;
-            z-index: 100;
-        }
-
-        .bg-overlay-2 {
-            pointer-events: none;
-            position: fixed;
-            inset: 0;
-            background-color: var(--background);
-            mix-blend-mode: difference;
-            z-index: 1;
-            opacity: 0.15;
-            transition: background-color 0.4s ease;
-        }
-
-        .radial-glow {
-            pointer-events: none;
-            position: fixed;
-            inset: 0;
-            background: radial-gradient(ellipse at 100% 100%, rgba(255,189,56,0) 40%, var(--glow-color) 100%);
-            mix-blend-mode: lighten;
-            opacity: 0.25;
-            z-index: 99;
-            transition: background 0.4s ease;
-        }
-
-        #grain-canvas {
-            pointer-events: none;
-            position: fixed;
-            inset: 0;
-            mix-blend-mode: color-dodge;
-            z-index: 101;
-            width: 100%;
-            height: 100%;
-            opacity: 0.45;
-        }
-
-        /* CONTAINER & GRIDS */
-        main {
-            position: relative;
-            z-index: 2;
-            max-width: 1600px;
-            margin: 0 auto;
-            padding: 2rem;
-        }
-
-        .g {
-            display: grid;
-            grid-template-columns: repeat(5, 1fr);
-            border-left: 1px var(--border-style) var(--border-color);
-            border-right: 1px var(--border-style) var(--border-color);
-            transition: border-color 0.4s ease;
-        }
-
-        .gc {
-            border-right: 1px var(--border-style) var(--border-color);
-            padding: 1.5rem;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            position: relative;
-            transition: border-color 0.4s ease;
-        }
-
-        .gc:last-child {
-            border-right: none;
-        }
-
-        .border-t {
-            border-top: 1px var(--border-style) var(--border-color);
-        }
-
-        .border-b {
-            border-bottom: 1px var(--border-style) var(--border-color);
-        }
-
-        .col-span-full {
-            grid-column: 1 / -1;
-        }
-
-        .col-span-3 {
-            grid-column: span 3;
-        }
-
-        .col-span-2 {
-            grid-column: span 2;
-        }
-
-        /* HOVER GLOWS */
-        .group {
-            cursor: pointer;
-            overflow: hidden;
-        }
-
-        .group-hover-overlay {
-            position: absolute;
-            inset: 1px;
-            background-color: var(--midground);
-            opacity: 0;
-            pointer-events: none;
-            transition: opacity 0.25s ease;
-        }
-
-        .group:hover .group-hover-overlay {
-            opacity: 0.04;
-        }
-
-        /* HEADER */
-        header .g {
-            border-top: 1px var(--border-style) var(--border-color);
-        }
-
-        .logo h2 {
-            font-size: 2.25rem;
-            font-weight: 800;
-            line-height: 1.05;
-            letter-spacing: -0.02em;
-            color: var(--midground);
-            transition: color 0.4s ease;
-        }
-
-        .logo span {
-            color: var(--accent);
-            font-size: 0.8rem;
-            display: block;
-            margin-top: 0.25rem;
-            letter-spacing: 0.2em;
-        }
-
-        .nav-label {
-            font-size: 0.65rem;
-            opacity: 0.5;
-            margin-bottom: 0.5rem;
-        }
-
-        .nav-link {
-            font-size: 1.15rem;
-            font-weight: 700;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-
-        .social-icons {
-            display: flex;
-            gap: 1rem;
-            align-items: center;
-            margin-top: 0.5rem;
-        }
-
-        .social-icons a:hover {
-            color: var(--accent);
-            transform: scale(1.1);
-        }
-
-        /* TOGGLES */
-        .toggle-btn {
-            background: transparent;
-            border: 1px var(--border-style) var(--midground);
-            color: var(--midground);
-            cursor: pointer;
-            padding: 0.5rem 1rem;
-            font-family: var(--font-mono);
-            font-size: 0.75rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            transition: all 0.3s ease;
-            position: relative;
-        }
-
-        .toggle-btn:hover {
-            background-color: var(--midground);
-            color: var(--background);
-        }
-
-        /* HERO SECTION */
-        .hero-cell {
-            padding: 5rem 3rem;
-            text-align: center;
-            align-items: center;
-            gap: 1.75rem;
-        }
-
-        .badge {
-            font-family: var(--font-mono);
-            font-size: 0.75rem;
-            border: 1px var(--border-style) var(--accent);
-            color: var(--accent);
-            padding: 0.25rem 0.75rem;
-            display: inline-block;
-            margin-bottom: 1rem;
-        }
-
-        .hero-title {
-            font-size: 4rem;
-            font-weight: 800;
-            line-height: 1.05;
-            letter-spacing: -0.03em;
-            max-width: 900px;
-        }
-
-        .hero-desc {
-            font-size: 1.15rem;
-            text-transform: none;
-            opacity: 0.7;
-            max-width: 650px;
-            font-family: var(--font-display);
-            font-weight: 400;
-            line-height: 1.6;
-        }
-
-        .author-tag {
-            font-family: var(--font-mono);
-            font-size: 0.85rem;
-            color: var(--accent);
-            margin-top: 1rem;
-        }
-
-        /* COMMAND BOXES */
-        .command-wrapper {
-            width: 100%;
-            max-width: 600px;
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem;
-            text-align: left;
-            margin-top: 1rem;
-        }
-
-        .command-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 0.65rem;
-            opacity: 0.6;
-        }
-
-        .command-box {
-            background-color: rgba(0, 0, 0, 0.3);
-            border: 1px var(--border-style) var(--border-color);
-            padding: 0.75rem 1rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-family: var(--font-mono);
-            font-size: 0.75rem;
-            color: var(--midground);
-            text-transform: none;
-            transition: border-color 0.4s ease;
-        }
-
-        .copy-btn {
-            background: transparent;
-            border: none;
-            color: var(--midground);
-            font-family: var(--font-mono);
-            font-size: 0.65rem;
-            cursor: pointer;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            opacity: 0.6;
-            padding: 0.25rem 0.5rem;
-            border: 1px var(--border-style) transparent;
-        }
-
-        .copy-btn:hover {
-            opacity: 1;
-            border-color: var(--border-color);
-        }
-
-        /* TERMINAL & SHOWCASE */
-        .demo-section {
-            border-top: 1px var(--border-style) var(--border-color);
-        }
-
-        .terminal-container {
-            border: 1px var(--border-style) var(--border-color);
-            background: rgba(0, 0, 0, 0.4);
-            font-family: var(--font-mono);
-            text-transform: none;
-            margin-top: 1rem;
-        }
-
-        .terminal-header {
-            border-bottom: 1px var(--border-style) var(--border-color);
-            padding: 0.5rem 1rem;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-
-        .terminal-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background-color: var(--midground);
-            opacity: 0.5;
-        }
-
-        .terminal-title {
-            font-size: 0.65rem;
-            text-transform: uppercase;
-            opacity: 0.6;
-        }
-
-        .terminal-body {
-            padding: 1.25rem;
-            font-size: 0.8rem;
-            min-height: 280px;
-            line-height: 1.6;
-            color: var(--midground);
-        }
-
-        .terminal-cursor {
-            display: inline-block;
-            width: 8px;
-            height: 15px;
-            background-color: var(--midground);
-            animation: blink 1s infinite;
-            vertical-align: middle;
-            margin-left: 2px;
-        }
-
-        @keyframes blink {
-            50% { opacity: 0; }
-        }
-
-        /* SKINS GRID */
-        .skins-grid {
-            display: grid;
-            grid-template-columns: repeat(3, 1fr);
-            gap: 0.75rem;
-            margin-top: 1rem;
-        }
-
-        .skin-card {
-            border: 1px var(--border-style) var(--border-color);
-            padding: 0.75rem 1rem;
-            cursor: pointer;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            min-height: 90px;
-            position: relative;
-            background-color: rgba(255, 255, 255, 0.01);
-            transition: all 0.3s ease;
-        }
-
-        .skin-card:hover {
-            border-color: var(--midground);
-            background-color: rgba(255, 255, 255, 0.03);
-        }
-
-        .skin-card.active {
-            background-color: var(--midground);
-            color: var(--background);
-            border-color: var(--midground);
-        }
-
-        .skin-card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .skin-card-name {
-            font-size: 0.75rem;
-            font-weight: 700;
-        }
-
-        .skin-indicator {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background-color: var(--accent);
-        }
-
-        .skin-card.active .skin-indicator {
-            background-color: var(--background);
-        }
-
-        .skin-colors {
-            display: flex;
-            gap: 0.25rem;
-            margin-top: 0.5rem;
-        }
-
-        .color-dot {
-            width: 12px;
-            height: 12px;
-            border: 1px solid rgba(255,255,255,0.2);
-            border-radius: 50%;
-        }
-
-        /* FEATURES SECTION */
-        .features-grid {
-            grid-template-columns: repeat(3, 1fr);
-            border-top: 1px var(--border-style) var(--border-color);
-        }
-
-        .feature-card {
-            border-bottom: 1px var(--border-style) var(--border-color);
-            min-height: 220px;
-        }
-
-        .features-grid:last-child .feature-card {
-            border-bottom: none;
-        }
-
-        .feature-title {
-            font-size: 1.15rem;
-            font-weight: 700;
-            color: var(--midground);
-            margin-bottom: 0.75rem;
-        }
-
-        .feature-desc {
-            font-size: 0.9rem;
-            text-transform: none;
-            opacity: 0.65;
-            line-height: 1.6;
-        }
-
-        /* FOOTER */
-        footer .g {
-            border-top: 1px var(--border-style) var(--border-color);
-            border-bottom: 1px var(--border-style) var(--border-color);
-        }
-
-        .footer-cell {
-            padding: 3rem 1.5rem;
-        }
-
-        .footer-text {
-            font-size: 0.75rem;
-            opacity: 0.6;
-        }
-
-        .footer-link {
-            font-size: 0.75rem;
-            font-weight: 700;
-            text-transform: uppercase;
-        }
-
-        .footer-link:hover {
-            color: var(--accent);
-        }
-
-        /* RESPONSIVE LAYOUT */
-        @media (max-width: 1024px) {
-            .g {
-                grid-template-columns: repeat(2, 1fr);
-            }
-            .col-span-3, .col-span-2 {
-                grid-column: span 2;
-            }
-            .features-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-            .hero-title {
-                font-size: 2.75rem;
-            }
-            .skins-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
-
-        @media (max-width: 640px) {
-            .g {
-                grid-template-columns: 1fr;
-            }
-            .gc {
-                border-right: none;
-                border-bottom: 1px var(--border-style) var(--border-color);
-            }
-            .gc:last-child {
-                border-bottom: none;
-            }
-            .col-span-3, .col-span-2 {
-                grid-column: span 1;
-            }
-            .features-grid {
-                grid-template-columns: 1fr;
-            }
-            .hero-title {
-                font-size: 2.25rem;
-            }
-            .skins-grid {
-                grid-template-columns: 1fr;
-            }
-            main {
-                padding: 1rem;
-            }
-        }
-    </style>
+    .comparison-intro {
+      font-size: 1rem;
+      color: var(--text-secondary);
+      max-width: 720px;
+      line-height: 1.7;
+      margin-top: 16px;
+      margin-bottom: 40px;
+    }
+    .comparison-intro strong { color: var(--text-primary); }
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border);
+      margin-bottom: 48px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+    thead th {
+      background: var(--bg-tertiary);
+      color: var(--text-secondary);
+      font-weight: 600;
+      font-size: 0.78rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 12px 16px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    thead th:first-child { color: var(--text-primary); }
+    tbody tr {
+      border-bottom: 1px solid var(--border);
+      transition: background 0.1s;
+    }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--bg-card-hover); }
+    tbody tr.highlight-row { background: var(--accent-subtle); }
+    tbody tr.highlight-row:hover { background: rgba(240, 165, 0, 0.12); }
+    tbody td {
+      padding: 12px 16px;
+      color: var(--text-secondary);
+      vertical-align: middle;
+    }
+    tbody td:first-child {
+      font-weight: 600;
+      color: var(--text-primary);
+      white-space: nowrap;
+    }
+    .check { color: var(--green); font-weight: 600; }
+    .partial { color: var(--accent); font-size: 0.82rem; }
+    .cloud { color: var(--blue); font-size: 0.82rem; }
+    .no { color: var(--text-muted); font-size: 0.82rem; }
+    .prev { color: var(--purple); font-size: 0.82rem; }
+
+    .comparison-cards {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-top: 32px;
+    }
+    .comparison-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      transition: border-color 0.2s;
+    }
+    .comparison-card:hover { border-color: var(--accent); background: var(--bg-card-hover); }
+    .comparison-card[role="link"] { position: relative; cursor: pointer; }
+    .comparison-card[role="link"]:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .card-arrow { position: absolute; top: 18px; right: 20px; color: var(--text-muted); font-size: 1.1rem; transition: transform 0.15s, color 0.15s; }
+    .comparison-card[role="link"]:hover .card-arrow { transform: translateX(4px); color: var(--accent); }
+    .comparison-card h4 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 10px;
+    }
+    .comparison-card p {
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      line-height: 1.65;
+    }
+
+    /* ===== INSTALLATION ===== */
+    .install-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 48px;
+      margin-top: 48px;
+    }
+    .install-layout > * { min-width: 0; }
+    .providers-table-wrap {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+    }
+    .provider-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      gap: 12px;
+    }
+    .provider-row:last-child { border-bottom: none; }
+    .provider-name {
+      font-weight: 500;
+      color: var(--text-primary);
+      font-size: 0.9rem;
+    }
+    .provider-auth {
+      color: var(--text-muted);
+      font-size: 0.8rem;
+    }
+    .provider-badge {
+      font-size: 0.7rem;
+      padding: 2px 8px;
+      border-radius: 100px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    .badge-oauth { background: rgba(63, 185, 80, 0.15); color: var(--green); border: 1px solid rgba(63, 185, 80, 0.3); }
+    .badge-key { background: rgba(88, 166, 255, 0.12); color: var(--blue); border: 1px solid rgba(88, 166, 255, 0.25); }
+    .badge-local { background: rgba(188, 140, 255, 0.12); color: var(--purple); border: 1px solid rgba(188, 140, 255, 0.25); }
+
+    .platforms-note {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 16px;
+      padding: 10px 16px;
+      background: var(--accent-subtle);
+      border: 1px solid rgba(240, 165, 0, 0.2);
+      border-radius: 6px;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+
+    /* ===== LIMITATIONS ===== */
+    .limitations-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 16px;
+      margin-top: 40px;
+    }
+    .limitation-item {
+      display: flex;
+      gap: 14px;
+      padding: 20px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      align-items: flex-start;
+    }
+    .limitation-icon {
+      font-size: 1.3rem;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .limitation-text {
+      font-size: 0.9rem;
+      color: var(--text-secondary);
+      line-height: 1.55;
+    }
+    .limitation-text strong { color: var(--text-primary); }
+
+    /* ===== RESOURCES ===== */
+    .resources-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin-top: 40px;
+    }
+    .resource-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 20px;
+      transition: border-color 0.2s, background 0.2s, transform 0.15s;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      text-decoration: none;
+    }
+    .resource-card:hover {
+      border-color: var(--accent);
+      background: var(--bg-card-hover);
+      transform: translateY(-2px);
+      color: var(--text-primary);
+    }
+    .resource-icon { font-size: 1.5rem; line-height: 1; }
+    .resource-title {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .resource-url {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      word-break: break-all;
+    }
+
+    /* ===== FOOTER ===== */
+    footer {
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border);
+      padding: 40px 24px;
+    }
+    .footer-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    .footer-left {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      max-width: 600px;
+      line-height: 1.6;
+    }
+    .footer-left a { color: var(--text-muted); text-decoration: underline; text-underline-offset: 3px; }
+    .footer-left a:hover { color: var(--text-secondary); }
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+    .footer-links a {
+      font-size: 0.825rem;
+      color: var(--text-muted);
+      transition: color 0.15s;
+    }
+    .footer-links a:hover { color: var(--text-secondary); }
+
+    /* ===== UTILITY ===== */
+    .mt-8 { margin-top: 8px; }
+    .mt-16 { margin-top: 16px; }
+    .mt-24 { margin-top: 24px; }
+    .mt-32 { margin-top: 32px; }
+    .subsection-title {
+      font-size: 1.3rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 16px;
+    }
+    .docs-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 20px;
+      color: var(--accent);
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+    .docs-link:hover { gap: 10px; }
+
+    /* ===== HIGHLIGHT.JS OVERRIDES ===== */
+    .hljs { background: transparent !important; padding: 0 !important; }
+
+    /* ===== LIGHTBOX ===== */
+    .lightbox-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      z-index: 2000;
+      cursor: zoom-out;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+    }
+    .lightbox-overlay.active { display: flex; }
+    .lightbox-overlay img {
+      max-width: 100%;
+      max-height: 90vh;
+      border-radius: var(--radius-lg);
+      box-shadow: 0 16px 64px rgba(0,0,0,0.5);
+    }
+
+    /* ===== COMMUNITY BANNER ===== */
+    .community-banner{display:flex;align-items:center;gap:16px;background:var(--accent-subtle);border:1px solid rgba(139,92,246,0.25);border-radius:var(--radius-lg);padding:16px 20px;margin-bottom:36px;text-decoration:none;color:inherit;transition:border-color 0.15s,background 0.15s}
+    [data-theme="light"] .community-banner{border-color:rgba(124,58,237,0.2)}
+    .community-banner:hover{border-color:var(--accent);background:var(--accent-glow);color:inherit}
+    .community-banner-icon{font-size:1.8rem;flex-shrink:0;line-height:1}
+    .community-banner-text{flex:1;display:flex;flex-direction:column;gap:2px}
+    .community-banner-text strong{color:var(--text-primary);font-size:0.95rem}
+    .community-banner-text span{color:var(--text-secondary);font-size:0.85rem}
+    .community-banner-arrow{color:var(--accent);font-size:1.2rem;flex-shrink:0;transition:transform 0.15s}
+    .community-banner:hover .community-banner-arrow{transform:translateX(4px)}
+
+    /* ===== OS TAB SELECTOR STYLES ===== */
+    .os-selector {
+      margin-bottom: 24px;
+      display: flex;
+      gap: 10px;
+    }
+    .os-tab-btn, .os-tab-btn-qs {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      font-family: 'Inter', sans-serif;
+      font-size: 0.85rem;
+      font-weight: 600;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .os-tab-btn:hover, .os-tab-btn-qs:hover {
+      border-color: var(--border-hover);
+      color: var(--text-primary);
+      background: var(--bg-tertiary);
+    }
+    .os-tab-btn.active, .os-tab-btn-qs.active {
+      background: var(--accent-subtle);
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+
+    @media (max-width: 1024px) {
+      .feature-grid { grid-template-columns: repeat(2, 1fr); }
+      .resources-grid { grid-template-columns: repeat(3, 1fr); }
+      .persona-grid { grid-template-columns: repeat(3, 1fr); }
+      .showcase-gallery { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 900px) {
+      .why-grid { grid-template-columns: 1fr; }
+      .pillars-grid { grid-template-columns: 1fr; }
+      .webui-layout { grid-template-columns: 1fr; }
+      .install-layout { grid-template-columns: 1fr; }
+      .comparison-cards { grid-template-columns: 1fr; }
+      .why-diagram { position: static; }
+      .persona-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .btn-nav-cta { display: none; }
+      .hamburger { display: flex; }
+      .section { padding: 56px 16px; }
+      #hero { padding: 72px 16px 56px; }
+      .feature-grid { grid-template-columns: 1fr 1fr; }
+      .resources-grid { grid-template-columns: 1fr 1fr; }
+      .webui-features { grid-template-columns: 1fr; }
+      .showcase-gallery { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 540px) {
+      .feature-grid { grid-template-columns: 1fr; }
+      .resources-grid { grid-template-columns: 1fr; }
+      .persona-grid { grid-template-columns: 1fr; }
+      .hero-stats { flex-direction: column; align-items: flex-start; }
+      thead th, tbody td { padding: 10px 12px; font-size: 0.8rem; }
+      .hero-ctas { flex-direction: column; }
+      .btn-primary, .btn-secondary { width: 100%; justify-content: center; }
+      .showcase-gallery { grid-template-columns: 1fr; }
+    }
+
+    /* ===== Language switching support ===== */
+    [lang="en"] .lang-ar { display: none !important; }
+    [lang="ar"] .lang-en { display: none !important; }
+
+    /* ===== RTL / ARABIC OVERRIDES ===== */
+    [dir="rtl"] {
+      text-align: right;
+    }
+    [lang="ar"] body {
+      font-family: 'Cairo', 'Inter', sans-serif;
+    }
+    [dir="rtl"] .nav-inner {
+      flex-direction: row-reverse;
+    }
+    [dir="rtl"] .nav-logo {
+      flex-direction: row-reverse;
+    }
+    [dir="rtl"] .nav-logo span {
+      border-left: none;
+      border-right: 1px solid var(--border);
+      padding-left: 0;
+      padding-right: 10px;
+      margin-left: 0;
+      margin-right: 8px;
+    }
+    [dir="rtl"] .nav-links {
+      flex-direction: row-reverse;
+    }
+    [dir="rtl"] .dropdown {
+      left: auto;
+      right: 0;
+    }
+    [dir="rtl"] .dropdown--right > .dropdown {
+      right: auto;
+      left: 0;
+    }
+    [dir="rtl"] .dropdown a {
+      text-align: right;
+    }
+    [dir="rtl"] .dropdown .dropdown-section-label {
+      text-align: right;
+    }
+    [dir="rtl"] #mobile-menu {
+      text-align: right;
+    }
+    [dir="rtl"] #mobile-menu a {
+      text-align: right;
+    }
+    [dir="rtl"] .hero-inner {
+      text-align: right;
+    }
+    [dir="rtl"] .hero-ctas {
+      justify-content: flex-start;
+      flex-direction: row-reverse;
+    }
+    [dir="rtl"] .hero-stats {
+      justify-content: flex-start;
+      flex-direction: row-reverse;
+    }
+    [dir="rtl"] .why-grid {
+      direction: rtl;
+    }
+    [dir="rtl"] .why-diagram {
+      text-align: left;
+      direction: ltr;
+    }
+    [dir="rtl"] .pillar-card {
+      text-align: right;
+    }
+    [dir="rtl"] .pillar-body ul {
+      padding-left: 0;
+      padding-right: 18px;
+    }
+    [dir="rtl"] .pillar-link {
+      margin-right: 0;
+      margin-left: auto;
+    }
+    [dir="rtl"] .webui-features {
+      direction: rtl;
+    }
+    [dir="rtl"] .webui-feature-item {
+      flex-direction: row-reverse;
+      text-align: right;
+    }
+    [dir="rtl"] .webui-feature-item::before {
+      margin-left: 0;
+      margin-right: 6px;
+    }
+    [dir="rtl"] .step-header {
+      flex-direction: row-reverse;
+    }
+    [dir="rtl"] .code-wrap pre, [dir="rtl"] .code-wrap code {
+      direction: ltr;
+      text-align: left;
+    }
+    [dir="rtl"] th, [dir="rtl"] td {
+      text-align: right;
+    }
+    [dir="rtl"] .comparison-intro {
+      text-align: right;
+    }
+    [dir="rtl"] .comparison-card {
+      text-align: right;
+    }
+    [dir="rtl"] .card-arrow {
+      left: 20px;
+      right: auto;
+      transform: scaleX(-1);
+    }
+    [dir="rtl"] .comparison-card[role="link"]:hover .card-arrow {
+      transform: scaleX(-1) translateX(4px);
+    }
+    [dir="rtl"] .providers-table-wrap {
+      direction: rtl;
+    }
+    [dir="rtl"] .provider-row {
+      flex-direction: row-reverse;
+    }
+    [dir="rtl"] .limitation-item {
+      flex-direction: row-reverse;
+      text-align: right;
+    }
+    [dir="rtl"] .community-banner {
+      flex-direction: row-reverse;
+      text-align: right;
+    }
+    [dir="rtl"] .community-banner-arrow {
+      transform: scaleX(-1);
+    }
+    [dir="rtl"] .community-banner:hover .community-banner-arrow {
+      transform: scaleX(-1) translateX(4px);
+    }
+    [dir="rtl"] .resource-card {
+      text-align: right;
+    }
+    [dir="rtl"] .footer-inner {
+      flex-direction: row-reverse;
+    }
+    [dir="rtl"] .footer-left {
+      text-align: right;
+    }
+    [dir="rtl"] .footer-links {
+      flex-direction: row-reverse;
+    }
+  </style>
 </head>
-<body class="antialiased">
+<body>
 
-    <!-- Ambient Overlays -->
-    <div class="bg-overlay-1"></div>
-    <div class="bg-overlay-2"></div>
-    <div class="radial-glow" id="glow-layer"></div>
-    <canvas id="grain-canvas"></canvas>
+<!-- ===== NAV ===== -->
+<nav id="nav">
+  <div class="nav-inner">
+    <a href="#hero" class="nav-logo">
+      <img src="logo.png" alt="Hermes Logo" style="width: 32px; height: 32px; border-radius: 6px; object-fit: cover; border: 1.5px solid var(--accent); transition: border-color 0.2s;" />
+      Hermes 
+      <span class="lang-en">Windows Edition</span>
+      <span class="lang-ar">نسخة ويندوز</span>
+    </a>
+    <ul class="nav-links">
+      <li class="has-dropdown">
+        <button type="button" class="nav-trigger" aria-haspopup="true" aria-expanded="false">
+          <span class="lang-en">Product <span class="caret" aria-hidden="true">▾</span></span>
+          <span class="lang-ar">المنتج <span class="caret" aria-hidden="true">▾</span></span>
+        </button>
+        <ul class="dropdown" role="menu">
+          <li role="none">
+            <a role="menuitem" href="#why">
+              <span class="lang-en">Why Hermes</span>
+              <span class="lang-ar">لماذا هيرميس</span>
+            </a>
+          </li>
+          <li role="none">
+            <a role="menuitem" href="#features">
+              <span class="lang-en">Features</span>
+              <span class="lang-ar">المميزات</span>
+            </a>
+          </li>
+          <li role="none">
+            <a role="menuitem" href="#webui">
+              <span class="lang-en">Web UI</span>
+              <span class="lang-ar">واجهة الويب</span>
+            </a>
+          </li>
+          <li role="none">
+            <a role="menuitem" href="#who">
+              <span class="lang-en">Who it's for</span>
+              <span class="lang-ar">لمن هذا النظام</span>
+            </a>
+          </li>
+        </ul>
+      </li>
+      <li>
+        <a href="#compare">
+          <span class="lang-en">Compare</span>
+          <span class="lang-ar">مقارنة</span>
+        </a>
+      </li>
+      <li>
+        <a href="#install">
+          <span class="lang-en">Install</span>
+          <span class="lang-ar">التثبيت</span>
+        </a>
+      </li>
+      <li class="has-dropdown dropdown--right">
+        <button type="button" class="nav-trigger" aria-haspopup="true" aria-expanded="false">
+          <span class="lang-en">Learn <span class="caret" aria-hidden="true">▾</span></span>
+          <span class="lang-ar">تعلم <span class="caret" aria-hidden="true">▾</span></span>
+        </button>
+        <ul class="dropdown" role="menu">
+          <li role="none">
+            <a role="menuitem" href="#resources">
+              <span class="lang-en">Resources</span>
+              <span class="lang-ar">المصادر</span>
+            </a>
+          </li>
+          <li role="none">
+            <a role="menuitem" href="https://github.com/1PROO/hermes-webui/blob/master/README.md" target="_blank">
+              <span class="lang-en">Docs</span>
+              <span class="lang-ar">الوثائق</span>
+            </a>
+          </li>
+        </ul>
+      </li>
+      <li>
+        <a href="https://fb.com/1PROO" target="_blank">
+          <span class="lang-en">Developer</span>
+          <span class="lang-ar">المطور</span>
+        </a>
+      </li>
+    </ul>
+    <div class="nav-actions">
+      <button class="btn-theme" id="lang-toggle" onclick="toggleLanguage()" aria-label="Toggle language" title="Switch Language">AR</button>
+      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark mode">🌙</button>
+      <a href="https://github.com/1PROO/hermes-webui" class="btn-nav-cta" target="_blank" rel="noopener">
+        <span class="lang-en">GitHub Repo &#8594;</span>
+        <span class="lang-ar">مستودع جيت هاب &#8594;</span>
+      </a>
+    </div>
+    <button class="hamburger" id="hamburger" aria-label="Open menu">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+</nav>
 
-    <main>
-        <!-- Header -->
-        <header>
-            <div class="g">
-                <!-- Column 1: Logo -->
-                <div class="gc col-span-2">
-                    <a href="#" class="logo">
-                        <h2>HERMES<br>AGENT</h2>
-                        <span>👑 WINDOWS NATIVE EDITION</span>
-                    </a>
-                </div>
-                
-                <!-- Column 2: Docs -->
-                <div class="gc group">
-                    <div class="group-hover-overlay"></div>
-                    <span class="nav-label">01 // RESOURCES</span>
-                    <a href="https://github.com/1PROO/hermes-webui/blob/main/README.md" target="_blank" class="nav-link">
-                        DOCS ↗
-                    </a>
-                </div>
+<!-- Mobile menu -->
+<div id="mobile-menu">
+  <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted);padding:8px 0 2px;">
+    <span class="lang-en">Product</span>
+    <span class="lang-ar">المنتج</span>
+  </div>
+  <a href="#why" onclick="closeMobileMenu()">
+    <span class="lang-en">Why Hermes</span>
+    <span class="lang-ar">لماذا هيرميس</span>
+  </a>
+  <a href="#features" onclick="closeMobileMenu()">
+    <span class="lang-en">Features</span>
+    <span class="lang-ar">المميزات</span>
+  </a>
+  <a href="#webui" onclick="closeMobileMenu()">
+    <span class="lang-en">Web UI</span>
+    <span class="lang-ar">واجهة الويب</span>
+  </a>
+  <a href="#who" onclick="closeMobileMenu()">
+    <span class="lang-en">Who it's for</span>
+    <span class="lang-ar">لمن هذا النظام</span>
+  </a>
+  <div style="height:1px;background:var(--border);margin:8px 0;"></div>
+  <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted);padding:4px 0 2px;">
+    <span class="lang-en">Install &amp; Compare</span>
+    <span class="lang-ar">التثبيت والمقارنة</span>
+  </div>
+  <a href="#install" onclick="closeMobileMenu()">
+    <span class="lang-en">Install</span>
+    <span class="lang-ar">التثبيت</span>
+  </a>
+  <a href="#compare" onclick="closeMobileMenu()">
+    <span class="lang-en">Compare</span>
+    <span class="lang-ar">مقارنة</span>
+  </a>
+  <div style="height:1px;background:var(--border);margin:8px 0;"></div>
+  <div style="font-size:0.68rem;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted);padding:4px 0 2px;">
+    <span class="lang-en">Developer</span>
+    <span class="lang-ar">المطور</span>
+  </div>
+  <a href="https://github.com/1PROO/hermes-webui/blob/master/README.md" target="_blank" onclick="closeMobileMenu()">
+    <span class="lang-en">Docs</span>
+    <span class="lang-ar">الوثائق</span>
+  </a>
+  <a href="#resources" onclick="closeMobileMenu()">
+    <span class="lang-en">Resources</span>
+    <span class="lang-ar">المصادر</span>
+  </a>
+  <a href="https://github.com/1PROO/hermes-webui" target="_blank" onclick="closeMobileMenu()">
+    <span class="lang-en">GitHub Repo</span>
+    <span class="lang-ar">مستودع جيت هاب</span>
+  </a>
+  <a href="https://fb.com/1PROO" target="_blank" onclick="closeMobileMenu()" style="color:var(--accent)">
+    <span class="lang-en">Facebook Profile</span>
+    <span class="lang-ar">حساب المطور فيسبوك</span>
+  </a>
+</div>
 
-                <!-- Column 3: Portal / Repo -->
-                <div class="gc group">
-                    <div class="group-hover-overlay"></div>
-                    <span class="nav-label">02 // WEBUI PORTAL</span>
-                    <a href="https://github.com/1PROO/hermes-webui" target="_blank" class="nav-link">
-                        GITHUB ↗
-                    </a>
-                </div>
+<!-- Lightbox -->
+<div class="lightbox-overlay" id="lightbox" onclick="closeLightbox()">
+  <img id="lightbox-img" src="" alt="Screenshot preview" />
+</div>
 
-                <!-- Column 4: Socials & Theme Toggle -->
-                <div class="gc flex-row items-center justify-between" style="gap: 1rem;">
-                    <div style="display: flex; flex-direction: column; gap: 0.5rem; width: 100%;">
-                        <span class="nav-label">03 // APP STYLING</span>
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <div class="social-icons">
-                                <a href="https://github.com/1PROO/hermes-webui" target="_blank" title="GitHub">
-                                    <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"></path></svg>
-                                </a>
-                                <a href="https://fb.com/1PROO" target="_blank" title="Facebook Dev Profile">
-                                    <svg width="18" height="18" fill="currentColor" viewBox="0 0 24 24"><path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"></path></svg>
-                                </a>
-                            </div>
-                            <button class="toggle-btn" id="theme-toggle" onclick="toggleTheme()">DARK</button>
-                        </div>
-                    </div>
-                </div>
+<main>
+
+  <!-- ===== SECTION 1: HERO ===== -->
+  <section id="hero">
+    <div class="hero-inner">
+      <div class="hero-eyebrow">
+        <span class="lang-en">&#9889; Windows Native Optimized Fork</span>
+        <span class="lang-ar">&#9889; نسخة مخصصة ومحسنة لويندوز</span>
+      </div>
+      <h1 class="hero-title">
+        <span class="lang-en">Hermes<br /><span class="accent">Agent</span></span>
+        <span class="lang-ar">هيرميس<br /><span class="accent">عميل ذكي</span></span>
+      </h1>
+      <p class="hero-sub lang-en">
+        The self-improving AI agent that runs on your server. Layered memory that accumulates across sessions, a cron scheduler that fires while you're offline, and a skills system that saves reusable procedures automatically.
+      </p>
+      <p class="hero-sub lang-ar">
+        العميل الذكي المطور ذاتياً الذي يعمل على خادمك الخاص. يتميز بذاكرة تراكمية متعددة الطبقات لحفظ السياق عبر الجلسات، وجدولة مهام تلقائية تعمل حتى عندما تكون غير متصل بالإنترنت، ونظام لتطوير وحفظ المهارات تلقائياً من واقع التجربة.
+      </p>
+      <div class="hero-ctas">
+        <a href="#install" class="btn-primary">
+          <span class="lang-en">Deploy Now &#8594;</span>
+          <span class="lang-ar">ابدأ التثبيت الآن &#8594;</span>
+        </a>
+        <a href="https://github.com/1PROO/hermes-webui" target="_blank" rel="noopener" class="btn-secondary">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          <span class="lang-en">Star Repository</span>
+          <span class="lang-ar">أضف نجمة للمستودع</span>
+        </a>
+      </div>
+      <div class="hero-stats">
+        <span class="stat-badge">
+          <span class="dot"></span>
+          <span class="lang-en">Windows Native Fork</span>
+          <span class="lang-ar">نسخة مخصصة لويندوز</span>
+        </span>
+        <span class="stat-badge">
+          <span class="dot"></span>
+          <span class="lang-en">~200MB RAM Footprint</span>
+          <span class="lang-ar">~200 ميجابايت استهلاك الرام</span>
+        </span>
+        <span class="stat-badge">
+          <span class="dot"></span>
+          <span class="lang-en">Multi-surface access</span>
+          <span class="lang-ar">وصول متعدد المنصات</span>
+        </span>
+        <span class="stat-badge">
+          <span class="dot"></span>
+          <span class="lang-en">MIT licensed</span>
+          <span class="lang-ar">ترخيص MIT الحرة</span>
+        </span>
+      </div>
+      <p class="hero-credit lang-en">Maintained &amp; Optimized by <a href="https://fb.com/1PROO" target="_blank" rel="noopener">Ahmed Akram</a></p>
+      <p class="hero-credit lang-ar">صيانة وتحسين بواسطة <a href="https://fb.com/1PROO" target="_blank" rel="noopener">أحمد أكرم</a></p>
+      
+      <p class="hero-community-note lang-en">Community Web UI &mdash; not affiliated with or endorsed by Nous Research. Official site: <a href="https://hermes-agent.nousresearch.com" target="_blank" rel="noopener">hermes-agent.nousresearch.com</a></p>
+      <p class="hero-community-note lang-ar">واجهة مستخدم مجتمعية &mdash; غير تابعة لـ Nous Research أو معتمدة منها. الموقع الرسمي: <a href="https://hermes-agent.nousresearch.com" target="_blank" rel="noopener">hermes-agent.nousresearch.com</a></p>
+    </div>
+  </section>
+
+  <!-- ===== SECTION 2: WHY HERMES ===== -->
+  <section id="why" class="section section-alt">
+    <div class="container">
+      <p class="section-label">
+        <span class="lang-en">The core idea</span>
+        <span class="lang-ar">الفكرة الأساسية</span>
+      </p>
+      <h2 class="section-title">
+        <span class="lang-en">Most tools are excellent in the moment and weak over time</span>
+        <span class="lang-ar">معظم الأدوات ممتازة في اللحظة نفسها ولكنها تضعف بمرور الوقت</span>
+      </h2>
+      <div class="why-grid">
+        <div class="why-text">
+          <div class="lang-en">
+            <p>
+              Memory is no longer a differentiator on its own. <strong>ChatGPT, Claude, Cursor, and GitHub Copilot all have some form of memory now.</strong> With GPT-5.5 and Claude Mythos pushing the frontier in April 2026, Anthropic, OpenAI, and Microsoft are all shipping scheduling and agent features. The category boundaries that existed twelve months ago are blurring fast.
+            </p>
+            <p>
+              The distinction that matters is not "has memory" vs. "has no memory." It's whether context <strong>persists across sessions automatically</strong>, whether execution happens on <strong>hardware you control</strong>, whether you can reach the same agent identity from <strong>any device</strong>, and whether the system gets meaningfully <strong>better at your workflow over time</strong> without manual configuration.
+            </p>
+            <p>
+              Hermes answers yes to all four. It runs as a persistent process on your server. Memory is markdown files in <code style="font-family: 'JetBrains Mono', monospace; font-size: 0.85em; background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px;">~/.hermes/</code>. The same agent that answered your Telegram message at 9am is available in your terminal at 2pm, with full context.
+            </p>
+          </div>
+          <div class="lang-ar">
+            <p>
+              الذاكرة لم تعد ميزة تنافسية بمفردها. <strong>تطبيقات ChatGPT و Claude و Cursor و GitHub Copilot تمتلك جميعها شكلاً من أشكال الذاكرة الآن.</strong> مع صدور GPT-5.5 و Claude Mythos في أبريل 2026، تعمل كل الشركات الكبرى على شحن ميزات الجدولة والعملاء الأذكياء. الحدود بين الفئات التي كانت قائمة قبل عام تتلاشى بسرعة.
+            </p>
+            <p>
+              الفرق الحقيقي ليس "يمتلك ذاكرة" مقابل "لا يمتلك ذاكرة"، بل هو ما إذا كان السياق <strong>يستمر عبر الجلسات تلقائياً</strong>، وما إذا كان التنفيذ يتم على <strong>عتاد تتحكم فيه بنفسك</strong>، وما إذا كان بإمكانك الوصول إلى نفس هوية العميل الذكي من <strong>أي جهاز</strong>، وما إذا كان النظام يتحسن بشكل ملموس في <strong>سير عملك بمرور الوقت</strong> دون تكوين يدوي.
+            </p>
+            <p>
+              يجيب هيرميس بنعم على هذه النقاط الأربعة. فهو يعمل كعملية مستمرة على خادمك الخاص، وتخزن ذاكرته كملفات Markdown بسيطة وقابلة للتعديل في المجلد الرئيسي <code style="font-family: 'JetBrains Mono', monospace; font-size: 0.85em; background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px;">~/.hermes/</code>. نفس العميل الذي أجاب على رسالتك في Telegram صباحاً سيكون متاحاً في واجهة الأوامر الخاصة بك في المساء بكامل السياق.
+            </p>
+          </div>
+          
+          <div class="convergence-note">
+            <strong class="lang-en">Why synthesis matters:</strong>
+            <strong class="lang-ar">لماذا التكامل مهم؟</strong>
+            <span class="lang-en">The market is converging. Chat assistants added scheduling. Editors shipped cloud agents. CLIs are getting skills. Any single feature is available somewhere else. The value is having all of them in one self-hosted system, running continuously, with a persistent identity that accumulates real knowledge of your stack over time.</span>
+            <span class="lang-ar">السوق يتقارب. أضافت مساعدات الدردشة ميزة الجدولة، وشحن محررو الأكواد عملاء سحابيين، وبدأت واجهات الأوامر (CLIs) بالحصول على مهارات. أي ميزة فردية متوفرة في مكان آخر. القيمة الحقيقية تكمن في الحصول عليها جميعاً في نظام مستقل واحد يعمل باستمرار، بهوية ثابتة تراكم المعرفة الفعلية لبيئة عملك بمرور الوقت.</span>
+          </div>
+        </div>
+        <div>
+          <div class="why-diagram">
+            <div class="label">
+              <span class="lang-en">Session-scoped tool</span>
+              <span class="lang-ar">أداة محدودة بالجلسة</span>
             </div>
-        </header>
-
-        <!-- Hero Section -->
-        <section>
-            <div class="g border-t">
-                <div class="gc col-span-full hero-cell">
-                    <span class="badge">OPEN SOURCE · MIT LICENSE</span>
-                    <h1 class="hero-title">THE AGENT THAT GROWS WITH YOU.</h1>
-                    <p class="hero-desc">
-                        A lightweight, ultra-optimized Windows fork of the Hermes Agent WebUI. 
-                        Run directly on native Windows architecture with zero Docker virtual machine overhead, zero WSL2 resource latency, and smooth, persistent file execution.
-                    </p>
-                    
-                    <span class="author-tag">MAINTAINED & OPTIMIZED BY: Ã̶ḧ̶Ḿ̶ĕ̶đ̶ Å̶ḱ̶ṝ̶à̶ḿ̶</span>
-
-                    <!-- Installer Command boxes -->
-                    <div class="command-wrapper">
-                        <div class="command-header">
-                            <span>POWERSHELL ONE-LINER INSTALLER</span>
-                            <span>FAST SYSTEM INITIALIZATION</span>
-                        </div>
-                        <div class="command-box">
-                            <span style="font-family: var(--font-mono); font-size: 0.72rem; word-break: break-all;" id="install-cmd">powershell -ExecutionPolicy Bypass -c "irm https://1proo.github.io/hermes-webui/install_windows.ps1 | iex"</span>
-                            <button class="copy-btn" onclick="copyText('install-cmd', this)">COPY</button>
-                        </div>
-                        
-                        <div class="command-header" style="margin-top: 0.5rem;">
-                            <span>MANUAL CLONE COMMANDS</span>
-                            <span>GIT SETUP</span>
-                        </div>
-                        <div class="command-box">
-                            <span style="font-family: var(--font-mono); font-size: 0.72rem; word-break: break-all;" id="manual-cmd">git clone https://github.com/1PROO/hermes-webui.git &amp;&amp; cd hermes-webui &amp;&amp; .\start.bat</span>
-                            <button class="copy-btn" onclick="copyText('manual-cmd', this)">COPY</button>
-                        </div>
-                    </div>
-                </div>
+            <div class="line">
+              <span class="kw">You</span> &#8594; <span class="bracket">[Tool]</span> &#8594; Answer &#8594; Done
             </div>
-        </section>
-
-        <!-- Terminal & Theme Swapping Interface -->
-        <section class="demo-section">
-            <div class="g border-t">
-                <!-- Terminal Column -->
-                <div class="gc col-span-3">
-                    <span class="nav-label">04 // INTERACTIVE TERMINAL</span>
-                    <div class="terminal-container">
-                        <div class="terminal-header">
-                            <span class="terminal-dot" style="background-color: #ef4444;"></span>
-                            <span class="terminal-dot" style="background-color: #eab308;"></span>
-                            <span class="terminal-dot" style="background-color: #22c55e;"></span>
-                            <span class="terminal-title">powershell.exe</span>
-                        </div>
-                        <div class="terminal-body" id="terminal-content">
-                            <span class="terminal-line">> </span><span class="terminal-cursor"></span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Theme swapper Column -->
-                <div class="gc col-span-2">
-                    <span class="nav-label">05 // LIVE ACCENT PREVIEWS</span>
-                    <h3 style="font-size: 1.1rem; font-weight: 700; margin-bottom: 0.5rem;">SELECT PAGE SKIN</h3>
-                    <p style="font-size: 0.8rem; text-transform: none; opacity: 0.7; line-height: 1.4;">
-                        Hermes WebUI ships with 12 distinct built-in skins. Click any palette card below to instantly transform this entire landing page's theme.
-                    </p>
-                    
-                    <div class="skins-grid">
-                        <!-- Skin cards -->
-                        <div class="skin-card active" id="card-default" onclick="setSkin('default')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">DEFAULT</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #041C1C;"></span>
-                                <span class="color-dot" style="background-color: #ffe6cb;"></span>
-                                <span class="color-dot" style="background-color: #FFD700;"></span>
-                            </div>
-                        </div>
-
-                        <div class="skin-card" id="card-ares" onclick="setSkin('ares')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">ARES</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #1a0808;"></span>
-                                <span class="color-dot" style="background-color: #FF4444;"></span>
-                                <span class="color-dot" style="background-color: #FF4444;"></span>
-                            </div>
-                        </div>
-
-                        <div class="skin-card" id="card-mono" onclick="setSkin('mono')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">MONO</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #121212;"></span>
-                                <span class="color-dot" style="background-color: #CCCCCC;"></span>
-                                <span class="color-dot" style="background-color: #888888;"></span>
-                            </div>
-                        </div>
-
-                        <div class="skin-card" id="card-slate" onclick="setSkin('slate')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">SLATE</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #0f172a;"></span>
-                                <span class="color-dot" style="background-color: #94A3B8;"></span>
-                                <span class="color-dot" style="background-color: #38bdf8;"></span>
-                            </div>
-                        </div>
-
-                        <div class="skin-card" id="card-poseidon" onclick="setSkin('poseidon')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">POSEIDON</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #022a3a;"></span>
-                                <span class="color-dot" style="background-color: #0EA5E9;"></span>
-                                <span class="color-dot" style="background-color: #38bdf8;"></span>
-                            </div>
-                        </div>
-
-                        <div class="skin-card" id="card-sisyphus" onclick="setSkin('sisyphus')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">SISYPHUS</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #1e1b4b;"></span>
-                                <span class="color-dot" style="background-color: #A78BFA;"></span>
-                                <span class="color-dot" style="background-color: #c084fc;"></span>
-                            </div>
-                        </div>
-
-                        <div class="skin-card" id="card-charizard" onclick="setSkin('charizard')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">CHARIZARD</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #2a1103;"></span>
-                                <span class="color-dot" style="background-color: #FB923C;"></span>
-                                <span class="color-dot" style="background-color: #f97316;"></span>
-                            </div>
-                        </div>
-
-                        <div class="skin-card" id="card-sienna" onclick="setSkin('sienna')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">SIENNA</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #1F1E1C;"></span>
-                                <span class="color-dot" style="background-color: #E0896D;"></span>
-                                <span class="color-dot" style="background-color: #D97757;"></span>
-                            </div>
-                        </div>
-
-                        <div class="skin-card" id="card-catppuccin" onclick="setSkin('catppuccin')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">CATPPUCCIN</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #1E1E2E;"></span>
-                                <span class="color-dot" style="background-color: #CBA6F7;"></span>
-                                <span class="color-dot" style="background-color: #f5c2e7;"></span>
-                            </div>
-                        </div>
-
-                        <div class="skin-card" id="card-hepburn" onclick="setSkin('hepburn')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">HEPBURN</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #110a0f;"></span>
-                                <span class="color-dot" style="background-color: #f278ad;"></span>
-                                <span class="color-dot" style="background-color: #ec5597;"></span>
-                            </div>
-                        </div>
-
-                        <div class="skin-card" id="card-nous" onclick="setSkin('nous')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">NOUS</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #0A0E14;"></span>
-                                <span class="color-dot" style="background-color: #7EB6E0;"></span>
-                                <span class="color-dot" style="background-color: #4682B4;"></span>
-                            </div>
-                        </div>
-
-                        <div class="skin-card" id="card-geist-contrast" onclick="setSkin('geist-contrast')">
-                            <div class="skin-card-header">
-                                <span class="skin-card-name">GEIST</span>
-                                <span class="skin-indicator"></span>
-                            </div>
-                            <div class="skin-colors">
-                                <span class="color-dot" style="background-color: #000000;"></span>
-                                <span class="color-dot" style="background-color: #FFF175;"></span>
-                                <span class="color-dot" style="background-color: #ffffff;"></span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
+            <div class="line" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">
+              <span class="lang-en">(some tools carry memory, but execution is stateless)</span>
+              <span class="lang-ar">(بعض الأدوات تحمل الذاكرة، لكن التنفيذ غير محفوظ الحالة)</span>
             </div>
-        </section>
+            <hr class="divider" />
+            <div class="label">
+              <span class="lang-en">Persistent agent</span>
+              <span class="lang-ar">عميل ذكي مستمر</span>
+            </div>
+            <div class="line">
+              <span class="kw">You</span> &#8596; <span class="bracket">[Hermes]</span> &#8596; <span class="paren">(memory, skills,</span>
+            </div>
+            <div class="line">
+              &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="paren">schedule, tools,</span>
+            </div>
+            <div class="line">
+              &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="paren">surfaces)</span>
+            </div>
+            <hr class="divider" />
+            <div style="font-size: 0.75rem; color: var(--text-muted); line-height: 1.6;">
+              <span class="lang-en">
+                Memory: ~/.hermes/ (markdown files, editable)<br />
+                Skills: auto-written from experience<br />
+                Schedule: cron, runs while you sleep<br />
+                Surfaces: Telegram &middot; Discord &middot; Slack &middot; browser<br />
+                Model: your choice, swap anytime
+              </span>
+              <span class="lang-ar">
+                الذاكرة: في مجلد ~/.hermes/ (ملفات Markdown قابلة للتعديل)<br />
+                المهارات: مكتوبة تلقائياً من واقع التجربة<br />
+                الجدولة: عبر cron، تعمل حتى أثناء نومك<br />
+                قنوات الوصول: Telegram &middot; Discord &middot; Slack &middot; المتصفح<br />
+                النموذج: اختيارك، يمكنك التبديل في أي وقت
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
 
-        <!-- Features Grid -->
-        <section>
-            <div class="g border-t features-grid">
-                <!-- Feature 1 -->
-                <div class="gc feature-card group">
-                    <div class="group-hover-overlay"></div>
-                    <span class="nav-label">MODIFICATION // 01</span>
-                    <h3 class="feature-title">ZERO OVERHEAD</h3>
-                    <p class="feature-desc">
-                        Runs natively on Windows kernels without container overhead. Save up to 1.2 GB of RAM compared to standard Docker environments.
-                    </p>
-                </div>
+  <!-- ===== SECTION 3: PILLARS ===== -->
+  <section id="pillars" class="section">
+    <div class="container">
+      <p class="section-label">
+        <span class="lang-en">Three pillars</span>
+        <span class="lang-ar">الركائز الثلاثة</span>
+      </p>
+      <h2 class="section-title">
+        <span class="lang-en">What makes it different</span>
+        <span class="lang-ar">ما الذي يجعله مختلفاً</span>
+      </h2>
+      <div class="pillars-grid">
 
-                <!-- Feature 2 -->
-                <div class="gc feature-card group">
-                    <div class="group-hover-overlay"></div>
-                    <span class="nav-label">MODIFICATION // 02</span>
-                    <h3 class="feature-title">FILE LOCKING FIXES</h3>
-                    <p class="feature-desc">
-                        Custom execution patterns tailored to handle Windows filesystem file locks (UAC) and path structures directly in python scripts.
-                    </p>
-                </div>
+        <div class="pillar-card">
+          <div class="pillar-icon">&#129504;</div>
+          <h3 class="pillar-title">
+            <span class="lang-en">Memory that compounds</span>
+            <span class="lang-ar">ذاكرة تراكمية</span>
+          </h3>
+          <div class="pillar-body">
+            <p class="lang-en">Layered memory system: user profile, agent memory, skills, and session history. All stored locally as readable, editable markdown files at ~/.hermes/.</p>
+            <p class="lang-ar">نظام ذاكرة متعدد الطبقات: ملف تعريف المستخدم، ذاكرة العميل، المهارات، وسجل الجلسات. يتم تخزينها محلياً كملفات Markdown قابلة للقراءة والتعديل في ~/.hermes/.</p>
+            <ul>
+              <li>
+                <span class="lang-en">Survives every reboot and model swap</span>
+                <span class="lang-ar">تبقى بعد كل عملية إعادة تشغيل وتبديل للنموذج</span>
+              </li>
+              <li>
+                <span class="lang-en">8 optional external memory providers</span>
+                <span class="lang-ar">تدعم 8 موفري ذاكرة خارجيين اختياريين</span>
+              </li>
+              <li>
+                <span class="lang-en">You never configure it manually</span>
+                <span class="lang-ar">لا تحتاج إلى تكوين يدوي مطلقاً</span>
+              </li>
+              <li>
+                <span class="lang-en">Portable, inspectable, deletable</span>
+                <span class="lang-ar">قابلة للنقل، الفحص، والحذف بسهولة</span>
+              </li>
+            </ul>
+          </div>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory" target="_blank" rel="noopener" class="pillar-link">
+            <span class="lang-en">Memory docs &#8594;</span>
+            <span class="lang-ar">وثائق الذاكرة &#8594;</span>
+          </a>
+        </div>
 
-                <!-- Feature 3 -->
-                <div class="gc feature-card group">
-                    <div class="group-hover-overlay"></div>
-                    <span class="nav-label">MODIFICATION // 03</span>
-                    <h3 class="feature-title">SMART INSTALLER</h3>
-                    <p class="feature-desc">
-                        PowerShell automation script that automatically configures python virtual environments, creates custom local configurations, and manages dependency resolution.
-                    </p>
+        <div class="pillar-card">
+          <div class="pillar-icon">&#9200;</div>
+          <h3 class="pillar-title">
+            <span class="lang-en">Autonomous scheduling</span>
+            <span class="lang-ar">جدولة ذاتية مستقلة</span>
+          </h3>
+          <div class="pillar-body">
+            <p class="lang-en">Built-in cron scheduler runs on your server with full access to your memory and skills, and delivers results wherever you want them.</p>
+            <p class="lang-ar">مجدول مهام مدمج (cron) يعمل على خادمك الخاص مع وصول كامل لذاكرتك ومهاراتك، ويرسل النتائج والتقارير إلى أي منصة تختارها.</p>
+            <ul>
+              <li>
+                <span class="lang-en">Morning news briefings to Telegram</span>
+                <span class="lang-ar">إرسال موجز الأخبار الصباحي إلى Telegram</span>
+              </li>
+              <li>
+                <span class="lang-en">PR review automation</span>
+                <span class="lang-ar">أتمتة مراجعة طلبات السحب (PRs)</span>
+              </li>
+              <li>
+                <span class="lang-en">Test suite monitoring</span>
+                <span class="lang-ar">مراقبة تشغيل اختبارات الأكواد</span>
+              </li>
+              <li>
+                <span class="lang-en">Blog watchers and price alerts</span>
+                <span class="lang-ar">تتبع تحديثات المواقع وتنبيهات الأسعار</span>
+              </li>
+            </ul>
+          </div>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/tools" target="_blank" rel="noopener" class="pillar-link">
+            <span class="lang-en">Scheduling docs &#8594;</span>
+            <span class="lang-ar">وثائق الجدولة &#8594;</span>
+          </a>
+        </div>
+
+        <div class="pillar-card">
+          <div class="pillar-icon">&#128225;</div>
+          <h3 class="pillar-title">
+            <span class="lang-en">Reach it from anywhere</span>
+            <span class="lang-ar">الوصول من أي مكان</span>
+          </h3>
+          <div class="pillar-body">
+            <p class="lang-en">Multi-surface access: same agent, same memory. Switch surfaces mid-conversation without losing context.</p>
+            <p class="lang-ar">وصول متعدد المنصات: نفس العميل الذكي، ونفس الذاكرة. تنقل بين المنصات أثناء المحادثة دون فقدان سياق الحوار.</p>
+            <ul>
+              <li>
+                <span class="lang-en">Telegram &middot; Discord &middot; Slack &middot; WhatsApp</span>
+                <span class="lang-ar">Telegram &middot; Discord &middot; Slack &middot; WhatsApp</span>
+              </li>
+              <li>
+                <span class="lang-en">Signal &middot; Matrix &middot; Mattermost &middot; Email &middot; SMS</span>
+                <span class="lang-ar">Signal &middot; Matrix &middot; Mattermost &middot; Email &middot; SMS</span>
+              </li>
+              <li>
+                <span class="lang-en">DingTalk &middot; Feishu &middot; WeCom &middot; BlueBubbles</span>
+                <span class="lang-ar">DingTalk &middot; Feishu &middot; WeCom &middot; BlueBubbles</span>
+              </li>
+              <li>
+                <span class="lang-en">Home Assistant &middot; browser</span>
+                <span class="lang-ar">Home Assistant &middot; المتصفح</span>
+              </li>
+            </ul>
+          </div>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/messaging" target="_blank" rel="noopener" class="pillar-link">
+            <span class="lang-en">Messaging docs &#8594;</span>
+            <span class="lang-ar">وثائق المراسلة &#8594;</span>
+          </a>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== SECTION 4: FEATURE GRID ===== -->
+  <section id="features" class="section section-alt">
+    <div class="container">
+      <p class="section-label">
+        <span class="lang-en">Full feature set</span>
+        <span class="lang-ar">الميزات الكاملة</span>
+      </p>
+      <h2 class="section-title">
+        <span class="lang-en">Everything in one system</span>
+        <span class="lang-ar">كل شيء في نظام واحد</span>
+      </h2>
+      <div class="feature-grid">
+
+        <div class="feature-tile">
+          <div class="feature-icon">&#128295;</div>
+          <div class="feature-title">
+            <span class="lang-en">47 built-in tools</span>
+            <span class="lang-ar">47 أداة مدمجة</span>
+          </div>
+          <p class="feature-body lang-en">Web search and extraction, browser automation, code execution, vision analysis, image generation, TTS, subagent delegation, and more.</p>
+          <p class="feature-body lang-ar">البحث في الويب، أتمتة المتصفح، تنصيب الأكواد، تحليل الرؤية، توليد الصور، تحويل النص لكلام، تفويض العملاء الفرعيين، والمزيد.</p>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/tools" target="_blank" rel="noopener" class="feature-link">
+            <span class="lang-en">Tools reference &#8594;</span>
+            <span class="lang-ar">مرجع الأدوات &#8594;</span>
+          </a>
+        </div>
+
+        <div class="feature-tile">
+          <div class="feature-icon">&#128218;</div>
+          <div class="feature-title">
+            <span class="lang-en">Self-improving skills</span>
+            <span class="lang-ar">مهارات مطورة ذاتياً</span>
+          </div>
+          <p class="feature-body lang-en">The agent writes its own skills from experience. Compatible with agentskills.io open standard and shareable via Skills Hub.</p>
+          <p class="feature-body lang-ar">يكتب العميل مهاراته الخاصة من واقع التجربة. متوافق مع معيار agentskills.io المفتوح ومشاركته عبر Skills Hub.</p>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills" target="_blank" rel="noopener" class="feature-link">
+            <span class="lang-en">Skills docs &#8594;</span>
+            <span class="lang-ar">وثائق المهارات &#8594;</span>
+          </a>
+        </div>
+
+        <div class="feature-tile">
+          <div class="feature-icon">&#128268;</div>
+          <div class="feature-title">
+            <span class="lang-en">MCP integration</span>
+            <span class="lang-ar">تكامل بروتوكول MCP</span>
+          </div>
+          <p class="feature-body lang-en">Connect to any MCP server. Hermes can also expose itself as an MCP server for Claude Code, Cursor, or Codex.</p>
+          <p class="feature-body lang-ar">الاتصال بأي خادم MCP. يمكن لهيرميس أيضاً تقديم نفسه كخادم MCP للعمل مع Claude Code أو Cursor أو Codex.</p>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp" target="_blank" rel="noopener" class="feature-link">
+            <span class="lang-en">MCP docs &#8594;</span>
+            <span class="lang-ar">وثائق MCP &#8594;</span>
+          </a>
+        </div>
+
+        <div class="feature-tile">
+          <div class="feature-icon">&#127908;</div>
+          <div class="feature-title">
+            <span class="lang-en">Voice mode</span>
+            <span class="lang-ar">الوضع الصوتي</span>
+          </div>
+          <p class="feature-body lang-en">Real-time voice in CLI (Ctrl+B to record), Telegram voice bubbles, Discord voice channels. Supports faster-whisper locally or Groq/OpenAI Whisper.</p>
+          <p class="feature-body lang-ar">صوت مباشر في واجهة الأوامر (Ctrl+B للتسجيل)، رسائل صوتية في Telegram، وقنوات الصوت في Discord. يدعم تشغيل الـ Whisper محلياً.</p>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/voice-mode" target="_blank" rel="noopener" class="feature-link">
+            <span class="lang-en">Voice docs &#8594;</span>
+            <span class="lang-ar">وثائق الصوت &#8594;</span>
+          </a>
+        </div>
+
+        <div class="feature-tile">
+          <div class="feature-icon">&#128421;</div>
+          <div class="feature-title">
+            <span class="lang-en">6 terminal backends</span>
+            <span class="lang-ar">6 واجهات تشغيل خلفية</span>
+          </div>
+          <p class="feature-body lang-en">Local, Docker, SSH, Daytona, Singularity, Modal. Run execution anywhere from a $5 VPS to serverless cloud, sandboxed as needed.</p>
+          <p class="feature-body lang-ar">محلي (Local)، وبيئة Docker، و SSH، و Daytona، و Singularity، و Modal. نفّذ الأوامر في أي مكان من خادم VPS إلى السحابة.</p>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/tools" target="_blank" rel="noopener" class="feature-link">
+            <span class="lang-en">Backend docs &#8594;</span>
+            <span class="lang-ar">الواجهات الخلفية &#8594;</span>
+          </a>
+        </div>
+
+        <div class="feature-tile">
+          <div class="feature-icon">&#127917;</div>
+          <div class="feature-title">
+            <span class="lang-en">Personality &amp; SOUL.md</span>
+            <span class="lang-ar">الشخصيات وملف SOUL.md</span>
+          </div>
+          <p class="feature-body lang-en">Define the agent's default voice with a global SOUL.md file. 14 built-in personas plus custom personalities via config.</p>
+          <p class="feature-body lang-ar">حدد نبرة وصوت العميل الذكي الافتراضي عبر ملف SOUL.md. يتوفر 14 شخصية جاهزة بالإضافة إلى إمكانية تخصيص نبرتك.</p>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/personality" target="_blank" rel="noopener" class="feature-link">
+            <span class="lang-en">Personality docs &#8594;</span>
+            <span class="lang-ar">وثائق الشخصية &#8594;</span>
+          </a>
+        </div>
+
+        <div class="feature-tile">
+          <div class="feature-icon">&#129309;</div>
+          <div class="feature-title">
+            <span class="lang-en">Agent orchestration</span>
+            <span class="lang-ar">تنسيق العملاء الأذكياء</span>
+          </div>
+          <p class="feature-body lang-en">Spawn Claude Code or Codex as sub-agents for heavy coding tasks. Results fold back into Hermes memory. Hermes also runs as an MCP server for other tools.</p>
+          <p class="feature-body lang-ar">إطلاق عملاء فرعيين مثل Claude Code أو Codex لإنجاز مهام البرمجة الصعبة وتغذية النتائج مجدداً في ذاكرة هيرميس.</p>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp" target="_blank" rel="noopener" class="feature-link">
+            <span class="lang-en">Orchestration docs &#8594;</span>
+            <span class="lang-ar">وثائق التنسيق &#8594;</span>
+          </a>
+        </div>
+
+        <div class="feature-tile">
+          <div class="feature-icon">&#128274;</div>
+          <div class="feature-title">
+            <span class="lang-en">Security model</span>
+            <span class="lang-ar">نموذج الحماية والأمان</span>
+          </div>
+          <p class="feature-body lang-en">7-layer defense in depth: user allowlists, dangerous command approval, Docker isolation, MCP credential filtering, prompt injection scanning, cross-session isolation, input sanitization.</p>
+          <p class="feature-body lang-ar">دفاع ذو 7 طبقات: قوائم سماح المستخدمين، تأكيد الأوامر الخطيرة، عزل الحاويات، تصفية بيانات اعتماد MCP، وعزل الجلسات.</p>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/security" target="_blank" rel="noopener" class="feature-link">
+            <span class="lang-en">Security docs &#8594;</span>
+            <span class="lang-ar">وثائق الأمان &#8594;</span>
+          </a>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== SECTION 5: WEB UI SHOWCASE ===== -->
+  <section id="webui" class="section">
+    <div class="container">
+      <p class="section-label">
+        <span class="lang-en">Hermes Web UI</span>
+        <span class="lang-ar">واجهة ويب هيرميس</span>
+      </p>
+      <h2 class="section-title">
+        <span class="lang-en">A beautiful browser interface for Hermes</span>
+        <span class="lang-ar">واجهة متصفح أنيقة وعصرية لهيرميس</span>
+      </h2>
+      <p class="section-body">
+        <span class="lang-en">Full-featured, no build step, no framework. Three-panel Claude-style layout with sessions sidebar, chat, and workspace file browser. Everything you can do from a terminal, you can do from this UI.</span>
+        <span class="lang-ar">كامل الميزات، بدون خطوات بناء معقدة، وبدون أطر عمل ثقيلة. تصميم ثلاثي الأقسام مستوحى من واجهة Claude، يحتوي على قائمة جانبية للجلسات، ونافذة الدردشة، ومستعرض ملفات بيئة العمل. كل ما يمكنك فعله من واجهة الأوامر، يمكنك إنجازه هنا.</span>
+        <a href="https://github.com/1PROO/hermes-webui" target="_blank" rel="noopener" style="margin-left: 6px;">GitHub &#8594;</a>
+      </p>
+
+      <!-- Hero screenshot -->
+      <div class="showcase-hero" onclick="openLightbox(this.querySelector('img').src)">
+        <img src="https://nesquena.github.io/hermes-webui/images/ui-hero.png" alt="Hermes Web UI - three-panel layout with sessions, chat, and workspace" loading="lazy" />
+        <div class="showcase-hero-label">
+          <span class="lang-en">Three-panel layout &mdash; dark mode</span>
+          <span class="lang-ar">تصميم ثلاثي الأقسام &mdash; الوضع الداكن</span>
+        </div>
+      </div>
+
+      <!-- Screenshot gallery -->
+      <div class="showcase-gallery">
+        <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
+          <img src="https://nesquena.github.io/hermes-webui/images/ui-light-mode.png" alt="Light mode with full profile support" loading="lazy" />
+          <div class="showcase-thumb-caption">
+            <span class="lang-en">Light mode with profile support</span>
+            <span class="lang-ar">الوضع الفاتح مع دعم ملفات التعريف المتعددة</span>
+          </div>
+        </div>
+        <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
+          <img src="https://nesquena.github.io/hermes-webui/images/ui-settings.png" alt="Settings panel with password protection" loading="lazy" />
+          <div class="showcase-thumb-caption">
+            <span class="lang-en">Settings &amp; password protection</span>
+            <span class="lang-ar">الإعدادات وحماية كلمة المرور</span>
+          </div>
+        </div>
+        <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
+          <img src="https://nesquena.github.io/hermes-webui/images/ui-workspace.png" alt="Workspace file browser with inline preview" loading="lazy" />
+          <div class="showcase-thumb-caption">
+            <span class="lang-en">Workspace file browser</span>
+            <span class="lang-ar">مستعرض ملفات بيئة العمل (Workspace)</span>
+          </div>
+        </div>
+        <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
+          <img src="https://nesquena.github.io/hermes-webui/images/ui-sessions.png" alt="Session projects, tags, and tool call cards" loading="lazy" />
+          <div class="showcase-thumb-caption">
+            <span class="lang-en">Sessions, projects &amp; tags</span>
+            <span class="lang-ar">الجلسات والمشاريع والوسوم</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="webui-layout">
+        <div>
+          <h3 class="subsection-title" style="margin-top: 0;">
+            <span class="lang-en">What it includes</span>
+            <span class="lang-ar">ما الذي تتضمنه الواجهة</span>
+          </h3>
+          <div class="webui-features">
+            <div class="webui-feature-item">
+              <span class="lang-en">1:1 parity with Hermes CLI</span>
+              <span class="lang-ar">تطابق كامل بنسبة 1:1 مع واجهة الأوامر (CLI)</span>
+            </div>
+            <div class="webui-feature-item">
+              <span class="lang-en">Multi-profile support</span>
+              <span class="lang-ar">دعم حسابات وملفات تعريف متعددة</span>
+            </div>
+            <div class="webui-feature-item">
+              <span class="lang-en">Session history with projects and tags</span>
+              <span class="lang-ar">سجل المحادثات مقسم حسب المشاريع والوسوم</span>
+            </div>
+            <div class="webui-feature-item">
+              <span class="lang-en">Tool call cards with expand/collapse</span>
+              <span class="lang-ar">بطاقات استدعاء الأدوات قابلة للتوسيع والطي</span>
+            </div>
+            <div class="webui-feature-item">
+              <span class="lang-en">Workspace file browser</span>
+              <span class="lang-ar">مستعرض ملفات متكامل لبيئة العمل</span>
+            </div>
+            <div class="webui-feature-item">
+              <span class="lang-en">Inline file preview (code, markdown, images)</span>
+              <span class="lang-ar">معاينة فورية للملفات (الأكواد، النصوص، الصور)</span>
+            </div>
+            <div class="webui-feature-item">
+              <span class="lang-en">Light + dark mode</span>
+              <span class="lang-ar">دعم الوضعين الداكن والفاتح</span>
+            </div>
+            <div class="webui-feature-item">
+              <span class="lang-en">Password protection</span>
+              <span class="lang-ar">حماية الواجهة بكلمة مرور</span>
+            </div>
+            <div class="webui-feature-item">
+              <span class="lang-en">SSH tunnel ready</span>
+              <span class="lang-ar">جاهز للربط عبر نفق SSH آمن</span>
+            </div>
+            <div class="webui-feature-item">
+              <span class="lang-en">Docker image available</span>
+              <span class="lang-ar">حاوية Docker جاهزة للاستخدام</span>
+            </div>
+            <div class="webui-feature-item">
+              <span class="lang-en">Voice input (Web Speech API)</span>
+              <span class="lang-ar">إدخال الأوامر بالصوت (Web Speech API)</span>
+            </div>
+            <div class="webui-feature-item">
+              <span class="lang-en">Mobile responsive</span>
+              <span class="lang-ar">تصميم متجاوب بالكامل مع الهواتف الذكية</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="webui-steps">
+          <div class="os-selector">
+            <button class="os-tab-btn active" onclick="switchOSTab('windows')">Windows Native</button>
+            <button class="os-tab-btn" onclick="switchOSTab('unix')">Linux / macOS</button>
+          </div>
+
+          <!-- Windows Native Steps -->
+          <div id="steps-windows" class="webui-steps-container">
+            <div>
+              <div class="step-header">
+                <div class="step-num">1</div>
+                <div class="step-title">
+                  <span class="lang-en">Automated PowerShell Install</span>
+                  <span class="lang-ar">تثبيت تلقائي عبر PowerShell</span>
                 </div>
+              </div>
+              <div class="code-wrap">
+                <div class="code-header">
+                  <span class="code-lang">powershell</span>
+                  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+                <pre><code class="language-bash">powershell -ExecutionPolicy Bypass -c "irm https://1proo.github.io/hermes-webui/install_windows.ps1 | iex"</code></pre>
+              </div>
             </div>
 
-            <div class="g features-grid">
-                <!-- Feature 4 -->
-                <div class="gc feature-card group">
-                    <div class="group-hover-overlay"></div>
-                    <span class="nav-label">ARCHITECTURE // 04</span>
-                    <h3 class="feature-title">PERSISTENT GROWTH</h3>
-                    <p class="feature-desc">
-                        The agent remembers past runs, retains local database logs, and saves custom scripts to its native database cache.
-                    </p>
+            <div>
+              <div class="step-header">
+                <div class="step-num">2</div>
+                <div class="step-title">
+                  <span class="lang-en">Clone and start manually</span>
+                  <span class="lang-ar">نسخ المستودع والتشغيل يدوياً</span>
                 </div>
-
-                <!-- Feature 5 -->
-                <div class="gc feature-card group">
-                    <div class="group-hover-overlay"></div>
-                    <span class="nav-label">INTEGRATION // 05</span>
-                    <h3 class="feature-title">CRON AUTOMATIONS</h3>
-                    <p class="feature-desc">
-                        Schedule natural-language script tasks to execute automatically via background powershell jobs and notifications.
-                    </p>
+              </div>
+              <div class="code-wrap">
+                <div class="code-header">
+                  <span class="code-lang">cmd</span>
+                  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
                 </div>
-
-                <!-- Feature 6 -->
-                <div class="gc feature-card group">
-                    <div class="group-hover-overlay"></div>
-                    <span class="nav-label">CONTROL // 06</span>
-                    <h3 class="feature-title">BROWSER ISOLATION</h3>
-                    <p class="feature-desc">
-                        Control full browser execution sessions natively on Windows. Includes complete vision models, web scraping, and file editing.
-                    </p>
-                </div>
+                <pre><code class="language-bash">git clone https://github.com/1PROO/hermes-webui.git
+cd hermes-webui
+.\start.bat</code></pre>
+              </div>
             </div>
-        </section>
 
-        <!-- Footer -->
-        <footer>
-            <div class="g border-t">
-                <div class="gc col-span-2 footer-cell">
-                    <span class="footer-text">HERMES WINDOWS NATIVE EDITION</span>
-                    <span class="footer-text" style="margin-top: 0.5rem; display: block; opacity: 0.4;">
-                        MAINTAINED BY Ã̶ḧ̶Ḿ̶ĕ̶đ̶ Å̶ḱ̶ṝ̶à̶ḿ̶
-                    </span>
+            <div>
+              <div class="step-header">
+                <div class="step-num">3</div>
+                <div class="step-title">
+                  <span class="lang-en">Configure Environment Paths</span>
+                  <span class="lang-ar">تكوين مسارات البيئة المخصصة</span>
                 </div>
-
-                <div class="gc footer-cell group">
-                    <div class="group-hover-overlay"></div>
-                    <span class="nav-label">06 // COMMUNITY</span>
-                    <a href="https://fb.com/1PROO" target="_blank" class="footer-link">FACEBOOK DEV PROFILE ↗</a>
+              </div>
+              <p style="margin-bottom: 10px; font-size: 0.85rem; color: var(--text-secondary);">
+                <span class="lang-en">Create a <code>.env</code> file in the folder root pointing to your local python binary and agent workspace folder:</span>
+                <span class="lang-ar">أنشئ ملف <code>.env</code> في جذر المجلد يشير إلى مفسر python ومجلد العميل:</span>
+              </p>
+              <div class="code-wrap">
+                <div class="code-header">
+                  <span class="code-lang">env</span>
+                  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
                 </div>
-
-                <div class="gc footer-cell group">
-                    <div class="group-hover-overlay"></div>
-                    <span class="nav-label">07 // NOUS SYSTEM</span>
-                    <a href="https://nousresearch.com" target="_blank" class="footer-link">NOUS RESEARCH ↗</a>
-                </div>
-
-                <div class="gc footer-cell">
-                    <span class="footer-text">MIT LICENSE · 2026</span>
-                    <span class="footer-text" style="margin-top: 0.5rem; display: block; opacity: 0.4; font-family: var(--font-mono); font-size: 0.65rem;">
-                        V0.51.119 - BUILD OK
-                    </span>
-                </div>
+                <pre><code class="language-bash">HERMES_WEBUI_AGENT_DIR=C:/Users/YOUR_USER/AppData/Local/hermes/hermes-agent
+HERMES_WEBUI_PYTHON=C:/Users/YOUR_USER/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe
+HERMES_WEBUI_HOST=127.0.0.1
+HERMES_WEBUI_PORT=8787</code></pre>
+              </div>
             </div>
-        </footer>
-    </main>
+          </div>
 
-    <!-- JS IMPLEMENTATION -->
-    <script>
-        // High-Performance Background Noise Loop
-        const canvas = document.getElementById('grain-canvas');
-        const ctx = canvas.getContext('2d');
-        let width = canvas.width = window.innerWidth;
-        let height = canvas.height = window.innerHeight;
+          <!-- Unix Steps (Hidden by default) -->
+          <div id="steps-unix" class="webui-steps-container" style="display: none;">
+            <div>
+              <div class="step-header">
+                <div class="step-num">1</div>
+                <div class="step-title">
+                  <span class="lang-en">Install Hermes Agent first</span>
+                  <span class="lang-ar">تثبيت عميل هيرميس أولاً</span>
+                </div>
+              </div>
+              <div class="code-wrap">
+                <div class="code-header">
+                  <span class="code-lang">bash</span>
+                  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+                <pre><code class="language-bash">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+hermes model   # configure your LLM provider</code></pre>
+              </div>
+            </div>
 
-        const noisePatterns = [];
-        const patternSize = 256;
-        for (let i = 0; i < 6; i++) {
-            const pCanvas = document.createElement('canvas');
-            pCanvas.width = patternSize;
-            pCanvas.height = patternSize;
-            const pCtx = pCanvas.getContext('2d');
-            const imgData = pCtx.createImageData(patternSize, patternSize);
-            const data = imgData.data;
-            for (let j = 0; j < data.length; j += 4) {
-                const val = Math.floor(Math.random() * 255);
-                data[j] = val;
-                data[j + 1] = val;
-                data[j + 2] = val;
-                data[j + 3] = 14; // Subtle grain opacity
-            }
-            pCtx.putImageData(imgData, 0, 0);
-            noisePatterns.push(pCanvas);
-        }
+            <div>
+              <div class="step-header">
+                <div class="step-num">2</div>
+                <div class="step-title">
+                  <span class="lang-en">Clone and start the Web UI</span>
+                  <span class="lang-ar">نسخ المستودع وتشغيل واجهة الويب</span>
+                </div>
+              </div>
+              <div class="code-wrap">
+                <div class="code-header">
+                  <span class="code-lang">bash</span>
+                  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+                <pre><code class="language-bash">git clone https://github.com/1PROO/hermes-webui.git hermes-webui
+cd hermes-webui
+./start.sh</code></pre>
+              </div>
+            </div>
 
-        let frame = 0;
-        let fpsInterval = 1000 / 24; // Limit to 24fps for filmic look and performance
-        let lastFrameTime = Date.now();
+            <div>
+              <div class="step-header">
+                <div class="step-num" style="background: var(--bg-tertiary); color: var(--text-secondary); border: 1px solid var(--border);">&nbsp;or&nbsp;</div>
+                <div class="step-title">
+                  <span class="lang-en">Docker option</span>
+                  <span class="lang-ar">التشغيل عبر Docker (اختياري)</span>
+                </div>
+              </div>
+              <div class="code-wrap">
+                <div class="code-header">
+                  <span class="code-lang">bash</span>
+                  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+                <pre><code class="language-bash">docker pull ghcr.io/1proo/hermes-webui:latest
+docker run -d \
+  -e WANTED_UID=$(id -u) -e WANTED_GID=$(id -g) \
+  -v ~/.hermes:/home/hermeswebui/.hermes \
+  -v ~/workspace:/workspace \
+  -p 8787:8787 ghcr.io/1proo/hermes-webui:latest</code></pre>
+              </div>
+            </div>
 
-        function drawNoise() {
-            requestAnimationFrame(drawNoise);
+            <div>
+              <div class="step-header">
+                <div class="step-num" style="background: var(--bg-tertiary); color: var(--text-secondary); border: 1px solid var(--border);">&#8594;</div>
+                <div class="step-title">
+                  <span class="lang-en">SSH tunnel (for remote servers)</span>
+                  <span class="lang-ar">نفق SSH (للخوادم البعيدة)</span>
+                </div>
+              </div>
+              <div class="code-wrap">
+                <div class="code-header">
+                  <span class="code-lang">bash</span>
+                  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+                </div>
+                <pre><code class="language-bash">ssh -N -L 8787:127.0.0.1:8787 user@your-server</code></pre>
+              </div>
+              <p style="margin-top: 10px; font-size: 0.85rem; color: var(--text-secondary);">
+                <span class="lang-en">Then visit <a href="http://localhost:8787" target="_blank" rel="noopener">http://localhost:8787</a></span>
+                <span class="lang-ar">ثم توجه إلى الرابط التالي: <a href="http://localhost:8787" target="_blank" rel="noopener">http://localhost:8787</a></span>
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
 
-            const now = Date.now();
-            const elapsed = now - lastFrameTime;
+  <!-- ===== SECTION 6: WHO IS IT FOR ===== -->
+  <section id="who" class="section section-alt">
+    <div class="container">
+      <p class="section-label">
+        <span class="lang-en">Who it's for</span>
+        <span class="lang-ar">لمن هذا النظام</span>
+      </p>
+      <h2 class="section-title">
+        <span class="lang-en">Built for these workflows</span>
+        <span class="lang-ar">مصمم خصيصاً لأساليب العمل هذه</span>
+      </h2>
+      <p class="section-body">
+        <span class="lang-en">Hermes earns its setup cost over time, not in the first session. These are the people and use cases where it shines.</span>
+        <span class="lang-ar">يعوض هيرميس تكلفة إعداده ومجهودها بمرور الوقت مع تراكم المعرفة البرمجية، وهذه هي الحالات التي يظهر فيها تفوقه الجوهري.</span>
+      </p>
+      <div class="persona-grid">
 
-            if (elapsed > fpsInterval) {
-                lastFrameTime = now - (elapsed % fpsInterval);
-                ctx.clearRect(0, 0, width, height);
-                const pattern = noisePatterns[frame % noisePatterns.length];
-                ctx.fillStyle = ctx.createPattern(pattern, 'repeat');
-                ctx.fillRect(0, 0, width, height);
-                frame++;
-            }
-        }
+        <div class="persona-card">
+          <div class="persona-icon">&#128187;</div>
+          <div class="persona-title">
+            <span class="lang-en">Solo developers</span>
+            <span class="lang-ar">المطورون المستقلون</span>
+          </div>
+          <div class="persona-body lang-en">Don't want to re-explain your stack every session. Want an AI that actually knows your environment, your conventions, and what you fixed last week.</div>
+          <div class="persona-body lang-ar">لا ترغب في إعادة شرح سياق وهندسة مشروعك في كل مرة. تريد ذكاءً اصطناعياً يعرف خبايا خادمك، اصطلاحاتك، وما أصلحته بالأمس.</div>
+        </div>
 
-        window.addEventListener('resize', () => {
-            width = canvas.width = window.innerWidth;
-            height = canvas.height = window.innerHeight;
-        });
+        <div class="persona-card">
+          <div class="persona-icon">&#128101;</div>
+          <div class="persona-title">
+            <span class="lang-en">Teams on a shared server</span>
+            <span class="lang-ar">الفرق على خادم مشترك</span>
+          </div>
+          <div class="persona-body lang-en">Multiple people sharing capable AI access without separate subscriptions. Each gets their own profile, memory, and history on the same instance.</div>
+          <div class="persona-body lang-ar">وصول مشترك لأعضاء الفريق دون الحاجة لاشتراكات منفصلة. يحصل كل عضو على ملف تعريف مستقل، وذاكرة، وسجل خاص به.</div>
+        </div>
 
-        drawNoise();
+        <div class="persona-card">
+          <div class="persona-icon">&#9889;</div>
+          <div class="persona-title">
+            <span class="lang-en">Automation-heavy</span>
+            <span class="lang-ar">محبو الأتمتة المستمرة</span>
+          </div>
+          <div class="persona-body lang-en">Want an AI running scheduled tasks, delivering results to your phone, without babysitting it. Morning briefings, PR reviews, monitoring.</div>
+          <div class="persona-body lang-ar">تريد أن يقوم الذكاء الاصطناعي بتشغيل مهام مجدولة، وإرسال تقارير النتائج لهاتفك دون الحاجة لرقابته (مثل موجز الصباح ومراجعة PRs).</div>
+        </div>
 
-        // Theme Management
-        function toggleTheme() {
-            const html = document.documentElement;
-            const themeToggle = document.getElementById('theme-toggle');
-            if (html.classList.contains('light')) {
-                html.classList.remove('light');
-                themeToggle.textContent = 'DARK';
-                localStorage.setItem('hermes-theme', 'dark');
-            } else {
-                html.classList.add('light');
-                themeToggle.textContent = 'LIGHT';
-                localStorage.setItem('hermes-theme', 'light');
-            }
-        }
+        <div class="persona-card">
+          <div class="persona-icon">&#128272;</div>
+          <div class="persona-title">
+            <span class="lang-en">Privacy-conscious</span>
+            <span class="lang-ar">المهتمون بالخصوصية</span>
+          </div>
+          <div class="persona-body lang-en">Conversations, memory, and files stay on your hardware. No data leaving your server. Full control over what the agent can access.</div>
+          <div class="persona-body lang-ar">محادثاتك، وذاكرتك، وملفاتك تبقى بالكامل على خادمك وعينات عتادك الخاص. حماية مطلقة وسيطرة كاملة على بياناتك.</div>
+        </div>
 
-        function setSkin(skinName) {
-            document.documentElement.setAttribute('data-skin', skinName);
-            localStorage.setItem('hermes-skin', skinName);
+        <div class="persona-card">
+          <div class="persona-icon">&#128260;</div>
+          <div class="persona-title">
+            <span class="lang-en">Multi-model users</span>
+            <span class="lang-ar">مستخدمو النماذج المتعددة</span>
+          </div>
+          <div class="persona-body lang-en">Switch between OpenAI, Anthropic, Google, DeepSeek, and others based on cost, capability, or rate limits without rebuilding your workflow.</div>
+          <div class="persona-body lang-ar">تنقل بمرونة بين نماذج OpenAI و Anthropic و Google و DeepSeek وغيرها بحسب التكلفة والفعالية دون تدمير سياق عملك.</div>
+        </div>
 
-            // Update active state in UI
-            document.querySelectorAll('.skin-card').forEach(card => {
-                card.classList.remove('active');
-            });
-            const activeCard = document.getElementById('card-' + skinName);
-            if (activeCard) {
-                activeCard.classList.add('active');
-            }
-        }
+      </div>
+    </div>
+  </section>
 
-        // Initialize saved settings
-        (function() {
-            const savedTheme = localStorage.getItem('hermes-theme') || 'dark';
-            const savedSkin = localStorage.getItem('hermes-skin') || 'default';
-            
-            if (savedTheme === 'light') {
-                document.documentElement.classList.add('light');
-                document.getElementById('theme-toggle').textContent = 'LIGHT';
-            }
-            
-            setSkin(savedSkin);
-        })();
+  <!-- ===== SECTION 7: COMPARISON ===== -->
+  <section id="compare" class="section">
+    <div class="container">
+      <p class="section-label">
+        <span class="lang-en">Honest comparison</span>
+        <span class="lang-ar">مقارنة منصفة</span>
+      </p>
+      <h2 class="section-title">
+        <span class="lang-en">How Hermes compares</span>
+        <span class="lang-ar">كيف يقارن هيرميس بالأدوات الأخرى</span>
+      </h2>
+      <p class="comparison-intro lang-en">
+        The agent landscape is converging fast. <strong>Chat assistants added scheduling and connectors.</strong> Editors shipped cloud agents and automations. CLIs are getting skills systems and multi-surface reach. The lines between "assistant," "editor," and "agent" are dissolving. This table reflects where things stand in mid-2026. Hermes wins through <strong>synthesis</strong>: all of these capabilities working together on hardware you own, with a model of your choice.
+      </p>
+      <p class="comparison-intro lang-ar">
+        المشهد البرمجي للعملاء الأذكياء يتقارب بسرعة. <strong>أضافت مساعدات الدردشة جدولة وربط أدوات.</strong> وشحن محررو الأكواد عملاء سحابيين وأتمتة. بينما واجهات الأوامر بدأت بامتلاك أنظمة مهارات ووصول متعدد المنصات. الحدود الفاصلة بين المساعد والمحرر والعميل تتلاشى. يوضح هذا الجدول الحالة الراهنة في منتصف 2026. يتفوق هيرميس بفضل <strong>التكامل المباشر</strong>: كل هذه الميزات تعمل معاً على أجهزة تمتلكها، مع نموذج من اختيارك.
+      </p>
 
-        // Copy functionality
-        function copyText(elementId, btn) {
-            const text = document.getElementById(elementId).textContent;
-            navigator.clipboard.writeText(text).then(() => {
-                const originalText = btn.textContent;
-                btn.textContent = 'COPIED!';
-                btn.style.color = 'var(--accent)';
-                setTimeout(() => {
-                    btn.textContent = originalText;
-                    btn.style.color = '';
-                }, 2000);
-            }).catch(err => {
-                console.error('Could not copy text: ', err);
-            });
-        }
+      <h3 class="subsection-title">
+        <span class="lang-en">vs. the agent landscape</span>
+        <span class="lang-ar">مقارنة ببيئة العملاء الأذكياء الأخرى</span>
+      </h3>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>
+                <span class="lang-en">Tool</span>
+                <span class="lang-ar">الأداة</span>
+              </th>
+              <th>
+                <span class="lang-en">Persistent memory</span>
+                <span class="lang-ar">الذاكرة التراكمية</span>
+              </th>
+              <th>
+                <span class="lang-en">Self-hosted scheduling</span>
+                <span class="lang-ar">جدولة ذاتية (خادمك)</span>
+              </th>
+              <th>
+                <span class="lang-en">Messaging / surfaces</span>
+                <span class="lang-ar">قنوات المراسلة</span>
+              </th>
+              <th>
+                <span class="lang-en">Self-hosted</span>
+                <span class="lang-ar">تشغيل محلي</span>
+              </th>
+              <th>
+                <span class="lang-en">Open source</span>
+                <span class="lang-ar">مصدر مفتوح</span>
+              </th>
+              <th>
+                <span class="lang-en">Self-improving skills</span>
+                <span class="lang-ar">مهارات مطورة</span>
+              </th>
+              <th>
+                <span class="lang-en">Always-on</span>
+                <span class="lang-ar">تشغيل مستمر</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="highlight-row">
+              <td>Hermes</td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003; <span class="lang-en">self-hosted</span><span class="lang-ar">تشغيل ذاتي</span></span></td>
+              <td><span class="check">&#10003; <span class="lang-en">many platforms</span><span class="lang-ar">منصات متعددة</span></span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003; MIT</span></td>
+              <td><span class="check">&#10003; <span class="lang-en">automatic</span><span class="lang-ar">تلقائي</span></span></td>
+              <td><span class="check">&#10003;</span></td>
+            </tr>
+            <tr>
+              <td>OpenClaw</td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003; <span class="lang-en">24+ platforms</span><span class="lang-ar">24+ منصة</span></span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003; MIT</span></td>
+              <td><span class="partial"><span class="lang-en">Partial</span><span class="lang-ar">جزئي</span></span></td>
+              <td><span class="check">&#10003;</span></td>
+            </tr>
+            <tr>
+              <td>Claude Code</td>
+              <td><span class="partial"><span class="lang-en">Partial&#8224;</span><span class="lang-ar">جزئي&#8224;</span></span></td>
+              <td><span class="cloud"><span class="lang-en">Cloud or desktop app</span><span class="lang-ar">سحابي أو مكتبي</span></span></td>
+              <td><span class="prev"><span class="lang-en">Preview</span><span class="lang-ar">تجريبي</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+            </tr>
+            <tr>
+              <td>Codex</td>
+              <td><span class="partial"><span class="lang-en">Partial</span><span class="lang-ar">جزئي</span></span></td>
+              <td><span class="partial"><span class="lang-en">Desktop app</span><span class="lang-ar">تطبيق مكتبي</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="check">&#10003; (CLI)</span></td>
+              <td><span class="check">&#10003; Apache 2.0</span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+            </tr>
+            <tr>
+              <td>OpenCode</td>
+              <td><span class="partial"><span class="lang-en">Partial</span><span class="lang-ar">جزئي</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="partial"><span class="lang-en">Community</span><span class="lang-ar">مجتمعي</span></span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="partial"><span class="lang-en">Community</span><span class="lang-ar">مجتمعي</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+            </tr>
+            <tr>
+              <td>Cursor</td>
+              <td><span class="check">&#10003; <span class="lang-en">per-project</span><span class="lang-ar">لكل مشروع</span></span></td>
+              <td><span class="cloud"><span class="lang-en">Cloud VMs</span><span class="lang-ar">سحابي</span></span></td>
+              <td><span class="check">&#10003; <span class="lang-en">Slack/web/mobile</span><span class="lang-ar">Slack/ويب/هاتف</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+            </tr>
+            <tr>
+              <td>GitHub Copilot</td>
+              <td><span class="partial"><span class="lang-en">Repo-scoped&#8225;</span><span class="lang-ar">لكل ريبو&#8225;</span></span></td>
+              <td><span class="partial"><span class="lang-en">Via agent</span><span class="lang-ar">عبر العميل</span></span></td>
+              <td><span class="partial"><span class="lang-en">Via CLI</span><span class="lang-ar">عبر CLI</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+            </tr>
+            <tr>
+              <td>Claude.ai</td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003; Cowork</span></td>
+              <td><span class="check">&#10003; <span class="lang-en">50+ connectors</span><span class="lang-ar">50+ أداة ربط</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+              <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+            </tr>
+             <tr>
+               <td>ChatGPT</td>
+               <td><span class="check">&#10003;</span></td>
+               <td><span class="check">&#10003;</span></td>
+               <td><span class="check">&#10003; <span class="lang-en">50+ connectors</span><span class="lang-ar">50+ أداة ربط</span></span></td>
+               <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+               <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+               <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+               <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+             </tr>
+             <tr>
+               <td>Perplexity Computer</td>
+               <td><span class="partial"><span class="lang-en">Partial</span><span class="lang-ar">جزئي</span></span></td>
+               <td><span class="partial"><span class="lang-en">Daily/weekly</span><span class="lang-ar">يومي / أسبوعي</span></span></td>
+               <td><span class="partial">Slack + Teams</span></td>
+               <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+               <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+               <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+               <td><span class="no"><span class="lang-en">No</span><span class="lang-ar">لا</span></span></td>
+             </tr>
+           </tbody>
+        </table>
+      </div>
+      <p style="font-size: 0.78rem; color: var(--text-muted); margin-top: -32px; margin-bottom: 48px; line-height: 1.6;">
+        <span class="lang-en">&#8224; Claude Code: CLAUDE.md / MEMORY.md plus auto-memory since v2.1.59+; no automatic cross-project accumulation<br />&#8225; Copilot Agentic Memory: public preview Jan 2026; repo-scoped, auto-expires after 28 days</span>
+        <span class="lang-ar">&#8224; Claude Code: ملفات الـ CLAUDE.md / MEMORY.md والذاكرة التلقائية منذ إصدار v2.1.59+؛ لا يوجد تراكم تلقائي للمشاريع المتقاطعة.<br />&#8225; Copilot Agentic Memory: معاينة عامة في يناير 2026؛ مقيدة بالمستودع وتنتهي صلاحيتها تلقائياً بعد 28 يوماً.</span>
+      </p>
 
-        // Interactive Terminal Typing Script
-        const terminalContent = document.getElementById('terminal-content');
-        const terminalCommands = [
-            { text: 'powershell -ExecutionPolicy Bypass -c "irm https://1proo.github.io/hermes-webui/install_windows.ps1 | iex"', isCmd: true },
-            { text: '\n[SYS] INITIALIZING NATIVE WINDOWS DEPLOYMENT SEQUENCE...\n', isSys: true },
-            { text: '[SYS] TESTING PYTHON INTERPRETER COMPATIBILITY...\n', isSys: true },
-            { text: '[SYS] FOUND VERSION 3.11.2 - SUCCESS\n', isSys: true },
-            { text: '[SYS] DEPLOYING ISOLATED VIRTUAL ENVIRONMENT (VENV)...\n', isSys: true },
-            { text: '[SYS] INSTALLING CORE LIBRARIES AND WINDOWS API HOOKS...\n', isSys: true },
-            { text: '[SYS] ATTACHING LOCAL STATE DATABASE AND GATEWAYS...\n', isSys: true },
-            { text: '[SYS] CONFIGURING PORT 8787 BINDING...\n', isSys: true },
-            { text: '\n[OK] HERMES WEBUI ONLINE AND LISTENING AT:\n     ==> HTTP://127.0.0.1:8787/\n\n', isSuccess: true }
-        ];
+      <h3 class="subsection-title mt-32">
+        <span class="lang-en">Head-to-head</span>
+        <span class="lang-ar">المقارنة التفصيلية</span>
+      </h3>
+      <div class="comparison-cards">
 
-        let currentCommandIndex = 0;
-        let currentCharIndex = 0;
+        <div class="comparison-card" onclick="window.open('https://github.com/1PROO/hermes-webui', '_blank')" role="link" tabindex="0" aria-label="Compare Hermes vs. OpenClaw" style="cursor:pointer">
+          <div class="card-arrow">→</div>
+          <h4>
+            <span class="lang-en">Hermes vs. OpenClaw</span>
+            <span class="lang-ar">هيرميس ضد OpenClaw</span>
+          </h4>
+          <p class="lang-en">
+            OpenClaw (MIT, 365k+ stars) is the closest comparison: open-source, self-hosted, always-on. OpenClaw has the widest messaging surface (24+ platforms including iMessage, LINE, WeChat, Teams) and native Chrome CDP browser control. Hermes wins on stability (OpenClaw's Telegram integration broke across multiple 2026 releases) and security &mdash; three separate 2026 audits found malicious skills in ClawHub (Koi Security linked 335 to "ClawHavoc," Bitdefender flagged ~900 packages, ~20% of the ecosystem). Hermes writes skills automatically from experience; OpenClaw centers on a human-curated marketplace. Hermes runs in Python/ML ecosystem; OpenClaw is Node.js.
+          </p>
+          <p class="lang-ar">
+            يعتبر OpenClaw (ترخيص MIT) المنافس الأقرب: مفتوح المصدر ومستقل ويعمل باستمرار. يمتلك واجهة وصول أوسع ونظام تحكم بمتصفح Chrome. لكن يتفوق هيرميس في الاستقرار (حيث تعطل ربط Telegram في إصدارات متعددة لـ OpenClaw عام 2026) والأمان &mdash; حيث كشفت ثلاثة عمليات تدقيق منفصلة في 2026 وجود حزم برمجية خبيثة في متجر ClawHub. يكتب هيرميس مهاراته تلقائياً من التجربة، ويعتمد على بيئة Python بينما OpenClaw مبني بـ Node.js.
+          </p>
+        </div>
 
-        function typeTerminal() {
-            if (currentCommandIndex >= terminalCommands.length) {
-                // Keep terminal active with blinking cursor
-                return;
-            }
+        <div class="comparison-card" onclick="window.open('https://github.com/1PROO/hermes-webui', '_blank')" role="link" tabindex="0" aria-label="Compare Hermes vs. Claude Code" style="cursor:pointer">
+          <div class="card-arrow">→</div>
+          <h4>
+            <span class="lang-en">Hermes vs. Claude Code</span>
+            <span class="lang-ar">هيرميس ضد Claude Code</span>
+          </h4>
+          <p class="lang-en">
+            Claude Code is Anthropic's official agentic tool spanning terminal, IDE, desktop, and browser. It has a 26-event hooks system, a plugin/skills marketplace, CLAUDE.md/MEMORY.md project memory with auto-memory since v2.1.59+, and cloud-managed scheduling on Anthropic infrastructure. Messaging channels (Telegram/Discord/iMessage) remain a research preview; Slack has not shipped. Key differences: scheduling requires cloud or desktop app (not a headless server daemon), memory doesn't accumulate across projects, and it's locked to Claude models. Hermes can spawn Claude Code as a sub-agent for heavy implementation tasks.
+          </p>
+          <p class="lang-ar">
+            أداة Claude Code هي الأداة الرسمية من شركة Anthropic وتعمل كأداة سطر أوامر ومتصفح ومحرر. تحتوي على نظام ربط، وتعتمد على ملفات CLAUDE.md/MEMORY.md للذاكرة، وتوفر جدولة سحابية. لكن الاختلافات تكمن في أن الجدولة تتطلب تشغيل التطبيق أو سحابة Anthropic وليس خادم خلفي مستقل، والذاكرة لا تتراكم خارج نطاق المشروع الفردي، كما أنها مغلقة على نماذج عائلة Claude فقط. يتميز هيرميس بالقدرة على إطلاق Claude Code كعميل فرعي لإنجاز المهام البرمجية المعقدة وإعادة دمج النتائج.
+          </p>
+        </div>
 
-            const current = terminalCommands[currentCommandIndex];
-            
-            if (current.isCmd) {
-                if (currentCharIndex < current.text.length) {
-                    // Type command characters one by one
-                    const cursor = terminalContent.querySelector('.terminal-cursor');
-                    const char = current.text[currentCharIndex];
-                    const charNode = document.createTextNode(char);
-                    terminalContent.insertBefore(charNode, cursor);
-                    currentCharIndex++;
-                    setTimeout(typeTerminal, 15 + Math.random() * 25);
-                } else {
-                    // Command finished typing, execute (show system response)
-                    currentCharIndex = 0;
-                    currentCommandIndex++;
-                    setTimeout(typeTerminal, 400);
-                }
-            } else {
-                // System message - display instantly or in quick blocks
-                const cursor = terminalContent.querySelector('.terminal-cursor');
-                const lineDiv = document.createElement('div');
-                
-                if (current.isSys) {
-                    lineDiv.style.opacity = '0.7';
-                } else if (current.isSuccess) {
-                    lineDiv.style.color = 'var(--accent)';
-                    lineDiv.style.fontWeight = 'bold';
-                }
-                
-                lineDiv.textContent = current.text;
-                terminalContent.insertBefore(lineDiv, cursor);
-                currentCommandIndex++;
-                setTimeout(typeTerminal, 150 + Math.random() * 100);
-            }
-        }
+        <div class="comparison-card" onclick="window.open('https://github.com/1PROO/hermes-webui', '_blank')" role="link" tabindex="0" aria-label="Compare Hermes vs. Cursor" style="cursor:pointer">
+          <div class="card-arrow">→</div>
+          <h4>
+            <span class="lang-en">Hermes vs. Cursor</span>
+            <span class="lang-ar">هيرميس ضد Cursor</span>
+          </h4>
+          <p class="lang-en">
+            Cursor has changed substantially. Memories (per-project) shipped June 2025. Automations launched March 2026 with time-based, event-based, and Slack triggers on cloud VMs. Cursor v3.0 (April 2026) is explicitly agent-first with a $29.3B valuation. Cursor excels at editor-native agents with strong IDE integration. Hermes is self-hosted and server-resident: the same persistent identity follows you across every surface without cloud intermediation, works with any model family, and for workflows requiring data sovereignty or deep Python/ML tooling on your own hardware, Cursor's cloud architecture is a fundamental mismatch.
+          </p>
+          <p class="lang-ar">
+            طرأت تغييرات جوهرية على محرر Cursor، حيث تم إطلاق ميزات الذاكرة (لكل مشروع) والجدولة والأتمتة السحابية. يتميز Cursor بقوته كعميل مدمج داخل محرر الأكواد بشكل افتراضي ومباشر. بالمقابل، يتميز هيرميس بكونه مقيماً وخادماً على عتادك الخاص: حيث تتبعك الهوية نفسها عبر كل القنوات دون وساطة سحابية، ويدعم أي نموذج ذكاء اصطناعي. بالنسبة للمؤسسات التي تتطلب سيادة مطلقة على البيانات أو تشغيل أدوات معقدة محلياً، فإن هيكلية Cursor السحابية تمثل مانعاً للاستخدام.
+          </p>
+        </div>
 
-        // Start terminal typing with delay
-        setTimeout(typeTerminal, 800);
-    </script>
+        <div class="comparison-card" onclick="window.open('https://github.com/1PROO/hermes-webui', '_blank')" role="link" tabindex="0" aria-label="Compare Hermes vs. Claude.ai / ChatGPT" style="cursor:pointer">
+          <div class="card-arrow">→</div>
+          <h4>
+            <span class="lang-en">Hermes vs. Claude.ai / ChatGPT</span>
+            <span class="lang-ar">هيرميس ضد Claude.ai / ChatGPT</span>
+          </h4>
+          <p class="lang-en">
+            Both are no longer simple chat tools. Claude Cowork added scheduling (Feb 2026) and 50+ connectors. ChatGPT (now running GPT-5.5, released April 23 2026) has Agent Mode, Scheduled Tasks, and 50+ connectors. Both have improved memory. The fundamental difference isn't features &mdash; it's where execution lives. Neither is self-hosted. Neither is provider-agnostic. Memory, sessions, and agent execution run on their servers, not yours. For workflows requiring data sovereignty, persistent server-resident execution, or provider flexibility, that's a disqualifying constraint.
+          </p>
+          <p class="lang-ar">
+            لم تعد هذه الأدوات مجرد واجهات دردشة بسيطة، حيث أضافت جدولة وجلب البيانات وأتمتة المهام ونماذج متقدمة مع تحسينات كبيرة للذاكرة. لكن الفارق الجوهري ليس في الميزات، بل في مكان تشغيل الأكواد. فكلاهما ليس تشغيلاً ذاتياً (Self-hosted) ولا يدعم تبديل موفري الخدمة بحرية. حيث تعمل الذاكرة والجلسات وتدريب النماذج على خوادمهم السحابية وليس خادمك الخاص، وهو ما يمثل عائقاً للأعمال التي تتطلب سيادة تامة على بياناتها.
+          </p>
+        </div>
+
+        <div class="comparison-card" onclick="window.open('https://github.com/1PROO/hermes-webui', '_blank')" role="link" tabindex="0" aria-label="Compare Hermes vs. Perplexity Computer" style="cursor:pointer">
+          <div class="card-arrow">&rarr;</div>
+          <h4>
+            <span class="lang-en">Hermes vs. Perplexity Computer</span>
+            <span class="lang-ar">هيرميس ضد Perplexity Computer</span>
+          </h4>
+          <p class="lang-en">
+            Perplexity Computer (February 2026) is a cloud agentic workflow engine that routes across 19+ frontier models, runs tasks in isolated sandboxes, and connects to 400+ services via prebuilt OAuth. Zero setup, broad coverage. Key difference from Hermes: cloud-only, no data sovereignty, opaque credit costs, and no persistent environment state between runs.
+          </p>
+          <p class="lang-ar">
+            محرك Perplexity Computer (فبراير 2026) هو نظام تشغيل سحابي يعتمد على توجيه الأوامر عبر 19 نموذجاً مختلفاً وينفذ المهام في بيئات معزولة. يوفر تشغيلاً سهلاً وتغطية واسعة. لكن الفارق الرئيسي عن هيرميس: أنه سحابي بالكامل، ولا يحقق سيادة البيانات، وتكلفة استخدامه غامضة، ولا يحتفظ بالحالة والنصوص بين فترات التشغيل.
+          </p>
+        </div>
+
+      </div>
+
+      <div class="compare-more">
+        <p class="compare-more-label">
+          <span class="lang-en">More comparisons</span>
+          <span class="lang-ar">المزيد من المقارنات</span>
+        </p>
+        <div class="compare-more-links">
+          <a href="https://github.com/1PROO/hermes-webui" target="_blank" class="compare-pill">vs. OpenClaw</a>
+          <a href="https://github.com/1PROO/hermes-webui" target="_blank" class="compare-pill">vs. Claude Code</a>
+          <a href="https://github.com/1PROO/hermes-webui" target="_blank" class="compare-pill">vs. Codex CLI</a>
+          <a href="https://github.com/1PROO/hermes-webui" target="_blank" class="compare-pill">vs. OpenCode</a>
+          <a href="https://github.com/1PROO/hermes-webui" target="_blank" class="compare-pill">vs. Cursor</a>
+          <a href="https://github.com/1PROO/hermes-webui" target="_blank" class="compare-pill">vs. GitHub Copilot</a>
+          <a href="https://github.com/1PROO/hermes-webui" target="_blank" class="compare-pill">vs. Claude.ai</a>
+          <a href="https://github.com/1PROO/hermes-webui" target="_blank" class="compare-pill">vs. ChatGPT</a>
+          <a href="https://github.com/1PROO/hermes-webui" target="_blank" class="compare-pill">vs. Perplexity Computer</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== SECTION 8: INSTALLATION ===== -->
+  <section id="install" class="section section-alt">
+    <div class="container">
+      <p class="section-label">
+        <span class="lang-en">Quick start</span>
+        <span class="lang-ar">البدء السريع</span>
+      </p>
+      <h2 class="section-title">
+        <span class="lang-en">Get started in 60 seconds</span>
+        <span class="lang-ar">ابدأ التشغيل في 60 ثانية</span>
+      </h2>
+
+      <div class="install-layout">
+        <div>
+          <div class="os-selector">
+            <button class="os-tab-btn-qs active" onclick="switchQuickStartTab('windows')">Windows Native</button>
+            <button class="os-tab-btn-qs" onclick="switchQuickStartTab('unix')">Linux / macOS</button>
+          </div>
+
+          <!-- Windows Quick Start -->
+          <div id="qs-windows" class="webui-steps-container">
+            <div class="code-wrap">
+              <div class="code-header">
+                <span class="code-lang">powershell &mdash; auto one-liner</span>
+                <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+              </div>
+              <pre><code class="language-bash">powershell -ExecutionPolicy Bypass -c "irm https://1proo.github.io/hermes-webui/install_windows.ps1 | iex"</code></pre>
+            </div>
+
+            <div class="code-wrap" style="margin-top: 16px;">
+              <div class="code-header">
+                <span class="code-lang">cmd &mdash; manual launch</span>
+                <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+              </div>
+              <pre><code class="language-bash">git clone https://github.com/1PROO/hermes-webui.git && cd hermes-webui && .\start.bat</code></pre>
+            </div>
+          </div>
+
+          <!-- Unix Quick Start (Hidden by default) -->
+          <div id="qs-unix" class="webui-steps-container" style="display: none;">
+            <div class="code-wrap">
+              <div class="code-header">
+                <span class="code-lang">bash &mdash; one-liner install</span>
+                <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+              </div>
+              <pre><code class="language-bash">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</code></pre>
+            </div>
+
+            <div class="code-wrap" style="margin-top: 16px;">
+              <div class="code-header">
+                <span class="code-lang">bash &mdash; first run</span>
+                <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+              </div>
+              <pre><code class="language-bash">source ~/.bashrc      # reload shell
+hermes model          # choose your LLM provider
+hermes                # start chatting</code></pre>
+            </div>
+
+            <div class="code-wrap" style="margin-top: 16px;">
+              <div class="code-header">
+                <span class="code-lang">bash &mdash; key commands</span>
+                <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+              </div>
+              <pre><code class="language-bash">hermes model          # choose LLM provider and model
+hermes tools          # configure enabled tools
+hermes gateway setup  # set up messaging platforms
+hermes doctor         # diagnose any issues</code></pre>
+            </div>
+          </div>
+
+          <a href="https://github.com/1PROO/hermes-webui/blob/master/README.md" target="_blank" rel="noopener" class="docs-link">
+            <span class="lang-en">Full installation guide &#8594;</span>
+            <span class="lang-ar">دليل التثبيت الكامل &#8594;</span>
+          </a>
+        </div>
+
+        <div>
+          <h3 class="subsection-title" style="margin-top: 0;">
+            <span class="lang-en">Supported LLM providers</span>
+            <span class="lang-ar">موفرو نماذج اللغة المدعومون</span>
+          </h3>
+          <div class="providers-table-wrap">
+            <div class="provider-row">
+              <span class="provider-name">Nous Portal</span>
+              <span class="provider-badge badge-oauth">OAuth</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-name">OpenAI / Codex</span>
+              <span class="provider-badge badge-oauth">Device code auth</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-name">Anthropic</span>
+              <span class="provider-badge badge-key">API key / auth</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-name">OpenRouter</span>
+              <span class="provider-auth">200+ models</span>
+              <span class="provider-badge badge-key">API key</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-name">GitHub Copilot</span>
+              <span class="provider-badge badge-oauth">OAuth or token</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-name">Google / Gemini</span>
+              <span class="provider-badge badge-key">API key</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-name">DeepSeek</span>
+              <span class="provider-badge badge-key">API key</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-name">Groq</span>
+              <span class="provider-badge badge-key">API key</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-name">Hugging Face</span>
+              <span class="provider-auth">20+ models</span>
+              <span class="provider-badge badge-key">API key</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-name">Ollama / local</span>
+              <span class="provider-badge badge-local">Local</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-name">Custom endpoint</span>
+              <span class="provider-auth">Any OpenAI-compatible URL</span>
+              <span class="provider-badge badge-local">Custom</span>
+            </div>
+          </div>
+          <div class="platforms-note">
+            <span>&#9889;</span>
+            <span class="lang-en">Run <code style="font-family: 'JetBrains Mono', monospace; font-size: 0.85em;">hermes model</code> to browse and authenticate interactively</span>
+            <span class="lang-ar">شغّل الأمر <code style="font-family: 'JetBrains Mono', monospace; font-size: 0.85em;">hermes model</code> لتحديد وضبط الإعدادات</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== SECTION 9: WHAT HERMES IS NOT ===== -->
+  <section id="limits" class="section">
+    <div class="container">
+      <p class="section-label">
+        <span class="lang-en">Honest limitations</span>
+        <span class="lang-ar">قيود واقعية</span>
+      </p>
+      <h2 class="section-title">
+        <span class="lang-en">What Hermes is not</span>
+        <span class="lang-ar">ما الذي لا يمثله هيرميس</span>
+      </h2>
+      <p class="section-body">
+        <span class="lang-en">Worth saying clearly. These are real trade-offs, not caveats.</span>
+        <span class="lang-ar">يجب أن نكون واضحين للغاية. هذه تنازلات ومقايضات حقيقية في النظام، وليست مجرد تحذيرات.</span>
+      </p>
+      <div class="limitations-grid">
+
+        <div class="limitation-item">
+          <div class="limitation-icon">&#9999;</div>
+          <div class="limitation-text">
+            <span class="lang-en"><strong>Not the best in-editor autocomplete.</strong> Cursor and Windsurf do that job better. Use one alongside Hermes &mdash; that's not what it's optimizing for.</span>
+            <span class="lang-ar"><strong>ليس أفضل أداة إكمال تلقائي للأكواد داخل المحرر.</strong> تؤدي محررات Cursor أو Windsurf هذه المهمة بشكل أفضل. استخدم أحدهما بجانب هيرميس &mdash; فهذا ليس الجانب الذي يركز هيرميس على تحسينه.</span>
+          </div>
+        </div>
+
+        <div class="limitation-item">
+          <div class="limitation-icon">&#128295;</div>
+          <div class="limitation-text">
+            <span class="lang-en"><strong>Not zero-setup.</strong> You're running a server. That means initial configuration, and you're responsible for uptime, upgrades, and backups. The tradeoff is data sovereignty and control.</span>
+            <span class="lang-ar"><strong>ليس نظاماً يعمل بضغطة زر واحدة بدون إعداد.</strong> أنت تقوم بتشغيل خادم خاص. هذا يعني تكويناً أولياً، وتتحمل مسؤولية وقت التشغيل والتحديثات والنسخ الاحتياطي. المقابل هو سيادة كاملة على بياناتك.</span>
+          </div>
+        </div>
+
+        <div class="limitation-item">
+          <div class="limitation-icon">&#129302;</div>
+          <div class="limitation-text">
+            <span class="lang-en"><strong>Doesn't make weaker models magical.</strong> Memory and skills help, but the underlying model determines reasoning quality. Hermes with a weak model is a well-organized weak model.</span>
+            <span class="lang-ar"><strong>لا يجعل النماذج الضعيفة خارقة الذكاء.</strong> تساعد ميزات الذاكرة وتراكم المهارات في تحسين الأداء، لكن جودة التفكير والاستنتاج تعتمد كلياً على قوة النموذج الأساسي.</span>
+          </div>
+        </div>
+
+        <div class="limitation-item">
+          <div class="limitation-icon">&#9888;</div>
+          <div class="limitation-text">
+            <span class="lang-en"><strong>Needs guardrails for high-stakes automations.</strong> Autonomous execution on a schedule with shell access is powerful and requires judgment. Terminal commands can require confirmation &mdash; use that for anything consequential.</span>
+            <span class="lang-ar"><strong>يتطلب ضوابط أمنية للأتمتة عالية الخطورة.</strong> تشغيل الأكواد التلقائية في الخلفية مع وصول مباشر لواجهة الأوامر يعد قوة كبيرة تتطلب الحذر. فعل ميزة تأكيد الأوامر لتجنب أي مشاكل.</span>
+          </div>
+        </div>
+
+        <div class="limitation-item">
+          <div class="limitation-icon">&#9889;</div>
+          <div class="limitation-text">
+            <span class="lang-en"><strong>Not the lowest-friction one-shot tool.</strong> For a quick answer you'll never revisit, a chat interface is faster. Hermes earns its setup cost over time, not in the first session.</span>
+            <span class="lang-ar"><strong>ليس أداة الدردشة الأسرع للمهام العابرة.</strong> للحصول على إجابة سريعة لسؤال عابر لن تعود إليه أبداً، تعد واجهات الدردشة السحابية أسرع. يعوض هيرميس تكلفة إعداده بمرور الوقت بفضل الذاكرة التراكمية.</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== SECTION 10: RESOURCES ===== -->
+  <section id="resources" class="section section-alt">
+    <div class="container">
+      <p class="section-label">
+        <span class="lang-en">Docs &amp; community</span>
+        <span class="lang-ar">الوثائق والمجتمع</span>
+      </p>
+      <h2 class="section-title">
+        <span class="lang-en">Resources</span>
+        <span class="lang-ar">المصادر البرمجية</span>
+      </h2>
+      <a href="https://github.com/1PROO/hermes-webui" class="community-banner">
+        <span class="community-banner-icon">&#127758;</span>
+        <div class="community-banner-text">
+          <strong>
+            <span class="lang-en">Community &amp; Ecosystem</span>
+            <span class="lang-ar">المجتمع والبيئة البرمجية</span>
+          </strong>
+          <span>
+            <span class="lang-en">Explore 30+ tools, client extensions, and integrations built for Hermes by the community.</span>
+            <span class="lang-ar">استكشف أكثر من 30 أداة وتوسعة تم بناؤها لهيرميس بواسطة مجتمع المطورين.</span>
+          </span>
+        </div>
+        <span class="community-banner-arrow">&rarr;</span>
+      </a>
+
+      <div class="resources-grid">
+
+        <a href="https://hermes-agent.nousresearch.com/docs/" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#128214;</div>
+          <div class="resource-title">
+            <span class="lang-en">Official docs</span>
+            <span class="lang-ar">الوثائق الرسمية</span>
+          </div>
+          <div class="resource-url">hermes-agent.nousresearch.com/docs</div>
+        </a>
+
+        <a href="https://github.com/1PROO/hermes-webui/blob/master/README.md" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#128640;</div>
+          <div class="resource-title">
+            <span class="lang-en">Installation guide</span>
+            <span class="lang-ar">دليل التثبيت</span>
+          </div>
+          <div class="resource-url">Getting started</div>
+        </a>
+
+        <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#129504;</div>
+          <div class="resource-title">
+            <span class="lang-en">Memory system</span>
+            <span class="lang-ar">نظام الذاكرة</span>
+          </div>
+          <div class="resource-url">Layered persistent memory</div>
+        </a>
+
+        <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#128218;</div>
+          <div class="resource-title">
+            <span class="lang-en">Skills system</span>
+            <span class="lang-ar">نظام المهارات</span>
+          </div>
+          <div class="resource-url">agentskills.io compatible</div>
+        </a>
+
+        <a href="https://hermes-agent.nousresearch.com/docs/user-guide/messaging" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#128172;</div>
+          <div class="resource-title">
+            <span class="lang-en">Messaging setup</span>
+            <span class="lang-ar">إعداد قنوات المراسلة</span>
+          </div>
+          <div class="resource-url">Multi-surface access</div>
+        </a>
+
+        <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/tools" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#128295;</div>
+          <div class="resource-title">
+            <span class="lang-en">Tools reference</span>
+            <span class="lang-ar">مرجع الأدوات البرمجية</span>
+          </div>
+          <div class="resource-url">47 built-in tools</div>
+        </a>
+
+        <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#128268;</div>
+          <div class="resource-title">
+            <span class="lang-en">MCP integration</span>
+            <span class="lang-ar">تكامل بروتوكول MCP</span>
+          </div>
+          <div class="resource-url">Connect any MCP server</div>
+        </a>
+
+        <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/voice-mode" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#127908;</div>
+          <div class="resource-title">
+            <span class="lang-en">Voice mode</span>
+            <span class="lang-ar">الوضع الصوتي</span>
+          </div>
+          <div class="resource-url">CLI, Telegram, Discord</div>
+        </a>
+
+        <a href="https://hermes-agent.nousresearch.com/docs/user-guide/security" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#128274;</div>
+          <div class="resource-title">
+            <span class="lang-en">Security model</span>
+            <span class="lang-ar">نموذج الحماية والأمن</span>
+          </div>
+          <div class="resource-url">7-layer defense in depth</div>
+        </a>
+
+        <a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#11088;</div>
+          <div class="resource-title">GitHub &mdash; Hermes Agent</div>
+          <div class="resource-url">NousResearch/hermes-agent</div>
+        </a>
+
+        <a href="https://github.com/1PROO/hermes-webui" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#128421;</div>
+          <div class="resource-title">GitHub &mdash; Hermes Web UI</div>
+          <div class="resource-url">1PROO/hermes-webui</div>
+        </a>
+
+        <a href="https://discord.gg/NousResearch" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#128172;</div>
+          <div class="resource-title">Discord</div>
+          <div class="resource-url">discord.gg/NousResearch</div>
+        </a>
+
+        <a href="https://nousresearch.com" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#128300;</div>
+          <div class="resource-title">Nous Research</div>
+          <div class="resource-url">nousresearch.com</div>
+        </a>
+
+        <a href="https://agentskills.io" target="_blank" rel="noopener" class="resource-card">
+          <div class="resource-icon">&#128736;</div>
+          <div class="resource-title">agentskills.io</div>
+          <div class="resource-url">Open skills standard</div>
+        </a>
+
+        <a href="https://github.com/1PROO/hermes-webui" class="resource-card">
+          <div class="resource-icon">&#127758;</div>
+          <div class="resource-title">
+            <span class="lang-en">Community &amp; Ecosystem</span>
+            <span class="lang-ar">المجتمع والبيئة البرمجية</span>
+          </div>
+          <div class="resource-url">30+ third-party projects</div>
+        </a>
+
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ===== FOOTER ===== -->
+<footer>
+  <div class="footer-inner">
+    <div class="footer-left">
+      <span class="lang-en">Hermes is <a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noopener">open source</a> and MIT licensed. Maintained &amp; Optimized by <a href="https://github.com/1PROO" target="_blank" rel="noopener">Ahmed Akram</a>. This community Web UI fork (<a href="https://github.com/1PROO/hermes-webui" target="_blank" rel="noopener">1PROO/hermes-webui</a>) is designed by Ahmed Akram, based on the original project by <a href="https://github.com/nesquena/hermes-webui" target="_blank" rel="noopener">nesquena</a>.</span>
+      <span class="lang-ar">هيرميس برنامج <a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noopener">مفتوح المصدر</a> وخاضع لرخصة MIT الحرة. صيانة وتحسين بواسطة <a href="https://github.com/1PROO" target="_blank" rel="noopener">أحمد أكرم</a>. هذه النسخة المفرعة من واجهة مستخدم الويب المجتمعية (<a href="https://github.com/1PROO/hermes-webui" target="_blank" rel="noopener">1PROO/hermes-webui</a>) هي من تصميم وتطوير أحمد أكرم، بناءً على المشروع الأصلي بواسطة المطور <a href="https://github.com/nesquena/hermes-webui" target="_blank" rel="noopener">nesquena</a>.</span>
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/1PROO/hermes-webui/blob/master/README.md" target="_blank" rel="noopener">
+        <span class="lang-en">Docs</span>
+        <span class="lang-ar">الوثائق</span>
+      </a>
+      <a href="https://github.com/1PROO/hermes-webui" target="_blank" rel="noopener">
+        <span class="lang-en">GitHub</span>
+        <span class="lang-ar">جيت هاب</span>
+      </a>
+      <a href="https://fb.com/1PROO" target="_blank" rel="noopener">
+        <span class="lang-en">Facebook Dev</span>
+        <span class="lang-ar">حساب المطور فيسبوك</span>
+      </a>
+      <a href="https://github.com/nesquena/hermes-webui" target="_blank" rel="noopener">
+        <span class="lang-en">Original Web UI</span>
+        <span class="lang-ar">المشروع الأصلي</span>
+      </a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // ===== HIGHLIGHT.JS =====
+  document.addEventListener('DOMContentLoaded', function() {
+    hljs.highlightAll();
+  });
+
+  // ===== THEME TOGGLE =====
+  var themeToggle = document.getElementById('theme-toggle');
+  var html = document.documentElement;
+
+  function setTheme(theme) {
+    html.setAttribute('data-theme', theme);
+    localStorage.setItem('theme', theme);
+    // Icon shows what you'll switch TO: sun in dark mode, moon in light mode
+    if (theme === 'light') {
+      themeToggle.textContent = '🌙';
+    } else {
+      themeToggle.textContent = '☀️';
+    }
+  }
+
+  // Init theme: dark by default
+  var saved = localStorage.getItem('theme');
+  if (saved) {
+    setTheme(saved);
+  } else {
+    setTheme('dark');
+  }
+
+  themeToggle.addEventListener('click', function() {
+    var current = html.getAttribute('data-theme');
+    setTheme(current === 'dark' ? 'light' : 'dark');
+  });
+
+  // ===== HAMBURGER MENU =====
+  var hamburger = document.getElementById('hamburger');
+  var mobileMenu = document.getElementById('mobile-menu');
+
+  hamburger.addEventListener('click', function() {
+    var isOpen = mobileMenu.classList.toggle('open');
+    hamburger.classList.toggle('open', isOpen);
+    hamburger.setAttribute('aria-expanded', isOpen);
+  });
+
+  function closeMobileMenu() {
+    mobileMenu.classList.remove('open');
+    hamburger.classList.remove('open');
+    hamburger.setAttribute('aria-expanded', 'false');
+  }
+
+  // Close on outside click
+  document.addEventListener('click', function(e) {
+    if (!hamburger.contains(e.target) && !mobileMenu.contains(e.target)) {
+      closeMobileMenu();
+    }
+  });
+
+  // ===== COPY CODE =====
+  function copyCode(btn) {
+    var pre = btn.closest('.code-wrap').querySelector('pre');
+    var text = pre.textContent;
+    navigator.clipboard.writeText(text).then(function() {
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(function() {
+        btn.textContent = 'Copy';
+        btn.classList.remove('copied');
+      }, 2000);
+    }).catch(function() {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(function() {
+        btn.textContent = 'Copy';
+        btn.classList.remove('copied');
+      }, 2000);
+    });
+  }
+
+  // ===== LIGHTBOX =====
+  function openLightbox(src) {
+    var lightbox = document.getElementById('lightbox');
+    var img = document.getElementById('lightbox-img');
+    img.src = src;
+    lightbox.classList.add('active');
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeLightbox() {
+    var lightbox = document.getElementById('lightbox');
+    lightbox.classList.remove('active');
+    document.body.style.overflow = '';
+  }
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeLightbox();
+  });
+
+
+  // ===== KEYBOARD NAV FOR CLICKABLE CARDS =====
+  document.querySelectorAll('.comparison-card[role="link"]').forEach(function(card) {
+    card.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); card.click(); }
+    });
+  });
+
+  // ===== SMOOTH SCROLL =====
+  document.querySelectorAll('a[href^="#"]').forEach(function(anchor) {
+    anchor.addEventListener('click', function(e) {
+      var hash = this.getAttribute('href');
+      var target = document.querySelector(hash);
+      if (target) {
+        e.preventDefault();
+        var top = target.getBoundingClientRect().top + window.scrollY - 72;
+        window.scrollTo({ top: top, behavior: 'smooth' });
+        // Update URL hash so the link is shareable / deep-linkable
+        history.pushState(null, '', hash);
+      }
+    });
+  });
+
+  // ===== DEEP LINK ON PAGE LOAD =====
+  if (window.location.hash) {
+    setTimeout(function() {
+      var target = document.querySelector(window.location.hash);
+      if (target) {
+        var top = target.getBoundingClientRect().top + window.scrollY - 72;
+        window.scrollTo({ top: top, behavior: 'smooth' });
+      }
+    }, 100);
+  }
+
+  // ===== NAV ACTIVE STATE =====
+  var sections = document.querySelectorAll('section[id]');
+  var navLinks = document.querySelectorAll('.nav-links a');
+
+  function updateActiveNav() {
+    var current = '';
+    sections.forEach(function(section) {
+      var top = section.offsetTop - 100;
+      if (window.scrollY >= top) {
+        current = section.getAttribute('id');
+      }
+    });
+    navLinks.forEach(function(link) {
+      link.style.color = '';
+      if (link.getAttribute('href') === '#' + current) {
+        link.style.color = 'var(--accent)';
+      }
+    });
+  }
+
+  window.addEventListener('scroll', updateActiveNav, { passive: true });
+  updateActiveNav();
+
+  // ===== OS TAB SWITCHING =====
+  function switchOSTab(os) {
+    var winBtn = document.querySelector('.os-tab-btn[onclick*="windows"]');
+    var unixBtn = document.querySelector('.os-tab-btn[onclick*="unix"]');
+    var winSteps = document.getElementById('steps-windows');
+    var unixSteps = document.getElementById('steps-unix');
+    
+    if (os === 'windows') {
+      winBtn.classList.add('active');
+      unixBtn.classList.remove('active');
+      winSteps.style.display = 'flex';
+      unixSteps.style.display = 'none';
+    } else {
+      unixBtn.classList.add('active');
+      winBtn.classList.remove('active');
+      unixSteps.style.display = 'flex';
+      winSteps.style.display = 'none';
+    }
+  }
+
+  function switchQuickStartTab(os) {
+    var winBtn = document.querySelector('.os-tab-btn-qs[onclick*="windows"]');
+    var unixBtn = document.querySelector('.os-tab-btn-qs[onclick*="unix"]');
+    var winQs = document.getElementById('qs-windows');
+    var unixQs = document.getElementById('qs-unix');
+    
+    if (os === 'windows') {
+      winBtn.classList.add('active');
+      unixBtn.classList.remove('active');
+      winQs.style.display = 'block';
+      unixQs.style.display = 'none';
+    } else {
+      unixBtn.classList.add('active');
+      winBtn.classList.remove('active');
+      unixQs.style.display = 'block';
+      winQs.style.display = 'none';
+    }
+  }
+
+  // ===== BILINGUAL LANGUAGE SWITCHING =====
+  function setLanguage(lang) {
+    var html = document.documentElement;
+    html.setAttribute('lang', lang);
+    localStorage.setItem('lang', lang);
+    
+    var langBtn = document.getElementById('lang-toggle');
+    if (lang === 'ar') {
+      html.setAttribute('dir', 'rtl');
+      langBtn.textContent = 'EN';
+      document.title = "هيرميس — واجهة المستخدم المجتمعية | تصميم أحمد أكرم";
+    } else {
+      html.setAttribute('dir', 'ltr');
+      langBtn.textContent = 'AR';
+      document.title = "Hermes — Community Web UI | Designed by Ahmed Akram";
+    }
+  }
+
+  function toggleLanguage() {
+    var current = document.documentElement.getAttribute('lang') || 'en';
+    setLanguage(current === 'en' ? 'ar' : 'en');
+  }
+
+  // Init language
+  (function() {
+    var savedLang = localStorage.getItem('lang') || 'en';
+    setLanguage(savedLang);
+  })();
+</script>
+
 </body>
 </html>
