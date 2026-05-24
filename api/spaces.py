@@ -2932,6 +2932,50 @@ def _research_progress_action_policy_receipt(preflight_receipt: dict[str, Any] |
     )
 
 
+def _research_artifact_prompt_preflight_receipt(artifact_value: dict[str, Any]) -> dict[str, Any]:
+    """Preflight Research Harness artifact metadata before export readiness.
+
+    The receipt is derived from bounded artifact metadata only. Raw markdown,
+    prompt/source text, renderer bodies, and credentials are never included in
+    the preflight payload or returned receipt.
+    """
+    from api.capy_policy import prompt_preflight
+
+    preflight_text = json.dumps(
+        {
+            "research_artifact": {
+                "title": artifact_value.get("title"),
+                "format": artifact_value.get("format"),
+                "status": artifact_value.get("status"),
+                "char_count": artifact_value.get("char_count"),
+                "line_count": artifact_value.get("line_count"),
+                "word_count": artifact_value.get("word_count"),
+                "export_pdf": "ready-for-user-request",
+            }
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    receipt = prompt_preflight(preflight_text, boundary="creator_commit")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+def _research_artifact_action_policy_receipt(preflight_receipt: dict[str, Any] | None) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
+    return action_policy_receipt(
+        "space.research.artifact",
+        approval_gates=["creator_commit"],
+        prompt_preflight_status=status,
+        model_route_hint="hint:summarize",
+    )
+
+
 def _record_research_progress_event(space_id: str, *, source_count: int, note_count: int) -> dict[str, Any]:
     """Best-effort metadata-only producer event for Research Harness progress."""
     run_id = f"research:{space_id}"
@@ -3081,6 +3125,10 @@ def set_research_artifact(space_id: str, title: Any, markdown: Any) -> dict[str,
         "word_count": len(re.findall(r"\S+", text)),
         "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
     }
+    prompt_preflight = _research_artifact_prompt_preflight_receipt(artifact_value)
+    if prompt_preflight.get("status") != "pass":
+        raise ValueError("Research artifact prompt preflight blocked")
+    autonomy_policy = _research_artifact_action_policy_receipt(prompt_preflight)
     artifact = set_shared_data_slot(
         sid,
         "research-summary",
@@ -3106,6 +3154,8 @@ def set_research_artifact(space_id: str, title: Any, markdown: Any) -> dict[str,
         "widget": widget_result["widget"],
         "revision_event_id": widget_result["revision_event_id"],
         "progress_event": progress_event,
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
     }
 
 

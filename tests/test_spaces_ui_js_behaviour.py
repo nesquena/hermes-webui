@@ -488,6 +488,8 @@ global.fetch = async function(path, opts = {}) {
           value_summary: { title: 'Research Harness PDF export smoke', status: 'ready', format: 'markdown', char_count: '82', line_count: '3', word_count: '12', sha256: 'UNTRUSTED_HASH_SHOULD_NOT_RENDER' },
           metadata_summary: { source_widget: 'research-summary', artifact_kind: 'markdown', export_pdf: 'ready-for-user-request', raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK' },
         },
+        prompt_preflight: { boundary: 'creator_commit', status: 'pass', categories: [], metadata_only: true, raw_prompt_stored: false, prompt_hash: 'UNTRUSTED_HASH_SHOULD_NOT_RENDER' },
+        autonomy_policy: { action: 'space.research.artifact', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit'], prompt_preflight_status: 'pass', model_route_hint: 'hint:summarize', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       } : undefined,
       research_rollback_check: isResearch ? { verified: true, restored_event_id: 'rev-before-export', restored_widget_count: 5, replayed_after_restore: true, renderer: '<script>bad()</script>', api_key: '***' } : undefined,
       context_status: {
@@ -5890,6 +5892,9 @@ def test_spaces_ui_research_demo_smoke_shows_pdf_export_progress_metadata_only(d
     assert "Summary artifact: Research Harness PDF export smoke" in out["rootHtml"]
     assert "Artifact status: ready" in out["rootHtml"]
     assert "PDF export: ready-for-user-request" in out["rootHtml"]
+    assert "Prompt preflight: pass · Boundary: creator_commit" in out["rootHtml"]
+    assert "Action policy: space.research.artifact · Mode: Supervised · Approval required: yes" in out["rootHtml"]
+    assert "Gates: Creator commit approval · Model route hint: hint:summarize" in out["rootHtml"]
     assert "Queued PDF export: yes" in out["rootHtml"]
     assert "Rollback replay: verified" in out["rootHtml"]
     assert "Widgets: 5" in out["rootHtml"]

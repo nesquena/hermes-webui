@@ -673,16 +673,27 @@
     const artifactTitle = safeDisplayMetadataText(valueSummary.title || '', 'metadata-only summary') || 'metadata-only summary';
     const artifactStatus = safeDisplayMetadataText(valueSummary.status || '', 'pending') || 'pending';
     const exportReady = safeDisplayMetadataText(metadataSummary.export_pdf || '', 'not ready') || 'not ready';
-    const rollbackCheck = data.research_rollback_check && typeof data.research_rollback_check === 'object' && !Array.isArray(data.research_rollback_check)
-      ? data.research_rollback_check
-      : {};
-    const queued = Number(data.queued_event_count || 0) > 0;
+    const queued = Number(data && data.queued_event_count || 0) > 0;
+    const rollbackCheck = data && data.research_rollback_check && typeof data.research_rollback_check === 'object' && !Array.isArray(data.research_rollback_check) ? data.research_rollback_check : {};
     const replayVerified = rollbackCheck.verified === true && rollbackCheck.replayed_after_restore === true;
     const hasResearchReceipt = Object.keys(progressWidgets).length || Object.keys(artifact).length || Object.keys(rollbackCheck).length || queued;
     if (!hasResearchReceipt) return '';
+    const preflight = artifactReceipt.prompt_preflight && typeof artifactReceipt.prompt_preflight === 'object' && !Array.isArray(artifactReceipt.prompt_preflight) ? artifactReceipt.prompt_preflight : null;
+    const preflightStatus = preflight ? safeDisplayMetadataText(preflight.status || 'unknown', 'unknown') || 'unknown' : '';
+    const preflightBoundary = preflight ? safeDisplayMetadataText(preflight.boundary || 'unknown', 'unknown') || 'unknown' : '';
+    const policy = artifactReceipt.autonomy_policy && typeof artifactReceipt.autonomy_policy === 'object' && !Array.isArray(artifactReceipt.autonomy_policy) ? artifactReceipt.autonomy_policy : null;
+    const policyAction = policy ? safeProgressPublicId(policy.action || '') : '';
+    const policyModeName = policy ? safePolicyMode(policy.mode) : 'supervised';
+    const policyMode = policy ? safeDisplayMetadataText(policy.label || safePolicyLabel(policyModeName), safePolicyLabel(policyModeName)) || safePolicyLabel(policyModeName) : '';
+    const policyApproval = policy && policy.approval_required === true ? 'yes' : 'no';
+    const policyGates = policy ? safePolicyGateLabels(policy.approval_gates) : [];
+    const policyRouteHint = policy ? safeModelRouteHint(policy.model_route_hint || '') : '';
     return '<div class="capy-spaces-card capy-spaces-demo-flow"><h4>Research harness checklist</h4>' +
       '<div class="capy-spaces-muted">Phase: '+escapeHtml(phase)+' · Sources: '+sourceRows.length+' · Notes: '+noteCount+'</div>' +
       '<div class="capy-spaces-muted">Summary artifact: '+escapeHtml(artifactTitle)+' · Artifact status: '+escapeHtml(artifactStatus)+' · PDF export: '+escapeHtml(exportReady)+'</div>' +
+      (preflightStatus ? '<div class="capy-spaces-muted">Prompt preflight: '+escapeHtml(preflightStatus)+' · Boundary: '+escapeHtml(preflightBoundary)+'</div>' : '') +
+      (policyAction ? '<div class="capy-spaces-muted">Action policy: '+escapeHtml(policyAction)+' · Mode: '+escapeHtml(policyMode)+' · Approval required: '+escapeHtml(policyApproval)+'</div>' : '') +
+      (policyGates.length || policyRouteHint ? '<div class="capy-spaces-muted">Gates: '+escapeHtml(policyGates.join(', '))+(policyRouteHint ? ' · Model route hint: '+escapeHtml(policyRouteHint) : '')+'</div>' : '') +
       '<div class="capy-spaces-muted">Queued PDF export: '+(queued ? 'yes' : 'no')+' · Rollback replay: '+(replayVerified ? 'verified' : 'not verified')+' · Restored widgets: '+Number(rollbackCheck.restored_widget_count || 0)+'</div>' +
       '</div>';
   }

@@ -8911,6 +8911,15 @@ def test_spaces_research_artifact_route_marks_summary_export_ready_metadata_only
     assert body["artifact"]["value_summary"]["format"] == "markdown"
     assert body["artifact"]["value_summary"]["status"] == "ready"
     assert body["artifact"]["value_summary"]["sha256"]
+    assert body["prompt_preflight"]["boundary"] == "creator_commit"
+    assert body["prompt_preflight"]["status"] == "pass"
+    assert body["prompt_preflight"]["metadata_only"] is True
+    assert body["prompt_preflight"]["raw_prompt_stored"] is False
+    assert body["autonomy_policy"]["action"] == "space.research.artifact"
+    assert body["autonomy_policy"]["approval_required"] is True
+    assert body["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert body["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert body["autonomy_policy"]["model_route_hint"] == "hint:summarize"
     assert detail["metadata"]["export"]["pdf"] == "ready-for-user-request"
     assert data_slot == body["artifact"]
     assert "public facts only" not in serialized
