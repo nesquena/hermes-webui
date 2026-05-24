@@ -1948,18 +1948,6 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         if model_provider:
             effective_model_provider = model_provider
 
-    # Read default personality from config display.personality
-    _default_personality = None
-    try:
-        from api.config import get_config as _get_cfg_for_personality
-        _cfg_personality = (_get_cfg_for_personality().get('display') or {}).get('personality')
-        if _cfg_personality and isinstance(_cfg_personality, str):
-            _cfg_personality = _cfg_personality.strip().lower()
-            if _cfg_personality and _cfg_personality not in ('default', 'none', 'neutral'):
-                _default_personality = _cfg_personality
-    except Exception:
-        pass
-
     wt = worktree_info if isinstance(worktree_info, dict) else None
     workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
     s = Session(
@@ -1968,7 +1956,6 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         model_provider=effective_model_provider,
         profile=profile,
         project_id=project_id,
-        personality=_default_personality,
         workspace_group=workspace_group,
         worktree_path=wt.get('path') if wt else None,
         worktree_branch=wt.get('branch') if wt else None,

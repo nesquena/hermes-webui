@@ -11,6 +11,10 @@
 
 ### Fixed
 
+- New WebUI sessions no longer inherit the legacy/global `display.personality`
+  config key. Profile response mode remains the source of truth, so a
+  Soul-Driven profile is not silently overridden by a stale built-in style such
+  as `kawaii`.
 - Spaces are now shared WebUI state instead of profile-local state: registered spaces and the last selected space stay consistent when switching agent profiles, while profile default workspaces remain separate profile runtime settings.
 - The automatically-created Home space now stays in the general Chats grouping instead of appearing as a workspace Project, including its archive rows.
 - New chats started from a selected non-Home Space now stay grouped under that workspace Project instead of being filed under general Chats when the workspace is inherited from the blank composer/default Space state.
