@@ -13,6 +13,150 @@
 - Document gateway-backed chat session semantics and keep session-continuity headers gated behind configured API-key auth.
 - Tighten the gateway-backed WebUI chat opt-in contract with runtime regression coverage that keeps unset or unrecognized `HERMES_WEBUI_CHAT_BACKEND` values on the direct WebUI chat path.
 
+## [v0.51.130] — 2026-05-24 — Release DB (stage-batch12 — 3-PR profile-isolation + boot-precedence + workspace Artifacts tab)
+
+### Fixed
+
+- **PR #2827** by @Koraji95-coder — Profile state-sync TLS-vs-thread fix (closes #2762). When switching profiles via the WebUI cookie selector, session token-usage and title were being written to the *previously-active* profile's `state.db` instead of the cookie-switched one (sidecar messages + workspace files were already routed correctly; only the `state.db` sidecar sync leaked). Root cause: the cookie middleware sets `_tls.profile = '<cookie>'` on the HTTP request thread, but the daemon thread spawned in `_run_agent_streaming` doesn't inherit that TLS. When the streaming worker calls `sync_session_usage`, `_get_state_db → get_active_hermes_home → get_active_profile_name` finds no TLS profile, falls through to `_active_profile` (the process default), and opens the wrong DB. Fix plumbs the session's own `profile` field through `sync_session_usage(..., profile=...)` and `_get_state_db(profile=...)` rather than leaning on TLS that doesn't exist on the worker thread. Keeps the existing TLS path for callers that don't pass `profile=` explicitly, so external integrations don't regress. Also adds defensive `_validate_profile_name` rejecting `../etc`, leading-dash, whitespace, and over-long names (prevents path traversal via cookie tampering). Adds 11 regression tests covering explicit-profile honors, multi-thread profile preservation, unknown-profile-name fallback path, invalid-name refusal, and legacy-call-shape compatibility.
+
+- **PR #2726** by @starship-s — Boot model-default precedence follow-up (refines #2709). The original v0.51.105 fix correctly preferred the profile/server default on fresh boot, but the implementation had two over-broad side effects flagged in post-merge review: (1) boot unconditionally cleared the persisted browser model state, even on restored sessions where that state should remain authoritative, and (2) `populateModelDropdown()` reapplied the default on every repopulate when no session model was present, which clobbered the in-page selection during ordinary dropdown refreshes. Fix is to gate the default-reapply behind an opt-in `{preferProfileDefaultOnFreshBoot: true}` parameter so boot keeps profile-default precedence, restored sessions keep their session model, and non-boot dropdown refreshes preserve the loaded session's model or the current in-page selection. Browser model state is no longer deleted just because the profile default wins this boot. Expanded the regression test coverage with a Node `select` / DOM shim that exercises the real `populateModelDropdown()` path for boot-default, restored-session, current-selection, and removed-model scenarios (+306 LOC tests).
+
+### Added
+
+- **PR #2673** by @AJV20 — Workspace Artifacts tab (closes #2655). New tab in the workspace panel that lists likely files mentioned, edited, or created during the active session. Prioritizes structured tool-call paths (file_write, edit, patch, etc.), filters dependency/build noise (node_modules, `__pycache__`, `.git`, lock files), and refreshes while live tool calls arrive. Artifact entries open through the existing workspace file preview flow. The MVP is frontend-scoped — backend ingestion uses the existing tool-call event stream rather than a new persistence path — so the maintainer can evaluate the UX before deciding whether artifact tracking should grow into a backend-backed feature. Refreshes alongside the file tree in `loadDir()` via a `typeof renderSessionArtifacts==='function'` guard so it composes cleanly with #2716's session stale-guard pattern. Adds `tests/test_issue2655_frontend.py`.
+
+### Notes
+
+- **In-stage cherry-pick mechanics**: All 3 PRs were on stale-base merge-bases (master had advanced through 3 releases). Used `git apply --3way` of each PR's net delta vs its merge-base onto current stage HEAD, then resolved 2 small JS conflicts manually:
+  - `static/boot.js` (#2726 vs post-#2716 master): kept PR's parameterized `populateModelDropdown({preferProfileDefaultOnFreshBoot:true})` call (the whole point of #2726) on top of master's #2716 hydration flow.
+  - `static/workspace.js` (#2673 vs post-#2716 master): kept master's `sessionId`-capture stale-session guard (closure-scoped sessionId check after `await`) AND added PR's `renderSessionArtifacts()` call to refresh the new Artifacts tab when the file tree updates. Wrapped in `typeof === 'function'` guard for defense-in-depth.
+- **In-stage test fixes**: Patched 3 brittle source-string assertions to accept both pre-#2716 and post-#2716 JS shapes (variable names changed during the cherry-pick, semantics preserved). Patched 1 schema mismatch in `tests/test_issue2762_state_sync_profile_kwarg.py::_read_session` helper — it queried `sessions.session_id` but the real `state.db` schema has `sessions.id` as primary key. Fix is mechanical: `SELECT id AS session_id` + `WHERE id = ?` so the helper queries the actual schema.
+- Full pytest: pending re-run on this finalized stage. Touched-tests gate: 41 passed (covering #2827 + #2726 + #2673 surface areas).
+- Agent self-verified: profile= kwarg threading on `_get_state_db` + `sync_session_usage`, production call site in `api/streaming.py:5078` passes `profile=getattr(s, 'profile', None)`, `populateModelDropdown` opt-in parameterization present, boot.js calls with `preferProfileDefaultOnFreshBoot:true`, workspace `renderSessionArtifacts()` defined + called.
+
+## [v0.51.129] — 2026-05-24 — Release DA (stage-batch11 — 4-PR feature + perf batch)
+
+### Performance
+
+- **PR #2836** by @v2psv — HTTP/1.1 keep-alive for WebUI responses. Bumps `Handler.protocol_version` from the HTTP/1.0 default to `HTTP/1.1` so browsers can reuse TCP connections across normal API and static-file requests. Adds explicit `Content-Length` headers to hand-written responses that weren't already using shared `j()` / `t()` helpers. Adds `Content-Length: 0` to empty redirect / range-error responses. Switches SSE-style streaming endpoints from `Connection: keep-alive` to `Connection: close` (keep-alive is only safe when the response body is framed; SSE bodies have no fixed length). Significant first-paint / session-open improvements on high-RTT / VPN / proxied paths — author reports ~47% faster first paint and ~30-40% improvements on panel-load flows on a typical remote-host setup.
+
+  **Opus pre-release advisor caught one missing framing site** in the on-the-fly folder ZIP download path (`/api/folder/download`): the body has no known length, doesn't use chunked encoding, and was relying on HTTP/1.0 connection-close-equals-EOF. Under HTTP/1.1 this would have left clients hanging waiting for the next response after the central-directory bytes finished. Patched inline before tag: add `Connection: close` header to mirror the SSE-endpoint pattern. Opus verified this was the ONLY remaining streaming response in the codebase that needed the header — all 12 hand-written response paths + 8 SSE streams + j()/t() helpers + auth flow were already correctly framed by the PR.
+
+### Added
+
+- **PR #2680** by @mccxj — Auxiliary Models settings card in Settings → Preferences. Lets users configure per-task model routing for 9 canonical side-task slots: vision, web extract, compression, session search, approval, MCP tool reasoning, title generation, skills hub, curator. Each slot exposes a provider dropdown + model dropdown plus an "auto (use main model)" / "auto (use provider default)" pair so users can keep aux routing implicit when they don't care. New endpoints: `GET /api/model/auxiliary` returns current assignments; `POST /api/model/set` writes assignments (`scope=auxiliary` for aux slots, `scope=main` for the default chat model) and supports `task="__reset__"` to reset all slots back to auto. 16 new i18n keys added across all 12 locales (en, it, ja, ru, es, de, zh, zh-Hant, pt, ko, fr, tr — Turkish translations added in-stage to cover the sibling-PR collision with v0.51.127's Turkish locale baseline). 24 source-level test assertions covering HTML structure, JS logic, i18n parity, and route registration.
+
+- **PR #2842** by @AJV20 — PWA polish for installed launches. New `static/pwa-startup.js` is loaded synchronously in `<head>` before the main UI bundle, so the page knows whether it's running standalone / in-browser / on iOS / offline before first paint. Marks `pwa-standalone`, `pwa-browser`, `pwa-ios`, `pwa-offline`, and short-lived `pwa-resumed` classes on `<html>`. Exposes `window.HermesPWA.{isStandalone, syncMode, launchAction, promptInstall}` helpers and captures `beforeinstallprompt` / `appinstalled` early enough that any future install-prompt UI can chain off them. Manifest gains app identity / scope / `display_override` (`window-controls-overlay` → `standalone` → `minimal-ui`) and a "New conversation" PWA App Shortcut. Service worker pre-caches the startup helper, switches navigation and shell-asset fetches to `cache: 'no-store'` before falling back to CacheStorage. Boot path wires `?source=pwa&action=new-chat` to start a fresh chat instead of reopening the last saved session. The viewport meta now sets `maximum-scale=1, user-scalable=no` for native-feel — acknowledged trade-off against WCAG 2.1 1.4.4 (Resize text), intentionally kept for the PWA-installed feel of this user base.
+
+- **PR #2794** by @Michaelyklam — Runtime adapter route selection harness. Routes explicit adapter-mode chat starts through `build_runtime_adapter(...)` and keeps `legacy-direct` as the default `/api/chat/start` path. Continues the #1925 RFC slice progression: this is slice 4e, the default-off chat-start route-selection seam. Returns a bounded `501 Not Configured` response when `runner-local` is explicitly selected before a supervised runner client exists, instead of silently starting a legacy WebUI-owned run. New `_chat_start_response_from_run_start(...)` helper whitelists legacy-compatible chat-start response fields and keeps adapter-internal `run_id`, `status`, and `active_controls` out of public responses. Updates `docs/rfcs/hermes-run-adapter-contract.md` to mark #2744 shipped and define slice 4e.
+
+### Notes
+
+- Full pytest: **6,467 passed / 6 skipped / 3 xpassed / 8 subtests passed**.
+- Opus pre-release advisor reviewed all 7 risk areas (HTTP framing surface completeness, PWA startup ordering, sibling-PR `api/routes.py` interaction, service worker cache invalidation, viewport-meta trade-off, runtime adapter response shape, locale-counter brittleness). Verdict: **1 MUST-FIX patched inline** (folder ZIP `Connection: close` header), **0 inline SHOULD-FIX**, 1 follow-up suggested (`set_auxiliary_model` could validate `task` against `AUX_TASK_SLOTS` whitelist — auth-gated, low severity, filing as follow-up).
+- Agent self-verified: protocol_version bumped, SSE Connection-close + Content-Length plumbing, Auxiliary Models API surface (config + endpoints + frontend), PWA helpers + manifest shortcuts + display_override, Runtime adapter wiring + whitelisting, i18n parity for all 12 locales on the 16 new aux keys.
+- Browser-verified at 1920×1080: Auxiliary Models card renders correctly under Settings → Preferences, 9 task slots with provider/model dropdowns, "Reset all to auto" button, layout consistent with surrounding Settings cards, no clutter or clipping. PWA classes populate on `<html>` and HermesPWA namespace populates with 4 helpers as expected.
+- In-stage commits added Turkish translations for #2680's 16 `settings_aux_*` / `settings_label_auxiliary_models` / `settings_desc_auxiliary_models` keys to close the sibling-collision gap with v0.51.127's Turkish locale (#2772). Bumped `test_auxiliary_models_settings.py::test_all_locales_have_auxiliary_keys` from `count == 11` to `count == 12` (the locale set grew when Turkish landed).
+
+## [v0.51.128] — 2026-05-24 — Release CZ (stage-batch10 — 2-PR perf + correctness batch)
+
+### Fixed
+
+- **PR #2830** by @franksong2702 — Pin state synchronization between persisted index and in-memory sessions (closes #2821). Three coupled bugs:
+  - **Bug A (load-bearing):** `/api/session/pin` pre-snapshot used `getattr(session, "pinned", False)` which always returned `False` for dict-backed index rows from `all_sessions()`. With ~55-session profiles and LRU eviction churn, pinned counts routinely under-counted because the persisted snapshot was effectively empty. New `_session_field(session, field, default)` helper resolves both dict-backed and Session-object snapshots correctly.
+  - **Bug B:** Removed stale client-side `pinLimitReached` short-circuit in the sidebar action menu that could block pin clicks before the server saw them, based on `_allSessions` data that was stale mid-render. Server now enforces the cap; the toast surfaces the 400 response.
+  - **Bug C recovery:** Pin/unpin failure path (4xx response from `/api/session/pin`) now triggers `renderSessionList()` to refresh `_allSessions` from the server, so the sidebar never gets stuck on stale optimistic state.
+
+  Adds `tests/test_issue2821_session_pin_state_sync.py` (70 LOC) covering the `_session_field` helper, the persisted-pinned snapshot, the removed `pinLimitReached` reference, and the failure-catch refresh path. Companion fix to #2782 (server-side 404→200 transition for missing CLI-synced sessions) which remains out of scope.
+
+### Performance
+
+- **PR #2716** by @dobby-d-elf — Six independent perf nudges plus one correctness fix. nesquena-APPROVED on 2026-05-22 after a deep-review iteration; cherry-picked onto post-v0.51.127 master via 3-way apply with sibling-PR composition resolution.
+
+  - **Metadata-only `/api/session` correctness fix.** Refactors the prior inline reconciliation into `_metadata_only_message_summary(sid, profile=None)` helper that runs the full `merge_session_messages_append_only()` path. Pre-fix shortcut could over-count stale state.db replay rows that the merge intentionally filters out, producing false "transcript newer than loaded conversation" signals (same bug class as #2705 / #2686). The new helper threads `profile=` through to `get_state_db_session_messages` to preserve #2827's TLS-vs-thread profile fix on background-thread reads.
+  - **Batched persisted-session checks in sidebar indexing.** One `SESSION_DIR.glob('*.json')` snapshot per call replaces per-row `_index_entry_exists()` filesystem lookups during `all_sessions()` pruning. Fallback to the per-row helper preserved when the glob raises.
+  - **Deferred render-cache signature.** `cachedRenderSignature` closes over the lookup-time signature so the cache STORE path reuses it without recomputing. `_messageRenderCacheSignature()` continues to include the content hash per #2692, preserving the cache-invalidation invariant.
+  - **Hoisted assistant tool-activity index.** Footer-rendering loop now uses an `O(1)` Set lookup instead of `S.toolCalls.some(...)` per message — ~30× fewer comparisons for a 100-message conversation with 30 tool calls.
+  - **Workspace stale-session guards.** `loadDir` and `_refreshGitBadge` in `static/workspace.js` capture `sessionId` at call time and check it after each `await` (including the catch path of `_refreshGitBadge` — without it, a late 404 from the previous session would hide the git badge on the current session).
+  - **Background model-catalog prime.** `_startBootModelDropdown` fires fire-and-forget on boot via `setTimeout(0)` so the live catalog hydrates without blocking. The existing `await` on the saved-session restore path is preserved (re-applies the saved session's model after hydration so the chip never shows the stale static default).
+  - **Failed hydration retryable.** `window._modelDropdownReady = null; throw e;` lets the next caller refetch instead of being stuck on a permanent failure.
+
+  Adds 76 LOC of new tests across `test_session_metadata_fast_path.py`, `test_webui_state_db_reconciliation.py`, `test_session_index.py`, `test_issue1539_provider_removal_dropdown_invalidation.py`, `test_issue1785_workspace_preview_breadcrumb.py`, `test_parallel_session_switch.py`.
+
+### Notes
+
+- PR #2716 had been pending merge since 2026-05-22 due to a rebase blocker against the rapidly-advancing master (10+ intervening releases). Cherry-picked via `git apply --3way` of the PR's net delta vs its original merge-base (`f9302601`); 12 of 14 files applied cleanly. Two files had genuine conflicts requiring resolution: `api/routes.py` (took the PR's helper extraction AND added `profile=` threading to preserve #2827's fix), and `tests/test_webui_state_db_reconciliation.py` (kept BOTH master's pre-existing `test_api_session_reload_drops_stale_cached_user_tail_after_saved_assistant` AND the PR's new `test_metadata_fast_path_matches_reconciliation_for_restamped_replays` — they pin different invariants).
+- Opus pre-release advisor reviewed all 6 risk areas (helper extraction correctness, sibling-PR composition, `Session.load` profile-safety, test coverage, deferred Bug D, stale-line-number cleanup nit). Verdict: **SHIP AS-IS** — no MUST-FIX, no inline SHOULD-FIX. Two follow-up issues to file post-tag (Bug D startup index rebuild perf; multi-profile state.db test for the `profile=` threading invariant).
+- Full pytest: **6,434 passed / 6 skipped / 3 xpassed / 8 subtests passed** in 2m43s.
+- Agent self-verified the producer→consumer channel for `_metadata_only_message_summary` with unmocked invocation against a real session-load path (per skill rule Trigger A + E for mocked-consumer test patterns).
+- Closes: #2821 (pin state sync), and `get_state_db_session_summary` dead-code removed (#2716).
+
+## [v0.51.127] — 2026-05-24 — Release CY (stage-batch9 — 7-PR low-risk batch — brick-class Linux + brick-class update apply + composer wide-screen + Turkish locale + MCP toggle + SSE settlement + Windows CI)
+
+### Fixed
+
+- **PR #2854** by @nesquena-hermes — Embedded terminal opens then immediately closes with `[terminal closed]` on every Linux install past `71d8a8fb`. Root cause: `_terminal_shell_preexec_fn` set `PR_SET_PDEATHSIG=SIGTERM` on the PTY shell so orphans would die when WebUI crashed, but `PR_SET_PDEATHSIG` is **per-thread**, not per-process. WebUI uses `ThreadingHTTPServer`, so each HTTP request runs in its own short-lived worker thread; when the request handler returns and the worker thread exits, the kernel sees the pdeathsig-parent thread has died and SIGTERMs the PTY shell within ~10ms. macOS users were unaffected because `libc.prctl` doesn't exist there. Fix: drop the `preexec_fn` entirely; rely on `atexit.register(close_all_terminals)` for graceful shutdown and explicit `close_terminal` for user-driven close. Adds `tests/test_terminal_process_cleanup.py::test_pty_shell_survives_when_spawning_thread_exits` (real PTY shell spawned via worker thread, asserts shell alive after 500ms grace) plus static-check that `preexec_fn` cannot be re-introduced. Closes #2853.
+
+- **PR #2855** by @nesquena-hermes — "Update Now" loops for every user past the latest tag (#2846). After #2758 the update check correctly fell through to branch comparison when `HEAD` had moved past the latest `v*` tag, but `_select_apply_compare_ref` still returned `tags[0]` — so `git pull --ff-only v2026.5.16` no-op'd, the server bounced, and the banner reappeared unchanged. `apply_force_update` had the same bug except worse (would `git reset --hard v2026.5.16` and rewind the checkout 254 commits). Fix: extract `_head_is_past_latest_tag(path, current_tag)` and have both check and apply paths consult it. Opus pre-release review caught a "case D" parameter-asymmetry drift (HEAD on older tag + commits + newer tag exists → predicate flipped between the two callsites) and patched the apply-side predicate to use `current_tag` + a `behind == 0` gate, exactly mirroring the check-side rule. Adds `test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_exists`. Closes #2846.
+
+- **PR #2852** by @ai-ag2026 — Chat `stream_end` handler now settles from the persisted session when `done` was not received or replayed, instead of leaving the active pane with live `Thinking` / assistant DOM and inflight state projected indefinitely. Reconnect / journal / replay paths can deliver `stream_end` without preceding `done`; the prior code treated `stream_end` as transport-only close. Duplicate / replayed `done` events are also made idempotent before completion sound / final render side effects. Opus pre-release review added a post-await race guard inside `_restoreSettledSession` to catch the case where a late `done` event runs the finalize path while the settlement is awaiting the `/api/session` roundtrip. Adds 4 new regression tests across `tests/test_1694_terminal_cleanup_ownership.py` covering both `stream_end`-without-`done` and duplicate-`done` paths.
+
+- **PR #2811** by @Koraji95-coder — Native-Windows startup E2E workflow now self-tests on PR push (closes the post-#2783 gap where Windows-only regressions like the WOW64 ProgramFiles redirect could only be caught after release). Reworked per maintainer feedback to use a stub `hermes_cli/__init__.py` next to a sibling `hermes-agent/` folder rather than `pip install hermes-agent` (which is not on PyPI). Workflow runs `start.ps1` for 8s and asserts none of its `Write-Error` guards fired (no Python, no agent dir, bad port, missing `hermes_cli`, missing `server.py`). PowerShell syntax + path discovery is the testable surface; the server can't actually boot on a stub. `taskkill` exit-128 swallowed when the stub process is already gone.
+
+### Changed
+
+- **PR #2812** by @Koraji95-coder — Composer max-width is now responsive on wide displays. Pre-change `.composer-box` had a fixed `max-width: 780px` that pinched footer chips (workspace name, model picker, reasoning chip, context ring) against each other on 1440p+ monitors. Switched to `max-width: clamp(780px, 60vw, 1100px)` — the 780px floor preserves byte-identical layout at 1280px (Aron's laptop reference width); 1440px viewports gain ~84px (864px composer); 1920px viewports gain ~320px (1100px composer cap). Mobile responsive logic untouched. Single-line CSS change in `static/style.css`.
+
+### Added
+
+- **PR #2772** by @vaur94 — Complete Turkish (`tr`) locale across `static/i18n.js` (~1,182 keys matching existing locale coverage). Adds Turkish login page strings in `api/routes.py` `_LOGIN_LOCALE`. Settings → Language now offers **Türkçe**; speech recognition uses `tr-TR`. Stage build absorbed a sibling-PR i18n collision with #2776 below (9 missing keys: `mcp_enable_server`, `mcp_disable_server`, `mcp_enabled_toast`, `mcp_disabled_toast`, `mcp_toggle_failed`, `open_in_vscode`, `open_in_vscode_failed`, `settings_label_ignore_agent_updates`, `settings_desc_ignore_agent_updates`) — Turkish translations added in-stage so locale-parity test passes. Closes #2537 as superseded (byzuzayli's earlier Turkish PR with narrower scope).
+
+- **PR #2776** by @roryford — New `PATCH /api/mcp/servers/{name}` endpoint accepts `{"enabled": bool}`, writes `mcp_servers.<name>.enabled` to `config.yaml`, calls `reload_config()`, returns `{"ok": true, "name": "<name>", "enabled": <bool>}`. Each MCP server row in the panel now shows a clickable Enabled/Disabled toggle. Also fixes a pre-existing bug: `_handle_mcp_server_delete` and `_handle_mcp_server_update` were defined at line ~11656 but never wired into the HTTP router — DELETE wired into `handle_delete`, PUT wired via new `handle_put` / `do_PUT` in `server.py`. CORS preflight `Access-Control-Allow-Methods` updated to include `PUT` (Opus pre-release review nit). Adds 5 i18n keys to all 11 locales (en, it, ja, ru, es, de, zh, zh-Hant, pt, ko, fr, tr via in-stage parity fix). 7 new tests covering enable, disable, 404, empty-name, missing-field, response payload, URL-decoded names.
+
+### Notes
+
+- Two PRs (#2854, #2855) are brick-class fixes — every Linux install was unable to use the embedded terminal, and every install past the latest agent tag was stuck in an Update Now loop. They land in the same low-risk batch as cosmetic / locale / CI changes because both fixes are mechanical, well-tested, and the brick-class severity made deferring impossible.
+- Opus pre-release advisor reviewed all 5 risk areas (PR_SET_PDEATHSIG removal, update apply path symmetry, MCP toggle wiring, composer clamp, stream_end settlement). 1 MUST-FIX + 3 SHOULD-FIX all addressed inline before tag. Net: +69/-9 across 5 files for the Opus fixes.
+- Full pytest: 6,424 passed / 6 skipped / 3 xpassed / 8 subtests passed.
+- UX evidence for #2812 captured at 1280/1440/1920/mobile (iPhone 14 emulation); Telegram-approved.
+- File a follow-up issue for pdeathsig-on-supervisor-thread hardening (#2854 deferred Option B) and French-locale `open_in_vscode` parity gap (predates this batch, Opus advisor flagged).
+
+## [v0.51.126] — 2026-05-24 — Release CX (stage-batch8 — 2-PR low-risk batch — kanban markdown + live activity timeline)
+
+### Added
+
+- **PR #2819** by @humayunak — Kanban task descriptions and comments now render as full GFM Markdown instead of plain-text. `_kanbanRenderMarkdown()` in `static/panels.js` rewrote the line-per-`<p>` wrapper as a block-parsing pipeline supporting headings, code blocks (fenced + indented), ordered/unordered lists, task lists with checkboxes, tables, blockquotes, horizontal rules, and strikethrough. `_kanbanRenderMarkdownInline()` gains `~~strikethrough~~` and tightens the italic regex to avoid mid-identifier `*` matches. CSS adds table borders, code-block background, checkbox styling, blockquote accent, and heading sizing scoped to `.hermes-kanban-md`. Frontend-only, scoped to the kanban panel. 95 existing kanban tests pass.
+
+### Changed
+
+- **PR #2847** by @AJV20 — Live chat Activity disclosure now shows observable run telemetry instead of an empty `Thinking…` placeholder when no reasoning text is available (squashed from 2 author commits). New baseline rows surface run-start metadata (model, profile), `Waiting on model` / `Waiting on tool result` / `Working for …` status, tool start/finish in the timeline alongside the existing compact tool cards, and a `No recent activity for …` state after quiet periods. Frontend-only telemetry derived from existing stream events — no new backend event types. Adds `tests/test_live_activity_timeline.py` (4 tests). The compact/calm default Activity disclosure is preserved; it only becomes informative when expanded.
+
+## [v0.51.125] — 2026-05-24 — Release CW (stage-batch7 — 10-PR low-risk batch — UI/UX polish + bug fixes + diagnostics)
+
+### Fixed
+
+- **PR #2839** by @tn801534 — Kanban worker log endpoint constructed URLs with a double query string (`?board=<slug>?tail=65536`) when a non-default board was active. The frontend was appending `?tail=65536` directly to a URL that already had `?board=...` from `_kanbanBoardQuery()`. Fix: pass `{tail: 65536}` as the `extra` argument to `_kanbanBoardQuery()` so it composes both params into a single valid query string. One-line, narrow scope.
+
+- **PR #2832** by @franksong2702 — Malformed HTTP request logging in `server.py` falls back to `"-"` for missing `command` or `path` instead of raising `AttributeError`. Defensive `getattr(self, 'command', None) or '-'` matches the pattern already used for `_req_t0` elsewhere in the handler. Adds `tests/test_issue2775_log_request.py` covering the malformed-request-before-path-assigned case.
+
+- **PR #2818** by @humayunak — Approval and clarify cards no longer steal focus from the composer textarea (`#msg`) when the user is mid-type. `showApprovalCard()` and `showClarifyCard()` now guard the `focus()` call on `document.activeElement !== $('msg')`, matching the pattern already used elsewhere for focus-sensitive paths. The clarify card also moves the focus call out of `setTimeout` for snappier UX. Silently dropped keystrokes during streaming are eliminated.
+
+- **PR #2826** by @Koraji95-coder — Composer footer chip wraps no longer overlap at narrow widths (closes #2740). The five chip wraps (`.composer-profile-wrap`, `.composer-ws-wrap`, `.composer-model-wrap`, `.composer-reasoning-wrap`, `.composer-toolsets-wrap`) had `flex: 0 1 auto` + `min-width: 0` so they would compress past their content's natural width when the composer narrowed, causing visual overlap of the profile / workspace / model / reasoning chips. Switched to `flex: 0 0 auto` via a single grouped selector. Each chip now keeps its natural width and the existing `overflow-x: auto` on `.composer-left` handles overflow via horizontal scroll. Default-width layout unchanged; only affects the overflow regime. Mobile-specific rules (already `flex: 0 0 auto`) untouched.
+
+- **PR #2829** by @franksong2702 — Workspace Markdown previews fall back to plain text for very large files (>64 KB or >1500 lines) instead of synchronously running the full rich Markdown renderer on the browser main thread, which could lock up the tab for several seconds on multi-megabyte `.md` files. Plain-text preview shows file size + line count in the status line so users know why rich rendering was bypassed; Edit mode still shows raw content as before. Closes #2823. Supersedes #2828 (same scope, less polished).
+
+- **PR #2837** by @franksong2702 — CSRF rejections now distinguish origin/proxy mismatches from expired session tokens, so provider-key removal and other protected requests show actionable diagnostics instead of the generic "Cross-origin request rejected" error. Adds `tests/test_issue2572_csrf_diagnostics.py` covering both failure modes.
+
+- **PR #2834** by @franksong2702 — Workspace Markdown `mailto:` and `tel:` links now render as clickable links, and sandboxed HTML preview links open outside the iframe (via injected `<base target="_blank">`) instead of navigating the preview into a browser-blocked page. Adds `tests/test_issue2768_workspace_links.py`.
+
+- **PR #2838** by @franksong2702 — Tasks panel surfaces a warning when the Hermes gateway is not configured or not running, so Docker users know scheduled jobs need the gateway daemon to tick while away. The single-container Docker boundary is also clarified in `docs/docker.md`. Adds `tests/test_issue2785_gateway_cron_guidance.py`.
+
+### Added
+
+- **PR #2820** by @tangerine-fan — Clarify user choice is now echoed as a visible message in the conversation transcript. After the user responds to a clarify prompt, a synthetic user message with the chosen value is inserted into `S.messages` (marked `_clarify_response: true` so downstream consumers can filter if needed). Previously the choice was only visible in the transient clarify card; now the chat history preserves the decision.
+
+- **PR #2843** by @AJV20 — New Settings preference "Ignore Agent updates" keeps WebUI update notices, banners, and update actions enabled while suppressing Hermes Agent update checks. Default `False` (current behavior). Useful when running an unreleased agent build or pinning to a specific agent commit.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added
@@ -110,7 +254,6 @@
 ### Added
 
 - **PR #2731** by @Michaelyklam — Clarification prompts now include a compact Collapse/Expand control so users can temporarily shrink a blocking decision card and reread the chat context behind it before responding. The toggle uses Lucide chevron icons (chevron-down expanded → click to collapse, chevron-up collapsed → click to expand) and a small circular pill matching the existing composer-button design language. The collapsed card sits cleanly above the composer at every tested viewport (desktop 1920×1080, mobile iPhone 14 390×844) without edge clipping. New clarification prompts still open expanded so users notice them.
-
 
 ## [v0.51.114] — 2026-05-22 — Release CL (stage-407 — 1-PR — update-check recovery from remote re-tags)
 
@@ -4160,6 +4303,11 @@ This release is the first under the May 2 2026 auto-rebase + auto-fix policy: co
 - **`/btw` stream handler hardened** — `_streamDone=true` now set *before* `src.close()` in `done` and `apperror` handlers (defensive ordering); `_ensureBtwRow()` in `done` gated on session match (`S.session.session_id === parentSid`) to prevent btw bubble leaking into a different session if the user switches mid-stream; `stream_end` handler also sets `_streamDone=true` for defense-in-depth. 14 new regression tests added. (`static/messages.js`, `tests/test_reasoning_chip_btw_fixes.py`) [#935]
 - **`/reasoning` toast aligned with BRAIN prefix** — success toast now reads `🧠 Reasoning effort: <level>` consistent with the command's other toasts. (`static/commands.js`) [#939]
 - **Bootstrap Python discovery finds `.venv/` layout** — `discover_launcher_python` now checks both `venv/` and `.venv/` inside the agent directory, covering installations that use a leading-dot venv layout. (`bootstrap.py`) [#941]
+
+## v0.50.185 — 2026-04-24
+
+### Fixed
+- **`/btw` `stream_end` now sets `_streamDone`** — defense-in-depth improvement per Opus code review: the `stream_end` SSE handler now sets `_streamDone=true` before closing the connection, guarding against any server flow that emits `stream_end` without a preceding `done`/`apperror` event. (`static/messages.js`)
 
 ## v0.50.184 — 2026-04-24
 

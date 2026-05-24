@@ -70,18 +70,17 @@ _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
 
 
-def _terminal_shell_preexec_fn() -> None:
-    """Ask Linux to terminate the PTY shell when the WebUI parent dies."""
-    try:
-        import ctypes
-
-        libc = ctypes.CDLL(None)
-        libc.prctl(1, signal.SIGTERM)  # PR_SET_PDEATHSIG=1, SIGTERM=15
-    except Exception:
-        # Non-Linux platforms or restricted runtimes should still be able to
-        # open an embedded terminal; they just do not get the Linux pdeathsig
-        # hardening.
-        pass
+# NOTE on parent-death-signal: a previous version of this module set
+# PR_SET_PDEATHSIG via a preexec_fn to terminate orphaned PTY shells when the
+# WebUI process crashed.  That broke every Linux user (#2853): WebUI runs a
+# ThreadingHTTPServer, so the Popen call happens on a short-lived per-request
+# thread, and PR_SET_PDEATHSIG is per-thread.  The PTY shell registered the
+# spawning thread as its "parent" and was killed with SIGTERM the instant that
+# thread joined — within ~10 ms of opening the terminal — surfacing as the
+# `[terminal closed]` banner.  The graceful path is covered by
+# `atexit.register(close_all_terminals)` and the explicit `close_terminal`
+# call sites; hard kills of the WebUI process leak the shell, which is the
+# tradeoff for working on Linux at all.
 
 
 def _decode_terminal_output(decoder, data: bytes) -> str:
@@ -193,7 +192,6 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             stdout=slave_fd,
             stderr=slave_fd,
             close_fds=True,
-            preexec_fn=_terminal_shell_preexec_fn,
             start_new_session=True,
         )
         os.close(slave_fd)

@@ -2153,9 +2153,27 @@ def all_sessions(diag=None):
             _diag_stage(diag, "all_sessions.prune_index")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
+            try:
+                persisted_ids = {
+                    p.stem
+                    for p in SESSION_DIR.glob('*.json')
+                    if not p.name.startswith('_')
+                }
+            except Exception:
+                persisted_ids = None
             index = [
                 s for s in index
-                if _index_entry_exists(s.get('session_id'), in_memory_ids=in_memory_ids)
+                if (
+                    str(s.get('session_id') or '') in in_memory_ids
+                    or (
+                        persisted_ids is not None
+                        and str(s.get('session_id') or '') in persisted_ids
+                    )
+                    or (
+                        persisted_ids is None
+                        and _index_entry_exists(s.get('session_id'), in_memory_ids=in_memory_ids)
+                    )
+                )
             ]
             backfilled = []
             for i, s in enumerate(index):
@@ -3030,55 +3048,6 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False, pr
     except Exception:
         return []
     return msgs
-
-
-def get_state_db_session_summary(sid) -> dict:
-    """Return cheap message count/max timestamp for one state.db session.
-
-    This is intentionally narrower than ``get_state_db_session_messages`` for
-    metadata-only WebUI polling: callers only need a staleness signal, not a
-    fully materialized transcript with tool/reasoning metadata.
-    """
-    import os
-    try:
-        import sqlite3
-    except ImportError:
-        return {}
-
-    db_path = _active_state_db_path()
-    if not sid or not db_path.exists():
-        return {}
-
-    try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(messages)")
-            available = {str(row['name']) for row in cur.fetchall()}
-            if not {'session_id', 'timestamp'}.issubset(available):
-                return {}
-            cur.execute(
-                """
-                SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at
-                FROM messages
-                WHERE session_id = ?
-                """,
-                (str(sid),),
-            )
-            row = cur.fetchone()
-            if not row:
-                return {}
-            count = int(row['message_count'] or 0)
-            last_message_at = row['last_message_at']
-            result = {'message_count': count}
-            if last_message_at not in (None, ''):
-                try:
-                    result['last_message_at'] = float(last_message_at)
-                except (TypeError, ValueError):
-                    pass
-            return result
-    except Exception:
-        return {}
 
 
 def _normalized_message_timestamp_for_key(value):

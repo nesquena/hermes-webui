@@ -46,6 +46,13 @@ That's it for a real personal Docker install. Your existing `~/.hermes`
 directory is mounted, your `~/workspace` is browsable, and the WebUI
 auto-detects your UID/GID from the mounted volume.
 
+The single-container setup runs the WebUI only. It can create cron jobs and run
+them manually from the Tasks panel. In Docker, scheduled jobs require the Hermes gateway daemon
+to tick while you are away. If System Settings shows `Gateway not configured`,
+use `docker-compose.two-container.yml`,
+`docker-compose.three-container.yml`, or run `hermes gateway` separately before
+relying on offline scheduled runs.
+
 For troubleshooting, reinstall, or onboarding reproduction trials, do not mount
 your real `~/.hermes` unless you intentionally want to test real state. Use an
 isolated Hermes home and follow

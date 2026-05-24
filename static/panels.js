@@ -428,9 +428,44 @@ function _cronDiagnostics(job) {
   return JSON.stringify(fields, null, 2);
 }
 
+function _cronGatewayNoticeHtml(status) {
+  if (!status || (status.configured && status.running)) return '';
+  const notConfigured = !status.configured;
+  const title = notConfigured
+    ? 'Gateway not configured'
+    : 'Gateway not running';
+  const body = notConfigured
+    ? 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon. If this is a single-container Docker install, jobs can be created and run manually here, but scheduled ticks need a gateway container or `hermes gateway` running outside the WebUI.'
+    : 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon to be running. Start the gateway container or `hermes gateway` before relying on offline scheduled runs.';
+  return `
+    <div class="detail-alert-title">${esc(title)}</div>
+    <p>${esc(body)}</p>
+  `;
+}
+
+async function loadCronGatewayNotice() {
+  const box = $('cronGatewayNotice');
+  if (!box) return;
+  try {
+    const status = await api('/api/gateway/status');
+    const html = _cronGatewayNoticeHtml(status);
+    if (html) {
+      box.innerHTML = html;
+      box.style.display = '';
+    } else {
+      box.innerHTML = '';
+      box.style.display = 'none';
+    }
+  } catch (_) {
+    box.innerHTML = '';
+    box.style.display = 'none';
+  }
+}
+
 async function loadCrons(animate) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
+  loadCronGatewayNotice();
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';
     refreshBtn.disabled = true;
@@ -1239,17 +1274,188 @@ function _kanbanRenderSidebar(columns){
 }
 
 
+/**
+ * Render inline markdown (bold, italic, code, links, strikethrough).
+ * Input is already HTML-escaped.
+ */
 function _kanbanRenderMarkdownInline(escaped){
   return String(escaped || '')
+    .replace(/~~([^~\n]+)~~/g, (_m, text) => `<del>${text}</del>`)
     .replace(/`([^`\n]+)`/g, (_m, code) => `<code>${code}</code>`)
     .replace(/\*\*([^*\n]+)\*\*/g, (_m, text) => `<strong>${text}</strong>`)
-    .replace(/(^|[^*])\*([^*\n]+)\*/g, (_m, prefix, text) => `${prefix}<em>${text}</em>`)
+    .replace(/(^|[^*a-zA-Z0-9])\*([^*\n]+)\*/g, (_m, prefix, text) => `${prefix}<em>${text}</em>`)
     .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g, (_m, text, href) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`);
 }
 
+/**
+ * Render full markdown block content: headings, code blocks, lists, tables,
+ * task lists, blockquotes, horizontal rules, paragraphs + inline formatting.
+ */
 function _kanbanRenderMarkdown(source){
   if (!source) return '';
-  return `<div class="hermes-kanban-md">${esc(source).split(/\r?\n/).map(line => line.trim() ? `<p>${_kanbanRenderMarkdownInline(line)}</p>` : '').join('')}</div>`;
+  const lines = esc(source).split(/\r?\n/);
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    // ── Code block ──
+    if (/^```/.test(trimmed)) {
+      const lang = trimmed.slice(3).trim();
+      const codeLines = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i].trim())) {
+        codeLines.push(lines[i]);
+        i++;
+      }
+      i++; // skip closing ```
+      const codeHtml = codeLines.join('\n');
+      out.push(lang
+        ? `<pre class="hermes-kanban-code"><code class="language-${_kanbanRenderMarkdownInline(lang)}">${codeHtml}</code></pre>`
+        : `<pre class="hermes-kanban-code"><code>${codeHtml}</code></pre>`);
+      continue;
+    }
+
+    // ── Horizontal rule ──
+    if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(trimmed)) {
+      out.push('<hr>');
+      i++;
+      continue;
+    }
+
+    // ── Heading ──
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      out.push(`<h${level}>${_kanbanRenderMarkdownInline(headingMatch[2])}</h${level}>`);
+      i++;
+      continue;
+    }
+
+    // ── Blockquote ──
+    if (/^>\s?/.test(trimmed)) {
+      const quoteLines = [];
+      while (i < lines.length && /^>\s?/.test(lines[i].trim())) {
+        quoteLines.push(lines[i].trim().replace(/^>\s?/, ''));
+        i++;
+      }
+      out.push(`<blockquote>${_kanbanRenderMarkdownInline(quoteLines.join('<br>'))}</blockquote>`);
+      continue;
+    }
+
+    // ── Table row ──
+    if (/^\|.+\|$/.test(trimmed)) {
+      const tableRows = [];
+      const tableAligns = [];
+      while (i < lines.length && /^\|.+\|$/.test(lines[i].trim())) {
+        const row = lines[i].trim();
+        // Detect alignment separator row
+        if (/^\|[\s:]*-{3,}[\s:]*\|/.test(row)) {
+          const cells = row.split('|').filter(c => c.trim().length > 0);
+          cells.forEach(c => {
+            const t = c.trim();
+            if (t.startsWith(':') && t.endsWith(':')) tableAligns.push('center');
+            else if (t.endsWith(':')) tableAligns.push('right');
+            else tableAligns.push('left');
+          });
+        } else {
+          const cells = row.split('|').filter(c => c.trim().length > 0);
+          tableRows.push(cells.map((c, ci) => {
+            const align = tableAligns[ci] ? ` style="text-align:${tableAligns[ci]}"` : '';
+            return `<td${align}>${_kanbanRenderMarkdownInline(c.trim())}</td>`;
+          }).join(''));
+        }
+        i++;
+      }
+      if (tableRows.length) {
+        out.push(`<table><tbody>${tableRows.map(r => `<tr>${r}</tr>`).join('')}</tbody></table>`);
+      }
+      continue;
+    }
+
+    // ── Task list item ──
+    const taskMatch = trimmed.match(/^[-*+]\s+\[( |x|X)\]\s+(.+)$/);
+    if (taskMatch) {
+      const checked = taskMatch[1] !== ' ';
+      const text = taskMatch[2];
+      const items = [];
+      items.push(`<li class="hermes-kanban-task${checked ? ' checked' : ''}"><input type="checkbox"${checked ? ' checked' : ''} disabled> ${_kanbanRenderMarkdownInline(text)}</li>`);
+      i++;
+      // Collect continuation items
+      while (i < lines.length) {
+        const next = lines[i].trim();
+        const nextTask = next.match(/^[-*+]\s+\[( |x|X)\]\s+(.+)$/);
+        const nextLi = next.match(/^[-*+]\s+(.+)$/);
+        if (nextTask) {
+          const c = nextTask[1] !== ' ';
+          items.push(`<li class="hermes-kanban-task${c ? ' checked' : ''}"><input type="checkbox"${c ? ' checked' : ''} disabled> ${_kanbanRenderMarkdownInline(nextTask[2])}</li>`);
+          i++;
+        } else if (nextLi) {
+          items.push(`<li>${_kanbanRenderMarkdownInline(nextLi[1])}</li>`);
+          i++;
+        } else {
+          break;
+        }
+      }
+      out.push(`<ul>${items.join('')}</ul>`);
+      continue;
+    }
+
+    // ── Unordered list item ──
+    const ulMatch = trimmed.match(/^[-*+]\s+(.+)$/);
+    if (ulMatch) {
+      const items = [];
+      items.push(`<li>${_kanbanRenderMarkdownInline(ulMatch[1])}</li>`);
+      i++;
+      while (i < lines.length) {
+        const next = lines[i].trim();
+        const nextUl = next.match(/^[-*+]\s+(.+)$/);
+        const nextTask = next.match(/^[-*+]\s+\[( |x|X)\]\s+(.+)$/);
+        if (nextTask) break; // let task list handler get it
+        if (nextUl) {
+          items.push(`<li>${_kanbanRenderMarkdownInline(nextUl[1])}</li>`);
+          i++;
+        } else {
+          break;
+        }
+      }
+      out.push(`<ul>${items.join('')}</ul>`);
+      continue;
+    }
+
+    // ── Ordered list item ──
+    const olMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (olMatch) {
+      const items = [];
+      items.push(`<li>${_kanbanRenderMarkdownInline(olMatch[1])}</li>`);
+      i++;
+      while (i < lines.length) {
+        const next = lines[i].trim();
+        const nextOl = next.match(/^\d+\.\s+(.+)$/);
+        if (nextOl) {
+          items.push(`<li>${_kanbanRenderMarkdownInline(nextOl[1])}</li>`);
+          i++;
+        } else {
+          break;
+        }
+      }
+      out.push(`<ol>${items.join('')}</ol>`);
+      continue;
+    }
+
+    // ── Empty line ──
+    if (!trimmed) {
+      out.push('');
+      i++;
+      continue;
+    }
+
+    // ── Paragraph ──
+    out.push(`<p>${_kanbanRenderMarkdownInline(trimmed)}</p>`);
+    i++;
+  }
+  return `<div class="hermes-kanban-md">${out.join('\n')}</div>`;
 }
 
 function _kanbanFormatDuration(seconds){
@@ -1816,7 +2022,7 @@ function _kanbanCommentHtml(comment){
   const by = comment.author || comment.created_by || comment.actor || '';
   const at = _kanbanFormatTimestamp(comment.created_at || comment.ts || '');
   return `<div class="kanban-detail-row">
-    <div class="kanban-detail-row-main">${esc(body)}</div>
+    <div class="kanban-detail-row-main">${_kanbanRenderMarkdown(body)}</div>
     <div class="kanban-detail-row-meta">${esc([by, at].filter(Boolean).join(' · '))}</div>
   </div>`;
 }
@@ -2368,7 +2574,7 @@ function _kanbanRenderTaskDetail(data){
       <div class="kanban-task-preview-title">${esc(title)}</div>
       <button class="btn secondary kanban-edit-btn" onclick="openKanbanEdit('${esc(task.id)}')" data-i18n="kanban_edit_task" title="${esc(t('kanban_edit_task') || 'Edit task')}">${esc(t('kanban_edit_task') || 'Edit task')}</button>
     </div>
-    <div class="kanban-task-preview-body">${esc(body)}</div>
+    <div class="kanban-task-preview-body">${_kanbanRenderMarkdown(body)}</div>
     ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
     <div class="kanban-status-actions">${statusButtons}</div>
     <div class="kanban-detail-grid">
@@ -2388,8 +2594,7 @@ async function loadKanbanTask(taskId){
   if (!taskId) return;
   try {
     const data = await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + _kanbanBoardQuery());
-    const logEndpoint = '/api/kanban/tasks/' + encodeURIComponent(taskId) + '/log' + _kanbanBoardQuery();
-    try { data.log = await api(logEndpoint + '?tail=65536'); } catch(e) { data.log = {}; }
+    try { data.log = await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + '/log' + _kanbanBoardQuery({tail: 65536})); } catch(e) { data.log = {}; }
     _kanbanCurrentTaskId = taskId;
     const task = data.task || {};
     const title = _kanbanTaskTitle(task);
@@ -5487,6 +5692,8 @@ function _preferencesPayloadFromUi(){
   if(syncCb) payload.sync_to_insights=syncCb.checked;
   const updateCb=$('settingsCheckUpdates');
   if(updateCb) payload.check_for_updates=updateCb.checked;
+  const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
+  if(ignoreAgentUpdatesCb) payload.ignore_agent_updates=ignoreAgentUpdatesCb.checked;
   const whatsNewSummaryCb=$('settingsWhatsNewSummary');
   if(whatsNewSummaryCb) payload.whats_new_summary_enabled=whatsNewSummaryCb.checked;
   const soundCb=$('settingsSoundEnabled');
@@ -5713,6 +5920,8 @@ async function loadSettingsPanel(){
       }
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
     }
+    // Auxiliary models — load task assignments and provider/model options
+    _loadAuxiliaryModels();
     // Send key preference
     const sendKeySel=$('settingsSendKey');
     if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
@@ -5778,6 +5987,8 @@ async function loadSettingsPanel(){
     if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateCb=$('settingsCheckUpdates');
     if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
+    if(ignoreAgentUpdatesCb){ignoreAgentUpdatesCb.checked=!!settings.ignore_agent_updates;ignoreAgentUpdatesCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const whatsNewSummaryCb=$('settingsWhatsNewSummary');
     if(whatsNewSummaryCb){whatsNewSummaryCb.checked=!!settings.whats_new_summary_enabled;whatsNewSummaryCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const soundCb=$('settingsSoundEnabled');
@@ -6527,10 +6738,13 @@ function _refreshModelDropdownsAfterProviderChange(){
     if(typeof window._invalidateSlashModelCache==='function'){
       window._invalidateSlashModelCache();
     }
-    if(typeof populateModelDropdown==='function'){
-      // Fire-and-forget: don't block the providers panel refresh on a
-      // dropdown rebuild. The composer/Settings dropdowns will catch up
-      // on the very next paint frame.
+    // Fire-and-forget: don't block the providers panel refresh on a
+    // dropdown rebuild. The composer/Settings dropdowns will catch up
+    // on the very next paint frame.
+    if(typeof window._ensureModelDropdownReady==='function'){
+      window._modelDropdownReady=null;
+      Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
+    }else if(typeof populateModelDropdown==='function'){
       Promise.resolve(populateModelDropdown()).catch(()=>{});
     }
   }catch(_e){
@@ -6669,6 +6883,223 @@ async function checkUpdatesNow(){
   }
 }
 
+// ── Auxiliary Models ──────────────────────────────────────────────────────────
+
+// Canonical auxiliary task slots with display names.
+// Keep in sync with hermes_cli/main.py _AUX_TASKS and hermes_cli/web_server.py _AUX_TASK_SLOTS.
+const _AUX_TASK_SLOTS=[
+ {key:'vision',name:'Vision',desc:'image/screenshot analysis'},
+ {key:'compression',name:'Compression',desc:'context summarization'},
+ {key:'web_extract',name:'Web extract',desc:'web page summarization'},
+ {key:'session_search',name:'Session search',desc:'past-conversation recall'},
+ {key:'approval',name:'Approval',desc:'smart command approval'},
+ {key:'mcp',name:'MCP',desc:'MCP tool reasoning'},
+ {key:'title_generation',name:'Title generation',desc:'session titles'},
+ {key:'skills_hub',name:'Skills hub',desc:'skills search/install'},
+ {key:'curator',name:'Curator',desc:'skill-usage review pass'},
+];
+
+let _auxProviders=[];       // cached provider list from /api/model/options
+let _auxOriginalConfig=null; // snapshot of initial config for dirty detection
+
+function _auxSelectStyle(){
+ return 'width:100%;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;box-sizing:border-box';
+}
+
+function _buildAuxProviderOptions(sel,providers,currentProvider){
+ sel.innerHTML='';
+ // "auto" = use main model
+ const autoOpt=document.createElement('option');
+ autoOpt.value='auto';autoOpt.textContent='auto ('+t('settings_aux_provider_auto')+')';
+ if(currentProvider==='auto'||!currentProvider) autoOpt.selected=true;
+ sel.appendChild(autoOpt);
+ for(const p of providers){
+  const opt=document.createElement('option');
+  opt.value=p.slug;opt.textContent=p.name;
+  if(p.slug===currentProvider) opt.selected=true;
+  sel.appendChild(opt);
+ }
+}
+
+function _buildAuxModelOptions(sel,provider,providers,currentModel){
+ sel.innerHTML='';
+ const emptyOpt=document.createElement('option');
+ emptyOpt.value='';emptyOpt.textContent=t('settings_aux_model_auto')||'auto (use provider default)';
+ sel.appendChild(emptyOpt);
+ if(!provider||provider==='auto'){
+  sel.value=currentModel||'';
+  return;
+ }
+ // Find matching provider in cached list
+ const pData=providers.find(p=>p.slug===provider);
+ if(pData&&pData.models){
+  for(const mId of pData.models){
+   const opt=document.createElement('option');
+   opt.value=mId;opt.textContent=mId;
+   if(mId===currentModel) opt.selected=true;
+   sel.appendChild(opt);
+  }
+ }
+ // Always allow custom model — add a text input option hint
+ const customOpt=document.createElement('option');
+ customOpt.value='__custom__';customOpt.textContent=t('settings_aux_model_custom')||'Custom model…';
+ sel.appendChild(customOpt);
+ // If currentModel not in list and not empty, add it as a custom option
+ if(currentModel&&!pData?.models?.includes(currentModel)){
+  const existingOpt=document.createElement('option');
+  existingOpt.value=currentModel;existingOpt.textContent=currentModel+' (configured)';
+  existingOpt.selected=true;
+  sel.insertBefore(existingOpt,customOpt);
+ }
+}
+
+function _onAuxProviderChange(taskKey,providers){
+ const provSel=$('aux-prov-'+taskKey);
+ const modelSel=$('aux-model-'+taskKey);
+ if(!provSel||!modelSel) return;
+ const provider=provSel.value;
+ _buildAuxModelOptions(modelSel,provider,providers,'');
+ _markAuxDirty();
+}
+
+async function _onAuxModelChange(taskKey){
+ const modelSel=$('aux-model-'+taskKey);
+ if(!modelSel) return;
+ if(modelSel.value==='__custom__'){
+  const customModel=await showPromptDialog({title:t('settings_aux_model_custom')||'Custom model',message:t('settings_aux_model_custom_prompt')||'Enter model ID:',placeholder:'model/provider:model-id',confirmLabel:t('settings_btn_apply_aux_models')||'Apply'});
+  if(customModel&&customModel.trim()){
+   // Insert custom model option before the __custom__ option
+   const opt=document.createElement('option');
+   opt.value=customModel.trim();opt.textContent=customModel.trim();
+   // Remove __custom__ selection
+   const customIdx=[...modelSel.options].findIndex(o=>o.value==='__custom__');
+   if(customIdx>=0) modelSel.insertBefore(opt,modelSel.options[customIdx]);
+   modelSel.value=customModel.trim();
+  }else{
+   modelSel.value='';
+  }
+ }
+ _markAuxDirty();
+}
+
+function _markAuxDirty(){
+ const applyBtn=$('btnApplyAuxModels');
+ if(applyBtn) applyBtn.style.display='';
+ _markSettingsDirty();
+}
+
+async function _loadAuxiliaryModels(){
+ const container=$('auxModelsContainer');
+ if(!container) return;
+ container.innerHTML='<div style="color:var(--muted);font-size:12px">'+(t('settings_aux_loading')||'Loading…')+'</div>';
+
+ try{
+ // Fetch auxiliary config AND the WebUI's own /api/models for provider/model lists
+ const [auxData,modelsData]=await Promise.all([
+ api('/api/model/auxiliary').catch(()=>null),
+ api('/api/models').catch(()=>null),
+ ]);
+ // Build provider list from /api/models groups
+ // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
+ const groups=(modelsData&&modelsData.groups)||[];
+ _auxProviders=groups.filter(g=>g.provider&&g.models&&g.models.length>0).map(g=>({
+ slug:g.provider_id||g.provider,
+ name:g.provider,
+ models:g.models.map(m=>m.id),
+ }));
+ const tasks=(auxData&&auxData.tasks)||[];
+  // Build a quick lookup: taskKey → {provider, model}
+  const taskMap={};
+  for(const t of tasks) taskMap[t.task]=t;
+  _auxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
+
+  container.innerHTML='';
+  for(const slot of _AUX_TASK_SLOTS){
+   const cfg=taskMap[slot.key]||{provider:'auto',model:''};
+   const row=document.createElement('div');
+   row.style.cssText='display:grid;grid-template-columns:120px 1fr 1fr;gap:8px;align-items:center;margin-bottom:8px';
+
+   // Task name + description
+   const label=document.createElement('div');
+   label.style.cssText='font-size:12px;font-weight:500;color:var(--text);line-height:1.3';
+   label.innerHTML=esc(slot.name)+'<div style="font-size:10px;color:var(--muted);font-weight:400">'+esc(slot.desc)+'</div>';
+   row.appendChild(label);
+
+   // Provider select
+   const provSel=document.createElement('select');
+   provSel.id='aux-prov-'+slot.key;
+   provSel.style.cssText=_auxSelectStyle();
+   _buildAuxProviderOptions(provSel,_auxProviders,cfg.provider);
+   provSel.addEventListener('change',()=>_onAuxProviderChange(slot.key,_auxProviders));
+   row.appendChild(provSel);
+
+   // Model select
+   const modelSel=document.createElement('select');
+   modelSel.id='aux-model-'+slot.key;
+   modelSel.style.cssText=_auxSelectStyle();
+   _buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
+   modelSel.addEventListener('change',()=>_onAuxModelChange(slot.key));
+   row.appendChild(modelSel);
+
+   container.appendChild(row);
+  }
+  // Hide apply button (no changes yet)
+  const applyBtn=$('btnApplyAuxModels');
+  if(applyBtn) applyBtn.style.display='none';
+
+  // Reset button
+  const resetBtn=$('btnResetAuxModels');
+  if(resetBtn&&!resetBtn._bound){
+   resetBtn._bound=true;
+   resetBtn.addEventListener('click',async()=>{
+    if(!(await showConfirmDialog({title:t('settings_aux_reset_confirm_title')||'Reset auxiliary models?',message:t('settings_aux_reset_confirm_msg')||'This will set all auxiliary tasks to auto (use main model).',confirmLabel:t('settings_btn_reset_aux_models')||'Reset',danger:true}))) return;
+    try{
+     await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:'__reset__',provider:'auto',model:''})});
+     if(typeof showToast==='function') showToast(t('settings_aux_reset_done')||'Auxiliary models reset to auto');
+     _loadAuxiliaryModels();
+    }catch(e){
+     if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to reset auxiliary models');
+    }
+   });
+  }
+
+  // Apply button
+  if(applyBtn&&!applyBtn._bound){
+   applyBtn._bound=true;
+   applyBtn.addEventListener('click',_applyAuxModels);
+  }
+ }catch(e){
+  console.warn('[settings] auxiliary models load failed',e);
+  container.innerHTML='<div style="color:var(--muted);font-size:12px">'+(t('settings_aux_load_failed')||'Could not load auxiliary model settings. Make sure the agent API is available.')+'</div>';
+ }
+}
+
+async function _applyAuxModels(){
+ let saved=0;
+ for(const slot of _AUX_TASK_SLOTS){
+  const provSel=$('aux-prov-'+slot.key);
+  const modelSel=$('aux-model-'+slot.key);
+  if(!provSel) continue;
+  const provider=provSel.value;
+  const model=(modelSel&&modelSel.value!=='__custom__')?(modelSel.value||''):'';
+  const orig=_auxOriginalConfig?.[slot.key]||{provider:'auto',model:''};
+  // Only save if changed
+  if(provider!==orig.provider||model!==orig.model){
+   try{
+    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:slot.key,provider,model})});
+    saved++;
+   }catch(e){
+    console.warn('[settings] failed to save aux task',slot.key,e);
+    if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to save auxiliary model for '+slot.name);
+    return;
+   }
+  }
+ }
+ if(typeof showToast==='function') showToast(saved?(t('settings_aux_saved')||'Auxiliary models updated'):(t('settings_aux_no_changes')||'No changes to apply'));
+ // Reload to refresh state
+ _loadAuxiliaryModels();
+}
+
 async function saveSettings(andClose){
   const model=($('settingsModel')||{}).value;
   const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'');
@@ -6707,6 +7138,7 @@ async function saveSettings(andClose){
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
+  body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;
   body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
   body.rtl=!!($('settingsRtl')||{}).checked;
@@ -6910,6 +7342,16 @@ function _mcpStatusLabel(status){
   }[status]||'mcp_status_unknown';
   return t(key);
 }
+function toggleMcpServer(name, enabled){
+  api('/api/mcp/servers/'+encodeURIComponent(name),{
+    method:'PATCH',
+    body:JSON.stringify({enabled:enabled}),
+  }).then(r=>{
+    if(r&&r.ok) showToast(t(enabled?'mcp_enabled_toast':'mcp_disabled_toast',name));
+    else showToast(t('mcp_toggle_failed'),'error');
+    loadMcpServers();
+  }).catch(()=>{showToast(t('mcp_toggle_failed'),'error');loadMcpServers();});
+}
 function loadMcpServers(){
   const list=$('mcpServerList');
   if(!list) return;
@@ -6920,7 +7362,6 @@ function loadMcpServers(){
       list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_no_servers'))}</div>`;
       return;
     }
-    const toggleNote=r.toggle_supported?'':'<div class="mcp-readonly-note">'+esc(t('mcp_toggle_followup'))+'</div>';
     list.innerHTML=r.servers.map(s=>{
       const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+(s.transport||'unknown'));
       const transportClass=s.transport==='http'?'mcp-http':s.transport==='stdio'?'mcp-stdio':'mcp-unknown';
@@ -6934,6 +7375,11 @@ function loadMcpServers(){
       const envInfo=s.env?Object.entries(s.env).map(([k,v])=>`${k}=${v}`).join(', '):'';
       const headersInfo=s.headers?Object.entries(s.headers).map(([k,v])=>`${k}=${v}`).join(', '):'';
       const secretInfo=[envInfo,headersInfo].filter(Boolean).join(' | ');
+      const isEnabled=s.enabled!==false;
+      const encodedName=encodeURIComponent(s.name).replace(/'/g,"\\'");
+      const toggleBtn=r.toggle_supported
+        ?`<button type="button" class="mcp-toggle-btn ${isEnabled?'mcp-toggle-enabled':'mcp-toggle-disabled'}" title="${esc(t(isEnabled?'mcp_disable_server':'mcp_enable_server'))}" onclick="toggleMcpServer('${encodedName}',${!isEnabled})">${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</button>`
+        :`<span>${esc(t(isEnabled?'mcp_enabled_yes':'mcp_enabled_no'))}</span>`;
       return `<div class="mcp-server-row">
         <div class="mcp-server-row-head">
           <span class="mcp-server-name">${esc(s.name)}</span>
@@ -6941,9 +7387,9 @@ function loadMcpServers(){
           ${statusBadge}
         </div>
         <div class="mcp-server-detail">${esc(detail)}${secretInfo?' | '+esc(secretInfo):''}</div>
-        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span><span>${esc(t(s.enabled===false?'mcp_enabled_no':'mcp_enabled_yes'))}</span></div>
+        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span>${toggleBtn}</div>
       </div>`;
-    }).join('')+toggleNote;
+    }).join('');
   }).catch(()=>{list.innerHTML=`<div class="mcp-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_load_failed'))}</div>`});
 }
 let _mcpToolsCache=[];

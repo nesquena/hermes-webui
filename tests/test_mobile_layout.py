@@ -665,6 +665,11 @@ def test_100dvh_viewport_height():
         "style.css must use 100dvh for correct mobile viewport height (100vh hides content under address bar)"
 
 
+def test_viewport_disables_page_zoom_for_native_pwa_shell():
+    """Installed PWA launches should not rubber-band into browser-style page zoom."""
+    assert 'name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"' in HTML
+
+
 def test_pwa_safe_area_top_stays_scoped_to_installed_modes():
     """The PWA shell should not opt into cover-mode geometry for every browser surface."""
     assert 'viewport-fit=cover' not in HTML
@@ -699,6 +704,20 @@ def test_safe_area_variables_available_for_pwa_shell():
     assert "padding:8px 10px 12px!important" in CSS, (
         "Phone composer should keep the proven pre-cover-mode padding contract"
     )
+
+
+def test_pwa_startup_classes_have_native_shell_affordances():
+    """The JS-startup fallback classes should mirror browser display-mode CSS.
+
+    iOS and embedded webviews do not always evaluate display-mode media queries
+    the same way as Chromium. pwa-startup.js adds classes early, so CSS should
+    provide the same native-feel affordances through those classes.
+    """
+    assert ".pwa-standalone" in CSS
+    assert ".pwa-standalone .app-titlebar-reload" in CSS
+    assert "overscroll-behavior:none" in CSS
+    assert ".pwa-offline .app-titlebar::after" in CSS
+    assert "pwa-title-resume" in CSS
 
 
 def test_composer_touch_target_size():
