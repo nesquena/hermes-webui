@@ -435,10 +435,12 @@ def check_auth(handler, parsed) -> bool:
         return True
     # Not authorized
     if parsed.path.startswith('/api/'):
+        body = b'{"error":"Authentication required"}'
         handler.send_response(401)
         handler.send_header('Content-Type', 'application/json')
+        handler.send_header('Content-Length', str(len(body)))
         handler.end_headers()
-        handler.wfile.write(b'{"error":"Authentication required"}')
+        handler.wfile.write(body)
     else:
         handler.send_response(302)
         # Pass the original path as ?next= so login.js redirects back after auth.
@@ -468,6 +470,7 @@ def check_auth(handler, parsed) -> bool:
         # `?`, `&`, `=`) gets percent-encoded.
         _next = _urlparse.quote(_path_with_query, safe='/')
         handler.send_header('Location', 'login?next=' + _next)
+        handler.send_header('Content-Length', '0')
         handler.end_headers()
     return False
 

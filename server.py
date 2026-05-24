@@ -170,6 +170,13 @@ class QuietHTTPServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
+    # HTTP/1.1 enables keep-alive connection reuse — major latency win on
+    # high-RTT links where every saved TCP handshake is 2×RTT. Each response
+    # MUST declare framing (Content-Length, Transfer-Encoding: chunked, or
+    # Connection: close) so the client knows where the message ends. Helpers
+    # j()/t() emit Content-Length; SSE/streaming endpoints emit
+    # Connection: close because the body has no terminator. See PR notes.
+    protocol_version = "HTTP/1.1"
     timeout = 30  # seconds — kills idle/incomplete connections to prevent thread exhaustion
     
     def setup(self):

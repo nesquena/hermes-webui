@@ -1022,7 +1022,7 @@ def _handle_events_sse_stream(handler, parsed):
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "keep-alive")
+    handler.send_header("Connection", "close")
     handler.end_headers()
 
     # Send an initial frame so the client knows the connection is open
