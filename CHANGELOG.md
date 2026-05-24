@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Agent "Update Now" loop on hosts past the latest tag** — fixes #2846. After [PR #2758](https://github.com/nesquena/hermes-webui/pull/2758) (the fix for #2653) the update check correctly fell through to the branch comparison when `HEAD` was past the latest `v*` tag, so the banner started reporting `Agent (origin/main): N updates available` with the real commit gap. But the apply path (`_select_apply_compare_ref`) still picked the latest tag whenever any `v*` tag existed. Clicking **Update Now** ran `git pull --ff-only v2026.5.16` against a checkout already past that tag — a no-op — scheduled the restart anyway, and the banner reappeared with the same `N updates available`. `apply_force_update` had the same bug and would have actively rewound the user's checkout `N` commits. Fix: extract a shared `_head_is_past_latest_tag` predicate that both the check and apply paths consult, so when `HEAD` is past the latest tag they both advance to `origin/<default-branch>` (or the configured upstream) instead of the stale tag. Adds 5 regression tests covering all four `_select_apply_compare_ref` branches plus a symmetry test pinning that check and apply paths agree under the past-tag scenario (`test_check_and_apply_paths_agree_when_head_is_past_tag`).
+
 ## [v0.51.126] — 2026-05-24 — Release CX (stage-batch8 — 2-PR low-risk batch — kanban markdown + live activity timeline)
 
 ### Added

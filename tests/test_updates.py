@@ -419,3 +419,131 @@ def test_check_repo_branch_check_runs_for_post_tag_commits(tmp_path):
     assert info.get('release_based') is not True, (
         'post-tag HEAD should use branch check, not release-based check'
     )
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for #2846: _select_apply_compare_ref must mirror the
+# check-side decision about whether to advance to the latest tag or to the
+# upstream branch. Pre-fix, the check correctly fell through to the branch
+# count when HEAD was past the latest tag, but apply still aimed at the tag —
+# so clicking "Update Now" no-op'd, restarted the server, and the banner
+# re-appeared with the same N commits.
+# ---------------------------------------------------------------------------
+
+
+def test_select_apply_compare_ref_uses_tag_when_head_is_on_tag(tmp_path):
+    """HEAD == latest tag → apply path advances to the tag (unchanged)."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v2026.5.16\nv2026.5.10', True
+        if args == ['describe', '--tags', '--always']:
+            return 'v2026.5.16', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        ref = updates._select_apply_compare_ref(tmp_path)
+
+    assert ref == 'v2026.5.16'
+
+
+def test_select_apply_compare_ref_falls_through_when_head_is_past_tag(tmp_path):
+    """HEAD past latest tag → apply path advances to origin/<branch>, not the tag.
+
+    Mirrors the issue #2846 repro: hermes-agent has tag v2026.5.16, master is
+    608 commits ahead, the banner correctly reports 608 commits available
+    (post-#2758), but pre-fix apply ran `git pull --ff-only v2026.5.16` — a
+    no-op — and the banner reappeared after restart.
+    """
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v2026.5.16', True
+        if args == ['describe', '--tags', '--always']:
+            return 'v2026.5.16-608-g1d22b9c2d', True
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return 'origin/main', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        ref = updates._select_apply_compare_ref(tmp_path)
+
+    assert ref == 'origin/main', (
+        'apply path must advance to the upstream branch when HEAD is past the '
+        'latest tag, otherwise Update Now no-ops and the banner loops (#2846)'
+    )
+
+
+def test_select_apply_compare_ref_no_tags_uses_upstream(tmp_path):
+    """No `v*` tags → apply path uses the configured upstream (unchanged)."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return '', True
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return 'origin/feat/foo', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        ref = updates._select_apply_compare_ref(tmp_path)
+
+    assert ref == 'origin/feat/foo'
+
+
+def test_select_apply_compare_ref_no_tags_no_upstream_uses_default_branch(tmp_path):
+    """No tags and no upstream → fall back to origin/<default-branch>."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return '', True
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return '', False
+        if args == ['symbolic-ref', 'refs/remotes/origin/HEAD']:
+            return 'refs/remotes/origin/main', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        ref = updates._select_apply_compare_ref(tmp_path)
+
+    assert ref == 'origin/main'
+
+
+def test_check_and_apply_paths_agree_when_head_is_past_tag(tmp_path):
+    """Check and apply paths must agree: both fall through to origin/<branch>.
+
+    The bug class in #2846 (and #2653 before it) was the two paths drifting
+    apart — check said "you're 608 behind origin/main", apply said "advance
+    to v2026.5.16". This test pins the symmetry so they can't drift again.
+    """
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v2026.5.16', True
+        if args == ['describe', '--tags', '--abbrev=0']:
+            return 'v2026.5.16', True
+        if args == ['describe', '--tags', '--always']:
+            return 'v2026.5.16-608-g1d22b9c2d', True
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return 'origin/main', True
+        return '', True
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        check_result = updates._check_repo_release(tmp_path, 'agent')
+        apply_ref = updates._select_apply_compare_ref(tmp_path)
+
+    # Check side falls through (release check returns None → branch check runs)
+    assert check_result is None, (
+        '_check_repo_release should fall through when HEAD is past the latest '
+        'tag (#2653)'
+    )
+    # Apply side picks the same branch the check would have reported against
+    assert apply_ref == 'origin/main', (
+        '_select_apply_compare_ref must mirror the check-side fall-through '
+        'when HEAD is past the latest tag (#2846)'
+    )
+

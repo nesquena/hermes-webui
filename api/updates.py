@@ -351,6 +351,21 @@ def _release_gap(tags, current, latest):
     return 1
 
 
+def _head_is_past_latest_tag(path, current_tag):
+    """Return True when HEAD has moved past the latest reachable release tag.
+
+    `git describe --tags --always` returns the bare tag name (e.g. ``v2026.5.16``)
+    when HEAD is exactly on the tag, and a ``v2026.5.16-608-g1d22b9c2`` suffix
+    when HEAD has moved 608 commits past it. Used by both the update check and
+    the update apply path so they agree on which ref to advance to — see #2653
+    (check side) and #2846 (apply side).
+    """
+    if not current_tag:
+        return False
+    full_desc, ok = _run_git(['describe', '--tags', '--always'], path)
+    return bool(ok and full_desc and full_desc != current_tag)
+
+
 def _select_apply_compare_ref(path):
     """Return the same remote ref family that the update check reports.
 
@@ -358,10 +373,20 @@ def _select_apply_compare_ref(path):
     an update must therefore advance to the latest release tag too; otherwise a
     checkout on a local/fork tracking branch can report release updates, pull a
     different branch that is already current, restart, and still remain behind.
+
+    When HEAD is past the latest tag (the agent repo's day-to-day state between
+    tagged releases), the check side falls through to the branch comparison via
+    `_check_repo_release` returning None. The apply side must mirror that
+    decision — otherwise we run `git pull --ff-only <latest-tag>` against a
+    checkout that's already past the tag, no-op, restart, and the banner
+    re-appears with the same N commits available. See #2846.
     """
     tags = _release_tags(path)
     if tags:
-        return tags[0]
+        latest_tag = tags[0]
+        # Mirror the predicate _check_repo_release uses to fall through.
+        if not _head_is_past_latest_tag(path, latest_tag):
+            return latest_tag
 
     upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
     if ok and upstream:
@@ -384,14 +409,11 @@ def _check_repo_release(path, name):
     # If behind == 0 but HEAD has moved past the tag (e.g. the agent repo
     # keeps committing to master between tagged releases), the release check
     # would report "Up to date" even though hundreds of commits are missing.
-    # Detect this by comparing the short describe output (which includes the
-    # -N-gSHA suffix when HEAD is past a tag) against the bare tag name.
-    # When HEAD is ahead of the latest tag, fall through to _check_repo_branch
-    # so the real commit count is reported instead.  See #2653.
-    if behind == 0:
-        full_desc, ok = _run_git(['describe', '--tags', '--always'], path)
-        if ok and full_desc and full_desc != current_tag:
-            return None
+    # Fall through to _check_repo_branch so the real commit count is reported
+    # instead. The same predicate is used by _select_apply_compare_ref so the
+    # check and apply sides cannot drift again. See #2653 (check), #2846 (apply).
+    if behind == 0 and _head_is_past_latest_tag(path, current_tag):
+        return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
     remote_url = _normalize_remote_url(remote_url)
