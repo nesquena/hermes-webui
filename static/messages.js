@@ -190,6 +190,42 @@ let _sendInProgress = false;
 let _sendInProgressSid = null;  // session_id of the in-flight send
 const _sessionTitleProvisionalBySid = new Map();
 
+function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
+  if(!S||!S.busy||compressionRunning) return false;
+  const session=S.session||{};
+  const sid=session.session_id||'';
+  const hasRuntimeConfirmation=Boolean(
+    S.activeStreamId||
+    session.active_stream_id||
+    session.pending_user_message||
+    session.pending_started_at
+  );
+  if(hasRuntimeConfirmation) return false;
+  if(typeof INFLIGHT==='object'&&INFLIGHT&&sid&&INFLIGHT[sid]){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+  S.activeStreamId=null;
+  if(session) session.active_stream_id=null;
+  if(typeof setBusy==='function') setBusy(false);
+  else S.busy=false;
+  if(typeof setComposerStatus==='function') setComposerStatus('');
+  if(typeof setStatus==='function') setStatus('');
+  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(sid&&typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(sid);
+  return true;
+}
+
+function _runOptionalPreStartUiStep(label, fn){
+  try{
+    return typeof fn==='function'?fn():undefined;
+  }catch(e){
+    const message=e&&e.message?e.message:String(e||'unknown error');
+    try{console.warn('[webui] optional pre-start UI step failed', label, message);}catch(_){ }
+    return undefined;
+  }
+}
+
 function _sessionTitleLooksDefaultOrProvisional(titleText, provisionalText){
   const title=String(titleText||'').replace(/\s+/g,' ').trim();
   if(!title||title==='Untitled'||title==='New Chat')return true;
@@ -262,6 +298,7 @@ async function send(){
   }
 
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on busy_input_mode
   if(S.busy||compressionRunning){
     if(text){
@@ -409,39 +446,68 @@ async function send(){
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
-  S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);
-  // First optimistic pass: make the local user turn visible before /api/chat/start
-  // can save pending state on the server.
-  if(typeof upsertActiveSessionForLocalTurn==='function'){
-    upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
-  }
-  const optimisticMessages=[...S.messages];
-  INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
-  if(typeof saveInflightState==='function'){
-    saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
-  }
-  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
-  startApprovalPolling(activeSid);
-  startClarifyPolling(activeSid);
-  _fetchYoloState(activeSid);  // sync YOLO pill with backend state
-  S.activeStreamId = null;  // will be set after stream starts
-  if(typeof updateSendBtn==='function') updateSendBtn();
-
-  // Set provisional title from user message immediately so session appears
-  // in the sidebar right away with a meaningful name. /api/chat/start persists
-  // the server-side provisional title and may refine this optimistic text.
-  if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
-    const provisionalTitle=displayText.slice(0,64);
-    applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
-    if(typeof upsertActiveSessionForLocalTurn==='function'){
-      // Second optimistic pass: carry the provisional title into the cached row
-      // without re-fetching /api/sessions before pending state exists server-side.
-      upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
+  let optimisticMessages;
+  try{
+    S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);
+    // First optimistic pass: make the local user turn visible before /api/chat/start
+    // can save pending state on the server.
+    _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.initial', ()=>{
+      if(typeof upsertActiveSessionForLocalTurn==='function'){
+        upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+      }
+    });
+    optimisticMessages=[...S.messages];
+    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    if(typeof saveInflightState==='function'){
+      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
     }
-  } else if(typeof upsertActiveSessionForLocalTurn==='function'){
-    upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
-  } else {
-    renderSessionListFromCache();  // ensure it's visible even if already titled
+    _runOptionalPreStartUiStep('renderSessionListFromCache.initial', ()=>{
+      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    });
+    _runOptionalPreStartUiStep('startApprovalPolling.prestart', ()=>startApprovalPolling(activeSid));
+    _runOptionalPreStartUiStep('startClarifyPolling.prestart', ()=>startClarifyPolling(activeSid));
+    _runOptionalPreStartUiStep('fetchYoloState.prestart', ()=>_fetchYoloState(activeSid));  // sync YOLO pill with backend state
+    S.activeStreamId = null;  // will be set after stream starts
+    _runOptionalPreStartUiStep('updateSendBtn.prestart', ()=>{
+      if(typeof updateSendBtn==='function') updateSendBtn();
+    });
+
+    // Set provisional title from user message immediately so session appears
+    // in the sidebar right away with a meaningful name. /api/chat/start persists
+    // the server-side provisional title and may refine this optimistic text.
+    if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
+      const provisionalTitle=displayText.slice(0,64);
+      _runOptionalPreStartUiStep('applySessionTitleUpdate.provisional', ()=>{
+        applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
+      });
+      _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.provisional', ()=>{
+        if(typeof upsertActiveSessionForLocalTurn==='function'){
+          // Second optimistic pass: carry the provisional title into the cached row
+          // without re-fetching /api/sessions before pending state exists server-side.
+          upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
+        }
+      });
+    } else if(typeof upsertActiveSessionForLocalTurn==='function'){
+      _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.titled', ()=>{
+        upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+      });
+    } else {
+      _runOptionalPreStartUiStep('renderSessionListFromCache.prestart', ()=>{
+        renderSessionListFromCache();  // ensure it's visible even if already titled
+      });
+    }
+  }catch(preStartError){
+    // The user turn must reach /api/chat/start even if local optimistic UI
+    // bookkeeping (render cache, storage quota, sidebar reconciliation, etc.)
+    // throws. Otherwise the pane can show a user bubble + spinner while the
+    // backend never receives the turn.
+    const message=preStartError&&preStartError.message?preStartError.message:String(preStartError||'unknown error');
+    try{console.warn('[webui] pre-start optimistic UI failed; continuing to /api/chat/start', message);}catch(_){ }
+    if(!S.messages.includes(userMsg)) S.messages.push(userMsg);
+    optimisticMessages=[...S.messages];
+    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    try{setBusy(true);}catch(_){S.busy=true;}
+    S.activeStreamId=null;
   }
 
   // Start the agent via POST, get a stream_id back
@@ -1285,6 +1351,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     step();
   }
+  function _flushPendingSegmentRender(){
+    if(!assistantBody||!_renderPending) return;
+    _cancelAnimationFramePendingStreamRender();
+    const displayText=segmentStart===0
+      ? _parseStreamState().displayText
+      : _stripXmlToolCalls(assistantText.slice(segmentStart));
+    if(_smdParser){
+      _smdWrite(displayText);
+    } else if(renderMd){
+      assistantBody.innerHTML=renderMd(displayText);
+    } else {
+      assistantBody.innerHTML=esc(displayText);
+    }
+  }
   function _resetAssistantSegment(){
     assistantRow=null;
     assistantBody=null;
@@ -1410,6 +1490,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!visible){
         return;
       }
+      reasoningText='';
+      liveReasoningText='';
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid) return;
         _resetAssistantSegment();
@@ -1423,6 +1505,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof updateThinking==='function') updateThinking(_liveThinkingText());
         else appendThinking(_liveThinkingText());
       }
+      _flushPendingSegmentRender();
       ensureAssistantRow(true);
       _resetAssistantSegment();
       _scheduleRender();
@@ -1467,12 +1550,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // to be re-created below everything when reasoning resumed post-tool.
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       liveReasoningText='';
+      reasoningText='';
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
       snapshotLiveTurn();
       // Reset the live assistant row reference so that any text tokens arriving
       // after this tool call create a NEW segment appended below the tool card,
       // rather than updating the old segment that sits above it in the DOM.
+      _flushPendingSegmentRender();
       _freshSegment=true;
       _smdEndParser();
       _resetAssistantSegment();

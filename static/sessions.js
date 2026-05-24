@@ -2024,6 +2024,31 @@ function _isOptimisticFirstTurnSessionRow(s){
   );
 }
 
+function _shouldKeepLocalOnlyOptimisticSessionRow(local){
+  if(!_isOptimisticFirstTurnSessionRow(local)) return false;
+  const sid=local.session_id;
+  if(typeof _sendInProgress!=='undefined'&&_sendInProgress&&sid===_sendInProgressSid) return true;
+  const activeSid=S&&S.session&&S.session.session_id;
+  const isActive=Boolean(activeSid&&activeSid===sid);
+  const hasRuntimeConfirmation=Boolean(local.active_stream_id||local.pending_user_message||local.pending_started_at);
+  if(isActive&&S.busy&&hasRuntimeConfirmation) return true;
+  const localTs=Number(local.last_message_at||local.updated_at||0);
+  const ageMs=localTs>0?Date.now()-(localTs*1000):Infinity;
+  return Boolean(isActive&&S.busy&&ageMs>=0&&ageMs<5000);
+}
+
+function _dropStaleOptimisticSessionRow(sid){
+  if(!sid) return;
+  if(INFLIGHT&&INFLIGHT[sid]){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+  if(typeof _sessionStreamingById!=='undefined'&&_sessionStreamingById&&typeof _sessionStreamingById.set==='function'){
+    _sessionStreamingById.set(sid,false);
+  }
+  if(typeof _forgetObservedStreamingSession==='function') _forgetObservedStreamingSession(sid);
+}
+
 function _mergeOptimisticFirstTurnSessions(fetchedSessions){
   const merged=Array.isArray(fetchedSessions)?[...fetchedSessions]:[];
   const bySid=new Map();
@@ -2035,24 +2060,31 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
     if(idx>=0){
       const fetched=merged[idx]||{};
       const fetchedIsServerIdle=_isServerIdleSessionRow(fetched);
+      const keepLocalOptimistic=fetchedIsServerIdle?false:_shouldKeepLocalOnlyOptimisticSessionRow(local);
       const localCount=Number(local.message_count||0);
       const fetchedCount=Number(fetched.message_count||0);
       const localTs=Number(local.last_message_at||local.updated_at||0);
       const fetchedTs=Number(fetched.last_message_at||fetched.updated_at||0);
+      if(!keepLocalOptimistic&&typeof _dropStaleOptimisticSessionRow==='function') _dropStaleOptimisticSessionRow(sid);
       merged[idx]={
         ...local,
         ...fetched,
-        message_count:Math.max(localCount,fetchedCount),
-        last_message_at:Math.max(localTs,fetchedTs),
-        updated_at:Math.max(Number(local.updated_at||0),Number(fetched.updated_at||0),localTs,fetchedTs),
-        active_stream_id:fetchedIsServerIdle?null:(fetched.active_stream_id||local.active_stream_id||null),
-        pending_user_message:fetchedIsServerIdle?null:(fetched.pending_user_message||local.pending_user_message||null),
-        pending_started_at:fetchedIsServerIdle?null:(fetched.pending_started_at||local.pending_started_at||null),
-        is_streaming:fetchedIsServerIdle?false:Boolean(fetched.is_streaming||local.is_streaming||_isSessionLocallyStreaming(local)),
+        title:keepLocalOptimistic?(local.title||fetched.title):fetched.title,
+        message_count:keepLocalOptimistic?Math.max(localCount,fetchedCount):fetchedCount,
+        last_message_at:keepLocalOptimistic?Math.max(localTs,fetchedTs):fetchedTs,
+        updated_at:keepLocalOptimistic?Math.max(Number(local.updated_at||0),Number(fetched.updated_at||0),localTs,fetchedTs):Number(fetched.updated_at||fetchedTs||0),
+        active_stream_id:fetchedIsServerIdle?null:(keepLocalOptimistic?(fetched.active_stream_id||local.active_stream_id||null):null),
+        pending_user_message:fetchedIsServerIdle?null:(keepLocalOptimistic?(fetched.pending_user_message||local.pending_user_message||null):null),
+        pending_started_at:fetchedIsServerIdle?null:(keepLocalOptimistic?(fetched.pending_started_at||local.pending_started_at||null):null),
+        is_streaming:fetchedIsServerIdle?false:(keepLocalOptimistic&&Boolean(fetched.is_streaming||local.is_streaming||_isSessionLocallyStreaming(local))),
       };
     }else{
-      merged.push({...local,is_streaming:true});
-      bySid.set(sid,merged.length-1);
+      if(_shouldKeepLocalOnlyOptimisticSessionRow(local)){
+        merged.push({...local,is_streaming:true});
+        bySid.set(sid,merged.length-1);
+      }else{
+        _dropStaleOptimisticSessionRow(sid);
+      }
     }
   }
   return merged;

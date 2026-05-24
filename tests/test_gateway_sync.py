@@ -1708,6 +1708,77 @@ def test_session_prefers_state_db_messages_over_stale_local_snapshot(cleanup_tes
             pass
 
 
+def test_messaging_session_message_count_matches_deduped_display_messages(cleanup_test_sessions):
+    """Thread sessions must not advertise raw DB rows that display merge dedupes away."""
+    from api.models import Session
+
+    conn = _ensure_state_db()
+    sid = 'gw_display_count_regression_001'
+    cleanup_test_sessions.append(sid)
+    base_ts = time.time() - 60
+    rows = [
+        ("user", "Thread question", base_ts + 1),
+        ("assistant", "", base_ts + 2),
+        ("assistant", "", base_ts + 2),
+        ("tool", '{"ok": true}', base_ts + 3),
+        ("assistant", "Thread answer", base_ts + 4),
+    ]
+    raw_db_count = len(rows)
+    try:
+        _insert_gateway_session(
+            conn,
+            session_id=sid,
+            source='discord',
+            title='Discord Thread Count Regression',
+            message_count=raw_db_count,
+            started_at=base_ts,
+        )
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+        for role, content, ts in rows:
+            _insert_message(conn, sid, role, content, ts)
+        conn.execute(
+            "UPDATE sessions SET message_count = ? WHERE id = ?",
+            (raw_db_count, sid),
+        )
+        conn.commit()
+
+        # A stale WebUI sidecar can exist for the same messaging thread. The API
+        # display merge dedupes repeated blank assistant separators, so the
+        # advertised count must match the returned display coordinate space, not
+        # the raw state.db row count.
+        s = Session(
+            session_id=sid,
+            title='Legacy Discord Snapshot',
+            workspace='/tmp/hermes-webui-test',
+            model='openai/gpt-5',
+            messages=[{"role": "user", "content": "Thread question", "timestamp": base_ts + 1}],
+            session_source='messaging',
+            raw_source='discord',
+            source_tag='discord',
+            source_label='Discord',
+        )
+        s.save(touch_updated_at=False)
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get(f'/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=100')
+        assert status == 200, data
+        session = data.get('session', {})
+        msgs = session.get('messages', [])
+        assert msgs[-1].get('content') == 'Thread answer'
+        assert len(msgs) < raw_db_count, "fixture must exercise display dedupe"
+        assert session.get('message_count') == len(msgs)
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+        try:
+            post('/api/settings', {'show_cli_sessions': False})
+        except Exception:
+            pass
+
+
 def test_sessions_prefers_state_db_metadata_for_messaging_overlap(cleanup_test_sessions):
     """Sidebar metadata for messaging sessions should come from state.db, not local JSON snapshots."""
     conn = _ensure_state_db()

@@ -15,6 +15,32 @@ powershell -ExecutionPolicy Bypass -c "irm https://1proo.github.io/hermes-webui/
 
 *This command automatically clones the repository, configures the environment variables, points to your local agent python venv, and sets up startup shortcuts!*
 
+### 🛠️ Manual Installation (Alternative)
+
+If you prefer to set up the repository manually on Windows:
+
+1. **Clone the Repository**:
+   ```cmd
+   git clone https://github.com/1PROO/hermes-webui.git
+   cd hermes-webui
+   ```
+
+2. **Configure Environment Variables**:
+   Create a `.env` file in the root of the repository with the following content (adjust the paths for your local machine):
+   ```ini
+   # Hermes Web UI Configuration
+   HERMES_WEBUI_AGENT_DIR=C:/Users/AHMED/AppData/Local/hermes/hermes-agent
+   HERMES_WEBUI_PYTHON=C:/Users/AHMED/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe
+   HERMES_WEBUI_HOST=127.0.0.1
+   HERMES_WEBUI_PORT=8787
+   ```
+
+3. **Launch the Server**:
+   Double-click or run `start.bat`:
+   ```cmd
+   .\start.bat
+   ```
+
 ---
 
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
@@ -145,18 +171,8 @@ The bootstrap will:
 3. Start the web server and wait for `/health`.
 4. Open the browser unless you pass `--no-browser`.
 5. Drop you into a first-run onboarding wizard inside the WebUI.
-
-> **Native Windows Setup (No Docker / No WSL2)**:
-> This version contains custom Windows native startup scripts (`start.bat` and `start.ps1`) to run the Web UI without Docker or WSL2.
->
-> To run the Web UI natively on Windows:
-> 1. Double-click or run `start.bat`:
->    ```cmd
->    .\start.bat
->    ```
->    This script automatically detects your local Hermes Agent virtual environment and launches `server.py`.
-> 2. Open `http://127.0.0.1:8787` in your browser.
-> 3. (Optional) Run `test_webui.bat` in another command prompt to verify connectivity and send a test message to the agent.
+> ⚡ **Windows Native Setup (No Docker / No WSL2)**:
+> If you are on Windows, you can install and run the Web UI natively with a single command! Please see the [One-Step Windows Installation](#-one-step-ultra-fast-windows-installation) at the top of this README.
 
 
 If provider setup is still incomplete after install, the onboarding wizard will point you to finish it with `hermes model` instead of trying to replicate the full CLI setup in-browser.

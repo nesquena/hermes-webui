@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hermes Web UI - Windows Native Edition</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --bg-color: #0d0f14;
+            --card-bg: rgba(20, 24, 33, 0.6);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --primary-accent: #7c3aed; /* Violet */
+            --secondary-accent: #06b6d4; /* Cyan */
+            --gradient-accent: linear-gradient(135deg, var(--primary-accent), var(--secondary-accent));
+            --glow-color: rgba(124, 58, 237, 0.35);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: 'Outfit', sans-serif;
+            overflow-x: hidden;
+            line-height: 1.6;
+        }
+
+        /* Decorative background glow */
+        .bg-glow-1 {
+            position: absolute;
+            width: 600px;
+            height: 600px;
+            border-radius: 50%;
+            background: radial-gradient(circle, var(--glow-color) 0%, rgba(13, 15, 20, 0) 70%);
+            top: -200px;
+            left: -200px;
+            z-index: -1;
+            filter: blur(80px);
+            animation: pulse 10s infinite alternate;
+        }
+
+        .bg-glow-2 {
+            position: absolute;
+            width: 500px;
+            height: 500px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(6, 182, 212, 0.2) 0%, rgba(13, 15, 20, 0) 70%);
+            bottom: 10%;
+            right: -100px;
+            z-index: -1;
+            filter: blur(80px);
+            animation: pulse 8s infinite alternate-reverse;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1) translate(0, 0); }
+            100% { transform: scale(1.1) translate(30px, 30px); }
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        /* Header / Navbar */
+        header {
+            padding: 24px 0;
+            border-bottom: 1px solid var(--border-color);
+            backdrop-filter: blur(12px);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background-color: rgba(13, 15, 20, 0.85);
+        }
+
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: 700;
+            background: var(--gradient-accent);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-github {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            background-color: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            border-radius: 30px;
+            color: var(--text-primary);
+            text-decoration: none;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .btn-github:hover {
+            background-color: var(--text-primary);
+            color: var(--bg-color);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        /* Hero Section */
+        .hero {
+            padding: 80px 0 60px 0;
+            text-align: center;
+            position: relative;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 6px 16px;
+            background: rgba(124, 58, 237, 0.15);
+            border: 1px solid rgba(124, 58, 237, 0.3);
+            border-radius: 30px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #c084fc;
+            margin-bottom: 24px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .hero h1 {
+            font-size: 56px;
+            font-weight: 800;
+            line-height: 1.15;
+            letter-spacing: -1px;
+            margin-bottom: 24px;
+            background: linear-gradient(180deg, #ffffff 0%, #a1a1aa 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero h1 span {
+            background: var(--gradient-accent);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero p {
+            font-size: 20px;
+            color: var(--text-secondary);
+            max-width: 700px;
+            margin: 0 auto 40px auto;
+        }
+
+        /* Installer Box */
+        .installer-container {
+            max-width: 800px;
+            margin: 0 auto 60px auto;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            backdrop-filter: blur(16px);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+            text-align: left;
+        }
+
+        .installer-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .installer-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        .dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .dot-red { background-color: #ef4444; }
+        .dot-yellow { background-color: #eab308; }
+        .dot-green { background-color: #22c55e; }
+
+        .installer-body {
+            position: relative;
+            background-color: rgba(0, 0, 0, 0.4);
+            border-radius: 8px;
+            padding: 16px 20px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 15px;
+            overflow-x: auto;
+            white-space: nowrap;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .command-text {
+            color: #22c55e;
+            user-select: all;
+        }
+
+        .btn-copy {
+            background: var(--gradient-accent);
+            border: none;
+            border-radius: 6px;
+            color: white;
+            padding: 8px 16px;
+            font-family: 'Outfit', sans-serif;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);
+            margin-left: 12px;
+        }
+
+        .btn-copy:hover {
+            opacity: 0.9;
+            transform: scale(1.02);
+        }
+
+        .btn-copy:active {
+            transform: scale(0.98);
+        }
+
+        /* Features Section */
+        .features {
+            padding: 80px 0;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .section-header {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+
+        .section-header h2 {
+            font-size: 36px;
+            font-weight: 700;
+            margin-bottom: 16px;
+        }
+
+        .section-header p {
+            color: var(--text-secondary);
+            font-size: 18px;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 32px;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 32px;
+            transition: all 0.3s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(124, 58, 237, 0.3);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+        }
+
+        .card-icon {
+            font-size: 32px;
+            margin-bottom: 20px;
+            display: inline-block;
+        }
+
+        .card h3 {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 12px;
+        }
+
+        .card p {
+            color: var(--text-secondary);
+            font-size: 16px;
+        }
+
+        /* Installation Options Section */
+        .installation-options {
+            padding: 80px 0;
+            border-top: 1px solid var(--border-color);
+            background-color: rgba(20, 24, 33, 0.2);
+        }
+
+        .terminal-block {
+            background-color: #07090e;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            margin-top: 24px;
+            box-shadow: inset 0 4px 12px rgba(0,0,0,0.8);
+        }
+
+        .terminal-line {
+            margin-bottom: 8px;
+            color: #d1d5db;
+        }
+
+        .terminal-comment {
+            color: #6b7280;
+        }
+
+        .terminal-command {
+            color: #06b6d4;
+        }
+
+        /* Footer */
+        footer {
+            padding: 60px 0 40px 0;
+            border-top: 1px solid var(--border-color);
+            text-align: center;
+            color: var(--text-secondary);
+            font-size: 15px;
+        }
+
+        footer p {
+            margin-bottom: 16px;
+        }
+
+        footer a {
+            color: var(--text-primary);
+            text-decoration: none;
+            font-weight: 600;
+            transition: color 0.2s ease;
+        }
+
+        footer a:hover {
+            color: var(--primary-accent);
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .hero h1 { font-size: 40px; }
+            .hero p { font-size: 18px; }
+            .installer-body { font-size: 13px; }
+            .btn-copy { padding: 6px 12px; font-size: 13px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-glow-1"></div>
+    <div class="bg-glow-2"></div>
+
+    <!-- Header -->
+    <header>
+        <div class="container header-content">
+            <div class="logo">
+                👑 Hermes WebUI <span>Windows Native</span>
+            </div>
+            <a href="https://github.com/1PROO/hermes-webui" class="btn-github" target="_blank">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                    <path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.579.688.481C19.137 20.162 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
+                </svg>
+                GitHub Repo
+            </a>
+        </div>
+    </header>
+
+    <!-- Hero Section -->
+    <section class="hero container">
+        <div class="badge">🔥 Native Windows Fork</div>
+        <h1>Hermes Web UI<br><span>Windows Native Edition</span></h1>
+        <p>A customized, lightweight, and ultra-fast fork of Nous Research's Hermes WebUI optimized to run directly on Windows with 0 Docker or WSL2 overhead.</p>
+
+        <!-- One-Step Installer Console -->
+        <div class="installer-container">
+            <div class="installer-header">
+                <div class="installer-title">
+                    <span class="dot dot-red"></span>
+                    <span class="dot dot-yellow"></span>
+                    <span class="dot dot-green"></span>
+                    <span style="margin-left: 8px;">PowerShell One-Liner Installer</span>
+                </div>
+            </div>
+            <div class="installer-body">
+                <span class="command-text" id="cmd-install">powershell -ExecutionPolicy Bypass -c "irm https://1proo.github.io/hermes-webui/install_windows.ps1 | iex"</span>
+                <button class="btn-copy" onclick="copyCommand()">Copy</button>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section class="features container">
+        <div class="section-header">
+            <h2>Key Modifications & Features</h2>
+            <p>Why choose the Windows Native Edition?</p>
+        </div>
+        <div class="grid">
+            <div class="card">
+                <div class="card-icon">⚡</div>
+                <h3>Zero Overhead</h3>
+                <p>Run directly on your native Windows operating system. No WSL2 virtual machines to start, no Docker container configuration issues. Save up to 1GB of RAM!</p>
+            </div>
+            <div class="card">
+                <div class="card-icon">🛠️</div>
+                <h3>UAC & Path Fixes</h3>
+                <p>Features specific fixes for Windows file locking, path formats (escaped backslashes), and security inheritance exceptions that usually break server.py on Windows.</p>
+            </div>
+            <div class="card">
+                <div class="card-icon">🤖</div>
+                <h3>Smart Auto-Installer</h3>
+                <p>Our PowerShell script sets up the interpreter, clones, creates environment configurations (.env), and generates local start shortcuts automatically.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Installation Details -->
+    <section class="installation-options">
+        <div class="container" style="max-width: 800px;">
+            <div class="section-header">
+                <h2>Alternative Setup</h2>
+                <p>If you prefer a manual setup over the one-liner command</p>
+            </div>
+
+            <div class="card">
+                <h3>Manual Installation Steps</h3>
+                <p style="margin-bottom: 16px;">Run the following commands in your command line:</p>
+                
+                <div class="terminal-block">
+                    <div class="terminal-line"><span class="terminal-comment"># 1. Clone the repository</span></div>
+                    <div class="terminal-line"><span class="terminal-command">git clone https://github.com/1PROO/hermes-webui.git</span></div>
+                    <div class="terminal-line"><span class="terminal-command">cd hermes-webui</span></div>
+                    <div class="terminal-line"></div>
+                    <div class="terminal-line"><span class="terminal-comment"># 2. Configure .env (pointing to your agent venv)</span></div>
+                    <div class="terminal-line"><span class="terminal-comment"># Create a .env file and set these paths:</span></div>
+                    <div class="terminal-line">HERMES_WEBUI_AGENT_DIR=C:/Users/YOUR_USER/AppData/Local/hermes/hermes-agent</div>
+                    <div class="terminal-line">HERMES_WEBUI_PYTHON=C:/Users/YOUR_USER/AppData/Local/hermes/hermes-agent/venv/Scripts/python.exe</div>
+                    <div class="terminal-line">HERMES_WEBUI_HOST=127.0.0.1</div>
+                    <div class="terminal-line">HERMES_WEBUI_PORT=8787</div>
+                    <div class="terminal-line"></div>
+                    <div class="terminal-line"><span class="terminal-comment"># 3. Start the Web UI natively</span></div>
+                    <div class="terminal-line"><span class="terminal-command">.\start.bat</span></div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="container">
+            <p>Made with 💖. Forked from the original <a href="https://github.com/nesquena/hermes-webui" target="_blank">nesquena/hermes-webui</a>.</p>
+            <p>Special thanks to <strong>Nathan Esquenazi</strong> and <strong>Adel</strong> for their incredible efforts!</p>
+            <p style="font-size: 13px; margin-top: 24px; color: rgba(255,255,255,0.2);">This is an independent community fork and is not officially affiliated with Nous Research.</p>
+        </div>
+    </footer>
+
+    <script>
+        function copyCommand() {
+            const commandEl = document.getElementById('cmd-install');
+            const range = document.createRange();
+            range.selectNode(commandEl);
+            window.getSelection().removeAllRanges();
+            window.getSelection().addRange(range);
+            
+            try {
+                document.execCommand('copy');
+                const btn = document.querySelector('.btn-copy');
+                btn.textContent = 'Copied!';
+                btn.style.background = 'linear-gradient(135deg, #22c55e, #10b981)';
+                
+                setTimeout(() => {
+                    btn.textContent = 'Copy';
+                    btn.style.background = 'var(--gradient-accent)';
+                }, 2000);
+            } catch (err) {
+                console.error('Failed to copy', err);
+            }
+            window.getSelection().removeAllRanges();
+        }
+    </script>
+</body>
+</html>

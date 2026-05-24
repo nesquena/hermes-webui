@@ -63,5 +63,6 @@ graphify-out/
 # Local Windows helper scripts and logs (never committed)
 push_to_github.bat
 sync_upstream.bat
+git_manager.bat
 webui_server.log
 test_webui.log
