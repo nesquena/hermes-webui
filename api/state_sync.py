@@ -25,33 +25,52 @@ def _get_state_db(profile: str=None):
 
     When ``profile`` is provided the function resolves *that* profile's
     home directory directly (via ``_resolve_profile_home_for_name``).
-    When ``profile`` is None it falls back to the TLS-based
-    ``get_active_hermes_home()`` lookup for backward compatibility —
-    but note that TLS may be unset in background/worker threads, in
-    which case the lookup falls through to the process-global active
-    profile and can write to the wrong DB. Callers that know the
-    session's profile (e.g. ``sync_session_usage`` after a stream
-    completes on a background thread) should pass it explicitly to
-    avoid that race. See #2762.
+    If resolution fails (unknown profile name, IO error, etc.) the
+    function returns ``None`` rather than silently falling back to
+    ``HERMES_HOME`` — silently routing the write to the wrong DB
+    would defeat the point of the explicit-profile path (#2762).
 
-    Returns None if hermes_state is not importable or DB is unavailable.
-    Each caller is responsible for calling db.close() when done.
+    When ``profile`` is None it falls back to the TLS-based
+    ``get_active_hermes_home()`` lookup for backward compatibility,
+    with a final ``HERMES_HOME`` fallback only on that path. TLS may be
+    unset in background/worker threads, in which case the lookup falls
+    through to the process-global active profile and can write to the
+    wrong DB. Callers that know the session's profile (e.g.
+    ``sync_session_usage`` after a stream completes on a background
+    thread) should pass it explicitly to avoid that race.
+
+    Returns None if hermes_state is not importable, the explicit
+    profile cannot be resolved, or the DB is unavailable. Each caller
+    is responsible for calling db.close() when done.
     """
     try:
         from hermes_state import SessionDB
     except ImportError:
         return None
 
-    try:
-        if profile:
+    if profile is not None:
+        # Explicit-profile path — a resolution failure here MUST NOT
+        # silently fall back to HERMES_HOME or the caller's "write to
+        # the named profile" contract is broken (the original #2762
+        # symptom: writes leaking into the wrong profile's state.db).
+        try:
             from api.profiles import _resolve_profile_home_for_name
-            hermes_home = _resolve_profile_home_for_name(profile).expanduser().resolve()
-        else:
+            hermes_home = Path(_resolve_profile_home_for_name(profile)).expanduser().resolve()
+        except Exception:
+            logger.warning(
+                "state_sync: could not resolve profile %r — skipping write rather "
+                "than leaking to the active profile (#2762).", profile,
+            )
+            return None
+    else:
+        # Implicit / TLS-fallback path — preserves pre-#2762 behavior
+        # for any caller that doesn't pass profile= explicitly.
+        try:
             from api.profiles import get_active_hermes_home
             hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
-    except Exception:
-        logger.debug("Failed to resolve hermes home, using default")
-        hermes_home = Path(os.getenv('HERMES_HOME', str(Path.home() / '.hermes')))
+        except Exception:
+            logger.debug("Failed to resolve hermes home, using default")
+            hermes_home = Path(os.getenv('HERMES_HOME', str(Path.home() / '.hermes')))
 
     db_path = hermes_home / 'state.db'
     if not db_path.exists():

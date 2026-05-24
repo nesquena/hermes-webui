@@ -23,7 +23,6 @@ These tests pin:
 """
 from __future__ import annotations
 
-import os
 import sys
 import sqlite3
 from pathlib import Path
@@ -39,22 +38,27 @@ if str(_REPO_ROOT) not in sys.path:
 
 @pytest.fixture()
 def two_profile_homes(tmp_path, monkeypatch):
-    """Stand up two minimal profile homes with state.db schemas in place."""
+    """Stand up two minimal profile homes with state.db initialized via
+    ``hermes_state.SessionDB`` itself (so the schema matches what the
+    production code expects — `sync_session_usage` does a raw-SQL
+    UPDATE of `message_count`, which hand-rolled schemas could miss).
+    Per Copilot review on PR #2827.
+    """
+    # Skip the fixture cleanly if the production package isn't importable
+    # in this env — same gate the tests below use.
+    pytest.importorskip("hermes_state")
+    from hermes_state import SessionDB
+
     hiyuki_home = tmp_path / 'hiyuki'
     maiko_home = tmp_path / 'maiko'
     for home in (hiyuki_home, maiko_home):
         home.mkdir(parents=True)
-        # state.db must exist for _get_state_db() to return a connection
-        db = sqlite3.connect(home / 'state.db')
-        db.execute(
-            "CREATE TABLE IF NOT EXISTS sessions ("
-            " session_id TEXT PRIMARY KEY, source TEXT, model TEXT, "
-            " title TEXT, input_tokens INTEGER DEFAULT 0, "
-            " output_tokens INTEGER DEFAULT 0, "
-            " estimated_cost_usd REAL DEFAULT 0)"
-        )
-        db.commit()
-        db.close()
+        # Touch state.db then open via SessionDB so its own constructor
+        # runs whatever schema init / migration the production code
+        # would see at runtime. Then close immediately — each test
+        # opens its own handle through the production code path.
+        (home / 'state.db').touch()
+        SessionDB(home / 'state.db').close()
 
     # Stub api.profiles to return our temp paths
     import api.profiles as profiles_mod
@@ -173,3 +177,44 @@ def test_sync_session_usage_without_profile_kwarg_uses_active(two_profile_homes)
     hiyuki_row = _read_session(two_profile_homes['hiyuki'] / 'state.db', 'legacy-call-shape')
     assert hiyuki_row is not None, \
         "sync_session_usage() without profile= regressed: did not write to active profile's state.db"
+
+
+def test_unknown_explicit_profile_returns_none_not_falls_back(two_profile_homes):
+    """Copilot review of PR #2827: when ``profile`` is explicit and
+    resolution fails (e.g. typoed profile name, IO error), the
+    function MUST return None rather than silently fall back to
+    HERMES_HOME and write to the wrong DB. That fallback would
+    re-introduce the exact #2762 symptom (writes leaking into the
+    active profile).
+
+    The fixture's `fake_resolve` raises LookupError for any name
+    that isn't 'hiyuki' or 'maiko', so passing 'does-not-exist'
+    here exercises the failure path.
+    """
+    try:
+        import hermes_state  # noqa: F401
+    except ImportError:
+        pytest.skip("hermes_state package not available in this test env")
+
+    from api.state_sync import sync_session_usage
+
+    # Passing an unknown profile name MUST NOT cause a write to land in
+    # hiyuki (the active profile's home). If we leaked there, that's
+    # the exact bug we're guarding against.
+    sync_session_usage(
+        session_id='unknown-profile-probe',
+        input_tokens=99,
+        output_tokens=99,
+        model='probe',
+        title='probe',
+        message_count=1,
+        profile='does-not-exist',
+    )
+
+    hiyuki_row = _read_session(two_profile_homes['hiyuki'] / 'state.db', 'unknown-profile-probe')
+    maiko_row = _read_session(two_profile_homes['maiko'] / 'state.db', 'unknown-profile-probe')
+
+    assert hiyuki_row is None, \
+        "unknown explicit profile leaked write into hiyuki's state.db — #2762 regression"
+    assert maiko_row is None, \
+        "unknown explicit profile somehow ended up in maiko's state.db"
