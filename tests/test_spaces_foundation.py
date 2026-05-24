@@ -1672,6 +1672,62 @@ def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metada
     assert '"source":' not in serialized
 
 
+def test_space_tool_path_helpers_return_policy_and_progress_receipts_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "path-helper-policy-lab", "name": "Path Helper Policy Lab"})
+
+    hostile_fields = {
+        "renderer": "<script>steal()</script>",
+        "html": "<img src=x onerror=steal()>",
+        "source": "SECRET_SOURCE_DO_NOT_LEAK",
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        "token": "SECRET_TOKEN_DO_NOT_LEAK",
+        "secret": "SECRET_VALUE_DO_NOT_LEAK",
+    }
+    cases = [
+        (
+            "space.spaces.buildSpaceManifestPath",
+            {"spaceId": created["space_id"], **hostile_fields},
+            "space.spaces.buildspacemanifestpath",
+            "~/spaces/path-helper-policy-lab/space.yaml",
+        ),
+        (
+            "space.spaces.buildSpaceWidgetFilePath",
+            {"spaceId": created["space_id"], "widgetId": "weather-card", **hostile_fields},
+            "space.spaces.buildspacewidgetfilepath",
+            "~/spaces/path-helper-policy-lab/widgets/weather-card.yaml",
+        ),
+    ]
+
+    for action, payload, normalized_action, expected_path in cases:
+        result = spaces.run_space_tool(action, payload)
+        serialized = json.dumps(result, sort_keys=True).lower()
+
+        assert result["ok"] is True
+        assert result["action"] == normalized_action
+        assert result["path"] == expected_path
+        assert result["paths"] == {"mode": "metadata-only"}
+        assert result["autonomy_policy"]["action"] == normalized_action
+        assert result["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+        assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+        assert result["autonomy_policy"]["model_route_hint"] == "hint:fast"
+        assert result["autonomy_policy"]["metadata_only"] is True
+        assert result["progress_event"]["event_type"] == "tool.completed"
+        assert result["progress_event"]["family"] == "tool"
+        assert result["progress_event"]["run_id"] == "path.helper:path-helper-policy-lab"
+        assert result["progress_event"]["space_id"] == created["space_id"]
+        assert result["progress_event"]["redaction_status"] == "metadata_only"
+        assert "steal" not in serialized
+        assert "<script" not in serialized
+        assert "renderer" not in serialized
+        assert '"html"' not in serialized
+        assert "api_key" not in serialized
+        assert '"source"' not in serialized
+        assert "token" not in serialized
+        assert "secret" not in serialized
+        assert "secret_value_do_not_leak" not in serialized
+        assert "secret_token_do_not_leak" not in serialized
+
 
 @pytest.mark.parametrize("ambient_key", ["activeSpaceId", "active_space_id", "currentSpaceId", "current_space_id"])
 @pytest.mark.parametrize(
@@ -5763,7 +5819,10 @@ def test_space_tool_adapter_supports_source_path_helpers_metadata_only(monkeypat
     scripts = spaces.run_space_tool("space.spaces.buildSpaceScriptsPath", {"spaceId": "path-lab"})
     serialized = json.dumps([root, manifest, widgets, widget_file, data_path, assets, scripts]).lower()
 
-    assert root == {"ok": True, "action": "space.spaces.buildspacerootpath", "path": "~/spaces/path-lab/", "paths": {"mode": "metadata-only"}}
+    assert root["ok"] is True
+    assert root["action"] == "space.spaces.buildspacerootpath"
+    assert root["path"] == "~/spaces/path-lab/"
+    assert root["paths"] == {"mode": "metadata-only"}
     assert manifest["path"] == "~/spaces/path-lab/space.yaml"
     assert widgets["path"] == "~/spaces/path-lab/widgets/"
     assert widget_file["path"] == "~/spaces/path-lab/widgets/weather-card.yaml"
