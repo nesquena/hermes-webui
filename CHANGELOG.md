@@ -8,12 +8,12 @@
 - **Composer box max-width: `780px` → `clamp(780px,60vw,1100px)`** —
   on wide displays (1440p+) the hardcoded 780px squeezed composer-footer
   chips (workspace, model, reasoning, context %) into the same narrow box,
-  causing the workspace label to truncate to `Fou...` / `Ho...` and chips
-  to overlap when the context-percentage ring appears.
-  `clamp(780px,60vw,1100px)` preserves the 780px floor (zero change for
-  viewports ≤ ~1300px) while letting wider viewports expand up to 1100px —
-  ~40% more horizontal room for footer chips at 1440p+. Pure CSS, one line,
-  no JS, no breaking change.
+  causing long workspace / model labels to truncate (e.g. a `"my-project"`
+  workspace name rendered as `"my-pro..."`) and chips to overlap when the
+  context-percentage ring appears. `clamp(780px,60vw,1100px)` preserves the
+  780px floor (zero change for viewports ≤ ~1300px) while letting wider
+  viewports expand up to 1100px — ~40% more horizontal room for footer
+  chips at 1440p+. Pure CSS, one line, no JS, no breaking change.
 
 ## [v0.51.120] — 2026-05-24 — Release CR (stage-batch2 — 3-PR low-risk batch — Bedrock provider / update check past-tag / CORS preflight)
 
