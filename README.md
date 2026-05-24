@@ -1,4 +1,17 @@
-# Hermes Web UI
+# Hermes Web UI (Windows Native Edition)
+
+> 🚀 **Windows Native Edition**: This is a modified version of the original [Hermes WebUI](https://github.com/nesquena/hermes-webui) optimized to run natively on Windows without requiring Docker or WSL2.
+> Special thanks to the original creator Nathan Esquenazi (@nesquena) and Adel for this amazing project and their incredible effort! This fork was created to make native Windows deployment seamless.
+
+### ⚡ One-Step Windows Installation
+
+Open PowerShell and run the following command to automatically install and configure:
+
+```powershell
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12; iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/1PROO/hermes-webui/main/install_windows.ps1'))
+```
+
+---
 
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
@@ -129,9 +142,18 @@ The bootstrap will:
 4. Open the browser unless you pass `--no-browser`.
 5. Drop you into a first-run onboarding wizard inside the WebUI.
 
-> Native Windows is not supported for this bootstrap yet. Use Linux, macOS, or WSL2.
-> For Windows / WSL auto-start at login, see [`docs/wsl-autostart.md`](docs/wsl-autostart.md).
-> A community-maintained native Windows guide is tracked in [#1952](https://github.com/nesquena/hermes-webui/issues/1952).
+> **Native Windows Setup (No Docker / No WSL2)**:
+> This version contains custom Windows native startup scripts (`start.bat` and `start.ps1`) to run the Web UI without Docker or WSL2.
+>
+> To run the Web UI natively on Windows:
+> 1. Double-click or run `start.bat`:
+>    ```cmd
+>    .\start.bat
+>    ```
+>    This script automatically detects your local Hermes Agent virtual environment and launches `server.py`.
+> 2. Open `http://127.0.0.1:8787` in your browser.
+> 3. (Optional) Run `test_webui.bat` in another command prompt to verify connectivity and send a test message to the agent.
+
 
 If provider setup is still incomplete after install, the onboarding wizard will point you to finish it with `hermes model` instead of trying to replicate the full CLI setup in-browser.
 For a step-by-step walkthrough of the wizard, provider choices, local model server Base URLs, and safe re-runs, see [`docs/onboarding.md`](docs/onboarding.md).
