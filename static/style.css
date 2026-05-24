@@ -4832,6 +4832,10 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   display:flex;align-items:center;justify-content:space-between;
   margin-top:8px;gap:12px;flex-wrap:wrap;
 }
+.profile-gateway-evidence{
+  margin-top:8px;color:var(--muted);font-size:12px;line-height:1.35;
+  min-height:16px;
+}
 .profile-gateway-toggle{
   display:inline-flex;align-items:center;gap:10px;
   padding:6px 10px;border-radius:999px;

@@ -84,6 +84,30 @@ def test_gateway_tile_renders_keyboard_info_button_and_copyable_dialog_path():
     assert "navigator.clipboard.writeText" in dialog
 
 
+def test_gateway_tile_renders_runtime_evidence_line():
+    tile = _extract_function(PANELS_JS, "_profileGatewayTile")
+    repaint = _extract_function(PANELS_JS, "_repaintGatewayTile")
+
+    assert "profile-gateway-evidence" in tile
+    assert ".profile-gateway-evidence" in STYLE_CSS
+    assert "_gatewayEvidenceText" in tile
+    assert "_gatewayEvidenceText" in repaint
+    assert "opsGatewayEvidence" in repaint
+
+
+def test_gateway_evidence_text_distinguishes_detection_sources():
+    helper = _extract_function(PANELS_JS, "_gatewayEvidenceText")
+
+    for expected in (
+        "Detected by PID",
+        "Detected from runtime metadata",
+        "Detected from remote health",
+        "Reported by control adapter",
+        "No runtime evidence",
+    ):
+        assert expected in helper
+
+
 def test_gateway_toggle_never_restarts_and_respects_unavailable_control():
     toggle = _extract_function(PANELS_JS, "_onGatewayToggle")
     assert "restart" not in toggle

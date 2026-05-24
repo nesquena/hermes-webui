@@ -138,6 +138,16 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
         assert not pid_file.exists()
 
 
+def test_start_command_does_not_invoke_gateway_runner():
+    ctl_text = CTL.read_text(encoding="utf-8")
+    start_block = ctl_text[ctl_text.index("start_cmd() {"):ctl_text.index("stop_cmd() {")]
+
+    assert "gateway run" not in start_block
+    assert "gateway stop" not in start_block
+    assert ".gateway-state.json" not in start_block
+    assert "gateway.pid" not in start_block
+
+
 def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()

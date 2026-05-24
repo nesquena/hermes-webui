@@ -5971,6 +5971,18 @@ function _gatewayInfoReason(state){
   return state && state.health && state.health.reason ? state.health.reason : '—';
 }
 
+function _gatewayEvidenceText(state){
+  const source = state && state.status_source ? String(state.status_source) : '';
+  const phase = state && state.phase ? String(state.phase) : '';
+  if (source === 'pid') return 'Detected by PID';
+  if (source === 'runtime_file') return 'Detected from runtime metadata';
+  if (source === 'remote_health') return 'Detected from remote health';
+  if (source === 'adapter') return 'Reported by control adapter';
+  if (phase === 'starting') return 'Waiting for Gateway startup evidence';
+  if (phase === 'stopping') return 'Waiting for Gateway shutdown evidence';
+  return 'No runtime evidence';
+}
+
 function _gatewayInfoVisible(phase){
   return _GATEWAY_INFO_PHASES.has(phase || 'stopped');
 }
@@ -6019,7 +6031,9 @@ function _repaintGatewayTile(profileName){
   const info = tile.querySelector('[data-gateway-info]');
   const toggle = tile.querySelector('#opsGatewayToggle');
   const toggleLabel = tile.querySelector('#opsGatewayToggleLabel');
+  const evidence = tile.querySelector('#opsGatewayEvidence');
   if (wifi) wifi.setAttribute('data-state', phase);
+  if (evidence) evidence.textContent = _gatewayEvidenceText(state);
   if (info) {
     info.hidden = !infoVisible;
     info.setAttribute('data-tooltip', summary);
@@ -6414,6 +6428,7 @@ function _profileGatewayTile(p){
   const phase = state.phase || 'stopped';
   const toggleLabel = _gatewayToggleLabelForPhase(phase);
   const summary = _gatewayInfoSummary(state);
+  const evidence = _gatewayEvidenceText(state);
   const infoHidden = _gatewayInfoVisible(phase) ? '' : ' hidden';
   const controlUnavailable = state.control_available === false || phase === 'unavailable' || _GATEWAY_TRANSIENT_PHASES.has(phase);
   const isRunning = phase === 'running';
@@ -6458,6 +6473,7 @@ function _profileGatewayTile(p){
           <span class="profile-gateway-platforms-label">Platforms · <span class="profile-gateway-platforms-count" data-platforms-count>${platformsCount}</span></span>
         </button>
       </div>
+      <div class="profile-gateway-evidence" id="opsGatewayEvidence">${esc(evidence)}</div>
     </article>`;
 }
 
