@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Workspace previews now render Markdown `mailto:` and `tel:` links as clickable
+  links, and sandboxed HTML preview links open outside the iframe instead of
+  navigating the preview into a browser-blocked page.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added
