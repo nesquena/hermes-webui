@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Make installed/PWA launches feel more native by adding an early `pwa-startup.js` helper that marks standalone/browser/offline/resumed state before the main UI paints, captures install prompt events, preloads and pre-caches the helper, adds native manifest launch metadata plus a New Chat shortcut, disables page zoom for the app shell viewport, and lets shell assets/navigation bypass HTTP cache before falling back to CacheStorage.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added

@@ -641,6 +641,13 @@
   /* ── Smooth dark mode transitions ── */
   body,header,footer,aside,nav,main,div,button,input,textarea,select{transition-property:background-color,border-color,color;transition-duration:.15s;transition-timing-function:ease;}
   :root{--app-titlebar-safe-top:0px;}
+  .pwa-standalone{overscroll-behavior:none;}
+  .pwa-standalone body{-webkit-tap-highlight-color:transparent;}
+  .pwa-standalone .app-titlebar-reload{display:inline-flex;}
+  .pwa-offline .app-titlebar::after{content:'';position:absolute;left:50%;bottom:5px;width:5px;height:5px;border-radius:999px;background:var(--warning);box-shadow:0 0 0 3px color-mix(in srgb,var(--warning) 22%,transparent);transform:translateX(-50%);}
+  .pwa-resumed .app-titlebar-title{animation:pwa-title-resume .6s ease-out;}
+  @keyframes pwa-title-resume{0%{opacity:.65;}100%{opacity:1;}}
+  @media (prefers-reduced-motion: reduce){.pwa-resumed .app-titlebar-title{animation:none;}}
   @supports (padding-top: env(safe-area-inset-top)){
     @media (display-mode: standalone), (display-mode: fullscreen){
       :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);}
