@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Changed
+- Live chat Activity now shows observable run events, model/run metadata, clearer working elapsed text, and explicit waiting/stale states instead of an empty `Thinking…` placeholder when no reasoning text is available.
+
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
 ### Added
