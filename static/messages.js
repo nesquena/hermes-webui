@@ -1682,6 +1682,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('done',e=>{
+      if(_streamFinalized) return;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       const _doneData=JSON.parse(e.data);
@@ -1859,12 +1860,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _finishDone();
     });
 
-    source.addEventListener('stream_end',e=>{
+    source.addEventListener('stream_end',async e=>{
+      if(_streamFinalized){
+        source.close();
+        return;
+      }
       _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
       }catch(_){}
+      // Some replay/journal paths can deliver stream_end without a preceding
+      // done event. In that case closing the EventSource is not enough: the
+      // live DOM/inflight state remains projected and can duplicate Thinking or
+      // assistant content until a later session switch. Settle from the persisted
+      // session before closing so the pane converges on canonical state.
+      if(await _restoreSettledSession()){
+        source.close();
+        return;
+      }
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _streamFinalized=true;
+      _cancelAnimationFramePendingStreamRender();
+      _streamFadeCleanupReduceMotionListener();
+      _smdEndParser();
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       source.close();
     });
 
@@ -2135,6 +2155,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const session=data&&data.session;
       if(!session) return false;
       if(session.active_stream_id||session.pending_user_message) return false;
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _streamFinalized=true;
+      _cancelAnimationFramePendingStreamRender();
+      _streamFadeCleanupReduceMotionListener();
+      _smdEndParser();
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       _clearOwnerInflightState();
       _closeSource();
       _clearApprovalForOwner();

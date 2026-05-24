@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Chat streams now settle from the persisted session when a replay/reconnect path delivers `stream_end` without a preceding `done` event. This prevents stale live Thinking/assistant DOM from lingering across session switches, and duplicate/replayed `done` events no longer replay completion sound or final-render side effects.
+
 ## [v0.51.126] — 2026-05-24 — Release CX (stage-batch8 — 2-PR low-risk batch — kanban markdown + live activity timeline)
 
 ### Added
