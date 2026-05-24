@@ -88,12 +88,18 @@ def append_turn_journal_event(
     path = _journal_path(session_id, session_dir=session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
-    fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
-    with os.fdopen(fd, "a", encoding="utf-8") as fh:
-        with _journal_file_lock(fh):
+    if os.name == "nt":
+        with open(path, "a", encoding="utf-8") as fh:
             fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())
+    else:
+        fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            with _journal_file_lock(fh):
+                fh.write(line)
+                fh.flush()
+                os.fsync(fh.fileno())
     if hasattr(os, "O_DIRECTORY"):
         try:
             dir_fd = os.open(path.parent, os.O_DIRECTORY)
