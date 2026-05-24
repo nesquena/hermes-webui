@@ -55,6 +55,21 @@ param(
 $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $PSCommandPath
 
+# === Auto-Update: Pull latest commits from GitHub fork silently on launch ===
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    Write-Host "[start] Checking for updates from GitHub..." -ForegroundColor Cyan
+    try {
+        Push-Location $RepoRoot
+        # Silently pull. Since .gitattributes is set to 'merge=ours', local configs are 100% safe!
+        git pull origin master --quiet 2>$null
+        Write-Host "[start] Up to date with repository!" -ForegroundColor Green
+    } catch {
+        Write-Host "[start] Offline mode or update check skipped." -ForegroundColor Yellow
+    } finally {
+        Pop-Location
+    }
+}
+
 # === Load .env (mirroring start.sh's filtering) ========================
 $envFile = Join-Path $RepoRoot '.env'
 if (Test-Path $envFile) {
