@@ -6807,7 +6807,7 @@ async function loadPasskeys(){
 
 async function registerPasskey(){
   if(!window.PublicKeyCredential||!navigator.credentials){showToast('Passkeys require a supported browser and secure context.');return;}
-  const label=(window.prompt('Name this passkey', 'This device')||'Passkey').trim();
+  const label='This device';
   try{
     const optData=await api('/api/auth/passkey/register/options',{method:'POST',body:'{}'});
     const pk=optData.publicKey;
