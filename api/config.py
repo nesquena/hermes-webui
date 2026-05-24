@@ -1211,8 +1211,17 @@ _PROVIDER_MODELS = {
     "x-ai": [
         {"id": "grok-4.20", "label": "Grok 4.20"},
     ],
+    # xAI OAuth — xAI OAuth provider (stores credentials in auth.json)
     "xai-oauth": [
         {"id": "grok-4.20", "label": "Grok 4.20"},
+        {"id": "grok-4.3", "label": "Grok 4.3"},
+        {"id": "grok-build-0.1", "label": "Grok Build 0.1"},
+        {"id": "grok-4.20-0309-reasoning", "label": "Grok 4.20 Reasoning"},
+        {"id": "grok-4.20-0309-non-reasoning", "label": "Grok 4.20"},
+        {"id": "grok-4.20-multi-agent-0309", "label": "Grok 4.20 Multi-Agent"},
+        {"id": "grok-imagine-image", "label": "Grok Imagine Image"},
+        {"id": "grok-imagine-image-quality", "label": "Grok Imagine Image (Quality)"},
+        {"id": "grok-imagine-video", "label": "Grok Imagine Video"},
     ],
     # AWS Bedrock — static fallback list; live model list is fetched via
     # hermes_cli.models.provider_model_ids("bedrock") when available (#2720).
