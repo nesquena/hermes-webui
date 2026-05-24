@@ -532,9 +532,13 @@ class Session:
             'enabled_toolsets', 'composer_draft',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        # Write message_count before the messages array so that
+        # load_metadata_only() can read it from the JSON prefix without
+        # parsing the full (potentially multi-MB) messages payload.
+        meta['message_count'] = len(self.messages) if self.messages else 0
         meta['messages'] = self.messages
         meta['tool_calls'] = self.tool_calls
-        # Fields not in METADATA_FIELDS (e.g. last_usage, message_count) go at the end
+        # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in ('messages', 'tool_calls')
                  and not k.startswith('_')}
@@ -3032,7 +3036,7 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False, pr
     return msgs
 
 
-def get_state_db_session_summary(sid) -> dict:
+def get_state_db_session_summary(sid, profile=None) -> dict:
     """Return cheap message count/max timestamp for one state.db session.
 
     This is intentionally narrower than ``get_state_db_session_messages`` for
@@ -3045,7 +3049,12 @@ def get_state_db_session_summary(sid) -> dict:
     except ImportError:
         return {}
 
-    db_path = _active_state_db_path()
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
     if not sid or not db_path.exists():
         return {}
 
@@ -3152,12 +3161,50 @@ def _session_message_visible_key(msg: dict):
     )
 
 
-def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]):
+def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], _cache=None):
+    """Check if visible_key has a fuzzy duplicate in visible_keys.
+
+    Performance: exact set lookup first (O(1)), then substring/loose matching
+    only for the rare miss cases. An optional _cache dict (keyed by role) maps
+    role -> list[(content, content_len)] so callers can avoid scanning unrelated
+    roles and apply cheap length guards before expensive substring checks.
+    """
     if visible_key in visible_keys:
         return visible_key
     role, content = visible_key
     if not content:
         return None
+    content_len = len(content)
+    # Use precomputed cache if available (built by merge function)
+    if _cache is not None:
+        role_entries = _cache.get(role)
+        if not role_entries:
+            return None
+        loose_content = None  # lazy compute
+        for existing_content, existing_len in role_entries:
+            if not existing_content:
+                continue
+            # Length guard: substring can only match if one fits inside the other
+            if content_len <= existing_len:
+                if content in existing_content:
+                    return (role, existing_content)
+            elif existing_len <= content_len:
+                if existing_content in content:
+                    return (role, existing_content)
+            # Loose match only if lengths are within 3x of each other
+            if existing_len > 3 * content_len or content_len > 3 * existing_len:
+                continue
+            if loose_content is None:
+                loose_content = _loose_session_message_content(content)
+            if not loose_content:
+                continue
+            existing_loose = _loose_session_message_content(existing_content)
+            if not existing_loose:
+                continue
+            if loose_content in existing_loose or existing_loose in loose_content:
+                return (role, existing_content)
+        return None
+    # Fallback: no cache, iterate visible_keys directly (legacy path)
     for existing_role, existing_content in visible_keys:
         if role != existing_role or not existing_content:
             continue
@@ -3206,6 +3253,13 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
         sidecar_visible_counts[visible_key] = sidecar_visible_counts.get(visible_key, 0) + 1
         sidecar_visible_sequence.append(visible_key)
         merged_messages.append(msg)
+    # Build a role-indexed cache for _matching_visible_duplicate so it can
+    # skip the O(n) scan over all visible_keys for each state message.
+    # Each entry: (content, content_len). Loose content is computed lazily
+    # inside _matching_visible_duplicate only when needed (rare).
+    _visible_cache = {}
+    for vk_role, vk_content in sidecar_visible_keys:
+        _visible_cache.setdefault(vk_role, []).append((vk_content, len(vk_content)))
     state_replay_idx = 0
     skipped_state_visible_counts = {}
     for msg in state_messages:
@@ -3215,13 +3269,20 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
         replays_sidecar_prefix = False
         if state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
-            if visible_key == expected_visible_key or _has_visible_duplicate(
-                visible_key, {expected_visible_key}
-            ):
+            if visible_key == expected_visible_key:
                 replays_sidecar_prefix = True
                 state_replay_idx += 1
+            elif visible_key[0] == expected_visible_key[0]:
+                # Only attempt fuzzy match if roles match and content lengths
+                # are compatible (one could be a substring of the other).
+                vk_len = len(visible_key[1]) if visible_key[1] else 0
+                exp_len = len(expected_visible_key[1]) if expected_visible_key[1] else 0
+                if vk_len and exp_len and min(vk_len, exp_len) * 3 >= max(vk_len, exp_len):
+                    if _has_visible_duplicate(visible_key, {expected_visible_key}):
+                        replays_sidecar_prefix = True
+                        state_replay_idx += 1
         if replays_sidecar_prefix:
-            matched_visible_key = _matching_visible_duplicate(visible_key, sidecar_visible_keys)
+            matched_visible_key = _matching_visible_duplicate(visible_key, sidecar_visible_keys, _cache=_visible_cache)
             if matched_visible_key is not None:
                 skipped_state_visible_counts[matched_visible_key] = (
                     skipped_state_visible_counts.get(matched_visible_key, 0) + 1
@@ -3234,7 +3295,7 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
                 continue
         if key in seen_message_keys:
             continue
-        matched_visible_key = _matching_visible_duplicate(visible_key, sidecar_visible_keys)
+        matched_visible_key = _matching_visible_duplicate(visible_key, sidecar_visible_keys, _cache=_visible_cache)
         if matched_visible_key is not None:
             skipped_count = skipped_state_visible_counts.get(matched_visible_key, 0)
             sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)

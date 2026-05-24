@@ -1351,7 +1351,12 @@ async function _loadOlderMessages() {
   // rebuilt transcript (#1937).
   const startGeneration = _messagesGeneration;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
+    // Ask the server for a larger tail window instead of a separate msg_before
+    // page. This keeps the public API unchanged while avoiding index-window
+    // stitching on the client: the server returns the last N authoritative
+    // merged messages, and we prepend only the newly exposed head.
+    const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`);
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) { _loadingOlder = false; return; }
     //  - response shape sane
@@ -1369,13 +1374,45 @@ async function _loadOlderMessages() {
     // counter and abort cleanly. _oldestIdx and _messagesTruncated were
     // already reset by the wholesale-replace path, so no rollback needed.
     if (_messagesGeneration !== startGeneration) return;
-    const olderMsgs = (data.session.messages || []).filter(m => m && m.role);
-    if (!olderMsgs.length) { _messagesTruncated = false; return; }
-    // Prepend older messages
+    let responseSession = data.session;
+    let expandedMsgs = (responseSession.messages || []).filter(m => m && m.role);
+    const currentMsgs = (S.messages || []).filter(m => m && m.role);
+    const currentLen = currentMsgs.length;
+    let tailMatches = expandedMsgs.length >= currentLen;
+    if (tailMatches && currentLen > 0) {
+      const start = expandedMsgs.length - currentLen;
+      for (let i = 0; i < currentLen; i++) {
+        if (!_sameTranscriptMessage(expandedMsgs[start + i], currentMsgs[i])) {
+          tailMatches = false;
+          break;
+        }
+      }
+    }
+    let olderCount = Math.max(0, expandedMsgs.length - currentLen);
+    let olderMsgs = expandedMsgs.slice(0, olderCount);
+    let nextMessages = expandedMsgs;
+    if (!tailMatches) {
+      // Rare race: the session tail changed while this request was in flight,
+      // so the larger tail window no longer has our current messages as a
+      // suffix. Fall back to the legacy index page to avoid dropping visible
+      // messages while still keeping the fast cumulative path as the default.
+      const fallback = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
+      if (!fallback || !fallback.session) { _loadingOlder = false; return; }
+      if (!S.session || S.session.session_id !== sid) return;
+      if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+      if (_messagesGeneration !== startGeneration) return;
+      responseSession = fallback.session;
+      olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
+      nextMessages = [...olderMsgs, ...S.messages];
+    }
+    if (!olderMsgs.length) { _messagesTruncated = !!responseSession._messages_truncated; return; }
+    // Replace with the larger tail window and preserve scroll as if older
+    // messages were prepended. When the suffix check fails, nextMessages uses
+    // the legacy prepend fallback to preserve correctness under races.
     // Use $('messages') — the scrollable container (#msgInner is not scrollable).
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
-    S.messages = [...olderMsgs, ...S.messages];
+    S.messages = nextMessages;
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
     // hidden and the "hidden" counter rises while the viewport appears stuck.
@@ -1389,8 +1426,8 @@ async function _loadOlderMessages() {
       return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m)))));
     }).length;
     _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
-    _messagesTruncated = !!data.session._messages_truncated;
-    _oldestIdx = data.session._messages_offset || 0;
+    _messagesTruncated = !!responseSession._messages_truncated;
+    _oldestIdx = responseSession._messages_offset || 0;
     renderMessages({ preserveScroll: true });
     if (container) {
       // Prepending older messages must not teleport the reader. Preserve the

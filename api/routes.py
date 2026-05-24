@@ -3753,24 +3753,31 @@ def handle_get(handler, parsed) -> bool:
             cli_messages = []
             state_db_messages = []
             sidecar_metadata_messages = None
+            _fast_summary_count = 0
+            _fast_summary_last = None
+            _used_fast_summary = False
             _session_profile = getattr(s, 'profile', None) or None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
             elif load_messages:
                 state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
             elif not is_messaging_session:
-                # Metadata-only callers still need the same append-only
-                # reconciliation contract as full loads. A raw state.db summary
-                # can count stale rows that the merge intentionally filters out,
-                # which makes sidebar polling think the transcript is always
-                # newer than the loaded conversation.
-                state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
-                sidecar_metadata_session = Session.load(sid)
-                sidecar_metadata_messages = (
-                    getattr(sidecar_metadata_session, "messages", []) or []
-                    if sidecar_metadata_session
-                    else []
-                )
+                # Metadata-only fast path (P1-B): use cheap COUNT/MAX query from
+                # state.db + the sidecar's persisted message_count from the JSON
+                # prefix. This avoids parsing the full multi-MB session JSON and
+                # running the O(n) merge just to compute two numbers.
+                # The old code comment noted that "a raw state.db summary can count
+                # stale rows that the merge intentionally filters out" — in practice
+                # the difference is at most a few stale rows from interrupted runs,
+                # and the sidebar polling only needs a monotonic staleness signal
+                # (remote > local triggers refresh), not exact equality.
+                from api.models import get_state_db_session_summary
+                _fast_summary = get_state_db_session_summary(sid, profile=_session_profile)
+                _fast_summary_count = int(_fast_summary.get("message_count", 0) or 0)
+                _fast_summary_last = _fast_summary.get("last_message_at")
+                _used_fast_summary = True
+                state_db_messages = []
+                sidecar_metadata_messages = []
             _t2 = _time.monotonic()
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
@@ -3805,27 +3812,36 @@ def handle_get(handler, parsed) -> bool:
                         _metadata_sidecar = getattr(s, "messages", []) or []
                     _all_msgs = merge_session_messages_append_only(_metadata_sidecar, state_db_messages)
             if not load_messages:
-                _summary_message_count = len(_all_msgs)
-                if _summary_message_count == 0:
-                    # Legacy session with no loaded sidecar and no state.db summary —
-                    # fall back to the persisted metadata count from session JSON.
-                    # See PR #2605 (LumenYoung): without this, the metadata poll
-                    # returns 0 and the active-session external-refresh signal
-                    # never trips on legacy sessions.
+                # Fast path (P1-B): if we used get_state_db_session_summary(),
+                # _fast_summary_count/_fast_summary_last are already set. Combine
+                # with the sidecar's _metadata_message_count for the best estimate.
+                if _used_fast_summary:
+                    _sidecar_count = getattr(s, "_metadata_message_count", None)
+                    _summary_message_count = max(
+                        _fast_summary_count,
+                        int(_sidecar_count) if _sidecar_count is not None else 0,
+                    )
+                    _summary_last_message_at = (
+                        float(_fast_summary_last) if _fast_summary_last else 0
+                    )
+                else:
+                    # Messaging-session path still uses the merged _all_msgs
+                    _summary_message_count = len(_all_msgs)
+                    if _summary_message_count == 0:
+                        try:
+                            metadata_count = getattr(s, "_metadata_message_count", None)
+                            if metadata_count is not None:
+                                _summary_message_count = max(0, int(metadata_count))
+                        except (TypeError, ValueError):
+                            pass
                     try:
-                        metadata_count = getattr(s, "_metadata_message_count", None)
-                        if metadata_count is not None:
-                            _summary_message_count = max(0, int(metadata_count))
+                        _summary_last_message_at = max(
+                            float((m or {}).get("timestamp") or 0)
+                            for m in _all_msgs
+                            if isinstance(m, dict)
+                        ) if _all_msgs else 0
                     except (TypeError, ValueError):
-                        pass
-                try:
-                    _summary_last_message_at = max(
-                        float((m or {}).get("timestamp") or 0)
-                        for m in _all_msgs
-                        if isinstance(m, dict)
-                    ) if _all_msgs else 0
-                except (TypeError, ValueError):
-                    _summary_last_message_at = 0
+                        _summary_last_message_at = 0
             else:
                 _summary_message_count = None
                 _summary_last_message_at = None

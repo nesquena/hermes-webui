@@ -21,11 +21,11 @@ def _function_body(src: str, signature: str) -> str:
 def test_loading_older_messages_expands_render_window_before_rendering():
     body = _function_body(SESSIONS_JS, "async function _loadOlderMessages")
 
-    prepend_idx = body.index("S.messages = [...olderMsgs, ...S.messages]")
+    replace_idx = body.index("S.messages = nextMessages")
     expand_idx = body.index("_messageRenderWindowSize=_currentMessageRenderWindowSize()")
     render_idx = body.index("renderMessages({ preserveScroll: true });")
 
-    assert prepend_idx < expand_idx < render_idx, (
+    assert replace_idx < expand_idx < render_idx, (
         "scroll-to-top paging must expand the DOM render window before renderMessages(); "
         "otherwise fetched older messages stay hidden and only the hidden counter changes"
     )
