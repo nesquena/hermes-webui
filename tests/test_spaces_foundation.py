@@ -5578,7 +5578,15 @@ def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only
     layer_url = spaces.run_space_tool("space.spaces.resolveAppUrl", {"path": "L0/_all/mod/_core/spaces/store.js"})
     serialized = json.dumps([home_url, widget_url, app_url, layer_url]).lower()
 
-    assert home_url == {"ok": True, "action": "space.spaces.resolveappurl", "url": "/~/", "resolve": {"mode": "metadata-only"}}
+    assert home_url["ok"] is True
+    assert home_url["action"] == "space.spaces.resolveappurl"
+    assert home_url["url"] == "/~/"
+    assert home_url["resolve"] == {"mode": "metadata-only"}
+    assert home_url["autonomy_policy"]["action"] == "space.spaces.resolveappurl"
+    assert home_url["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    assert home_url["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert home_url["autonomy_policy"]["metadata_only"] is True
+    assert widget_url["autonomy_policy"]["action"] == "space.spaces.resolveappurl"
     assert widget_url["url"] == "/~/spaces/weather/widgets/card.yaml"
     assert app_url["url"] == "/L0/_all/mod/_core/spaces/view.html"
     assert layer_url["url"] == "/L0/_all/mod/_core/spaces/store.js"

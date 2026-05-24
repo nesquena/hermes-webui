@@ -5482,6 +5482,18 @@ def repair_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 
+def _space_resolve_app_url_action_policy_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only policy evidence for browser-surface app URL resolution."""
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        action,
+        approval_gates=["destructive_external_action"],
+        prompt_preflight_status="required",
+        model_route_hint="hint:fast",
+    )
+
+
 def _space_tool_resolve_app_url(payload: dict[str, Any]) -> str:
     """Resolve a Space Agent-style logical app path without exposing raw unsafe inputs."""
     raw = payload.get("logicalPath") or payload.get("logical_path") or payload.get("path") or ""
@@ -5768,7 +5780,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         kind = "space" if name.endswith("spaceid") else "widget"
         return {"ok": True, "action": name, **_space_tool_normalize_id_payload(kind, data)}
     if name == "space.spaces.resolveappurl":
-        return {"ok": True, "action": name, "url": _space_tool_resolve_app_url(data), "resolve": {"mode": "metadata-only"}}
+        return {
+            "ok": True,
+            "action": name,
+            "url": _space_tool_resolve_app_url(data),
+            "resolve": {"mode": "metadata-only"},
+            "autonomy_policy": _space_resolve_app_url_action_policy_receipt(name),
+        }
     if name == "space.spaces.sizetotoken":
         return {"ok": True, "action": name, **_space_tool_size_to_token(data), "mode": "metadata-only"}
     if name == "space.spaces.defaultwidgetsize":
