@@ -644,6 +644,308 @@ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded'
 else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
+// Profile avatars are lightweight WebUI-only metadata loaded from /api/profiles.
+window._profileAvatarMap=window._profileAvatarMap||{};
+window._activeProfileAvatar=window._activeProfileAvatar||null;
+window._activeProfileAvatarShape=window._activeProfileAvatarShape||'circle';
+window._activeProfileAvatarProfileName=window._activeProfileAvatarProfileName||'';
+window._activeProfileAvatarMode=window._activeProfileAvatarMode||'static';
+window._activeProfileReactiveAvatar=window._activeProfileReactiveAvatar||{version:1,updated_at:null,slots:{}};
+window._activeProfileEffectiveReactiveAvatar=window._activeProfileEffectiveReactiveAvatar||{};
+window._activeProfileAvatarState=window._activeProfileAvatarState||'idle';
+window._activeProfileAvatarErrorHoldUntil=window._activeProfileAvatarErrorHoldUntil||0;
+window._activeProfileAvatarErrorTimer=window._activeProfileAvatarErrorTimer||null;
+const _PROFILE_REACTIVE_AVATAR_STATES=['idle','thinking','talking','working','error'];
+function _normalizeProfileAvatarShape(shape){
+  const normalized=String(shape||'circle').trim().toLowerCase();
+  return ['square','circle'].includes(normalized)?normalized:'circle';
+}
+function _normalizeProfileAvatarMode(mode){
+  const normalized=String(mode||'static').trim().toLowerCase();
+  return ['static','reactive'].includes(normalized)?normalized:'static';
+}
+function _normalizeProfileAvatar(avatar){
+  if(!avatar||typeof avatar!=='object') return null;
+  const type=String(avatar.type||'').trim().toLowerCase();
+  const value=String(avatar.value||'').trim();
+  if(!value||!['emoji','url','asset','image'].includes(type)) return null;
+  if(type==='url'&&!/^https?:\/\//i.test(value)) return null;
+  if(type==='asset'&&(value.startsWith('/')||value.includes('..')||value.includes('\\')||value.includes(':'))) return null;
+  return {type,value,shape:_normalizeProfileAvatarShape(avatar.shape)};
+}
+function _isAvatarMotionReduced(){
+  try{return !!(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches);}catch(_){return false;}
+}
+function _normalizeReactiveAvatarPack(pack){
+  const slots={};
+  const rawSlots=pack&&typeof pack==='object'&&pack.slots&&typeof pack.slots==='object'?pack.slots:{};
+  _PROFILE_REACTIVE_AVATAR_STATES.forEach(state=>{
+    const meta=rawSlots[state];
+    if(!meta||typeof meta!=='object') return;
+    const url=String(meta.url||'').trim();
+    if(!url) return;
+    slots[state]={...meta,state,url};
+  });
+  return {
+    version:Number(pack&&pack.version)||1,
+    updated_at:(pack&&pack.updated_at)||null,
+    slots,
+  };
+}
+function _normalizeEffectiveReactiveAvatarMap(map){
+  const out={};
+  if(map&&typeof map==='object'){
+    _PROFILE_REACTIVE_AVATAR_STATES.forEach(state=>{
+      const entry=map[state];
+      if(!entry||typeof entry!=='object') return;
+      const avatar=_normalizeProfileAvatar(entry.avatar);
+      if(!avatar) return;
+      out[state]={
+        type:String(entry.type||'').trim().toLowerCase()==='reactive'?'reactive':'static',
+        state:String(entry.state||state),
+        avatar,
+      };
+    });
+  }
+  return out;
+}
+function _profileAvatarEntryFromSettings(profileName, settings={}){
+  settings=settings&&typeof settings==='object'?settings:{};
+  const name=String(settings.name||profileName||'default').trim()||'default';
+  return {
+    name,
+    avatar:_normalizeProfileAvatar(settings.avatar),
+    shape:_normalizeProfileAvatarShape(settings.avatar_shape||settings.shape),
+    mode:_normalizeProfileAvatarMode(settings.avatar_mode||settings.mode),
+    reactiveAvatar:_normalizeReactiveAvatarPack(settings.reactive_avatar||settings.reactiveAvatar),
+    effectiveReactiveAvatar:_normalizeEffectiveReactiveAvatarMap(settings.effective_reactive_avatar||settings.effectiveReactiveAvatar),
+  };
+}
+function _activeProfileAvatarEntry(){
+  return {
+    name:String(window._activeProfileAvatarProfileName||S.activeProfile||'default').trim()||'default',
+    avatar:window._activeProfileAvatar||null,
+    shape:_normalizeProfileAvatarShape(window._activeProfileAvatarShape),
+    mode:_normalizeProfileAvatarMode(window._activeProfileAvatarMode),
+    reactiveAvatar:_normalizeReactiveAvatarPack(window._activeProfileReactiveAvatar),
+    effectiveReactiveAvatar:_normalizeEffectiveReactiveAvatarMap(window._activeProfileEffectiveReactiveAvatar),
+  };
+}
+function _profileAvatarForStateFromEntry(entry, state='idle'){
+  const normalizedState=_PROFILE_REACTIVE_AVATAR_STATES.includes(state)?state:'idle';
+  const data=entry&&typeof entry==='object'?entry:{};
+  if(_normalizeProfileAvatarMode(data.mode)==='reactive'){
+    const effective=data.effectiveReactiveAvatar||{};
+    const selected=effective[normalizedState]||effective.idle;
+    if(selected&&selected.avatar) return selected.avatar;
+  }
+  return data.avatar||null;
+}
+function _profileAvatarEntryForName(profileName){
+  const name=String(profileName||'default').trim()||'default';
+  const map=window._profileAvatarMap||{};
+  if(map[name]) return map[name];
+  if(window._activeProfileAvatarProfileName&&window._activeProfileAvatarProfileName===name) return _activeProfileAvatarEntry();
+  return _profileAvatarEntryFromSettings(name,{name});
+}
+function _currentConversationProfileName(){
+  try{
+    if(typeof currentSessionProfile==='function') return currentSessionProfile();
+  }catch(_){}
+  return (S.session&&S.session.profile)||S.activeProfile||'default';
+}
+function _conversationProfileAvatarForState(state='idle', profileName){
+  return _profileAvatarForStateFromEntry(_profileAvatarEntryForName(profileName||_currentConversationProfileName()),state);
+}
+function _conversationProfileAvatarMarkupForState(state='idle', opts={}){
+  const profileName=opts.profileName||_currentConversationProfileName();
+  const entry=_profileAvatarEntryForName(profileName);
+  return _profileAvatarMarkup(_profileAvatarForStateFromEntry(entry,state),{...opts,state,shape:opts.shape||entry.shape,profileName});
+}
+function _preloadProfileAvatarEntry(entry){
+  const seen=new Set();
+  const preloadAvatar=avatar=>{
+    const normalized=_normalizeProfileAvatar(avatar);
+    if(!normalized||!['url','asset','image'].includes(normalized.type)) return;
+    if(seen.has(normalized.value)) return;
+    seen.add(normalized.value);
+    try{
+      if(typeof Image==='function'){
+        const img=new Image();
+        img.src=normalized.value;
+      }
+    }catch(_){}
+  };
+  preloadAvatar(entry&&entry.avatar);
+  const effectiveReactiveAvatar=(entry&&entry.effectiveReactiveAvatar)||{};
+  Object.values(effectiveReactiveAvatar).forEach(e=>preloadAvatar(e&&e.avatar));
+}
+function setProfileAvatarEntry(profileName, settings){
+  const entry=_profileAvatarEntryFromSettings(profileName,settings||{});
+  window._profileAvatarMap={...(window._profileAvatarMap||{}),[entry.name]:entry};
+  _preloadProfileAvatarEntry(entry);
+  return entry;
+}
+function _activeProfileAvatarForState(state='idle'){
+  return _profileAvatarForStateFromEntry(_activeProfileAvatarEntry(),state);
+}
+function _profileAvatarMarkup(avatar, opts={}){
+  const normalized=_normalizeProfileAvatar(avatar);
+  const fallback=String(opts.fallback||'H').trim().slice(0,2).toUpperCase()||'H';
+  const classes=String(opts.classes||'').trim();
+  const shape=_normalizeProfileAvatarShape(opts.shape||(normalized&&normalized.shape));
+  const title=opts.title?` title="${esc(opts.title)}"`:'';
+  const state=String(opts.state||'').trim().toLowerCase();
+  const stateAttr=_PROFILE_REACTIVE_AVATAR_STATES.includes(state)?` data-avatar-state="${esc(state)}"`:'';
+  const profileName=String(opts.profileName||'').trim();
+  const profileAttr=profileName?` data-avatar-profile="${esc(profileName)}"`:'';
+  const reactiveClass=stateAttr?' profile-avatar--reactive':'';
+  const cls=`profile-avatar profile-avatar-shape--${shape}${reactiveClass} ${classes}`.trim();
+  if(normalized&&normalized.type==='emoji') return `<div class="${esc(cls)} profile-avatar--emoji"${title}${stateAttr}${profileAttr}>${esc(normalized.value)}</div>`;
+  if(normalized&&(normalized.type==='url'||normalized.type==='asset'||normalized.type==='image')) return `<div class="${esc(cls)} profile-avatar--image"${title}${stateAttr}${profileAttr}><img src="${esc(normalized.value)}" alt="" loading="lazy" decoding="async" onerror="this.parentElement.classList.add('profile-avatar--broken');this.remove();"><span class="profile-avatar-fallback-text">${esc(fallback)}</span></div>`;
+  return `<div class="${esc(cls)} profile-avatar--fallback"${title}${stateAttr}${profileAttr}>${esc(fallback)}</div>`;
+}
+function _activeProfileAvatarMarkupForState(state='idle', opts={}){
+  return _profileAvatarMarkup(_activeProfileAvatarForState(state), {...opts,state});
+}
+function setActiveProfileAvatar(avatar, shape, opts={}){
+  const normalized=_normalizeProfileAvatar(avatar);
+  const normalizedShape=_normalizeProfileAvatarShape(shape||(normalized&&normalized.shape));
+  const hasReactiveOpts=opts&&typeof opts==='object'&&(
+    Object.prototype.hasOwnProperty.call(opts,'avatarMode')||
+    Object.prototype.hasOwnProperty.call(opts,'reactiveAvatar')||
+    Object.prototype.hasOwnProperty.call(opts,'effectiveReactiveAvatar')
+  );
+  const before=JSON.stringify(window._activeProfileAvatar||null);
+  const after=JSON.stringify(normalized||null);
+  const beforeShape=window._activeProfileAvatarShape||'circle';
+  const beforeReactive=hasReactiveOpts?JSON.stringify({
+    mode:window._activeProfileAvatarMode,
+    pack:window._activeProfileReactiveAvatar,
+    effective:window._activeProfileEffectiveReactiveAvatar,
+  }):'';
+  window._activeProfileAvatar=normalized;
+  window._activeProfileAvatarShape=normalizedShape;
+  if(hasReactiveOpts){
+    window._activeProfileAvatarMode=_normalizeProfileAvatarMode(opts.avatarMode);
+    window._activeProfileReactiveAvatar=_normalizeReactiveAvatarPack(opts.reactiveAvatar);
+    window._activeProfileEffectiveReactiveAvatar=_normalizeEffectiveReactiveAvatarMap(opts.effectiveReactiveAvatar);
+  }
+  const afterReactive=hasReactiveOpts?JSON.stringify({
+    mode:window._activeProfileAvatarMode,
+    pack:window._activeProfileReactiveAvatar,
+    effective:window._activeProfileEffectiveReactiveAvatar,
+  }):'';
+  if(before===after&&beforeShape===normalizedShape&&beforeReactive===afterReactive) return;
+  if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+  if(typeof refreshAssistantProfileAvatars==='function') refreshAssistantProfileAvatars();
+}
+function setActiveProfileAvatarSettings(settings){
+  settings=settings&&typeof settings==='object'?settings:{};
+  const profileName=String(settings.name||window._activeProfileAvatarProfileName||S.activeProfile||'default').trim()||'default';
+  window._activeProfileAvatarProfileName=profileName;
+  const entry=setProfileAvatarEntry(profileName,settings);
+  setActiveProfileAvatar(entry.avatar||null,entry.shape,{
+    avatarMode:entry.mode,
+    reactiveAvatar:entry.reactiveAvatar||{version:1,updated_at:null,slots:{}},
+    effectiveReactiveAvatar:entry.effectiveReactiveAvatar||{},
+  });
+}
+function setProfileAvatarMap(profiles, activeName){
+  const map={};
+  for(const p of profiles||[]){
+    const entry={
+      name:p.name,
+      avatar:_normalizeProfileAvatar(p.avatar),
+      shape:_normalizeProfileAvatarShape(p.avatar_shape),
+      mode:_normalizeProfileAvatarMode(p.avatar_mode),
+      reactiveAvatar:_normalizeReactiveAvatarPack(p.reactive_avatar),
+      effectiveReactiveAvatar:_normalizeEffectiveReactiveAvatarMap(p.effective_reactive_avatar),
+    };
+    map[p.name]=entry;
+  }
+  window._profileAvatarMap=map;
+  const active=activeName||S.activeProfile||'default';
+  const entry=map[active]||{};
+  const reactiveOpts={
+    avatarMode:entry.mode,
+    reactiveAvatar:entry.reactiveAvatar||{version:1,updated_at:null,slots:{}},
+    effectiveReactiveAvatar:entry.effectiveReactiveAvatar||{},
+  };
+  if(window._activeProfileAvatarProfileName&&window._activeProfileAvatarProfileName===active){
+    setActiveProfileAvatar(entry.avatar||null, entry.shape, reactiveOpts);
+  }else{
+    window._activeProfileAvatarProfileName=active;
+    setActiveProfileAvatar(entry.avatar||null, entry.shape, reactiveOpts);
+  }
+}
+async function refreshConversationProfileAvatarSettings(profileName){
+  profileName=String(profileName||_currentConversationProfileName()||'default').trim()||'default';
+  try{
+    const settings=await api(`/api/profile/avatar-settings?name=${encodeURIComponent(profileName)}`);
+    setProfileAvatarEntry(profileName,settings);
+    if(_currentConversationProfileName()===profileName&&typeof refreshAssistantProfileAvatars==='function'){
+      refreshAssistantProfileAvatars({state:window._activeProfileAvatarState||'idle',force:true});
+    }
+    return settings;
+  }catch(_){
+    return null;
+  }
+}
+function setReactiveAvatarState(state='idle', opts={}){
+  const normalized=_PROFILE_REACTIVE_AVATAR_STATES.includes(state)?state:'idle';
+  const now=Date.now();
+  if(normalized==='error'&&opts&&opts.holdMs){
+    window._activeProfileAvatarErrorHoldUntil=now+Number(opts.holdMs||0);
+    if(window._activeProfileAvatarErrorTimer) clearTimeout(window._activeProfileAvatarErrorTimer);
+    window._activeProfileAvatarErrorTimer=setTimeout(()=>{
+      window._activeProfileAvatarErrorTimer=null;
+      setReactiveAvatarState('idle');
+    },Number(opts.holdMs||0));
+  }else if(normalized==='idle'&&window._activeProfileAvatarErrorHoldUntil>now){
+    return;
+  }else if(normalized!=='error'){
+    window._activeProfileAvatarErrorHoldUntil=0;
+    if(window._activeProfileAvatarErrorTimer){
+      clearTimeout(window._activeProfileAvatarErrorTimer);
+      window._activeProfileAvatarErrorTimer=null;
+    }
+  }
+  if(window._activeProfileAvatarState===normalized&&!opts.force){
+    if(opts.liveOnly&&_assistantAvatarRefreshNeeded(normalized,true)){
+      refreshAssistantProfileAvatars({state:normalized,liveOnly:true});
+    }
+    return;
+  }
+  window._activeProfileAvatarState=normalized;
+  refreshAssistantProfileAvatars({state:normalized,liveOnly:!!opts.liveOnly});
+}
+function _assistantAvatarRefreshNeeded(state='idle', liveOnly=false){
+  const normalized=_PROFILE_REACTIVE_AVATAR_STATES.includes(state)?state:'idle';
+  const profileName=_currentConversationProfileName();
+  const selector=liveOnly
+    ? '#liveAssistantTurn .msg-role.assistant .role-icon.assistant'
+    : '.msg-role.assistant .role-icon.assistant';
+  const nodes=document.querySelectorAll(selector);
+  if(!nodes.length) return false;
+  return Array.from(nodes).some(node=>node.getAttribute('data-avatar-state')!==normalized||node.getAttribute('data-avatar-profile')!==profileName);
+}
+function refreshAssistantProfileAvatars(opts={}){
+  const label=window._botName||'Hermes';
+  const fallback=label.charAt(0).toUpperCase()||'H';
+  const requestedState=opts.state||window._activeProfileAvatarState||'idle';
+  const state=_PROFILE_REACTIVE_AVATAR_STATES.includes(requestedState)?requestedState:'idle';
+  const selector=opts.liveOnly
+    ? '#liveAssistantTurn .msg-role.assistant .role-icon.assistant'
+    : '.msg-role.assistant .role-icon.assistant';
+  document.querySelectorAll(selector).forEach(node=>{
+    const wrap=document.createElement('div');
+    wrap.innerHTML=_conversationProfileAvatarMarkupForState(state,{fallback,classes:'role-icon assistant profile-avatar--message',title:label});
+    const next=wrap.firstElementChild;
+    if(next) node.replaceWith(next);
+  });
+}
+
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
 let _providerQuotaRefreshInFlight=false;
 
@@ -1327,9 +1629,22 @@ function _positionModelDropdown(){
   dd.style.left=`${left}px`;
 }
 
+// renderModelDropdown(opts?) — composer's rich model picker. With no opts it
+// targets the chat composer (#composerModelDropdown + #modelSelect) and writes
+// through to selectModelFromDropdown(); with opts it can be reused by other
+// surfaces (e.g. the profile screen's Default-model tile). The renderer reads
+// options out of `opts.select` (a hidden <select> mirror), paints rows into
+// `opts.dropdown`, and on click invokes `opts.onSelect(value)` instead of
+// selectModelFromDropdown. `opts.scopeNote` overrides the advisory line.
 function renderModelDropdown(){
-  const dd=$('composerModelDropdown');
-  const sel=$('modelSelect');
+  const opts = arguments[0] || null;
+  const dd = (opts && opts.dropdown) || $('composerModelDropdown');
+  const sel = (opts && opts.select) || $('modelSelect');
+  const onSelect = (opts && typeof opts.onSelect === 'function') ? opts.onSelect : selectModelFromDropdown;
+  const onClose = (opts && typeof opts.onClose === 'function') ? opts.onClose : closeModelDropdown;
+  const scopeNoteText = (opts && typeof opts.scopeNote === 'string')
+    ? opts.scopeNote
+    : (t('model_scope_advisory') || 'Applies to this conversation from your next message.');
   if(!dd||!sel) return;
   // Store model data for filtering
   const _modelData=[];
@@ -1375,7 +1690,7 @@ function renderModelDropdown(){
   // Create search input FIRST before filterModels definition
   const _scopeNote=document.createElement('div');
   _scopeNote.className='model-scope-note';
-  _scopeNote.textContent=t('model_scope_advisory')||'Applies to this conversation from your next message.';
+  _scopeNote.textContent=scopeNoteText;
   const _searchRow=document.createElement('div');
   _searchRow.className='model-search-row';
   _searchRow.innerHTML=`<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off"><button class="model-search-clear" title="Clear search">${li('x',10)}</button>`;
@@ -1478,7 +1793,7 @@ function renderModelDropdown(){
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
         row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-        row.onclick=()=>selectModelFromDropdown(m.value);
+        row.onclick=()=>onSelect(m.value);
         dd.appendChild(row);
       }
     }
@@ -1517,7 +1832,7 @@ function renderModelDropdown(){
       // Inline provider chip on every row that has a group (#1425)
       const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
       row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-      row.onclick=()=>selectModelFromDropdown(m.value);
+      row.onclick=()=>onSelect(m.value);
       dd.appendChild(row);
     }
     // Show "No results" if filtered and nothing matched
@@ -1535,15 +1850,15 @@ function renderModelDropdown(){
   };
   // Event handlers for search input
   _si.addEventListener('input',()=>_filterModels(_si.value));
-  _si.addEventListener('keydown',e=>{if(e.key==='Enter') {e.preventDefault();}if(e.key==='Escape') {closeModelDropdown();}});
+  _si.addEventListener('keydown',e=>{if(e.key==='Enter') {e.preventDefault();}if(e.key==='Escape') {onClose();}});
   _si.addEventListener('click',e=>e.stopPropagation());
   // Event handlers for clear button
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
   // Event handlers for custom input
-  const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
+  const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;onSelect(v);_ci.value='';};
   _cb.onclick=_applyCustom;
-  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
+  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){onClose();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
   // Add search and custom elements to dropdown (initial render)
   dd.appendChild(_scopeNote);
@@ -1638,6 +1953,64 @@ function _formatReasoningEffortLabel(effort){
   if(effort==='none') return 'None';
   if(!effort) return 'Default';
   return effort;
+}
+
+// Shared reasoning effort option set. Both the chat composer's static dropdown
+// (index.html #composerReasoningDropdown) and the profile screen's
+// Default-model tile read from this list so they stay in lockstep. Labels
+// are intentionally lowercase to match the composer chip's display style.
+const REASONING_OPTS = [
+  ['none',    'none'],
+  ['minimal', 'minimal'],
+  ['low',     'low'],
+  ['medium',  'medium'],
+  ['high',    'high'],
+  ['xhigh',   'xhigh'],
+];
+
+// renderReasoningDropdown(opts?) — same shape as renderModelDropdown(opts).
+// With no opts it rebuilds the chat composer's reasoning dropdown rows
+// (idempotent re-render of what index.html already ships, kept in sync with
+// REASONING_OPTS). With opts it can be reused by other surfaces (e.g. the
+// profile screen's Default-model tile):
+//   - opts.dropdown:  the dropdown element to paint into
+//   - opts.onSelect:  function(value) called when a row is clicked. The row's
+//                     own click handler calls ev.stopPropagation() before
+//                     invoking onSelect, so the document-level composer
+//                     reasoning handler does NOT fire for foreign surfaces.
+//   - opts.current:   current effort string, used to mark the .selected row.
+function renderReasoningDropdown(opts){
+  const dd = (opts && opts.dropdown) || $('composerReasoningDropdown');
+  if(!dd) return;
+  const current = (opts && typeof opts.current === 'string')
+    ? String(opts.current||'').trim().toLowerCase()
+    : _currentReasoningEffort || '';
+  const onSelect = (opts && typeof opts.onSelect === 'function') ? opts.onSelect : null;
+  // Capitalize for label display (Composer chip historically shows lowercase
+  // but the dropdown row text was capitalized in the original HTML — keep
+  // capitalized labels in rows for visual contrast against the chip label).
+  const _cap = (s) => s ? (s.charAt(0).toUpperCase() + s.slice(1)) : s;
+  const _labelFor = (value) => {
+    if(value === 'xhigh') return 'Extra High';
+    return _cap(value);
+  };
+  dd.innerHTML = REASONING_OPTS.map(([value]) =>
+    `<div class="reasoning-option${value === current ? ' selected' : ''}" data-effort="${esc(value)}">${esc(_labelFor(value))}</div>`
+  ).join('');
+  // When opts.onSelect is supplied, the foreign surface owns the click path —
+  // attach its handler AND stop propagation so the composer's document-level
+  // listener doesn't double-fire and POST to /api/reasoning.
+  if(onSelect){
+    dd.querySelectorAll('.reasoning-option').forEach(row => {
+      row.onclick = (ev) => {
+        ev.stopPropagation();
+        const v = row.dataset.effort || '';
+        onSelect(v);
+      };
+    });
+  }
+  // For composer-default rendering, rows have no per-row onclick — the
+  // document-level click listener handles them (existing behavior).
 }
 
 function _applyReasoningChip(eff){
@@ -3469,6 +3842,7 @@ async function handleComposerPrimaryAction(){
 
 function setBusy(v){
   S.busy=v;
+  if(typeof setReactiveAvatarState==='function') setReactiveAvatarState(v?'thinking':'idle',{liveOnly:true});
   updateSendBtn();
   if(!v){
     if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
@@ -5004,7 +5378,7 @@ function syncTopbar(){
     if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     // Update profile chip even when no session is active (e.g. right after profile switch)
     const _profileLabel=$('profileChipLabel');
-    if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
+    if(_profileLabel) _profileLabel.textContent=(typeof currentSessionProfile==='function'?currentSessionProfile():(S.activeProfile||'default'));
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -5115,7 +5489,7 @@ function syncTopbar(){
   // modelSelect already set above
   // Update profile chip label
   const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(profileLabel) profileLabel.textContent=(typeof currentSessionProfile==='function'?currentSessionProfile():(S.activeProfile||'default'));
 }
 
 function msgContent(m){
@@ -5155,7 +5529,10 @@ function isTpsDisplayEnabled(){
 function _assistantRoleHtml(tsTitle='', tpsText=''){
   const _bn=assistantDisplayName();
   const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span>${tps}</div>`;
+  const avatarHtml=(typeof _profileAvatarMarkup==='function')
+    ? _conversationProfileAvatarMarkupForState('idle',{fallback:_bn.charAt(0).toUpperCase()||'H',classes:'role-icon assistant profile-avatar--message',title:_bn})
+    : `<div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div>`;
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}>${avatarHtml}<span style="font-size:12px">${esc(_bn)}</span>${tps}</div>`;
 }
 function _setAssistantTurnTps(turn, tpsText=''){
   if(!turn) return;
@@ -5174,6 +5551,10 @@ function _setAssistantTurnTps(turn, tpsText=''){
 }
 function _setLiveAssistantTps(value){
   _setAssistantTurnTps($('liveAssistantTurn'), isTpsDisplayEnabled()?_formatTurnTps(value):'');
+}
+function _refreshLiveAssistantAvatarFromCurrentState(){
+  if(typeof refreshAssistantProfileAvatars!=='function') return;
+  refreshAssistantProfileAvatars({state:window._activeProfileAvatarState||'idle',liveOnly:true,force:true});
 }
 function _createAssistantTurn(tsTitle='', tpsText=''){
   const row=document.createElement('div');
@@ -6297,6 +6678,7 @@ function renderMessages(options){
       // right session's DOM (the user may have switched tabs/sessions
       // while this stream is still streaming). See #1366.
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
+      _refreshLiveAssistantAvatarFromCurrentState();
       seg.setAttribute('data-live-assistant','1');
     }
     if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
@@ -6810,6 +7192,7 @@ function appendLiveToolCard(tc){
     turn.id='liveAssistantTurn';
     if(S.session) turn.dataset.sessionId=S.session.session_id;  // see #1366
     $('msgInner').appendChild(turn);
+    _refreshLiveAssistantAvatarFromCurrentState();
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return;
@@ -7657,6 +8040,7 @@ function appendThinking(text='', options){
     turn.id='liveAssistantTurn';
     if(S.session) turn.dataset.sessionId=S.session.session_id;  // see #1366
     $('msgInner').appendChild(turn);
+    _refreshLiveAssistantAvatarFromCurrentState();
   }
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return;

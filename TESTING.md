@@ -12,6 +12,14 @@
 > Run: `pytest tests/ -v --timeout=60`
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
+>
+> Chat boot responsiveness focus: after a server restart and hard browser reload, click the composer and type immediately while the page is still settling. The textarea should accept input right away, the send button should enable from already-typed text without waiting for workspace, onboarding, sidebar, or model-list hydration, and pressing Enter should submit without a multi-second pause.
+>
+> Profile UI state-preservation gate: when a profile action is supposed to update only one surface, set an unrelated visible control to an unusual sentinel value first, perform the action, and confirm the selected profile, detail pane, sliders, inputs, and profile cards do not remount or flash to defaults. Prefer targeted DOM patching over full panel reloads for avatar-only or metadata-only saves.
+>
+> Reactive avatar regression focus: in Profiles, open Change avatar, switch to Reactive, upload only an Idle animation first, save, and confirm the other state rows show fallback behavior rather than requiring all five files. Switch back to Static and save, then reopen Reactive and confirm the saved animation is still selectable without reuploading. With both a static avatar and reactive Idle uploaded, save Reactive mode and verify profile cards, the profile hero, and a live assistant turn show the reactive Idle asset rather than the static avatar. Start or open a conversation owned by profile B, switch the active/default profile to profile A, then return to the profile B conversation and confirm the live assistant avatar still uses profile B animations while it moves through thinking, talking, working/tool, error, and idle states. While saving avatar changes, confirm the selected profile detail does not reload: runtime sliders and inputs must not flash back to default values, profile selection must stay stable, and only avatar surfaces should repaint. Verify Clear static leaves saved animations intact, Clear animations leaves the static fallback intact, and a live assistant turn changes the avatar through thinking, talking, working/tool, and error states when those events occur. For visual QA, capture desktop and narrow screenshots of the dialog: the live preview must sit in a side panel, Static/Reactive must render as styled selector cards, native file inputs must not be visible, state preview buttons must appear only in Reactive mode, and transparent animated/image avatars must not show fallback text or color behind the loaded image.
+>
+> Chat profile switch regression focus: while a conversation owned by profile B is actively streaming, use the chat profile picker to select profile A. The picker should keep profile A selected, the visible chat should become a fresh profile-A conversation quickly, profile B's live stream should not be retagged or committed synchronously, and slower model/workspace/sidebar refreshes should complete in the background without resetting the picker.
 
 ---
 
@@ -1798,7 +1806,7 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - "+ New profile" form: name validation (lowercase + hyphens), clone config checkbox.
 - Create profile → appears in list and dropdown.
 - Delete profile → confirmation modal. Auto-switches to default if deleting active.
-- Attempt switch while agent busy → blocked with toast message.
+- Switch profiles while the visible agent is busy → a fresh chat for the selected profile appears quickly; the previous live session remains owned by its original profile.
 - With hermes-agent not installed → only default profile shown, graceful fallback.
 
 ---

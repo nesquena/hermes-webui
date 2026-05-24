@@ -429,6 +429,10 @@ function _markPollingCompletionUnreadTransitions(sessions) {
   }
 }
 
+function currentSessionProfile(){
+  return (S.session&&S.session.profile)||S.activeProfile||'default';
+}
+
 let _newSessionInFlight=null;
 const _newSessionPendingText=()=>t('new_session_creating')||'Creating new conversation…';
 function _setNewSessionPending(pending){
@@ -460,18 +464,44 @@ async function newSession(flash, options={}){
     // switch, then cleared.  Use a dedicated flag so S._profileDefaultWorkspace (the
     // persistent boot/settings default) is not consumed and remains available for the
     // blank-page display on all subsequent returns to the empty state (#823).
-    const switchWs=S._profileSwitchWorkspace;
-    S._profileSwitchWorkspace=null;
-    const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
+    const hasOption=(key)=>options&&Object.prototype.hasOwnProperty.call(options,key);
+    const explicitWorkspace=hasOption('workspace');
+    const switchWs=explicitWorkspace?null:S._profileSwitchWorkspace;
+    if(!explicitWorkspace) S._profileSwitchWorkspace=null;
+    const inheritWs=explicitWorkspace
+      ? (options.workspace||null)
+      : (switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null));
+    const targetProfile=String(hasOption('profile')?options.profile:(S.activeProfile||'default')).trim()||'default';
+    // Use the saved default model for new sessions (#872). The user's saved
+    // default_model (from Settings) takes priority over the chat-header dropdown
+    // value, which reflects the *previous* session's model. Fall back to the
+    // dropdown value only when no default_model is configured.
+    const modelSel=$('modelSelect');
+    const explicitModel=hasOption('model')&&String(options.model||'').trim();
+    const explicitProvider=hasOption('model_provider')?options.model_provider:null;
+    const selectedDefaultModel=explicitModel?String(options.model||'').trim():(window._defaultModel||(modelSel&&modelSel.value)||'');
+    let defaultApplied=false;
+    if(!explicitModel&&window._defaultModel&&modelSel&&typeof _applyModelToDropdown==='function'){
+      defaultApplied=!!_applyModelToDropdown(window._defaultModel,modelSel,window._activeProvider||null);
+    }
+    const canQualify=explicitModel||!window._defaultModel||defaultApplied||(modelSel&&modelSel.value===selectedDefaultModel);
+    const newModelState=explicitModel
+      ? {model:selectedDefaultModel,model_provider:explicitProvider||null}
+      : (canQualify&&typeof _modelStateForSelect==='function')
+      ? _modelStateForSelect(modelSel,selectedDefaultModel)
+      : {model:selectedDefaultModel,model_provider:null};
     const reqBody={
       workspace:inheritWs,
-      profile:S.activeProfile||'default',
+      profile:targetProfile,
     };
-    if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
+    if(options.commitPrevious!==false&&S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     if(options&&options.worktree) reqBody.worktree=true;
     if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=data.session;S.messages=data.session.messages||[];
+    if(typeof refreshConversationProfileAvatarSettings==='function'){
+      void refreshConversationProfileAvatarSettings(currentSessionProfile());
+    }
     S.lastUsage={...(data.session.last_usage||{})};
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
@@ -482,7 +512,8 @@ async function newSession(flash, options={}){
     // duplicate model ids can exist under several providers, and a stale persisted
     // picker selection with the same model id should not mask the new session's
     // configured default provider.
-    const modelSel=$('modelSelect');
+    // `modelSel` is already declared at the top of this IIFE (see the options-driven
+    // model-resolution block above) — reuse that binding instead of re-declaring.
     if(S.session.model && modelSel && typeof _applyModelToDropdown==='function'){
       const currentModelState=(typeof _modelStateForSelect==='function')
         ? _modelStateForSelect(modelSel,modelSel.value)
@@ -615,6 +646,9 @@ async function loadSession(sid){
   // Stale response? A newer loadSession() call has already started (#1060).
   if (_loadingSessionId !== sid) return;
   S.session=data.session;
+  if(typeof refreshConversationProfileAvatarSettings==='function'){
+    void refreshConversationProfileAvatarSettings(currentSessionProfile());
+  }
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
   // Reset scroll-direction tracker on session switch so the new chat's
@@ -2162,7 +2196,10 @@ async function renderSessionList(opts={}){
   if(!deferWhileInteracting) _pendingSessionListPayload=null;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
-    const allProfilesQS = _showAllProfiles ? '?all_profiles=1' : '';
+    const sessionProfile=S.session&&S.session.profile;
+    const needsCurrentProfile=Boolean(sessionProfile&&S.activeProfile&&sessionProfile!==S.activeProfile);
+    const allProfilesToggleQS = _showAllProfiles ? '?all_profiles=1' : '';
+    const allProfilesQS = needsCurrentProfile ? '?all_profiles=1' : allProfilesToggleQS;
     const [sessData, projData] = await Promise.all([
       api('/api/sessions' + allProfilesQS),
       api('/api/projects' + allProfilesQS),

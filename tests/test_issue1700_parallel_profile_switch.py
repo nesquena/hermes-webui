@@ -76,6 +76,36 @@ def test_per_client_switch_allowed_when_stream_is_active(tmp_path, monkeypatch):
 
     assert result["active"] == "writer"
     assert result["default_model"] == "gpt-5.5"
+    assert result["default_model_provider"] == "openai-codex"
+
+
+def test_per_client_switch_returns_effective_default_model_for_fast_handoff(tmp_path, monkeypatch):
+    """The chat switch path needs the target default before /api/models hydrates."""
+    import api.profiles as profiles
+
+    default_home = tmp_path / ".hermes"
+    target_home = default_home / "profiles" / "writer"
+    target_workspace = tmp_path / "writer-workspace"
+    target_workspace.mkdir(parents=True)
+    target_home.mkdir(parents=True)
+    (target_home / "config.yaml").write_text(
+        f"terminal:\n  cwd: {target_workspace}\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", default_home)
+    monkeypatch.setattr(profiles, "_active_profile", "default")
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [{"name": "default"}, {"name": "writer"}])
+    monkeypatch.setenv("HERMES_MODEL", "fast-handoff-model")
+    profiles._tls.profile = None
+    try:
+        result = profiles.switch_profile("writer", process_wide=False)
+    finally:
+        profiles._tls.profile = None
+
+    assert result["active"] == "writer"
+    assert result["default_model"] == "fast-handoff-model"
+    assert result["default_model_provider"] is None
 
 
 def test_frontend_profile_switch_no_longer_blocks_on_busy_state():

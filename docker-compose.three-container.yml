@@ -136,6 +136,17 @@ services:
       # to match the agent container's UID, or use a named Docker volume (preferred).
       # Optional: set a password for remote access
       # - HERMES_WEBUI_PASSWORD=your-secret-password
+      # Optional split-container Gateway Tile lifecycle adapter.
+      # Default is local/status-from-shared-files. To make Profile Gateway Tile
+      # start/stop execute in the hermes-agent container instead of the WebUI
+      # namespace, install Docker CLI in the WebUI image and mount docker.sock,
+      # then uncomment:
+      # - WEBUI_GATEWAY_CONTROL_MODE=docker_exec
+      # - WEBUI_GATEWAY_DOCKER_CONTAINER=hermes-agent
+      # Status-only remote health can be enabled without docker.sock:
+      # - WEBUI_GATEWAY_CONTROL_MODE=remote_health
+      # - WEBUI_GATEWAY_REMOTE_HEALTH_URL=http://hermes-agent:8642
+      # - WEBUI_GATEWAY_REMOTE_HEALTH_ALLOW_SERVICE=true
       # Bind-mount permission handling for the WebUI (fixes #1389, #1399).
       # NOTE: WebUI's HERMES_HOME_MODE is a credential-file threshold (allow
       # group bits on .env/.signing_key/etc.), DIFFERENT from the agent's

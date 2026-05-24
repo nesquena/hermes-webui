@@ -4498,6 +4498,146 @@ def handle_get(handler, parsed) -> bool:
         with cron_profile_context():
             return _handle_cron_status(handler, parsed)
 
+    if parsed.path == "/api/profile/skills":
+        qs = parse_qs(parsed.query)
+        name = qs.get("name", [""])[0]
+        if not name:
+            return bad(handler, "name required")
+        try:
+            from api.profiles import list_profile_skills_api
+            return j(handler, list_profile_skills_api(name))
+        except FileNotFoundError:
+            return bad(handler, "profile not found", status=404)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+
+    if parsed.path == "/api/profile/avatar-image":
+        qs = parse_qs(parsed.query)
+        name = qs.get("name", [""])[0]
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            from api.profiles import read_profile_avatar_image_api
+            payload, content_type, etag = read_profile_avatar_image_api(name)
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+        if handler.headers.get("If-None-Match") == etag:
+            handler.send_response(304)
+            handler.send_header("ETag", etag)
+            handler.send_header("Cache-Control", "private, max-age=86400")
+            handler.end_headers()
+            return True
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.send_header("Cache-Control", "private, max-age=86400")
+        handler.send_header("ETag", etag)
+        _security_headers(handler)
+        handler.end_headers()
+        handler.wfile.write(payload)
+        return True
+
+    if parsed.path == "/api/profile/avatar-asset":
+        qs = parse_qs(parsed.query)
+        name = qs.get("name", [""])[0]
+        asset = qs.get("asset", [""])[0]
+        if not name:
+            return bad(handler, "name is required")
+        if not asset:
+            return bad(handler, "asset is required")
+        try:
+            from api.profiles import read_profile_avatar_asset_api
+            payload, content_type, etag = read_profile_avatar_asset_api(name, asset)
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+        if handler.headers.get("If-None-Match") == etag:
+            handler.send_response(304)
+            handler.send_header("ETag", etag)
+            handler.send_header("Cache-Control", "private, max-age=31536000, immutable")
+            handler.end_headers()
+            return True
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.send_header("Cache-Control", "private, max-age=31536000, immutable")
+        handler.send_header("ETag", etag)
+        _security_headers(handler)
+        handler.end_headers()
+        handler.wfile.write(payload)
+        return True
+
+    if parsed.path == "/api/profile/avatar-settings":
+        from api.profiles import get_profile_avatar_settings_api
+
+        qs = parse_qs(parsed.query)
+        name = str(qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            return j(handler, get_profile_avatar_settings_api(name))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+
+    if parsed.path == "/api/profile/skill_content":
+        from api.profiles import resolve_profile_skill_file
+        qs = parse_qs(parsed.query)
+        name = str(qs.get("name", [""])[0] or "").strip() or "default"
+        skill = str(qs.get("skill", [""])[0] or "").strip()
+        if not skill:
+            return bad(handler, "skill is required")
+        try:
+            skill_md = resolve_profile_skill_file(name, skill)
+        except FileNotFoundError as e:
+            return bad(handler, str(e), status=404)
+        except ValueError as e:
+            return bad(handler, str(e), status=400)
+        try:
+            content = skill_md.read_text(encoding="utf-8", errors="replace")
+        except (PermissionError, OSError) as e:
+            return bad(handler, str(e))
+        return j(handler, {
+            "ok": True,
+            "profile": name,
+            "skill": skill,
+            "content": content,
+            "path": str(skill_md),
+        })
+
+    if parsed.path == "/api/profile/gateway/status":
+        qs = parse_qs(parsed.query)
+        name = (qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            from api.profiles import profile_gateway_status_api
+            data = profile_gateway_status_api(name)
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+        # NOTE: promotes transient phases as a side effect; GET is not idempotent here.
+        return j(handler, data)
+
+    if parsed.path == "/api/profile/gateway/platforms":
+        qs = parse_qs(parsed.query)
+        name = (qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            from api.profiles import _list_platforms_for_profile
+            data = _list_platforms_for_profile(name)
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+        return j(handler, data)
+
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
         qs = parse_qs(parsed.query)
@@ -4546,19 +4686,116 @@ def handle_get(handler, parsed) -> bool:
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
         from api.profiles import list_profiles_api, get_active_profile_name
+        qs = parse_qs(parsed.query)
+        include_skill_counts = (qs.get("include_skill_counts", ["0"])[0] or "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        include_full_avatars = (qs.get("include_full_avatars", ["0"])[0] or "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
         return j(
             handler,
-            {"profiles": list_profiles_api(), "active": get_active_profile_name()},
+            {
+                "profiles": list_profiles_api(
+                    include_skill_counts=include_skill_counts,
+                    include_full_avatars=include_full_avatars,
+                ),
+                "active": get_active_profile_name(),
+            },
         )
 
     if parsed.path == "/api/profile/active":
-        from api.profiles import get_active_profile_name, get_active_hermes_home
+        from api.profiles import get_active_profile_name, get_active_hermes_home, get_profile_avatar_summary_api
 
-        return j(
-            handler,
-            {"name": get_active_profile_name(), "path": str(get_active_hermes_home())},
-        )
+        name = get_active_profile_name()
+        payload = {"name": name, "path": str(get_active_hermes_home())}
+        try:
+            payload["avatar"] = get_profile_avatar_summary_api(name)
+        except Exception:
+            payload["avatar"] = None
+        try:
+            from api.profiles import _read_profile_avatar_shape_for_home
+            payload["avatar_shape"] = _read_profile_avatar_shape_for_home(get_active_hermes_home())
+        except Exception:
+            payload["avatar_shape"] = "circle"
+        try:
+            from api.profiles import get_profile_avatar_settings_api
+            avatar_settings = get_profile_avatar_settings_api(name)
+            payload["avatar_mode"] = avatar_settings.get("avatar_mode", "static")
+            payload["reactive_avatar"] = avatar_settings.get("reactive_avatar")
+            effective = avatar_settings.get("effective_reactive_avatar") or {}
+            for state_meta in effective.values():
+                if isinstance(state_meta, dict) and state_meta.get("type") == "static":
+                    state_meta["avatar"] = payload.get("avatar")
+            payload["effective_reactive_avatar"] = effective
+        except Exception:
+            payload["avatar_mode"] = "static"
+            payload["reactive_avatar"] = {"version": 1, "updated_at": None, "slots": {}}
+            payload["effective_reactive_avatar"] = {}
+        return j(handler, payload)
+
+    if parsed.path == "/api/profile/settings":
+        from api.profiles import get_profile_settings_api
+
+        qs = parse_qs(parsed.query)
+        name = str(qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        include_avatar = (qs.get("include_avatar", ["1"])[0] or "").lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        try:
+            return j(handler, get_profile_settings_api(name, include_avatar=include_avatar))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+
+    # ── Profile Files API (GET) ──
+    if parsed.path == "/api/profile/files":
+        return _handle_profile_file_read(handler, parsed)
+
+    # ── Profile Persona API (GET) ──
+    # Voice excerpt from SOUL.md for the hero dossier (rework 2026-05-14).
+    if parsed.path == "/api/profile/persona":
+        from api.profiles import read_profile_persona_api
+
+        qs = parse_qs(parsed.query)
+        name = str(qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            return j(handler, read_profile_persona_api(name))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+
+    # ── Profile Activity API (GET) ──
+    # last-used + sessions-this-week + gateway-last-run for the activity line.
+    if parsed.path == "/api/profile/activity":
+        from api.profiles import read_profile_activity_api
+
+        qs = parse_qs(parsed.query)
+        name = str(qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            return j(handler, read_profile_activity_api(name))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
 
     # ── Gateway Status (GET) ──
     if parsed.path == "/api/gateway/status":
@@ -4700,6 +4937,23 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
+
+    if parsed.path == "/api/profile/avatar-settings":
+        content_type = handler.headers.get("Content-Type", "")
+        if content_type.lower().startswith("multipart/form-data"):
+            try:
+                from api.upload import parse_multipart
+                from api.profiles import REACTIVE_AVATAR_MULTIPART_MAX_BYTES, update_profile_avatar_settings_api
+
+                content_length = int(handler.headers.get("Content-Length", "0") or 0)
+                if content_length > REACTIVE_AVATAR_MULTIPART_MAX_BYTES:
+                    return bad(handler, "reactive avatar uploads are too large", status=413)
+                fields, files = parse_multipart(handler.rfile, content_type, content_length)
+                return j(handler, update_profile_avatar_settings_api(fields, files))
+            except FileNotFoundError as e:
+                return bad(handler, _sanitize_error(e), 404)
+            except ValueError as e:
+                return bad(handler, _sanitize_error(e), 400)
 
     if diag:
         diag.stage("read_body")
@@ -5589,6 +5843,67 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, _sanitize_error(e), 500)
 
+    # ── Profile Skills (POST) ──
+    if parsed.path == "/api/profile/skills/toggle":
+        name = (body or {}).get("name")
+        skill = (body or {}).get("skill")
+        enabled_raw = (body or {}).get("enabled")
+        if not isinstance(name, str) or not name:
+            return bad(handler, "name required")
+        if not isinstance(skill, str) or not skill:
+            return bad(handler, "skill required")
+        if not isinstance(enabled_raw, bool):
+            return bad(handler, "enabled must be a boolean")
+        try:
+            from api.profiles import toggle_profile_skill_api
+            return j(handler, toggle_profile_skill_api(name, skill, enabled_raw))
+        except FileNotFoundError:
+            return bad(handler, "profile not found", status=404)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+
+    # Batched save — replaces the full per-profile disabled-skills list in one
+    # write. Body: {name, disabled:[...]}. Used by the Skills modal Save button.
+    if parsed.path == "/api/profile/skills":
+        name = (body or {}).get("name")
+        disabled = (body or {}).get("disabled")
+        if not isinstance(name, str) or not name:
+            return bad(handler, "name required")
+        try:
+            from api.profiles import set_profile_disabled_skills_api
+            return j(handler, set_profile_disabled_skills_api(name, disabled))
+        except FileNotFoundError:
+            return bad(handler, "profile not found", status=404)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+
+    if parsed.path == "/api/profile/skill_content":
+        from api.profiles import resolve_profile_skill_file, _invalidate_skill_cache_for_path
+        name = str((body or {}).get("name") or "").strip() or "default"
+        skill = str((body or {}).get("skill") or "").strip()
+        content = (body or {}).get("content", "")
+        if not skill:
+            return bad(handler, "skill is required")
+        if not isinstance(content, str):
+            return bad(handler, "content must be a string", status=400)
+        try:
+            skill_md = resolve_profile_skill_file(name, skill)
+        except FileNotFoundError as e:
+            return bad(handler, str(e), status=404)
+        except ValueError as e:
+            return bad(handler, str(e), status=400)
+        try:
+            skill_md.write_text(content, encoding="utf-8")
+        except (PermissionError, OSError) as e:
+            return bad(handler, str(e))
+        _invalidate_skill_cache_for_path(skill_md)
+        return j(handler, {
+            "ok": True,
+            "profile": name,
+            "skill": skill,
+            "path": str(skill_md),
+        })
+
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
         return _handle_skill_save(handler, body)
@@ -5681,6 +5996,124 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, _sanitize_error(e))
         except RuntimeError as e:
             return bad(handler, str(e), 409)
+
+    if parsed.path == "/api/profile/rename":
+        name = body.get("name", "").strip() if isinstance(body.get("name"), str) else ""
+        new_name = body.get("new_name", "").strip() if isinstance(body.get("new_name"), str) else ""
+        if not name:
+            return bad(handler, "name is required")
+        if not new_name:
+            return bad(handler, "new_name is required")
+        try:
+            from api.profiles import rename_profile_api
+            from api.helpers import build_profile_cookie
+
+            result = rename_profile_api(name, new_name)
+            extra = None
+            if result.get('was_active'):
+                extra = {'Set-Cookie': build_profile_cookie(result['new_name'])}
+            return j(handler, result, extra_headers=extra)
+        except (ValueError, FileNotFoundError) as e:
+            return bad(handler, _sanitize_error(e), 404 if isinstance(e, FileNotFoundError) else 400)
+        except FileExistsError as e:
+            return bad(handler, str(e), 409)
+        except RuntimeError as e:
+            return bad(handler, str(e), 409)
+
+    if parsed.path == "/api/profile/duplicate":
+        name = body.get("name", "").strip() if isinstance(body.get("name"), str) else ""
+        new_name = body.get("new_name", "").strip() if isinstance(body.get("new_name"), str) else ""
+        if not name:
+            return bad(handler, "name is required")
+        if not new_name:
+            return bad(handler, "new_name is required")
+        clone_all = bool(body.get("clone_all", False))
+        try:
+            from api.profiles import duplicate_profile_api
+
+            result = duplicate_profile_api(name, new_name, clone_all=clone_all)
+            return j(handler, {"ok": True, "profile": result})
+        except (ValueError, FileNotFoundError) as e:
+            return bad(handler, _sanitize_error(e), 404 if isinstance(e, FileNotFoundError) else 400)
+        except FileExistsError as e:
+            return bad(handler, str(e), 409)
+        except RuntimeError as e:
+            return bad(handler, str(e), 409)
+
+    if parsed.path == "/api/profile/gateway":
+        name = body.get("name", "").strip() if isinstance(body.get("name"), str) else ""
+        action = body.get("action", "").strip().lower() if isinstance(body.get("action"), str) else ""
+        if not name:
+            return bad(handler, "name is required")
+        if action not in ("start", "stop"):
+            return bad(handler, "action must be 'start' or 'stop'")
+        try:
+            from api.profiles import profile_gateway_control_api
+
+            result = profile_gateway_control_api(name, action)
+            return j(handler, result)
+        except (ValueError, FileNotFoundError) as e:
+            return bad(handler, _sanitize_error(e), 404 if isinstance(e, FileNotFoundError) else 400)
+
+    if parsed.path == "/api/profile/gateway/platform":
+        # Name lives on the query string for symmetry with the GET endpoint.
+        qs = parse_qs(parsed.query)
+        name = (qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        platform_key = ""
+        if isinstance(body.get("platform"), str):
+            platform_key = body["platform"].strip()
+        if not platform_key:
+            return bad(handler, "platform is required")
+        values = body.get("values")
+        if values is None:
+            values = {}
+        if not isinstance(values, dict):
+            return bad(handler, "values must be an object")
+        try:
+            from api.profiles import _set_platform_for_profile
+            data = _set_platform_for_profile(name, platform_key, values)
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+        return j(handler, data)
+
+    if parsed.path == "/api/profile/settings":
+        from api.profiles import update_profile_settings_api
+
+        name = str(body.get("name", "") or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        updates = {}
+        for key in (
+            "provider", "model", "avatar", "reasoning_effort", "description",
+            "fallback_model", "response_mode", "compression", "max_turns",
+            "auxiliary_models", "toolsets", "default_workspace", "avatar_shape",
+        ):
+            if key in body:
+                updates[key] = body.get(key)
+        try:
+            return j(handler, update_profile_settings_api(name, **updates))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+
+    if parsed.path == "/api/profile/avatar-settings":
+        from api.profiles import update_profile_avatar_settings_api
+
+        try:
+            return j(handler, update_profile_avatar_settings_api(body, {}))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+
+    # ── Profile Files API (POST) ──
+    if parsed.path == "/api/profile/files":
+        return _handle_profile_file_write(handler, body)
 
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
@@ -6321,6 +6754,24 @@ def handle_delete(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "DELETE")
         return True
+
+    if parsed.path == "/api/profile/gateway/platform":
+        qs = parse_qs(parsed.query)
+        name = (qs.get("name", [""])[0] or "").strip()
+        platform_key = (qs.get("platform", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        if not platform_key:
+            return bad(handler, "platform is required")
+        try:
+            from api.profiles import _clear_platform_for_profile
+            data = _clear_platform_for_profile(name, platform_key)
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+        return j(handler, data)
+
     return False
 
 
@@ -8131,6 +8582,67 @@ def _handle_memory_read(handler):
             "soul_mtime": soul_file.stat().st_mtime if soul_file.exists() else None,
         },
     )
+
+
+# ── Profile file read/write ──────────────────────────────────────────────────
+
+_PROFILE_FILE_WHITELIST = {"SOUL.md", "config.yaml", ".env", "memories/MEMORY.md", "memories/USER.md"}
+
+
+def _handle_profile_file_read(handler, parsed):
+    """Read a whitelisted file from a named profile directory."""
+    from api.profiles import _resolve_profile_home_for_name
+    from urllib.parse import parse_qs
+    qs = parse_qs(parsed.query)
+    name = qs.get("name", [""])[0].strip()
+    filename = qs.get("file", [""])[0].strip()
+    if not filename:
+        return bad(handler, "file is required")
+    if filename not in _PROFILE_FILE_WHITELIST:
+        return bad(handler, f"File not editable: {filename}", 403)
+    try:
+        profile_home = _resolve_profile_home_for_name(name or "default")
+    except Exception as e:
+        return bad(handler, str(e), 404)
+    target = (profile_home / filename).resolve()
+    try:
+        target.relative_to(profile_home.resolve())
+    except ValueError:
+        return bad(handler, "Invalid file path", 403)
+    if not target.exists():
+        return j(handler, {"content": "", "file": filename, "profile": name or "default", "exists": False})
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+        return j(handler, {"content": content, "file": filename, "profile": name or "default", "exists": True})
+    except (PermissionError, OSError) as e:
+        return bad(handler, str(e))
+
+
+def _handle_profile_file_write(handler, body):
+    """Write content to a whitelisted file in a named profile directory."""
+    from api.profiles import _resolve_profile_home_for_name
+    name = body.get("name", "").strip()
+    filename = body.get("file", "").strip()
+    content = body.get("content", "")
+    if not filename:
+        return bad(handler, "file is required")
+    if filename not in _PROFILE_FILE_WHITELIST:
+        return bad(handler, f"File not editable: {filename}", 403)
+    try:
+        profile_home = _resolve_profile_home_for_name(name or "default")
+    except Exception as e:
+        return bad(handler, str(e), 404)
+    target = (profile_home / filename).resolve()
+    try:
+        target.relative_to(profile_home.resolve())
+    except ValueError:
+        return bad(handler, "Invalid file path", 403)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.write_text(content, encoding="utf-8")
+        return j(handler, {"ok": True, "file": filename, "profile": name or "default"})
+    except (PermissionError, OSError) as e:
+        return bad(handler, str(e))
 
 
 # ── POST route helpers ────────────────────────────────────────────────────────
