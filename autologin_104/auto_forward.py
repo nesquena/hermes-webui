@@ -636,23 +636,42 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
     btn_ready = False
     for i in range(20):
         await asyncio.sleep(1)
-        if await cdp_eval(ws_url, """
+        found_by = await cdp_eval(ws_url, """
             (function() {
+                // 優先：找含 vip-icon-forward 圖示的按鈕（不受文字/letterSpacing影響）
+                const iconEl = document.querySelector('.vip-icon-forward');
+                if (iconEl) {
+                    const btn = iconEl.closest('button, [role="button"]') || iconEl.parentElement;
+                    if (btn) {
+                        const r = btn.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) return 'icon';
+                    }
+                }
+                // 備援：文字比對
                 const btns = document.querySelectorAll('button, aot-button, [role="button"]');
                 for (const b of btns) {
                     const r = b.getBoundingClientRect();
                     if (r.width === 0 && r.height === 0) continue;
                     const t = (b.innerText || b.textContent || b.getAttribute('label') || '').replace(/\s+/g, '');
-                    if (t === '轉寄') return true;
+                    if (t === '轉寄') return 'text';
                 }
-                return false;
+                return null;
             })()
-        """):
+        """)
+        if found_by:
             btn_ready = True
-            print(f'    ✓ 轉寄 按鈕已渲染 ({i+1}s)')
+            print(f'    ✓ 轉寄 按鈕已渲染 ({i+1}s, by={found_by})')
             break
     if not btn_ready:
-        print(f'    ✗ 等不到 轉寄 按鈕')
+        debug_btns = await cdp_eval(ws_url, """
+            (function() {
+                const btns = Array.from(document.querySelectorAll('button, aot-button, [role="button"]'));
+                const vis = btns.filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+                    .map(b => (b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 20));
+                return JSON.stringify(vis.slice(0, 15));
+            })()
+        """)
+        print(f'    ✗ 等不到 轉寄 按鈕，頁面可見按鈕：{debug_btns}')
         return False
     await asyncio.sleep(3)  # 多等讓 Vue 綁定事件
 
@@ -678,6 +697,19 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
     # 2. 點擊 轉寄 按鈕（試多種方式直到 picker 開啟）
     btn_coords = await cdp_eval(ws_url, """
         (function() {
+            // 優先：vip-icon-forward 圖示
+            const iconEl = document.querySelector('.vip-icon-forward');
+            if (iconEl) {
+                const btn = iconEl.closest('button, [role="button"]') || iconEl.parentElement;
+                if (btn) {
+                    const r = btn.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) {
+                        btn.focus && btn.focus();
+                        return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
+                    }
+                }
+            }
+            // 備援：文字比對
             const btns = document.querySelectorAll('button, aot-button, [role="button"]');
             for (const b of btns) {
                 const r = b.getBoundingClientRect();
@@ -712,6 +744,13 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
         elif method == 'js_click':
             await cdp_eval(ws_url, """
                 (function() {
+                    // 優先：vip-icon-forward 圖示
+                    const iconEl = document.querySelector('.vip-icon-forward');
+                    if (iconEl) {
+                        const btn = iconEl.closest('button, [role="button"]') || iconEl.parentElement;
+                        if (btn) { btn.click(); return true; }
+                    }
+                    // 備援：文字比對
                     const btns = document.querySelectorAll('button');
                     for (const b of btns) {
                         const r = b.getBoundingClientRect();
