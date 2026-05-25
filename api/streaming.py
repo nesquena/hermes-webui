@@ -3696,6 +3696,18 @@ def _run_agent_streaming(
                 stats.setdefault('estimated', False)
                 put('metering', stats)
 
+            def _compact_for_echo_compare(value: str) -> str:
+                return re.sub(r'\s+', ' ', str(value or '')).strip()
+
+            def _is_visible_output_echo(text: str) -> bool:
+                candidate = _compact_for_echo_compare(text)
+                if not candidate:
+                    return False
+                visible_tail = _compact_for_echo_compare(
+                    STREAM_PARTIAL_TEXT.get(stream_id, '')[-max(len(str(text)) * 2, 512):]
+                )
+                return bool(visible_tail and visible_tail.endswith(candidate))
+
             def on_token(text):
                 nonlocal _token_sent
                 if text is None:
@@ -3716,11 +3728,18 @@ def _run_agent_streaming(
                 nonlocal _reasoning_text
                 if text is None:
                     return
-                _reasoning_text += str(text)
+                reasoning_delta = str(text)
+                # Some runtimes mirror user-visible progress text through the
+                # reasoning channel after it already streamed as normal assistant
+                # output. Treat that as an echo, otherwise the UI renders the
+                # same sentence again inside a Thinking card.
+                if _is_visible_output_echo(reasoning_delta):
+                    return
+                _reasoning_text += reasoning_delta
                 # Mirror to shared dict so cancel_stream() can persist it (#1361 §A)
                 if stream_id in STREAM_REASONING_TEXT:
-                    STREAM_REASONING_TEXT[stream_id] += str(text)
-                put('reasoning', {'text': str(text)})
+                    STREAM_REASONING_TEXT[stream_id] += reasoning_delta
+                put('reasoning', {'text': reasoning_delta})
                 # Track reasoning deltas in the meter so live TPS reflects all AI output.
                 _metering_reasoning_deltas[0] += 1
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
@@ -3732,9 +3751,10 @@ def _run_agent_streaming(
                 visible = str(text).strip()
                 if not visible:
                     return
+                already_streamed = bool(cb_kwargs.get('already_streamed', False)) or _is_visible_output_echo(visible)
                 put('interim_assistant', {
                     'text': visible,
-                    'already_streamed': bool(cb_kwargs.get('already_streamed', False)),
+                    'already_streamed': already_streamed,
                 })
 
             # Pre-initialise the activity counter here so on_tool (which
@@ -3804,11 +3824,17 @@ def _run_agent_streaming(
                 if event_type in ('reasoning.available', '_thinking'):
                     reason_text = preview if event_type == 'reasoning.available' else name
                     if reason_text:
-                        _reasoning_text += str(reason_text)
+                        reason_delta = str(reason_text)
+                        # Older tool-progress paths can mirror the same visible
+                        # progress text already emitted through stream_delta_callback.
+                        # Suppress those echoes like the dedicated reasoning callback.
+                        if _is_visible_output_echo(reason_delta):
+                            return
+                        _reasoning_text += reason_delta
                         # Mirror to shared dict so cancel_stream() can persist it (#1361 §A)
                         if stream_id in STREAM_REASONING_TEXT:
-                            STREAM_REASONING_TEXT[stream_id] += str(reason_text)
-                        put('reasoning', {'text': str(reason_text)})
+                            STREAM_REASONING_TEXT[stream_id] += reason_delta
+                        put('reasoning', {'text': reason_delta})
                         _metering_reasoning_deltas[0] += 1
                         meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
                         _emit_metering()

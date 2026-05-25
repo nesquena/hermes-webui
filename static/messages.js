@@ -609,10 +609,11 @@ async function send(){
 
 const LIVE_STREAMS={};
 
-function closeLiveStream(sessionId, streamId){
+function closeLiveStream(sessionId, streamId, source){
   const live=LIVE_STREAMS[sessionId];
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
+  if(source&&live.source!==source) return;
   try{live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
 }
@@ -747,8 +748,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_persistTimer) return;
     _persistTimer=setTimeout(()=>{_persistTimer=null;persistInflightState();},2000);
   }
-  function _closeSource(){
-    closeLiveStream(activeSid, streamId);
+  function _closeSource(source){
+    closeLiveStream(activeSid, streamId, source);
   }
   function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
@@ -1455,6 +1456,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
+    const existingLive=LIVE_STREAMS[activeSid];
+    if(existingLive&&existingLive.source&&existingLive.source!==source){
+      try{existingLive.source.close();}catch(_){ }
+    }
+    LIVE_STREAMS[activeSid]={streamId,source};
+
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
     // the accumulators here so the re-sent tokens wouldn't double the prefix.
@@ -1880,7 +1887,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('stream_end',async e=>{
       if(_streamFinalized){
-        source.close();
+        _closeSource(source);
         return;
       }
       _terminalStateReached=true;
@@ -1893,8 +1900,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // live DOM/inflight state remains projected and can duplicate Thinking or
       // assistant content until a later session switch. Settle from the persisted
       // session before closing so the pane converges on canonical state.
-      if(await _restoreSettledSession()){
-        source.close();
+      if(await _restoreSettledSession(source)){
         return;
       }
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -1903,7 +1909,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      source.close();
+      _closeSource(source);
     });
 
     source.addEventListener('pending_steer_leftover',e=>{
@@ -2032,7 +2038,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
-      source.close();
+      _closeSource(source);
       _clearOwnerInflightState();
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
@@ -2081,13 +2087,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('error',async e=>{
       if(_terminalStateReached || _streamFinalized){
-        _closeSource();
+        _closeSource(source);
         return;
       }
       if(typeof recordClientSSEError==='function') recordClientSSEError('chat-response',{ready_state:source?source.readyState:null,session_id:activeSid,stream_id:streamId,reason:'chat EventSource.onerror'});
       source.close();
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden()) return;
+      _closeSource(source);
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
@@ -2108,17 +2115,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }catch(_){
             if(_deferStreamErrorIfOffline()) return;
           }
-          if(await _restoreSettledSession()) return;
+          if(await _restoreSettledSession(source)) return;
           if(_deferStreamErrorIfOffline()) return;
           if(_deferStreamErrorIfPageHidden()) return;
-          _handleStreamError();
+          _handleStreamError(source);
         },1500);
         return;
       }
-      if(await _restoreSettledSession()) return;
+      if(await _restoreSettledSession(source)) return;
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden()) return;
-      _handleStreamError();
+      _handleStreamError(source);
     });
 
     source.addEventListener('cancel',e=>{
@@ -2129,7 +2136,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _streamFadeCleanupReduceMotionListener();
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
-      source.close();
+      _closeSource(source);
       _clearOwnerInflightState();
       _clearApprovalForOwner();
       _clearClarifyForOwner('cancelled');
@@ -2168,7 +2175,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
   }
 
-  async function _restoreSettledSession(){
+  async function _restoreSettledSession(source){
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
@@ -2184,7 +2191,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       _clearOwnerInflightState();
-      _closeSource();
+      _closeSource(source);
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
       const isSessionViewed=_isSessionActivelyViewed(activeSid);
@@ -2231,7 +2238,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
   }
 
-  function _handleStreamError(){
+  function _handleStreamError(source){
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
@@ -2240,7 +2247,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeCleanupReduceMotionListener();
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     _clearOwnerInflightState();
-    _closeSource();
+    _closeSource(source);
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
     if(S.session&&S.session.session_id===activeSid){

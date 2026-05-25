@@ -99,8 +99,8 @@ def test_stream_end_without_done_restores_settled_session_before_closing():
     never replaces the pane with the persisted transcript when done is missing.
     """
     body = _event_body("stream_end")
-    restore_idx = body.find("_restoreSettledSession()")
-    close_idx = body.rfind("source.close()")
+    restore_idx = body.find("_restoreSettledSession(source)")
+    close_idx = body.rfind("_closeSource(source)")
     finalized_idx = body.find("_streamFinalized=true")
     assert restore_idx != -1, "stream_end handler must restore settled session when done is absent"
     assert close_idx != -1, "stream_end handler must still close the EventSource"
@@ -121,3 +121,29 @@ def test_done_handler_is_idempotent_for_replay_or_duplicate_done_events():
     assert guard_idx != -1 and guard_idx < sound_idx, (
         "completion sound must be behind the duplicate-done finalization guard"
     )
+
+
+def test_attach_live_stream_registers_one_source_per_session_stream():
+    """Reconnect/compaction paths must not stack same-stream EventSources.
+
+    The stream channel broadcasts each token to every subscriber. If the browser
+    opens four live EventSources for the same run, one assistant paragraph is
+    appended four times even though the run journal contains it once.
+    """
+    close_body = _function_body("closeLiveStream")
+    attach_body = _function_body("attachLiveStream")
+    wire_body = _function_body("_wireSSE")
+    error_body = _event_body("error")
+
+    assert "const LIVE_STREAMS={};" in MESSAGES_JS
+    assert "LIVE_STREAMS[activeSid]={streamId,source};" in wire_body
+    assert "existingLive.source.close();" in wire_body
+    assert "if(source&&live.source!==source) return;" in close_body
+    assert "existingLive&&existingLive.streamId===streamId" in attach_body
+    assert "_restoreSettledSession(source)" in error_body
+    assert "_handleStreamError(source)" in error_body
+    assert "_closeSource(source);" in error_body
+    assert "function _restoreSettledSession(source)" in attach_body
+    assert "function _handleStreamError(source)" in attach_body
+    for event_name in ("stream_end", "apperror", "cancel"):
+        assert "_closeSource(source);" in _event_body(event_name), event_name

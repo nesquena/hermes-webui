@@ -176,7 +176,7 @@ class TestReconnectAccumulatorPreservation:
         It calls renderMessages() which settles the DOM. Any pending rAF must be
         cancelled before that renderMessages call — same as done/apperror/cancel."""
         src = read('static/messages.js')
-        m = re.search(r'function _handleStreamError\(\)\{.*?\n  \}', src, re.DOTALL)
+        m = re.search(r'function _handleStreamError\([^)]*\)\{.*?\n  \}', src, re.DOTALL)
         assert m, "_handleStreamError not found"
         fn = m.group(0)
         assert '_streamFinalized=true' in fn or '_streamFinalized = true' in fn, (

@@ -681,7 +681,7 @@ def test_streaming_persists_reasoning_in_session():
         "_reasoning_text variable not initialised in streaming.py"
 
     # on_reasoning must accumulate into _reasoning_text
-    assert '_reasoning_text += str(text)' in src, \
+    assert '_reasoning_text += reasoning_delta' in src, \
         "on_reasoning callback does not accumulate into _reasoning_text"
 
     # Persistence block must exist before raw_session is built
