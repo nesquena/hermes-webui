@@ -1,4 +1,4 @@
-"""Tests for registered skill-chip highlighting and composer preview contracts."""
+"""Tests for registered skill-chip highlighting in conversation messages."""
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,7 +31,7 @@ def test_postprocess_invokes_skill_highlighter():
 
 
 def test_skill_highlighter_supports_requested_token_forms():
-    """Matcher should support slash, bare, and inline-code skill mentions."""
+    """Conversation matcher should support slash, bare, and inline-code skill mentions."""
     skills = read("static/skills.js")
 
     assert "`\\/?([A-Za-z0-9][A-Za-z0-9_-]*)`" in skills
@@ -41,7 +41,7 @@ def test_skill_highlighter_supports_requested_token_forms():
 
 
 def test_skill_chip_truncates_slash_and_code_markers():
-    """Chip label should strip presentation markers from slash/code forms."""
+    """Conversation chip label should strip presentation markers from slash/code forms."""
     skills = read("static/skills.js")
     assert "chip.textContent = skill.name;" in skills
     assert "chip.textContent = matchedText;" not in skills
@@ -62,21 +62,27 @@ def test_skill_highlighter_allows_inline_code_but_skips_blocks_and_links():
     assert "'CODE'" not in skip_line
 
 
-def test_skill_chip_styles_present():
-    """CSS must provide visual chip style and composer preview style."""
+def test_skill_chip_styles_present_for_conversation_view():
+    """CSS must provide conversation chip style without composer-specific chip overlay styles."""
     css = read("static/style.css")
     assert ".skill-chip{" in css, "Missing .skill-chip rule"
     assert ".skill-chip:hover{" in css, "Missing .skill-chip:hover rule"
-    assert ".composer-skill-overlay{" in css, "Missing composer skill overlay rule"
+    assert ".composer-skill-overlay" not in css
+    assert ".composer-overlay-token" not in css
 
 
-def test_composer_remains_native_textarea_contract():
-    """The chat composer must remain a native textarea with no contenteditable shim."""
+def test_composer_remains_plain_native_textarea_contract():
+    """The chat composer must stay a native textarea with no contenteditable or chip overlay."""
     html = read("static/index.html")
     ui = read("static/ui.js")
     css = read("static/style.css")
+    skills = read("static/skills.js")
+    boot = read("static/boot.js")
+    commands = read("static/commands.js")
+    messages = read("static/messages.js")
 
     assert '<textarea id="msg"' in html
+    assert 'id="composerSkillOverlay"' not in html
     assert 'contenteditable="true"' not in html
     assert 'id="msg" class="composer-editor"' not in html
     assert "Object.defineProperty(el,'value'" not in ui
@@ -86,6 +92,20 @@ def test_composer_remains_native_textarea_contract():
     assert "#msg.composer-editor" not in css
     assert "textarea#msg" in css
 
+    forbidden = [
+        "COMPOSER_SKILL_TOKEN_RE",
+        "findCompletedComposerSkillMentions",
+        "updateComposerSkillPreview",
+        "renderComposerSkillOverlay",
+        "composer-overlay-token",
+        "initComposerSkillOverlayScrollSync",
+    ]
+    for token in forbidden:
+        assert token not in skills
+        assert token not in boot
+        assert token not in commands
+        assert token not in messages
+
 
 def test_workspace_drop_can_use_textarea_selection_api():
     """Workspace path drops should still target native textarea selection APIs safely."""
@@ -93,44 +113,3 @@ def test_workspace_drop_can_use_textarea_selection_api():
     assert "msgEl.selectionStart" in panels
     assert "msgEl.selectionEnd" in panels
     assert "msgEl.selectionStart=msgEl.selectionEnd" in panels
-
-
-def test_composer_skill_overlay_uses_whitespace_completed_mentions():
-    """Composer chips are inline overlay rendering for completed mentions, not editor replacements."""
-    html = read("static/index.html")
-    skills = read("static/skills.js")
-    boot = read("static/boot.js")
-    commands = read("static/commands.js")
-    css = read("static/style.css")
-
-    assert 'id="composerSkillOverlay"' in html
-    assert "function updateComposerSkillPreview" in skills
-    assert "function renderComposerSkillOverlay" in skills
-    assert "composer-overlay-token" in skills
-    assert "composer-overlay-token-raw" not in skills
-    assert "rawMatch" not in skills
-    assert ".skill-chip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:12px;cursor:default;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;}" in css
-    assert ".composer-skill-overlay .skill-chip{font-size:inherit;line-height:inherit;font-weight:inherit;padding:0;border:none;box-shadow:0 0 0 1px var(--border2),0 0 0 3px var(--input-bg);vertical-align:baseline;margin:0;}" in css
-    assert "const COMPOSER_SKILL_TOKEN_RE = /(^|\\s)(\\/([A-Za-z0-9][A-Za-z0-9_-]*))(?=\\s)/g;" in skills
-    assert "const raw = m[2] || '';" in skills
-    assert "const token = m[3] || '';" in skills
-    assert "token.appendChild(createSkillChip({name: mention.raw" in skills
-    assert "updateComposerSkillPreview();" in boot
-    assert "updateComposerSkillPreview({force:true});" not in commands
-    assert "replaceChild(textNode,chip)" not in skills
-
-
-def test_composer_overlay_preserves_direct_slash_skill_mentions():
-    """Completed /skill mentions should remain direct slash tokens so chip width matches caret text."""
-    skills = read("static/skills.js")
-    assert "function normalizeCompletedComposerSkillMentions" not in skills
-    assert "textarea.setSelectionRange(nextSelection, nextSelection);" not in skills
-    assert "normalizeCompletedComposerSkillMentions(textarea);" not in skills
-
-def test_composer_preview_avoids_prefix_overlap_by_waiting_for_whitespace():
-    """Prefix-overlapping skills should not mismatch because unfinished tokens are ignored."""
-    skills = read("static/skills.js")
-    assert "COMPOSER_SKILL_TOKEN_RE" in skills
-    assert "(?=\\s)" in skills
-    assert "startsWith(slug)" not in skills
-    assert "startsWith(slug)" not in read("static/ui.js")

@@ -1297,7 +1297,7 @@ function refreshSlashCommandDropdown(){
 }
 function ensureSkillCommandsLoadedForAutocomplete(){
   if(_skillCommandCacheReady||_skillCommandLoadPromise)return;
-  loadSkillCommands().then(()=>{refreshSlashCommandDropdown();if(typeof updateComposerSkillPreview==='function')updateComposerSkillPreview();});
+  loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
   // Also preload agent/plugin command metadata for autocomplete
   if(!_agentCommandCacheReady&&!_agentCommandCachePromise){
     loadAgentCommandMetadata().then(()=>{refreshSlashCommandDropdown();});
@@ -1332,7 +1332,6 @@ function showCmdDropdown(matches){
       e.preventDefault();
       const nextValue=isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':''));
       $('msg').value=nextValue;
-      if(typeof updateComposerSkillPreview==='function')updateComposerSkillPreview();
       $('msg').focus();
       if(!isSubArg&&c.source!=='skill'&&nextValue.endsWith(' ')&&typeof getSlashAutocompleteMatches==='function'){
         getSlashAutocompleteMatches(nextValue).then(matches=>{
