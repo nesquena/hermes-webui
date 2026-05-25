@@ -101,10 +101,15 @@ def test_composer_skill_overlay_uses_whitespace_completed_mentions():
     skills = read("static/skills.js")
     boot = read("static/boot.js")
     commands = read("static/commands.js")
+    css = read("static/style.css")
 
     assert 'id="composerSkillOverlay"' in html
     assert "function updateComposerSkillPreview" in skills
     assert "function renderComposerSkillOverlay" in skills
+    assert "composer-overlay-token" in skills
+    assert "composer-overlay-token-raw" in skills
+    assert "position:absolute" in css
+    assert "visibility:hidden" in css
     assert "function findCompletedComposerSkillMentions" in skills
     assert "COMPOSER_SKILL_TOKEN_RE" in skills
     assert "(?=\\s)" in skills

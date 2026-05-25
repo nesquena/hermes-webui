@@ -182,12 +182,27 @@ function appendOverlayText(fragment, text) {
   fragment.appendChild(span);
 }
 
+function createComposerOverlayToken(rawText, skill) {
+  const token = document.createElement('span');
+  token.className = 'composer-overlay-token';
+
+  const raw = document.createElement('span');
+  raw.className = 'composer-overlay-token-raw';
+  raw.textContent = rawText;
+  token.appendChild(raw);
+
+  const chip = createSkillChip(skill);
+  chip.classList.add('composer-overlay-token-chip');
+  token.appendChild(chip);
+  return token;
+}
+
 function renderComposerSkillOverlay(text, mentions) {
   const fragment = document.createDocumentFragment();
   let last = 0;
   for(const mention of mentions){
     appendOverlayText(fragment, text.slice(last, mention.start));
-    fragment.appendChild(createSkillChip(mention.skill));
+    fragment.appendChild(createComposerOverlayToken(text.slice(mention.start, mention.end), mention.skill));
     last = mention.end;
   }
   appendOverlayText(fragment, text.slice(last));
