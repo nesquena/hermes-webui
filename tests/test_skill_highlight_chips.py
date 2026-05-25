@@ -110,7 +110,7 @@ def test_composer_skill_overlay_uses_whitespace_completed_mentions():
     assert "composer-overlay-token-raw" not in skills
     assert "rawMatch" not in skills
     assert ".skill-chip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:12px;cursor:default;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;}" in css
-    assert ".composer-skill-overlay .skill-chip{vertical-align:baseline;margin:0;}" in css
+    assert ".composer-skill-overlay .skill-chip{font-size:inherit;line-height:inherit;font-weight:inherit;padding:0;border:none;box-shadow:0 0 0 1px var(--border2),0 0 0 3px var(--input-bg);vertical-align:baseline;margin:0;}" in css
     assert "const COMPOSER_SKILL_TOKEN_RE = /(^|\\s)(\\/([A-Za-z0-9][A-Za-z0-9_-]*))(?=\\s)/g;" in skills
     assert "const raw = m[2] || '';" in skills
     assert "const token = m[3] || '';" in skills
