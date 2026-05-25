@@ -2304,7 +2304,7 @@ function transcript(){
   return lines.join('\n');
 }
 
-function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();if(typeof updateComposerSkillChipPreview==='function')updateComposerSkillChipPreview();}
+function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();if(typeof updateComposerSkillPreview==='function')updateComposerSkillPreview();}
 
 
 // ── YOLO mode state ──

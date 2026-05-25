@@ -1,116 +1,122 @@
-"""Tests for message skill-chip highlighting in rendered messages."""
+"""Tests for registered skill-chip highlighting and composer preview contracts."""
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def test_skill_registry_is_single_api_skills_source():
+    """Skill identity should come from one /api/skills registry, not autocomplete cache ownership."""
+    skills = read("static/skills.js")
+    commands = read("static/commands.js")
+    ui = read("static/ui.js")
+
+    assert "async function loadSkillRegistry" in skills
+    assert "await api('/api/skills')" in skills
+    assert "function getSkillByMentionToken" in skills
+    assert "function getSkillAutocompleteEntries" in skills
+    assert "window.loadSkillRegistry" in skills
+    assert "getSkillAutocompleteEntries()" in commands
+    assert "await api('/api/skills')" not in commands
+    assert "_skillCommandCache" not in ui
 
 
 def test_postprocess_invokes_skill_highlighter():
-    """postProcessRenderedMessages should invoke skill highlighting."""
-    with open("static/ui.js", "r", encoding="utf-8") as f:
-        content = f.read()
-    assert "highlightSkillsInMessages(container);" in content, (
-        "postProcessRenderedMessages must call highlightSkillsInMessages"
-    )
-
-
-def test_skill_highlighter_uses_api_skills_cache():
-    """Skill chip source should be loaded from /api/skills with caching fields."""
-    with open("static/ui.js", "r", encoding="utf-8") as f:
-        content = f.read()
-
-    assert "async function _loadSkillMentions()" in content
-    assert "await api('/api/skills')" in content
-    assert "_skillMentionCacheReady" in content
-    assert "_skillMentionCacheLoadPromise" in content
-    assert "if(skill && skill.disabled) continue;" in content
-    assert "_SKILL_MENTION_TOKEN_RE" in content
-    assert "root.textContent && root.textContent.includes('/')" not in content
+    """postProcessRenderedMessages should invoke registered skill highlighting."""
+    ui = read("static/ui.js")
+    assert "highlightSkillsInMessages(container);" in ui
 
 
 def test_skill_highlighter_supports_requested_token_forms():
     """Matcher should support slash, bare, and inline-code skill mentions."""
-    with open("static/ui.js", "r", encoding="utf-8") as f:
-        content = f.read()
+    skills = read("static/skills.js")
 
-    assert "`\\/?([A-Za-z0-9][A-Za-z0-9_-]*)`" in content
-    assert "\\/?([A-Za-z0-9][A-Za-z0-9_-]*)" in content
-    assert "const matchedText = m[2] || '';" in content
-    assert "const skillName = m[3] || m[4] || '';" in content
+    assert "`\\/?([A-Za-z0-9][A-Za-z0-9_-]*)`" in skills
+    assert "\\/?([A-Za-z0-9][A-Za-z0-9_-]*)" in skills
+    assert "const matchedText = m[2] || '';" in skills
+    assert "const skillName = m[3] || m[4] || '';" in skills
 
 
 def test_skill_chip_truncates_slash_and_code_markers():
     """Chip label should strip presentation markers from slash/code forms."""
-    with open("static/ui.js", "r", encoding="utf-8") as f:
-        content = f.read()
-
-    assert "chip.textContent = skillName;" in content
-    assert "chip.textContent = matchedText;" not in content
+    skills = read("static/skills.js")
+    assert "chip.textContent = skill.name;" in skills
+    assert "chip.textContent = matchedText;" not in skills
 
 
 def test_inline_code_wrapper_is_replaced_by_skill_chip():
     """Inline code skill mentions should not leave a <code> wrapper around the chip."""
-    with open("static/ui.js", "r", encoding="utf-8") as f:
-        content = f.read()
-
-    assert "const codeParent = _nearestInlineSkillMentionCodeParent(node);" in content
-    assert "codeParent.parentNode.replaceChild(chip, codeParent);" in content
+    skills = read("static/skills.js")
+    assert "const codeParent = nearestInlineSkillMentionCodeParent(node);" in skills
+    assert "codeParent.parentNode.replaceChild(chip, codeParent);" in skills
 
 
 def test_skill_highlighter_allows_inline_code_but_skips_blocks_and_links():
     """Inline backtick-rendered code can be chipped, but blocks/links remain protected."""
-    with open("static/ui.js", "r", encoding="utf-8") as f:
-        content = f.read()
-
-    skip_line = "const _SKILL_MENTION_SKIP_TAGS = new Set(['PRE', 'A', 'SCRIPT', 'STYLE', 'TEXTAREA', 'INPUT', 'BUTTON']);"
-    assert skip_line in content
+    skills = read("static/skills.js")
+    skip_line = "const SKILL_MENTION_SKIP_TAGS = new Set(['PRE', 'A', 'SCRIPT', 'STYLE', 'TEXTAREA', 'INPUT', 'BUTTON']);"
+    assert skip_line in skills
     assert "'CODE'" not in skip_line
 
 
 def test_skill_chip_styles_present():
-    """CSS must provide visual chip style for highlighted skills."""
-    with open("static/style.css", "r", encoding="utf-8") as f:
-        css = f.read()
-
+    """CSS must provide visual chip style and composer preview style."""
+    css = read("static/style.css")
     assert ".skill-chip{" in css, "Missing .skill-chip rule"
     assert ".skill-chip:hover{" in css, "Missing .skill-chip:hover rule"
+    assert ".composer-skill-preview{" in css, "Missing composer skill preview rule"
 
 
-def test_composer_skill_chip_editor_is_wired_to_autocomplete():
-    """The chat composer should render skill chips in-place while preserving #msg.value."""
-    with open("static/index.html", "r", encoding="utf-8") as f:
-        html = f.read()
-    with open("static/ui.js", "r", encoding="utf-8") as f:
-        ui = f.read()
-    with open("static/commands.js", "r", encoding="utf-8") as f:
-        commands = f.read()
-    with open("static/style.css", "r", encoding="utf-8") as f:
-        css = f.read()
+def test_composer_remains_native_textarea_contract():
+    """The chat composer must remain a native textarea with no contenteditable shim."""
+    html = read("static/index.html")
+    ui = read("static/ui.js")
+    css = read("static/style.css")
 
-    assert 'id="msg" class="composer-editor"' in html
-    assert "Object.defineProperty(el,'value'" in ui
-    assert "function _renderComposerSkillChips(opts={})" in ui
-    assert "chip.dataset.raw=raw;" in ui
-    assert "raw.slice(0,-1)" in ui
-    assert "function renderComposerSkillChips(opts={})" in commands
-    assert "renderComposerSkillChips();" in commands
-    assert "#msg.composer-editor" in css
+    assert '<textarea id="msg"' in html
+    assert 'contenteditable="true"' not in html
+    assert 'id="msg" class="composer-editor"' not in html
+    assert "Object.defineProperty(el,'value'" not in ui
+    assert "Object.defineProperty(el, 'value'" not in ui
+    assert "setSelectionRange=function" not in ui
+    assert "composer-editor" not in ui
+    assert "#msg.composer-editor" not in css
+    assert "textarea#msg" in css
 
 
-def test_composer_skill_chips_only_render_after_whitespace_boundary():
-    """Composer skill chips should render only after whitespace confirms token completion."""
-    with open("static/ui.js", "r", encoding="utf-8") as f:
-        ui = f.read()
-    with open("static/commands.js", "r", encoding="utf-8") as f:
-        commands = f.read()
-
-    assert "_composerSkillTokenHasWhitespaceBoundary(text,end)" in ui
-    assert "if(!opts.allowPrefixExact&&!_composerSkillTokenHasWhitespaceBoundary(text,end)) continue;" in ui
-    assert "String(skill.name||'').startsWith(slug)" not in ui
-    assert "renderComposerSkillChips(c.source==='skill'?{allowPrefixExact:true}:{})" in commands
+def test_workspace_drop_can_use_textarea_selection_api():
+    """Workspace path drops should still target native textarea selection APIs safely."""
+    panels = read("static/panels.js")
+    assert "msgEl.selectionStart" in panels
+    assert "msgEl.selectionEnd" in panels
+    assert "msgEl.selectionStart=msgEl.selectionEnd" in panels
 
 
-def test_composer_backspace_chip_reverts_before_browser_deletes_node():
-    """Backspace around a chip should convert it to shortened plain text."""
-    with open("static/ui.js", "r", encoding="utf-8") as f:
-        ui = f.read()
+def test_composer_skill_preview_uses_whitespace_completed_mentions():
+    """Composer chips are previews for completed mentions, not in-editor replacements."""
+    html = read("static/index.html")
+    skills = read("static/skills.js")
+    boot = read("static/boot.js")
+    commands = read("static/commands.js")
 
-    assert "const revertChipForBackspace=e=>" in ui
-    assert "deleteContentBackward" in ui
-    assert "chip.parentNode.replaceChild(textNode,chip);" in ui
+    assert 'id="composerSkillPreview"' in html
+    assert "function updateComposerSkillPreview" in skills
+    assert "function findCompletedComposerSkillMentions" in skills
+    assert "COMPOSER_SKILL_TOKEN_RE" in skills
+    assert "(?=\\s)" in skills
+    assert "opts && opts.force" in skills
+    assert "updateComposerSkillPreview();" in boot
+    assert "updateComposerSkillPreview({force:true});" in commands
+    assert "replaceChild(textNode,chip)" not in skills
+
+
+def test_composer_preview_avoids_prefix_overlap_by_waiting_for_whitespace():
+    """Prefix-overlapping skills should not mismatch because unfinished tokens are ignored."""
+    skills = read("static/skills.js")
+    assert "COMPOSER_SKILL_TOKEN_RE" in skills
+    assert "(?=\\s)" in skills
+    assert "startsWith(slug)" not in skills
+    assert "startsWith(slug)" not in read("static/ui.js")

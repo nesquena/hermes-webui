@@ -513,8 +513,8 @@
   /* Light mode: override white user-bubble-text so textarea text is black */
   :root[data-skin="geist-contrast"]:not(.dark){--user-bubble-text:#111111;}
   /* Remove scrollbar from composer */
-  :root[data-skin="geist-contrast"] #msg.composer-editor{scrollbar-width:none;overflow-y:auto;}
-  :root[data-skin="geist-contrast"] #msg.composer-editor::-webkit-scrollbar{display:none;}
+  :root[data-skin="geist-contrast"] textarea#msg{scrollbar-width:none;overflow-y:auto;}
+  :root[data-skin="geist-contrast"] textarea#msg::-webkit-scrollbar{display:none;}
 
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
@@ -1397,9 +1397,12 @@
   @media (hover: hover) {
     .attach-thumb:hover{filter:brightness(1.05);transform:scale(1.04);}
   }
-#msg.composer-editor{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:16px;line-height:1.65;padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;overflow-y:auto;white-space:pre-wrap;word-break:break-word;}
-#msg.composer-editor:empty::before{content:attr(data-placeholder);color:var(--muted);pointer-events:none;}
-#msg.composer-editor .skill-chip{font-size:12px;vertical-align:baseline;margin:0 1px;}
+.composer-input-shell{display:flex;flex-direction:column;min-width:0;width:100%;}
+textarea#msg{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:16px;line-height:1.65;padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;overflow-y:auto;}
+textarea#msg::placeholder{color:var(--muted);opacity:1;}
+.composer-skill-preview{display:flex;flex-wrap:wrap;gap:4px;padding:0 12px 6px;min-height:0;}
+.composer-skill-preview[hidden]{display:none!important;}
+.composer-skill-preview .skill-chip{font-size:11px;}
 .composer-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px 10px;position:relative;container-type:inline-size;container-name:composer-footer;}
   .composer-left{display:flex;align-items:center;gap:4px;min-width:0;flex:1;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;}
   .composer-left::-webkit-scrollbar{display:none;}
