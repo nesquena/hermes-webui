@@ -668,7 +668,10 @@ def _recovery_toggle_output_compaction_receipt(
     safe_action = _context_value(action, 120) or "space.recovery.action"
     safe_space_id = _context_value(space_id, 120) or "unknown-space"
     safe_target_kind = _context_value(target_kind, 40) or "space"
-    safe_target_id = _context_value(target_id, 120) if target_id is not None else None
+    if target_id is not None and safe_target_kind == "module":
+        safe_target_id = _public_module_id_summary(target_id)
+    else:
+        safe_target_id = _context_value(target_id, 120) if target_id is not None else None
     lines = [
         "recovery_toggle: recorded",
         "metadata_only: true",
@@ -9926,12 +9929,26 @@ def disable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str
     _atomic_write_json(_recovery_module_path(mid), module)
     summary = _module_summary(module)
     action = "space.module.recovery.disable"
-    summary["prompt_preflight"] = _recovery_required_prompt_preflight_receipt(action)
-    summary["progress_event"] = _record_space_recovery_progress_event(
+    prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
+    progress_event = _record_space_recovery_progress_event(
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
         action="module.disable",
     )
-    summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt(action)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(action)
+    summary["prompt_preflight"] = prompt_preflight
+    summary["progress_event"] = progress_event
+    summary["autonomy_policy"] = autonomy_policy
+    summary["output_compaction"] = _recovery_toggle_output_compaction_receipt(
+        action=action,
+        space_id=_RECOVERY_MODULE_PROGRESS_SPACE_ID,
+        target_kind="module",
+        target_id=mid,
+        disabled=True,
+        revision_event_id=event_id,
+        prompt_preflight=prompt_preflight,
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_event,
+    )
     return summary
 
 
@@ -9955,12 +9972,26 @@ def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str,
     _atomic_write_json(_recovery_module_path(mid), module)
     summary = _module_summary(module)
     action = "space.module.recovery.enable"
-    summary["prompt_preflight"] = _recovery_required_prompt_preflight_receipt(action)
-    summary["progress_event"] = _record_space_recovery_progress_event(
+    prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
+    progress_event = _record_space_recovery_progress_event(
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
         action="module.enable",
     )
-    summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt(action)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(action)
+    summary["prompt_preflight"] = prompt_preflight
+    summary["progress_event"] = progress_event
+    summary["autonomy_policy"] = autonomy_policy
+    summary["output_compaction"] = _recovery_toggle_output_compaction_receipt(
+        action=action,
+        space_id=_RECOVERY_MODULE_PROGRESS_SPACE_ID,
+        target_kind="module",
+        target_id=mid,
+        disabled=False,
+        revision_event_id=event_id,
+        prompt_preflight=prompt_preflight,
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_event,
+    )
     return summary
 
 

@@ -3492,6 +3492,65 @@ def test_widget_recovery_toggle_outputs_include_compaction_receipts_metadata_onl
     assert "bearer" not in serialized
 
 
+def test_recovery_module_toggle_outputs_include_compaction_receipts_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "module-compaction-lab",
+            "name": "Module Compaction Lab",
+            "description": "Generated module held for safe recovery review",
+            "scope": "space",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "renderer": "<script>stored()</script>",
+            "html": "<script>stored html</script>",
+            "credentials": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+
+    disabled = spaces.disable_module_for_recovery(
+        "module-compaction-lab",
+        reason="broken renderer <script>bad()</script> with SECRET_VALUE_DO_NOT_LEAK",
+    )
+    enabled = spaces.enable_module_for_recovery(
+        "module-compaction-lab",
+        reason="safe after renderer cleanup with bearer placeholder",
+    )
+    serialized = json.dumps({"disabled": disabled, "enabled": enabled}, sort_keys=True).lower()
+
+    for result, action in [
+        (disabled, "space.module.recovery.disable"),
+        (enabled, "space.module.recovery.enable"),
+    ]:
+        compaction = result["output_compaction"]
+        assert compaction["tool"] == "capy-spaces-recovery-toggle"
+        assert compaction["command"] == action
+        assert compaction["metadata_only"] is True
+        assert compaction["original_chars"] > 0
+        assert compaction["compacted_chars"] <= 700
+        assert compaction["redaction_status"] == "metadata_only"
+        assert compaction["rules_applied"]
+        text = compaction["text"].lower()
+        assert f"action: {action}" in text
+        assert "space_id: recovery-modules" in text
+        assert "target_kind: module" in text
+        assert "target_id: module-compaction-lab" in text
+        assert "raw_prompt_stored: false" in text
+        assert "broken renderer" not in text
+        assert "safe after" not in text
+        handles = compaction["retained_artifact_handles"]
+        assert any(handle.get("handle") == "space:recovery-modules" for handle in handles)
+        assert any(handle.get("handle") == "module:recovery-modules:module-compaction-lab" for handle in handles)
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "bearer" not in serialized
+    assert '"source":' not in serialized
+    assert '"html":' not in serialized
+    assert '"credentials":' not in serialized
+
+
 def test_recovery_module_enable_disable_tools_record_metadata_only_progress_events(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     quarantined = spaces.upsert_recovery_module(
@@ -14107,6 +14166,11 @@ def test_recovery_module_public_summaries_redact_unsafe_module_ids(monkeypatch, 
         assert stored["module_id"] == module_id
         assert module["module_id"] == "[REDACTED]"
         assert disabled["module_id"] == "[REDACTED]"
+        compaction_text = disabled["output_compaction"]["text"].lower()
+        compaction_handles = json.dumps(disabled["output_compaction"].get("retained_artifact_handles", [])).lower()
+        assert "target_id: [redacted]" in compaction_text
+        assert f"target_id: {module_id.lower()}" not in compaction_text
+        assert f":{module_id.lower()}" not in compaction_handles
         returned.extend([module, disabled])
         for event_id in (module["revision_event_id"], disabled["revision_event_id"]):
             event = json.loads((spaces.events_dir() / f"{event_id}.json").read_text(encoding="utf-8"))
