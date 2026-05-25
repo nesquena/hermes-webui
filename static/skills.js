@@ -2,9 +2,9 @@ let _skillRegistryReady = false;
 let _skillRegistryPromise = null;
 let _skillRegistry = new Map();
 
-async function loadSkillRegistry(force=false) {
-  if(_skillRegistryReady && !force) return _skillRegistry;
-  if(_skillRegistryPromise && !force) return _skillRegistryPromise;
+async function loadSkillRegistry() {
+  if(_skillRegistryReady) return _skillRegistry;
+  if(_skillRegistryPromise) return _skillRegistryPromise;
 
   _skillRegistryPromise = (async () => {
     try {
