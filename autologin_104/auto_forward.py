@@ -625,98 +625,49 @@ async def submit_contact_picker(ws_url: str) -> bool:
 
 
 async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_url: str) -> bool:
-    """單一收件人轉寄：navigate → 點轉寄 → 在 picker 選此 email → 送出 → 填說明 → 發送。
+    """單一收件人轉寄流程（依 104 實際 HTML 結構重寫）：
 
-    每次呼叫都會重新 navigate，確保 Vue 完整初始化 click handler。
+    1. navigate 到候選人詳情頁
+    2. 點 sidebar 的「轉寄」按鈕 → 開啟「轉寄」modal
+       - modal 含預設收件者 i00788@fong-yi.com.tw（要先移除）
+    3. 在轉寄 modal：清除預設收件者，點「收件者」aot-tag-selector → 開啟「選擇聯絡人」picker
+    4. 在 picker：搜尋 email → 勾選 checkbox → 點「送出」關閉 picker
+    5. 回到轉寄 modal：填說明 textarea
+    6. 點「發送」aot-button
     """
-    # 1. 重新 navigate（即使是同一 URL，Page.navigate 會強制重新載入）
-    await navigate(ws_url, detail_url)
+    email_json = json.dumps(email)
 
-    # 等 轉寄 按鈕渲染
+    # 1. navigate
+    await navigate(ws_url, detail_url)
     btn_ready = False
     for i in range(20):
         await asyncio.sleep(1)
-        found_by = await cdp_eval(ws_url, """
+        if await cdp_eval(ws_url, """
             (function() {
-                // 優先：找含 vip-icon-forward 圖示的按鈕（不受文字/letterSpacing影響）
-                const iconEl = document.querySelector('.vip-icon-forward');
-                if (iconEl) {
-                    const btn = iconEl.closest('button, [role="button"]') || iconEl.parentElement;
-                    if (btn) {
-                        const r = btn.getBoundingClientRect();
-                        if (r.width > 0 && r.height > 0) return 'icon';
-                    }
-                }
-                // 備援：文字比對
-                const btns = document.querySelectorAll('button, aot-button, [role="button"]');
+                const btns = document.querySelectorAll('button');
                 for (const b of btns) {
-                    const r = b.getBoundingClientRect();
-                    if (r.width === 0 && r.height === 0) continue;
-                    const t = (b.innerText || b.textContent || b.getAttribute('label') || '').replace(/\s+/g, '');
-                    if (t === '轉寄') return 'text';
+                    if (b.offsetParent === null) continue;
+                    if ((b.textContent || '').trim() === '轉寄' && b.querySelector('.vip-icon-forward')) return true;
                 }
-                return null;
+                return false;
             })()
-        """)
-        if found_by:
+        """):
             btn_ready = True
-            print(f'    ✓ 轉寄 按鈕已渲染 ({i+1}s, by={found_by})')
+            print(f'    ✓ sidebar 轉寄 按鈕已渲染 ({i+1}s)')
             break
     if not btn_ready:
-        debug_btns = await cdp_eval(ws_url, """
-            (function() {
-                const btns = Array.from(document.querySelectorAll('button, aot-button, [role="button"]'));
-                const vis = btns.filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
-                    .map(b => (b.innerText || b.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 20));
-                return JSON.stringify(vis.slice(0, 15));
-            })()
-        """)
-        print(f'    ✗ 等不到 轉寄 按鈕，頁面可見按鈕：{debug_btns}')
+        print(f'    ✗ 等不到 sidebar 轉寄 按鈕')
         return False
-    await asyncio.sleep(3)  # 多等讓 Vue 綁定事件
+    await asyncio.sleep(3)
 
-    # 清掉可能的遺留 modal
-    await cdp_eval(ws_url, """
-        (function() {
-            const closes = document.querySelectorAll('.close, .modal-close, [aria-label="Close"], [aria-label="關閉"]');
-            for (const c of closes) {
-                const r = c.getBoundingClientRect();
-                if (r.width > 0 || r.height > 0) c.click();
-            }
-        })()
-    """)
-    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
-        for params in [
-            {'type': 'keyDown', 'key': 'Escape', 'code': 'Escape', 'windowsVirtualKeyCode': 27, 'nativeVirtualKeyCode': 27},
-            {'type': 'keyUp', 'key': 'Escape', 'code': 'Escape', 'windowsVirtualKeyCode': 27, 'nativeVirtualKeyCode': 27},
-        ]:
-            await ws.send(json.dumps({'id': 1, 'method': 'Input.dispatchKeyEvent', 'params': params}))
-            await ws.recv()
-    await asyncio.sleep(0.5)
-
-    # 2. 點擊 轉寄 按鈕（試多種方式直到 picker 開啟）
+    # 2. 點 sidebar 的 轉寄 按鈕 → 開啟「轉寄」modal
     btn_coords = await cdp_eval(ws_url, """
         (function() {
-            // 優先：vip-icon-forward 圖示
-            const iconEl = document.querySelector('.vip-icon-forward');
-            if (iconEl) {
-                const btn = iconEl.closest('button, [role="button"]') || iconEl.parentElement;
-                if (btn) {
-                    const r = btn.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0) {
-                        btn.focus && btn.focus();
-                        return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
-                    }
-                }
-            }
-            // 備援：文字比對
-            const btns = document.querySelectorAll('button, aot-button, [role="button"]');
+            const btns = document.querySelectorAll('button');
             for (const b of btns) {
-                const r = b.getBoundingClientRect();
-                if (r.width === 0 && r.height === 0) continue;
-                const t = (b.innerText || b.textContent || b.getAttribute('label') || '').replace(/\s+/g, '');
-                if (t === '轉寄') {
-                    b.focus && b.focus();
+                if (b.offsetParent === null) continue;
+                if ((b.textContent || '').trim() === '轉寄' && b.querySelector('.vip-icon-forward')) {
+                    const r = b.getBoundingClientRect();
                     return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
                 }
             }
@@ -724,120 +675,208 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
         })()
     """)
     if not btn_coords:
-        print(f'    ✗ 找不到 轉寄 按鈕座標')
         return False
     bc = json.loads(btn_coords)
 
-    # 試 3 種點擊方式，每次後檢查 picker 是否開啟
-    picker_opened = False
-    for method in ['cdp_mouse', 'js_click', 'enter_key']:
-        if method == 'cdp_mouse':
-            async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
-                for i_id, params in enumerate([
-                    {'type': 'mouseMoved', 'x': bc['x'], 'y': bc['y']},
-                    {'type': 'mousePressed', 'x': bc['x'], 'y': bc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
-                    {'type': 'mouseReleased', 'x': bc['x'], 'y': bc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
-                ]):
-                    await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
-                    await ws.recv()
-                    await asyncio.sleep(0.08)
-        elif method == 'js_click':
-            await cdp_eval(ws_url, """
-                (function() {
-                    // 優先：vip-icon-forward 圖示
-                    const iconEl = document.querySelector('.vip-icon-forward');
-                    if (iconEl) {
-                        const btn = iconEl.closest('button, [role="button"]') || iconEl.parentElement;
-                        if (btn) { btn.click(); return true; }
-                    }
-                    // 備援：文字比對
-                    const btns = document.querySelectorAll('button');
-                    for (const b of btns) {
-                        const r = b.getBoundingClientRect();
-                        if (r.width === 0 && r.height === 0) continue;
-                        if ((b.textContent || '').replace(/\s+/g, '') === '轉寄') {
-                            b.click();
-                            const i = b.querySelector('i');
-                            const s = b.querySelector('span');
-                            if (i) i.click();
-                            if (s) s.click();
-                            return true;
-                        }
-                    }
-                    return false;
-                })()
-            """)
-        elif method == 'enter_key':
-            async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
-                for params in [
-                    {'type': 'keyDown', 'key': 'Enter', 'code': 'Enter', 'windowsVirtualKeyCode': 13, 'nativeVirtualKeyCode': 13},
-                    {'type': 'keyUp', 'key': 'Enter', 'code': 'Enter', 'windowsVirtualKeyCode': 13, 'nativeVirtualKeyCode': 13},
-                ]:
-                    await ws.send(json.dumps({'id': 1, 'method': 'Input.dispatchKeyEvent', 'params': params}))
-                    await ws.recv()
-        await asyncio.sleep(2)
-        # 檢查 picker 是否開啟
-        opened = await cdp_eval(ws_url, """
+    # 用真實滑鼠序列點擊
+    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+        for i_id, params in enumerate([
+            {'type': 'mouseMoved', 'x': bc['x'], 'y': bc['y']},
+            {'type': 'mousePressed', 'x': bc['x'], 'y': bc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
+            {'type': 'mouseReleased', 'x': bc['x'], 'y': bc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
+        ]):
+            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
+            await ws.recv()
+            await asyncio.sleep(0.1)
+    await asyncio.sleep(2)
+
+    # 確認「轉寄」modal 開啟（標題 = "轉寄" 而非 sidebar 按鈕）
+    forward_modal = await cdp_eval(ws_url, """
+        (function() {
+            const titles = document.querySelectorAll('.modal-title');
+            for (const t of titles) {
+                if (t.offsetParent === null) continue;
+                // 取第一段文字（去掉子節點的 tip 文字）
+                const main = (t.firstChild && t.firstChild.textContent || '').trim();
+                if (main === '轉寄') return true;
+            }
+            return false;
+        })()
+    """)
+    if not forward_modal:
+        print(f'    ✗ 點 轉寄 後「轉寄」modal 未出現')
+        # debug 顯示頁面的 modal-title 文字
+        titles_dbg = await cdp_eval(ws_url, """
             (function() {
-                // 找含「選擇聯絡人」標題或 placeholder「聯絡人姓名」的 input
-                const all = document.querySelectorAll('h1,h2,h3,h4,h5,div,span');
-                for (const e of all) {
-                    if (e.offsetParent === null) continue;
-                    if ((e.textContent || '').trim() === '選擇聯絡人') return true;
-                }
-                const inputs = document.querySelectorAll('input');
-                for (const i of inputs) {
-                    if (i.offsetParent === null) continue;
-                    if (/聯絡人|姓名/.test(i.placeholder || '')) return true;
-                }
-                return false;
+                return Array.from(document.querySelectorAll('.modal-title'))
+                    .filter(t => t.offsetParent !== null)
+                    .map(t => (t.textContent || '').trim().slice(0, 30));
             })()
         """)
-        if opened:
-            print(f'    📋 picker 已開啟（方法: {method}）')
-            picker_opened = True
-            break
-
-    if not picker_opened:
-        print(f'    ✗ 3 種點擊方式都無法開啟 picker')
+        print(f'    ↳ debug modal titles: {titles_dbg}')
         return False
+    print(f'    📋 轉寄 modal 已開啟')
 
-    # 3. 在 picker 中：先取消所有已選取的（清除預設），然後搜尋並勾選此 email
+    # 3. 移除已選取的收件者 tags（預設可能有 i00788 等）
     await cdp_eval(ws_url, """
         (function() {
-            // 點掉「已選取」區的所有 × 移除按鈕
-            const removes = document.querySelectorAll('.tag-close, .chip-close, [aria-label*="remove"], [aria-label*="移除"]');
-            for (const r of removes) {
-                if (r.offsetParent !== null) r.click();
-            }
-            // 通用：找 chip 內的 × 文字
-            const tags = document.querySelectorAll('.tag, .chip, [class*="selected-item"]');
-            for (const t of tags) {
-                if (t.offsetParent === null) continue;
-                const closeIcon = Array.from(t.querySelectorAll('*')).find(e => (e.textContent || '').trim() === '×' || (e.textContent || '').trim() === '✕');
-                if (closeIcon) closeIcon.click();
+            // 找 aot-tag-selector 內的 tag (有 .vip-icon-delete)
+            const selectors = document.querySelectorAll('.aot-tag-selector');
+            for (const s of selectors) {
+                if (s.offsetParent === null) continue;
+                const deletes = s.querySelectorAll('.vip-icon-delete');
+                for (const d of deletes) d.click();
             }
         })()
     """)
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0.8)
 
-    # 搜尋並勾選
-    ok = await select_contact_by_search(ws_url, email)
-    if not ok:
-        print(f'    ✗ 無法勾選聯絡人 {email}')
+    # 4. 點「收件者」aot-tag-selector → 開啟「選擇聯絡人」picker
+    sel_clicked = await cdp_eval(ws_url, """
+        (function() {
+            // aot-tag-selector__input 是可點擊的觸發元素
+            const selectors = document.querySelectorAll('.aot-tag-selector__input');
+            for (const s of selectors) {
+                if (s.offsetParent === null) continue;
+                const r = s.getBoundingClientRect();
+                if (r.width < 5 || r.height < 5) continue;
+                return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
+            }
+            return null;
+        })()
+    """)
+    if not sel_clicked:
+        print(f'    ✗ 找不到 收件者 selector')
         return False
-    print(f'    📧 已勾選 {email}')
-
-    # 4. 點 picker 的「送出」
-    if not await submit_contact_picker(ws_url):
-        print(f'    ⚠️ 點不到 送出 按鈕')
+    sc = json.loads(sel_clicked)
+    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+        for i_id, params in enumerate([
+            {'type': 'mouseMoved', 'x': sc['x'], 'y': sc['y']},
+            {'type': 'mousePressed', 'x': sc['x'], 'y': sc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
+            {'type': 'mouseReleased', 'x': sc['x'], 'y': sc['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
+        ]):
+            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
+            await ws.recv()
+            await asyncio.sleep(0.1)
     await asyncio.sleep(2)
 
-    # 5. 填說明 textarea
+    # 確認「選擇聯絡人」picker 已開啟
+    picker_opened = await cdp_eval(ws_url, """
+        (function() {
+            const titles = document.querySelectorAll('.modal-title');
+            for (const t of titles) {
+                if (t.offsetParent === null) continue;
+                if ((t.textContent || '').trim() === '選擇聯絡人') return true;
+            }
+            return false;
+        })()
+    """)
+    if not picker_opened:
+        print(f'    ✗ 點 收件者 後「選擇聯絡人」picker 未開啟')
+        return False
+    print(f'    📋 選擇聯絡人 picker 已開啟')
+
+    # 5. 在 picker 搜尋輸入 email
+    typed = await cdp_eval(ws_url, f"""
+        (function(email) {{
+            const inputs = document.querySelectorAll('input[placeholder*="輸入聯絡人"]');
+            const input = Array.from(inputs).find(i => i.offsetParent !== null);
+            if (!input) return false;
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            input.focus();
+            setter.call(input, '');
+            input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            setter.call(input, email);
+            input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            return true;
+        }})({email_json})
+    """)
+    if not typed:
+        print(f'    ✗ picker 搜尋框找不到')
+        return False
+    await asyncio.sleep(1.5)
+
+    # 6. 勾選對應的 checkbox（row 結構：col-5 checkbox + col email）
+    check_result = await cdp_eval(ws_url, f"""
+        (function(email) {{
+            // 找含此 email 的 row（class="row"）
+            const rows = document.querySelectorAll('.mail-list .row');
+            for (const row of rows) {{
+                if (row.offsetParent === null) continue;
+                if (!(row.textContent || '').includes(email)) continue;
+                const cb = row.querySelector('input[type="checkbox"]');
+                if (!cb) continue;
+                if (!cb.checked) {{
+                    // 點 label 觸發 Vue 的 v-model 更新
+                    const label = cb.closest('label') || row.querySelector('label');
+                    if (label) {{
+                        label.click();
+                    }} else {{
+                        cb.click();
+                    }}
+                }}
+                return JSON.stringify({{ ok: true, checked: cb.checked, rowText: row.textContent.trim().slice(0, 50) }});
+            }}
+            return JSON.stringify({{ ok: false, reason: 'no matching row' }});
+        }})({email_json})
+    """)
+    cr = json.loads(check_result or '{}')
+    if not cr.get('ok'):
+        print(f'    ✗ 勾選失敗: {cr}')
+        return False
+    print(f'    ☑ 已勾選聯絡人「{cr.get("rowText","")}」')
+    await asyncio.sleep(1)
+
+    # 7. 驗證「已選取」chip 有此 email
+    in_selected = await cdp_eval(ws_url, f"""
+        (function(email) {{
+            const tags = document.querySelectorAll('.selected-list .tag .tag__content, .selected-list .tag');
+            for (const t of tags) {{
+                if ((t.textContent || '').includes(email)) return true;
+            }}
+            return false;
+        }})({email_json})
+    """)
+    if not in_selected:
+        print(f'    ⚠️ 勾選後「已選取」區未出現 {email}（嘗試繼續送出）')
+
+    # 8. 點 picker 的「送出」按鈕（btn-primary btn--sm 文字為「送出」）
+    submit_coords = await cdp_eval(ws_url, """
+        (function() {
+            const btns = document.querySelectorAll('button.btn-primary, button');
+            for (const b of btns) {
+                if (b.offsetParent === null) continue;
+                if ((b.textContent || '').trim() === '送出') {
+                    const r = b.getBoundingClientRect();
+                    return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
+                }
+            }
+            return null;
+        })()
+    """)
+    if not submit_coords:
+        print(f'    ✗ 找不到 picker 送出 按鈕')
+        return False
+    sb = json.loads(submit_coords)
+    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+        for i_id, params in enumerate([
+            {'type': 'mouseMoved', 'x': sb['x'], 'y': sb['y']},
+            {'type': 'mousePressed', 'x': sb['x'], 'y': sb['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
+            {'type': 'mouseReleased', 'x': sb['x'], 'y': sb['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
+        ]):
+            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
+            await ws.recv()
+            await asyncio.sleep(0.1)
+    await asyncio.sleep(2)
+    print(f'    ✓ 已送出 picker 選擇')
+
+    # 9. 回到「轉寄」modal，填說明 textarea
     fill_expr = """
     (function(text){
-        const tas = Array.from(document.querySelectorAll('textarea')).filter(t => t.offsetParent !== null);
-        const ta = tas[0];
+        // 找轉寄 modal 內的 textarea
+        const tas = Array.from(document.querySelectorAll('.modal-body textarea, textarea'));
+        const ta = tas.find(t => t.offsetParent !== null);
         if (!ta) return 'no textarea';
         ta.focus();
         const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
@@ -858,25 +897,33 @@ async def forward_one_recipient(ws_url: str, summary: str, email: str, detail_ur
     print(f'    ✓ 已填說明（{fill_result} 字）')
     await asyncio.sleep(1)
 
-    # 6. 點「發送」
-    coords_str = await cdp_eval(ws_url, """
-        (function(){
-            const candidates = Array.from(document.querySelectorAll('aot-button, button, .btn, [role="button"]'));
-            const btn = candidates.find(b => {
-                if (b.offsetParent === null) return false;
-                const t = (b.innerText || b.textContent || b.getAttribute('label') || '').trim();
-                return t === '發送' || t === '送出' || t === '確認送出';
-            });
-            if (!btn) return null;
-            const r = btn.getBoundingClientRect();
-            return JSON.stringify({x: r.left + r.width/2, y: r.top + r.height/2});
+    # 10. 點「發送」aot-button（custom web component，需要用座標）
+    send_coords = await cdp_eval(ws_url, """
+        (function() {
+            const btns = document.querySelectorAll('aot-button');
+            for (const b of btns) {
+                if (b.offsetParent === null) continue;
+                if (b.getAttribute('label') === '發送') {
+                    const r = b.getBoundingClientRect();
+                    return JSON.stringify({ x: r.left + r.width/2, y: r.top + r.height/2 });
+                }
+            }
+            return null;
         })()
     """)
-    if not coords_str:
-        print(f'    ✗ 找不到 發送 按鈕')
+    if not send_coords:
+        print(f'    ✗ 找不到 發送 aot-button')
         return False
-    cs = json.loads(coords_str)
-    await cdp_click_at(ws_url, cs['x'], cs['y'])
+    sd = json.loads(send_coords)
+    async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+        for i_id, params in enumerate([
+            {'type': 'mouseMoved', 'x': sd['x'], 'y': sd['y']},
+            {'type': 'mousePressed', 'x': sd['x'], 'y': sd['y'], 'button': 'left', 'clickCount': 1, 'buttons': 1},
+            {'type': 'mouseReleased', 'x': sd['x'], 'y': sd['y'], 'button': 'left', 'clickCount': 1, 'buttons': 0},
+        ]):
+            await ws.send(json.dumps({'id': i_id + 1, 'method': 'Input.dispatchMouseEvent', 'params': params}))
+            await ws.recv()
+            await asyncio.sleep(0.1)
     await asyncio.sleep(3)
     await dismiss_network_error(ws_url)
     print(f'    ✓ 已點 發送 → {email}')
