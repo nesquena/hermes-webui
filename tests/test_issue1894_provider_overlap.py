@@ -55,7 +55,7 @@ def test_selected_opencode_go_wins_over_custom_provider_overlap():
     # custom endpoint.
     import api.config as cfg_mod
     old_model, old_custom = _apply_config_overrides(cfg_mod, {
-        'base_url': 'https://api.opencode.ai/go/v1',
+        'base_url': 'https://opencode.ai/zen/go/v1',
     })
     cfg_mod.cfg['custom_providers'] = [{
         'name': 'ds2api',
@@ -71,7 +71,7 @@ def test_selected_opencode_go_wins_over_custom_provider_overlap():
             f'Expected provider=opencode-go, got provider={provider!r}. '
             f'WebUI was routed to custom provider instead.'
         )
-        assert base_url == 'https://api.opencode.ai/go/v1', (
+        assert base_url == 'https://opencode.ai/zen/go/v1', (
             f'Expected base_url from opencode-go config, got {base_url!r}'
         )
         assert model == 'deepseek-v4-pro'
@@ -84,7 +84,7 @@ def test_selected_opencode_go_wins_direct_resolve():
     # resolver path directly with a bare model id.
     import api.config as cfg_mod
     old_model, old_custom = _apply_config_overrides(cfg_mod, {
-        'base_url': 'https://api.opencode.ai/go/v1',
+        'base_url': 'https://opencode.ai/zen/go/v1',
     })
     cfg_mod.cfg['custom_providers'] = [{
         'name': 'ds2api',
@@ -96,7 +96,7 @@ def test_selected_opencode_go_wins_direct_resolve():
         assert provider == 'opencode-go', (
             f'Expected provider=opencode-go, got provider={provider!r}'
         )
-        assert base_url == 'https://api.opencode.ai/go/v1'
+        assert base_url == 'https://opencode.ai/zen/go/v1'
     finally:
         _restore_config(cfg_mod, old_model, old_custom)
 
@@ -110,7 +110,7 @@ def test_custom_only_model_still_routes_to_custom_provider():
     # correctly when no explicit provider prefix is given.
     import api.config as cfg_mod
     old_model, old_custom = _apply_config_overrides(cfg_mod, {
-        'base_url': 'https://api.opencode.ai/go/v1',
+        'base_url': 'https://opencode.ai/zen/go/v1',
     })
     cfg_mod.cfg['custom_providers'] = [{
         'name': 'ds2api',
