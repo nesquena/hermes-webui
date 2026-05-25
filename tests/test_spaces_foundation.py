@@ -1613,6 +1613,11 @@ def test_space_tool_adapter_supports_source_open_alias_and_camelcase_space_id_me
     assert opened["action"] == "space.spaces.open"
     assert opened["space"]["space_id"] == created["space_id"]
     assert opened["space"]["widgets"][0]["id"] == "unsafe-widget"
+    assert opened["prompt_preflight"]["action"] == "space.spaces.open"
+    assert opened["prompt_preflight"]["boundary"] == "browser_navigation"
+    assert opened["prompt_preflight"]["status"] == "required"
+    assert opened["prompt_preflight"]["metadata_only"] is True
+    assert opened["prompt_preflight"]["raw_prompt_stored"] is False
     assert opened["autonomy_policy"]["action"] == "space.spaces.open"
     assert opened["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
     assert opened["autonomy_policy"]["prompt_preflight_status"] == "required"
@@ -8885,6 +8890,11 @@ def test_space_tool_adapter_supports_widget_see_and_reload_aliases_metadata_only
     assert source_current["ok"] is True
     assert source_current["action"] == "space.spaces.reloadcurrentspace"
     assert source_current["space"]["widgets"][0]["id"] == "weather-card"
+    assert source_current["prompt_preflight"]["action"] == "space.spaces.reloadcurrentspace"
+    assert source_current["prompt_preflight"]["boundary"] == "browser_navigation"
+    assert source_current["prompt_preflight"]["status"] == "required"
+    assert source_current["prompt_preflight"]["metadata_only"] is True
+    assert source_current["prompt_preflight"]["raw_prompt_stored"] is False
     assert source_current["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
     assert source_current["autonomy_policy"]["prompt_preflight_status"] == "required"
     assert source_current["autonomy_policy"]["metadata_only"] is True

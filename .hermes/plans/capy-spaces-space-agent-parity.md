@@ -11,7 +11,7 @@ Research targets:
 
 Last updated: 2026-05-25 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the OpenHuman-inspired Capy Memory Tree / compaction / source freshness / policy / progress MVP surfaces are implemented as metadata-only foundations, with recent expansion through source-style current-space viewport/reposition prompt-preflight/action-policy/progress receipts, logical storage path-helper policy/progress receipts, source-style Space open/reload navigation policy/progress receipts, and widget reload/refresh required-preflight/action-policy receipts. This plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, model-route invocation, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the OpenHuman-inspired Capy Memory Tree / compaction / source freshness / policy / progress MVP surfaces are implemented as metadata-only foundations, with recent expansion through source-style current-space viewport/reposition prompt-preflight/action-policy/progress receipts, logical storage path-helper policy/progress receipts, source-style Space open/reload navigation prompt-preflight/action-policy/progress receipts, and widget reload/refresh required-preflight/action-policy receipts. This plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, model-route invocation, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
 
 ## OpenHuman-Inspired Expansion Track
 
@@ -37,6 +37,10 @@ Roadmap priority for upcoming autonomous sprints:
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
 
 Recent completed slices:
+
+- `feat(spaces): add navigation preflight receipts`
+  - Added RED/GREEN backend coverage proving source-style Space open/reload browser-navigation helpers return metadata-only `prompt_preflight` receipts beside existing autonomy-policy and structured progress evidence.
+  - The new required-preflight receipts stay action-scoped, local-only, and raw-prompt-free while hostile renderer/script/source/API-auth/token fixture markers remain absent from serialized helper responses.
 
 - `feat(spaces): require widget reload policy receipts`
   - Added RED/GREEN backend coverage proving widget reload/refresh aliases without a free-form prompt or reason still return metadata-only `required` prompt-preflight and action-policy receipts beside structured progress events.
