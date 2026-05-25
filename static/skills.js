@@ -169,35 +169,64 @@ function findCompletedComposerSkillMentions(text) {
   for(let m=COMPOSER_SKILL_TOKEN_RE.exec(String(text || '')); m; m=COMPOSER_SKILL_TOKEN_RE.exec(String(text || ''))){
     const token = m[2] || '';
     const skill = getSkillByMentionToken(token);
-    if(skill) mentions.push({token, skill});
+    if(skill) mentions.push({token, skill, start: m.index + (m[1] || '').length, end: COMPOSER_SKILL_TOKEN_RE.lastIndex});
   }
   return mentions;
 }
 
-async function updateComposerSkillPreview(opts={}) {
-  const preview = (typeof $ === 'function' && $('composerSkillPreview')) || document.getElementById('composerSkillPreview');
-  const textarea = (typeof $ === 'function' && $('msg')) || document.getElementById('msg');
-  if(!preview || !textarea) return;
-  await loadSkillRegistry();
-  let mentions = findCompletedComposerSkillMentions(String(textarea.value || ''));
-  if(opts && opts.force && !mentions.length){
-    const forcedToken = String(textarea.value || '').trim().replace(/^\//, '');
-    const forcedSkill = getSkillByMentionToken(forcedToken);
-    if(forcedSkill) mentions = [{token: forcedToken, skill: forcedSkill}];
-  }
-  preview.innerHTML = '';
-  if(!mentions.length){
-    preview.hidden = true;
-    return;
-  }
-  preview.hidden = false;
-  const seen = new Set();
-  for(const mention of mentions){
-    if(seen.has(mention.skill.slug)) continue;
-    seen.add(mention.skill.slug);
-    preview.appendChild(createSkillChip(mention.skill));
-  }
+function appendOverlayText(fragment, text) {
+  if(!text) return;
+  const span = document.createElement('span');
+  span.className = 'composer-overlay-text';
+  span.textContent = text;
+  fragment.appendChild(span);
 }
+
+function renderComposerSkillOverlay(text, mentions) {
+  const fragment = document.createDocumentFragment();
+  let last = 0;
+  for(const mention of mentions){
+    appendOverlayText(fragment, text.slice(last, mention.start));
+    fragment.appendChild(createSkillChip(mention.skill));
+    last = mention.end;
+  }
+  appendOverlayText(fragment, text.slice(last));
+  // Preserve an empty visible line box so the transparent textarea and overlay align.
+  if(!text) appendOverlayText(fragment, ' ');
+  return fragment;
+}
+
+async function updateComposerSkillPreview(opts={}) {
+  const overlay = (typeof $ === 'function' && $('composerSkillOverlay')) || document.getElementById('composerSkillOverlay');
+  const textarea = (typeof $ === 'function' && $('msg')) || document.getElementById('msg');
+  if(!overlay || !textarea) return;
+  await loadSkillRegistry();
+  const text = String(textarea.value || '');
+  let mentions = findCompletedComposerSkillMentions(text);
+  if(opts && opts.force && !mentions.length){
+    const forcedToken = text.trim().replace(/^\//, '');
+    const forcedSkill = getSkillByMentionToken(forcedToken);
+    if(forcedSkill) mentions = [{token: forcedToken, skill: forcedSkill, start: text.indexOf(forcedToken), end: text.indexOf(forcedToken) + forcedToken.length}];
+  }
+  overlay.innerHTML = '';
+  overlay.appendChild(renderComposerSkillOverlay(text, mentions));
+  overlay.scrollTop = textarea.scrollTop;
+  overlay.scrollLeft = textarea.scrollLeft;
+}
+
+function initComposerSkillOverlayScrollSync() {
+  const overlay = (typeof $ === 'function' && $('composerSkillOverlay')) || document.getElementById('composerSkillOverlay');
+  const textarea = (typeof $ === 'function' && $('msg')) || document.getElementById('msg');
+  if(!overlay || !textarea || textarea._composerSkillOverlayScrollSync) return;
+  textarea._composerSkillOverlayScrollSync = true;
+  textarea.addEventListener('scroll', () => {
+    overlay.scrollTop = textarea.scrollTop;
+    overlay.scrollLeft = textarea.scrollLeft;
+  }, {passive:true});
+}
+
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', initComposerSkillOverlayScrollSync);
+else initComposerSkillOverlayScrollSync();
 
 window.normalizeSkillSlug = normalizeSkillSlug;
 window.loadSkillRegistry = loadSkillRegistry;

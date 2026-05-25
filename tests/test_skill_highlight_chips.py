@@ -67,7 +67,7 @@ def test_skill_chip_styles_present():
     css = read("static/style.css")
     assert ".skill-chip{" in css, "Missing .skill-chip rule"
     assert ".skill-chip:hover{" in css, "Missing .skill-chip:hover rule"
-    assert ".composer-skill-preview{" in css, "Missing composer skill preview rule"
+    assert ".composer-skill-overlay{" in css, "Missing composer skill overlay rule"
 
 
 def test_composer_remains_native_textarea_contract():
@@ -95,15 +95,16 @@ def test_workspace_drop_can_use_textarea_selection_api():
     assert "msgEl.selectionStart=msgEl.selectionEnd" in panels
 
 
-def test_composer_skill_preview_uses_whitespace_completed_mentions():
-    """Composer chips are previews for completed mentions, not in-editor replacements."""
+def test_composer_skill_overlay_uses_whitespace_completed_mentions():
+    """Composer chips are inline overlay rendering for completed mentions, not editor replacements."""
     html = read("static/index.html")
     skills = read("static/skills.js")
     boot = read("static/boot.js")
     commands = read("static/commands.js")
 
-    assert 'id="composerSkillPreview"' in html
+    assert 'id="composerSkillOverlay"' in html
     assert "function updateComposerSkillPreview" in skills
+    assert "function renderComposerSkillOverlay" in skills
     assert "function findCompletedComposerSkillMentions" in skills
     assert "COMPOSER_SKILL_TOKEN_RE" in skills
     assert "(?=\\s)" in skills

@@ -5,7 +5,7 @@
 
 ### Added
 
-- Chat messages now render registered Hermes skills as quiet inline chips using the current profile's `/api/skills` list. The composer keeps its native textarea behavior while surfacing completed registered skill mentions in a lightweight chip preview after whitespace or explicit autocomplete selection, avoiding arbitrary slash-command false positives and prefix-overlap mismatches.
+- Chat messages now render registered Hermes skills as quiet inline chips using the current profile's `/api/skills` list. The composer keeps its native textarea behavior while rendering completed registered skill mentions through a non-interactive inline overlay after whitespace or explicit autocomplete selection, avoiding arbitrary slash-command false positives and prefix-overlap mismatches.
 
 ## [v0.51.134] — 2026-05-25 — Release DF (stage-batch16 — single-PR Windows path defaults)
 
