@@ -39,7 +39,7 @@ class _FakeHandler:
         return json.loads(bytes(self.body).decode("utf-8"))
 
 
-def _call_insights(monkeypatch, tmp_path, entries, days="7", now=None):
+def _call_insights(monkeypatch, tmp_path, entries, days="7", now=None, scope=None):
     import api.routes as routes
 
     session_dir = tmp_path / "sessions"
@@ -50,10 +50,247 @@ def _call_insights(monkeypatch, tmp_path, entries, days="7", now=None):
         monkeypatch.setattr(time, "time", lambda: now)
 
     handler = _FakeHandler()
-    parsed = SimpleNamespace(query=f"days={days}")
+    qs = f"days={days}"
+    if scope is not None:
+        qs += f"&scope={scope}"
+    parsed = SimpleNamespace(query=qs)
     routes._handle_insights(handler, parsed)
     assert handler.status == 200
     return handler.json_body()
+
+
+def _seed_state_db(db_path, rows):
+    """Build a minimal hermes-agent state.db with the schema columns
+    _load_global_state_db_entries reads. Returns the path written."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("""
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                model TEXT,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                message_count INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0,
+                cache_write_tokens INTEGER DEFAULT 0,
+                estimated_cost_usd REAL,
+                actual_cost_usd REAL
+            )
+        """)
+        for r in rows:
+            conn.execute("""
+                INSERT INTO sessions (
+                    id, source, model, started_at, ended_at, message_count,
+                    input_tokens, output_tokens, cache_read_tokens,
+                    cache_write_tokens, estimated_cost_usd, actual_cost_usd
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                r["id"], r["source"], r.get("model", "test"),
+                r["started_at"], r.get("ended_at"), r.get("message_count", 1),
+                r.get("input_tokens", 0), r.get("output_tokens", 0),
+                r.get("cache_read_tokens", 0), r.get("cache_write_tokens", 0),
+                r.get("estimated_cost_usd"), r.get("actual_cost_usd"),
+            ))
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path
+
+
+def test_insights_default_scope_is_webui_and_response_advertises_scope(monkeypatch, tmp_path):
+    """Without ``?scope=`` the endpoint serves the historical webui-only
+    payload, and the response declares the effective scope so the UI can
+    label what's being shown."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [{
+        "session_id": "webui-only",
+        "updated_at": now,
+        "created_at": now,
+        "message_count": 3,
+        "input_tokens": 9000,
+        "output_tokens": 100,
+        "estimated_cost": 0.05,
+        "model": "gpt-5.5",
+    }]
+
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
+    assert data["scope"] == "webui"
+    assert data["scope_requested"] == "webui"
+    assert data["scope_available"] is True
+    assert data["total_input_tokens"] == 9000
+    assert data["total_output_tokens"] == 100
+    assert data["total_tokens"] == 9100
+
+
+def test_insights_global_scope_reads_state_db_with_full_prompt_semantics(monkeypatch, tmp_path):
+    """scope=global must aggregate every Hermes session source from state.db
+    and reshape ``input_tokens`` to the *full prompt total* (new + cache_read
+    + cache_write) so it lines up with what providers bill — and with what
+    the WebUI scope already shows."""
+    import api.routes as routes
+
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    one_hour_ago = now - 3600
+
+    home_dir = tmp_path / "hermes_home"
+    home_dir.mkdir()
+    state_db = home_dir / "state.db"
+    _seed_state_db(state_db, [
+        # WebUI session — also exists in _index.json conceptually; here we
+        # just verify it is summed in the global view.
+        {
+            "id": "webui-1", "source": "webui", "model": "claude-opus-4.7",
+            "started_at": one_hour_ago, "ended_at": one_hour_ago + 60,
+            "message_count": 4,
+            "input_tokens": 1_000_000,    # new prompt only (cache subtracted)
+            "output_tokens": 50_000,
+            "cache_read_tokens": 7_700_000,
+            "cache_write_tokens": 400_000,
+            "estimated_cost_usd": 5.0,
+        },
+        # Discord session — completely invisible in the WebUI scope.
+        {
+            "id": "discord-1", "source": "discord", "model": "claude-sonnet-4",
+            "started_at": one_hour_ago, "ended_at": one_hour_ago + 30,
+            "message_count": 2,
+            "input_tokens": 500_000,
+            "output_tokens": 20_000,
+            "cache_read_tokens": 3_000_000,
+            "cache_write_tokens": 100_000,
+            "actual_cost_usd": 1.25,
+        },
+        # CLI session — cost only via actual_cost_usd; estimated is null.
+        {
+            "id": "cli-1", "source": "cli", "model": "gpt-5.5",
+            "started_at": one_hour_ago, "ended_at": None,
+            "message_count": 1,
+            "input_tokens": 100_000, "output_tokens": 10_000,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+            "actual_cost_usd": 0.42,
+        },
+    ])
+    monkeypatch.setenv("HERMES_HOME", str(home_dir))
+    # SESSION_DIR is still patched by _call_insights but should not be read
+    # for scope=global; pass an empty index just in case.
+    data = _call_insights(monkeypatch, tmp_path, [], days="7", now=now, scope="global")
+
+    assert data["scope"] == "global"
+    assert data["scope_requested"] == "global"
+    assert data["scope_available"] is True
+    assert data["total_sessions"] == 3
+
+    # Full-prompt semantics: state.db's three buckets must be summed back
+    # together so the WebUI's "input" column equals provider prompt_tokens.
+    expected_input = (
+        (1_000_000 + 7_700_000 + 400_000) +
+        (500_000 + 3_000_000 + 100_000) +
+        (100_000 + 0 + 0)
+    )
+    expected_output = 50_000 + 20_000 + 10_000
+    assert data["total_input_tokens"] == expected_input
+    assert data["total_output_tokens"] == expected_output
+    assert data["total_tokens"] == expected_input + expected_output
+
+    # Cost: actual_cost_usd preferred when present; otherwise estimated.
+    # Here: webui-1 → 5.0 (estimated, no actual), discord-1 → 1.25 (actual),
+    # cli-1 → 0.42 (actual). Total = 6.67.
+    assert abs(data["total_cost"] - 6.67) < 1e-6
+
+    # Per-model breakdown must include both webui and discord models.
+    model_names = {m["model"] for m in data["models"]}
+    assert {"claude-opus-4.7", "claude-sonnet-4", "gpt-5.5"}.issubset(model_names)
+
+
+def test_insights_global_scope_includes_sessions_active_inside_window(monkeypatch, tmp_path):
+    """Global scope should use the same active-in-window semantics as the
+    historical WebUI scope: a long-running session that started before the
+    selected range but ended/updated inside it is still relevant."""
+    now = time.mktime((2026, 5, 25, 12, 0, 0, 0, 0, -1))
+    today = time.localtime(now)
+    today_midnight = time.mktime((
+        today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0,
+        today.tm_wday, today.tm_yday, today.tm_isdst,
+    ))
+    cutoff = today_midnight - (6 * 86400)  # days=7 calendar window
+
+    home_dir = tmp_path / "hermes_home_active_window"
+    home_dir.mkdir()
+    _seed_state_db(home_dir / "state.db", [{
+        "id": "long-session",
+        "source": "webui",
+        "model": "claude-opus-4.7",
+        "started_at": cutoff - 3600,
+        "ended_at": cutoff + 3600,
+        "message_count": 2,
+        "input_tokens": 10,
+        "cache_read_tokens": 20,
+        "cache_write_tokens": 30,
+        "output_tokens": 5,
+        "estimated_cost_usd": 0.1,
+    }])
+    monkeypatch.setenv("HERMES_HOME", str(home_dir))
+
+    data = _call_insights(monkeypatch, tmp_path, [], days="7", now=now, scope="global")
+    assert data["scope"] == "global"
+    assert data["total_sessions"] == 1
+    assert data["total_messages"] == 2
+    assert data["total_input_tokens"] == 60
+    assert data["total_output_tokens"] == 5
+    assert data["total_tokens"] == 65
+
+
+def test_insights_global_scope_falls_back_when_state_db_missing(monkeypatch, tmp_path):
+    """Asking for scope=global when state.db isn't reachable must return
+    the WebUI payload with scope_available=false so the UI can disable the
+    Global toggle and explain why."""
+    home_dir = tmp_path / "hermes_home_no_db"
+    home_dir.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home_dir))
+
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [{
+        "session_id": "webui-only",
+        "updated_at": now,
+        "created_at": now,
+        "message_count": 1,
+        "input_tokens": 200,
+        "output_tokens": 50,
+        "estimated_cost": 0.0,
+        "model": "gpt-5.5",
+    }]
+
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now, scope="global")
+    assert data["scope"] == "webui"               # effective fell back
+    assert data["scope_requested"] == "global"     # but UI knows the user asked for global
+    assert data["scope_available"] is False        # so the toggle can disable
+    assert data["total_input_tokens"] == 200
+    assert data["total_output_tokens"] == 50
+
+
+def test_insights_unknown_scope_param_is_treated_as_webui(monkeypatch, tmp_path):
+    """Defensive: any garbage value in ?scope= must collapse to the safe
+    WebUI default rather than 500-ing or leaking implementation details."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    entries = [{
+        "session_id": "webui-only",
+        "updated_at": now,
+        "created_at": now,
+        "message_count": 1,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "estimated_cost": 0.0,
+        "model": "x",
+    }]
+
+    data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now, scope="bogus-scope-name")
+    assert data["scope"] == "webui"
+    assert data["scope_requested"] == "webui"
+    assert data["total_tokens"] == 15
 
 
 def _day(ts):
@@ -96,6 +333,8 @@ def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeyp
         "date": _day(now),
         "input_tokens": 1200,
         "output_tokens": 300,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
         "sessions": 1,
         "cost": 0.0123,
     }
@@ -103,6 +342,8 @@ def test_insights_daily_tokens_zero_fills_selected_range_and_parses_cost(monkeyp
         "date": _day(now - 86400),
         "input_tokens": 0,
         "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
         "sessions": 0,
         "cost": 0.0,
     }
@@ -158,10 +399,85 @@ def test_insights_frontend_has_daily_chart_styles_and_range_switching_hooks():
     assert 'option value="30"' in INDEX_HTML
     assert 'option value="90"' in INDEX_HTML
     assert "loadInsights()" in INDEX_HTML
-    assert "/api/insights?days=${period}" in PANELS_JS
+    # Scope param now part of the insights URL contract.
+    assert "/api/insights?days=${period}&scope=${scope}" in PANELS_JS
     assert ".insights-daily-token-chart" in STYLE_CSS
     assert ".insights-daily-bar-output" in STYLE_CSS
     assert ".insights-model-cost" in STYLE_CSS
+
+
+def test_insights_frontend_exposes_webui_global_scope_toggle():
+    """The toggle must exist in both the markup and the panel script,
+    and CSS must style the segmented control. This is the visual contract
+    that lets a user flip between WebUI-only and Hermes-global token
+    views without any other page state changing."""
+    # HTML: toggle DOM
+    assert 'id="insightsScopeToggle"' in INDEX_HTML
+    assert 'data-scope="webui"' in INDEX_HTML
+    assert 'data-scope="global"' in INDEX_HTML
+    scope_start = INDEX_HTML.index('id="insightsScopeToggle"')
+    scope_end = INDEX_HTML.index('</div>\n        </div>', scope_start)
+    scope_markup = INDEX_HTML[scope_start:scope_end]
+    assert 'aria-pressed="true"' in scope_markup
+    assert 'role="tab"' not in scope_markup
+    assert 'role="tablist"' not in scope_markup
+    assert "insights_scope_label" in INDEX_HTML
+    assert "insights_scope_webui" in INDEX_HTML
+    assert "insights_scope_global" in INDEX_HTML
+    assert "setInsightsScope" in INDEX_HTML
+
+    # JS: state, setter, fetch param, fallback sync
+    assert "let _insightsScope" in PANELS_JS
+    assert "function setInsightsScope" in PANELS_JS
+    assert "_syncInsightsScopeUI" in PANELS_JS
+    assert "let _insightsRequestSeq" in PANELS_JS
+    assert "requestSeq !== _insightsRequestSeq" in PANELS_JS
+    assert "aria-pressed" in PANELS_JS
+    assert "scope_available" in PANELS_JS  # frontend reads the fallback flag
+    assert "insights_scope_note" in PANELS_JS
+    assert "insights-scope-note" in PANELS_JS
+    assert "localStorage.setItem('insightsScope'" in PANELS_JS  # persisted preference
+
+    # CSS: segmented control styling
+    assert ".insights-scope-toggle" in STYLE_CSS
+    assert ".insights-scope-segmented" in STYLE_CSS
+    assert ".insights-scope-btn" in STYLE_CSS
+    assert ".insights-scope-btn.is-active" in STYLE_CSS
+    assert ".insights-scope-note" in STYLE_CSS
+
+
+def test_insights_i18n_scope_keys_present_in_every_locale():
+    """Every locale must carry the four scope-toggle keys so the toggle
+    label and the unavailable-tooltip work in every language. Missing a
+    locale would surface as 'undefined' text in the UI."""
+    import re as _re
+
+    i18n_path = REPO_ROOT / "static" / "i18n.js"
+    text = i18n_path.read_text(encoding="utf-8")
+
+    locales: list[tuple[str, int, int]] = []
+    for m in _re.finditer(r"^  ([a-z]{2}(?:-[a-z]+)?):\s*\{", text, _re.MULTILINE):
+        locales.append((m.group(1), m.start(), -1))
+    # Compute end-offsets
+    finalized = []
+    for i, (name, start, _end) in enumerate(locales):
+        end = locales[i + 1][1] if i + 1 < len(locales) else len(text)
+        finalized.append((name, start, end))
+
+    # Sanity: project ships at least 11 locales today.
+    assert len(finalized) >= 11, f"expected >=11 locales, found {len(finalized)}"
+
+    required_keys = (
+        "insights_scope_label",
+        "insights_scope_webui",
+        "insights_scope_global:",          # trailing colon disambiguates from _global_unavailable
+        "insights_scope_global_unavailable",
+        "insights_scope_note",
+    )
+    for name, start, end in finalized:
+        block = text[start:end]
+        for key in required_keys:
+            assert key in block, f"locale '{name}' missing i18n key: {key.rstrip(':')}"
 
 
 def _make_daily_rows(n):
