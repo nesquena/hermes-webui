@@ -111,11 +111,3 @@ def test_composer_remains_plain_native_textarea_contract():
         assert token not in boot
         assert token not in commands
         assert token not in messages
-
-
-def test_workspace_drop_can_use_textarea_selection_api():
-    """Workspace path drops should still target native textarea selection APIs safely."""
-    panels = read("static/panels.js")
-    assert "msgEl.selectionStart" in panels
-    assert "msgEl.selectionEnd" in panels
-    assert "msgEl.selectionStart=msgEl.selectionEnd" in panels

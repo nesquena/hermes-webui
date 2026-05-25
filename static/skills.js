@@ -131,4 +131,3 @@ function highlightSkillsInMessages(container) {
 }
 
 window.highlightSkillsInMessages = highlightSkillsInMessages;
-window.loadSkillRegistry = loadSkillRegistry;
