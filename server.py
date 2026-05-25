@@ -439,6 +439,13 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
 
+    # Load WebUI dashboard plugins
+    try:
+        from api.plugins import load_plugins
+        load_plugins()
+    except Exception as e:
+        print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
+
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 
     # ── TLS/HTTPS setup (optional) ─────────────────────────────────────────

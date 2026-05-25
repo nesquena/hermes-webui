@@ -532,6 +532,7 @@ const LOCALES = {
     settings_tab_preferences: 'Preferences',
     settings_tab_plugins: 'Plugins',
     settings_plugins_title: 'Plugins',
+    settings_plugins_enable_toggle: 'Enable',
     settings_plugins_meta: 'View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.',
     settings_plugins_empty: 'No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.',
     plugins_unnamed: 'Unnamed plugin',

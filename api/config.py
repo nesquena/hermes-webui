@@ -4514,6 +4514,7 @@ _SETTINGS_DEFAULTS = {
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "simplified_tool_calling": True,  # render tools/thinking as compact inline timeline activity
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
+    "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
     "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
@@ -4685,8 +4686,16 @@ def save_settings(settings: dict) -> dict:
     if settings.pop("_clear_password", False):
         current["password_hash"] = None
         _password_changed = True
+    # Deep-merge dashboard_plugins dict (plugin_name -> bool)
+    _dashboard_plugins = settings.get("dashboard_plugins")
+    if isinstance(_dashboard_plugins, dict):
+        current_dash = current.get("dashboard_plugins", {})
+        if isinstance(current_dash, dict):
+            current_dash.update(_dashboard_plugins)
+            current["dashboard_plugins"] = current_dash
     for k, v in settings.items():
-        if k in _SETTINGS_ALLOWED_KEYS:
+        if k == "dashboard_plugins":
+            continue
             if k == "theme":
                 if isinstance(v, str) and v.strip():
                     pending_theme = v

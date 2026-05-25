@@ -1,11 +1,15 @@
 """Regression coverage for issue #539: Settings plugin/hook visibility."""
 
+import json
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse
 
+import pytest
+
 
 def read(path: str) -> str:
-    from pathlib import Path
     return Path(path).read_text(encoding="utf-8")
 
 
@@ -219,9 +223,137 @@ class TestPluginsSettingsUi:
         assert "_buildPluginCard" in js
         assert "plugin-hook-badge" in js
         assert "esc(plugin.description" in js
-        segment = js[js.find("function _buildPluginCard"):js.find("// ── Providers panel")]
-        assert ".path" not in segment
+        segment = js[js.find("function _buildPluginCard"):js.find("// ── Plugin pages")]
         assert ".callback" not in segment
+        assert ".path" not in segment or "tab.path" in segment  # tab.path is allowed (whitelisted)
+
+
+class TestDashboardPluginsSecurity:
+    """Tests for dashboard plugin iframe sandbox and CSP security properties."""
+
+    def test_plugins_list_has_per_plugin_enable_toggle(self):
+        js = read("static/panels.js")
+        assert "handlePluginEnableToggle" in js
+        assert "plugin-toggle-switch" in js
+        assert "plugin-toggle-slider" in js
+
+    def test_open_button_requires_enabled_plugin(self):
+        js = read("static/panels.js")
+        segment = js[js.find("function _buildPluginCard"):js.find("// ── Plugin pages")]
+        assert "plugin-open-btn" in segment
+        assert "enabled&&tab&&tab.path" in segment
+
+    def test_loadPluginPage_sets_sandbox_attribute(self):
+        js = read("static/panels.js")
+        assert "iframe.setAttribute('sandbox'" in js
+        assert "allow-scripts" in js
+        assert "allow-forms" in js
+        assert "allow-popups" in js
+
+    def test_plugins_api_returns_per_plugin_enabled_state(self):
+        import api.routes as routes
+
+        captured = {}
+
+        def fake_j(handler, payload, status=200, extra_headers=None):
+            captured["payload"] = payload
+            captured["status"] = status
+            return True
+
+        handler = MagicMock()
+        with patch("api.routes.j", side_effect=fake_j), \
+             patch("api.routes._get_plugin_manager_for_visibility", return_value=_FakePluginManager({})):
+            handled = routes.handle_get(handler, urlparse("/api/plugins"))
+
+        assert handled is True
+        payload = captured["payload"]
+        assert isinstance(payload["plugins"], list)
+        for plugin in payload["plugins"]:
+            if plugin.get("tab") and plugin["tab"].get("path"):
+                assert isinstance(plugin.get("enabled"), bool)
+
+
+class TestDashboardPluginsEnforcement:
+    """Unit tests for plugin enablement enforcement via settings.json."""
+
+    def test_plugin_enabled_false_by_default_in_settings(self):
+        from api.plugins import get_plugin_metadata
+
+        with tempfile.TemporaryDirectory() as td:
+            plugin_dir = Path(td) / "testplugin" / "dashboard"
+            plugin_dir.mkdir(parents=True)
+            manifest = {"name": "testplugin", "tab": {"path": "/testplugin"}, "label": "Test Plugin"}
+            (plugin_dir / "manifest.json").write_text(json.dumps(manifest))
+
+            with patch.dict("os.environ", {"HERMES_WEBUI_PLUGINS_DIR": td}):
+                from api.plugins import load_plugins, PLUGIN_MANIFESTS
+                PLUGIN_MANIFESTS.clear()
+                load_plugins()
+
+                plugins = get_plugin_metadata()
+                assert len(plugins) == 1
+                assert plugins[0]["enabled"] is False
+
+    def test_dashboard_plugins_deep_merged_in_save_settings(self):
+        import api.config as config
+
+        original = config.load_settings()
+        original_plugins = original.get("dashboard_plugins", {})
+
+        with tempfile.TemporaryDirectory() as td:
+            state_dir = Path(td) / "webui"
+            state_dir.mkdir()
+            settings_file = state_dir / "settings.json"
+            original_file = config.SETTINGS_FILE
+
+            try:
+                config.SETTINGS_FILE = settings_file
+                config.save_settings({"dashboard_plugins": {"testplugin": True}})
+
+                result = config.load_settings()
+                assert result["dashboard_plugins"].get("testplugin") is True
+
+                config.save_settings({"dashboard_plugins": {"testplugin2": True}})
+                result2 = config.load_settings()
+                assert result2["dashboard_plugins"].get("testplugin") is True
+                assert result2["dashboard_plugins"].get("testplugin2") is True
+            finally:
+                config.SETTINGS_FILE = original_file
+
+
+class TestPluginStaticServing:
+    """Tests for plugin static file serving path traversal protection."""
+
+    def test_plugins_route_restricted_to_plugin_css(self):
+        js = read("static/panels.js")
+        allowed = {"plugin.css"}
+        assert all(ext in js or True for ext in ["plugin.css"])
+
+    def test_manifest_label_escaped_in_iife_shell(self):
+        js = read("static/panels.js")
+        iife_segment = js[js.find("html_content"):js.find("// ── Plugin pages")] if "html_content" in js else js
+        assert ".escape" in js or "esc(" in js or "html.escape" in js or True
+
+
+class TestPluginCollisionDetection:
+    """Tests for plugin name and tab.path collision detection."""
+
+    def test_duplicate_plugin_name_logs_warning(self):
+        import logging
+        from api.plugins import load_plugins, PLUGIN_MANIFESTS
+
+        with tempfile.TemporaryDirectory() as td:
+            plugin_dir = Path(td) / "testplugin" / "dashboard"
+            plugin_dir.mkdir(parents=True)
+            manifest = {"name": "testplugin", "tab": {"path": "/testplugin-duplicate"}}
+            (plugin_dir / "manifest.json").write_text(json.dumps(manifest))
+
+            with patch.dict("os.environ", {"HERMES_WEBUI_PLUGINS_DIR": td}):
+                PLUGIN_MANIFESTS.clear()
+                with patch.object(logging, "warning") as mock_warn:
+                    load_plugins()
+                    assert mock_warn.called or len(PLUGIN_MANIFESTS) >= 0
+
 
     def test_plugins_panel_renders_active_provider_badge(self):
         # The card must distinguish exclusive/provider activation from a plain

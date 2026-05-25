@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2622** by @pix0127 — Dashboard plugin system: discover and render WebUI dashboard plugins from `~/.hermes/plugins/<name>/dashboard/manifest.json`. Plugins appear as cards in Settings → Plugins with an "Open" button that loads the plugin page in an isolated iframe (CSS/JS/modal sandboxed). Adds `/plugins/` and `/dashboard-plugins/` static asset routes with path-traversal protection. Plugin page serve order: `dashboard/dist/index.html` → `static/index.html` → auto-generated IIFE shell. Clicking Settings sidebar items while viewing a plugin page correctly switches back to the Settings main content.
+
 ## [v0.51.134] — 2026-05-25 — Release DF (stage-batch16 — single-PR Windows path defaults)
 
 ### Fixed
@@ -217,6 +221,7 @@
 - **PR #2820** by @tangerine-fan — Clarify user choice is now echoed as a visible message in the conversation transcript. After the user responds to a clarify prompt, a synthetic user message with the chosen value is inserted into `S.messages` (marked `_clarify_response: true` so downstream consumers can filter if needed). Previously the choice was only visible in the transient clarify card; now the chat history preserves the decision.
 
 - **PR #2843** by @AJV20 — New Settings preference "Ignore Agent updates" keeps WebUI update notices, banners, and update actions enabled while suppressing Hermes Agent update checks. Default `False` (current behavior). Useful when running an unreleased agent build or pinning to a specific agent commit.
+>>>>>>> origin/master
 
 ## [v0.51.124] — 2026-05-24 — Release CV (stage-batch6 — 3-PR Windows-only stack — agent paths / docs / port hardening)
 
