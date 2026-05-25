@@ -1410,6 +1410,14 @@
     <div class="panel-header">
       <div class="workspace-panel-title-group"><span id="workspacePanelHeading" class="workspace-panel-heading" title="Workspace">Workspace</span><span id="workspaceHiddenIndicator" class="workspace-hidden-indicator" data-i18n-title="workspace_hidden_files_visible_title" title="Hidden files are visible — click for options" hidden onclick="toggleWorkspacePrefsMenu(event)"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span data-i18n="workspace_hidden_files_visible">hidden visible</span></span></div>
       <span class="git-badge" id="gitBadge" style="display:none"></span>
+      <span class="git-auto-fetch-status" id="gitAutoFetchStatus" hidden></span>
+      <div class="git-branch-control" id="gitBranchControl" style="display:none">
+        <button class="git-branch-button" id="btnGitBranchMenu" type="button" onclick="toggleGitBranchMenu(event)" aria-haspopup="menu" aria-expanded="false" title="Switch branch">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+          <span id="gitBranchLabel">branch</span>
+        </button>
+        <div class="git-branch-menu" id="gitBranchMenu" role="menu" hidden></div>
+      </div>
       <div class="panel-actions">
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnUpDir" data-tooltip="Parent directory" onclick="navigateUp()" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFile" data-tooltip="New file" onclick="promptNewFile()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
@@ -1421,24 +1429,59 @@
       </div>
     </div>
     <input type="file" id="workspaceFileInput" class="file-input-visually-hidden" multiple accept="image/*,text/*,.pdf,.json,.csv,.md,.py,.js,.ts,.yaml,.yml,.toml,.zip,.tar,.gz,.tgz,.bz2,.xz">
-    <div class="workspace-panel-tabs" role="tablist" aria-label="Workspace panel views">
-      <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button" onclick="switchWorkspacePanelTab('files')" role="tab" aria-selected="true">Files</button>
-      <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false">Artifacts <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
+    <div class="workspace-tabs workspace-panel-tabs" id="workspaceGitTabs" role="tablist" aria-label="Workspace panel views">
+      <button class="workspace-tab workspace-panel-tab active" id="btnWorkspaceFilesTab" type="button" onclick="switchWorkspacePanelTab('files')" role="tab" aria-selected="true" data-i18n="git_files">Files</button>
+      <button class="workspace-tab workspace-panel-tab" id="btnWorkspaceChangesTab" type="button" onclick="switchWorkspacePanelTab('changes')" role="tab" aria-selected="false" data-i18n="git_changes" hidden>Changes</button>
+      <button class="workspace-tab workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false">Artifacts <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree"></div>
     <div class="workspace-artifacts" id="workspaceArtifacts" hidden></div>
+    <div class="git-changes-view" id="gitChangesView" style="display:none">
+      <div id="gitChangesList" class="git-changes-list"></div>
+      <div class="git-commit-box" id="gitCommitBox">
+        <div class="git-selection-summary" id="gitSelectionSummary"></div>
+        <textarea id="gitCommitMessage" rows="3" placeholder="Commit message" data-i18n-placeholder="git_commit_message"></textarea>
+        <div class="git-privacy-note" data-i18n="git_commit_message_privacy">Generating a message sends the selected diff to your configured model provider.</div>
+        <div class="git-commit-actions">
+          <button class="mini-btn" id="btnGitGenerateCommitMessage" type="button" onclick="generateGitCommitMessage()">Generate message</button>
+          <button class="sm-btn git-commit-primary" id="btnGitCommit" type="button" onclick="commitGitChanges()" data-i18n="git_commit">Commit</button>
+        </div>
+      </div>
+    </div>
     <div id="wsEmptyState" style="display:none;flex:1;align-items:center;justify-content:center;padding:24px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6"></div>
     <div class="preview-area" id="previewArea">
       <div class="preview-path" id="previewPath">
+        <button id="btnPreviewBack" class="panel-icon-btn preview-back-btn" style="display:none" onclick="returnFromPreview()" title="Back"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg><span id="previewBackLabel"></span></button>
         <span id="previewPathText"></span>
         <span class="preview-badge" id="previewBadge"></span>
+        <button id="btnMarkdownPopout" class="panel-icon-btn preview-toolbar-btn" style="margin-left:auto;font-size:12px;width:auto;padding:2px 8px;display:none;align-items:center;gap:4px" onclick="openMarkdownPopout()" title="Open rendered Markdown preview"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> Preview</button>
         <button id="btnOpenInBrowser" class="panel-icon-btn" style="margin-left:auto;font-size:12px;width:auto;padding:2px 8px;display:none;align-items:center;gap:4px" onclick="openInBrowser()" title="Open in new browser tab"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg> <span data-i18n="open_in_browser">Open in browser</span></button>
         <button id="btnRenderMarkdownAnyway" class="panel-icon-btn" style="font-size:12px;width:auto;padding:2px 8px;display:none;align-items:center;gap:4px" onclick="forceRenderMarkdownPreview()" title="Render this large file as rich Markdown"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/><path d="M7 8h10"/><path d="M7 12h10"/><path d="M7 16h6"/></svg> Render as markdown anyway</button>
         <button id="btnDownloadFile" class="panel-icon-btn" style="margin-left:auto;font-size:12px;width:auto;padding:2px 8px;display:inline-flex;align-items:center;gap:4px" onclick="downloadFile(_previewCurrentPath)" title="Download file to your computer"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download</button>
         <button id="btnEditFile" class="panel-icon-btn" style="font-size:12px;width:auto;padding:2px 8px;display:none;align-items:center;gap:4px" onclick="toggleEditMode()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg> Edit</button>
       </div>
-      <pre class="preview-code" id="previewCode"></pre>
+      <div class="workspace-editor-shell" id="workspaceEditorShell" style="display:none">
+        <div class="workspace-editor-toolbar">
+          <label class="workspace-editor-toggle"><input id="previewWrapToggle" type="checkbox" onchange="setEditorSoftWrap(this.checked)"> <span data-i18n="editor_soft_wrap">Soft wrap</span></label>
+          <span class="workspace-editor-dirty" id="editorDirtyState"></span>
+          <span class="workspace-editor-status" id="previewEditorStatus">Ln 1, Col 1</span>
+          <span class="workspace-editor-actions" id="previewEditorActions" hidden>
+            <button type="button" class="mini-btn" id="btnEditorCancel" onclick="requestCancelEditMode()" data-i18n="cancel">Cancel</button>
+            <button type="button" class="mini-btn workspace-editor-save" id="btnEditorSave" onclick="toggleEditMode()" data-i18n="save">Save</button>
+          </span>
+        </div>
+        <div class="workspace-editor-surface" id="previewReadShell">
+          <div class="workspace-editor-gutter" id="previewCodeGutter" aria-hidden="true"></div>
+          <div class="workspace-editor-guides" id="previewCodeGuides" aria-hidden="true"></div>
+          <pre class="preview-code workspace-editor-code" id="previewCode" onscroll="syncEditorScroll('read')"></pre>
+        </div>
+        <div class="workspace-editor-surface workspace-editor-edit-surface" id="previewEditShell" style="display:none">
+          <div class="workspace-editor-gutter" id="previewEditGutter" aria-hidden="true"></div>
+          <div class="workspace-editor-guides" id="previewEditGuides" aria-hidden="true"></div>
+          <textarea id="previewEditArea" class="workspace-editor-textarea" oninput="handleEditorInput()" onscroll="syncEditorScroll('edit')"></textarea>
+        </div>
+      </div>
       <div class="preview-img-wrap" id="previewImgWrap" style="display:none"><img class="preview-img" id="previewImg" src="" alt=""></div>
       <div class="preview-media-wrap" id="previewMediaWrap" style="display:none"></div>
       <div class="preview-pdf-wrap" id="previewPdfWrap" style="display:none">
@@ -1448,7 +1491,7 @@
       <div class="preview-html-wrap" id="previewHtmlWrap" style="display:none;flex:1;border-radius:8px;overflow:hidden;border:1px solid var(--border2)">
         <iframe id="previewHtmlIframe" style="width:100%;height:100%;border:none;background:#fff" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" title="HTML preview"></iframe>
       </div>
-      <textarea id="previewEditArea" style="display:none;flex:1;width:100%;background:var(--code-bg);color:var(--pre-text);border:1px solid var(--border2);border-radius:8px;padding:12px;font-family:'SF Mono',ui-monospace,monospace;font-size:12px;line-height:1.6;resize:none;outline:none" oninput="_previewDirty=true;updateEditBtn()"></textarea>
+      <div class="git-diff-view" id="gitDiffView" style="display:none"></div>
     </div>
   </aside>
 </div>
