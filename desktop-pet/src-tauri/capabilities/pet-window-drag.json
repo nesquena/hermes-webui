@@ -1,0 +1,29 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet-window-drag",
+  "description": "Allow the fixed pet window and the separate bubbles window to coordinate position, visibility, and drag events.",
+  "windows": [
+    "pet",
+    "pet_bubbles"
+  ],
+  "local": true,
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*/*",
+      "http://localhost:*/*"
+    ]
+  },
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-current-monitor",
+    "core:window:allow-available-monitors",
+    "core:window:allow-outer-position",
+    "core:window:allow-outer-size",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:event:allow-emit",
+    "core:event:allow-listen"
+  ]
+}

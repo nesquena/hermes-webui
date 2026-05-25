@@ -3876,16 +3876,12 @@ function _memorySectionMeta(key) {
 
 function _memorySectionContent(key) {
   if (!_memoryData) return '';
-  if (key === 'user') return _memoryData.user || '';
-  if (key === 'soul') return _memoryData.soul || '';
-  return _memoryData.memory || '';
+  return key === 'user' ? (_memoryData.user || '') : (_memoryData.memory || '');
 }
 
 function _memorySectionMtime(key) {
   if (!_memoryData) return 0;
-  if (key === 'user') return _memoryData.user_mtime || 0;
-  if (key === 'soul') return _memoryData.soul_mtime || 0;
-  return _memoryData.memory_mtime || 0;
+  return key === 'user' ? (_memoryData.user_mtime || 0) : (_memoryData.memory_mtime || 0);
 }
 
 function _setMemoryHeaderButtons(mode) {
@@ -5864,6 +5860,347 @@ function _preferencesPayloadFromUi(){
   return payload;
 }
 
+const DESKTOP_PET_ENABLED_KEY='hermes-desktop-pet-enabled';
+let _desktopPetAutostartAttempted=false;
+let _desktopPetPreferenceCache=null;
+let _desktopPetPreferenceLoadPromise=null;
+let _desktopPetPreferenceRefreshAt=0;
+
+function _desktopPetSetupDelay(ms){
+  return new Promise(resolve=>setTimeout(resolve,ms));
+}
+
+function isDesktopPetAvailableOnThisDevice(){
+  const ua=(navigator.userAgent||'').toLowerCase();
+  const touch=Number(navigator.maxTouchPoints||0)>1;
+  const coarse=!!(window.matchMedia&&window.matchMedia('(pointer: coarse)').matches);
+  const mobileUA=/android|iphone|ipad|ipod|mobile|tablet|kindle|silk/.test(ua);
+  const ipadOS=/macintosh/.test(ua)&&touch;
+  return !(mobileUA||ipadOS||(touch&&coarse));
+}
+
+function _legacyDesktopPetPreferenceEnabled(){
+  try{return localStorage.getItem(DESKTOP_PET_ENABLED_KEY)==='true';}catch(_){return false;}
+}
+
+function _cacheDesktopPetPreference(enabled){
+  _desktopPetPreferenceCache=!!enabled;
+  try{localStorage.setItem(DESKTOP_PET_ENABLED_KEY,enabled?'true':'false');}catch(_){}
+}
+
+async function _loadDesktopPetPreference(){
+  if(typeof _desktopPetPreferenceCache==='boolean') return _desktopPetPreferenceCache;
+  if(_desktopPetPreferenceLoadPromise) return _desktopPetPreferenceLoadPromise;
+  _desktopPetPreferenceLoadPromise=(async()=>{
+    const legacy=_legacyDesktopPetPreferenceEnabled();
+    try{
+      const result=await api('/api/pet/preference');
+      if(result&&result.ok){
+        if(result.configured===false){
+          return await _setDesktopPetPreferenceEnabled(legacy);
+        }
+        _cacheDesktopPetPreference(!!result.enabled);
+        return _desktopPetPreferenceCache;
+      }
+    }catch(_){}
+    _cacheDesktopPetPreference(legacy);
+    return _desktopPetPreferenceCache;
+  })().finally(()=>{_desktopPetPreferenceLoadPromise=null;});
+  return _desktopPetPreferenceLoadPromise;
+}
+
+async function _desktopPetPreferenceEnabled(){
+  return await _loadDesktopPetPreference();
+}
+
+async function _setDesktopPetPreferenceEnabled(enabled){
+  _cacheDesktopPetPreference(!!enabled);
+  try{
+    const result=await api('/api/pet/preference',{method:'POST',body:JSON.stringify({enabled:!!enabled})});
+    if(result&&result.ok){
+      _cacheDesktopPetPreference(!!result.enabled);
+    }
+  }catch(e){
+    throw e;
+  }
+  return _desktopPetPreferenceCache;
+}
+
+window.addEventListener('storage',event=>{
+  if(event.key!==DESKTOP_PET_ENABLED_KEY) return;
+  _cacheDesktopPetPreference(event.newValue==='true');
+  _setDesktopPetSwitch(_desktopPetPreferenceCache,false);
+  if(!_desktopPetPreferenceCache) _setDesktopPetInlineStatus('');
+});
+
+function _syncDesktopPetAvailabilityUi(){
+  const available=isDesktopPetAvailableOnThisDevice();
+  const field=$('settingsDesktopPetField');
+  if(field) field.hidden=!available;
+  return available;
+}
+
+async function _waitForDesktopPetRunning(timeoutMs=2600){
+  const deadline=Date.now()+timeoutMs;
+  while(Date.now()<deadline){
+    try{
+      const status=await api('/api/pet/status',{method:'POST',body:'{}'});
+      if(status&&status.running) return true;
+    }catch(_){}
+    await _desktopPetSetupDelay(180);
+  }
+  return false;
+}
+
+let _desktopPetToggleBusy=false;
+let _desktopPetSetupProgressTimer=0;
+let _desktopPetSetupProgressIndex=0;
+let _desktopPetSetupProgressStartedAt=0;
+
+const DESKTOP_PET_SETUP_PROGRESS_KEYS=[
+  'settings_desktop_pet_setup_prepare',
+  'settings_desktop_pet_setup_build_wait',
+  'settings_desktop_pet_setup_build_continue',
+  'settings_desktop_pet_setup_pick_spot',
+  'settings_desktop_pet_setup_link_sessions',
+  'settings_desktop_pet_setup_pack_bubbles',
+  'settings_desktop_pet_setup_polish',
+  'settings_desktop_pet_setup_build_finish'
+];
+
+function _desktopPetSwitch(){
+  return $('settingsDesktopPetEnabled');
+}
+
+function _setDesktopPetInlineStatus(keyOrText, options={}){
+  const el=$('desktopPetInlineStatus');
+  if(!el) return;
+  const args=Array.isArray(options.args)?options.args:[];
+  const text=options.raw?String(keyOrText||''):(keyOrText?t(keyOrText,...args):'');
+  el.textContent=text;
+}
+
+function _notifyDesktopPetSetup(options, key, duration=12000, args=[]){
+  if(!options||!options.notifySetup||typeof showToast!=='function') return;
+  showToast(t(key,...args), duration, 'info');
+}
+
+function _stopDesktopPetSetupProgress(){
+  if(_desktopPetSetupProgressTimer){
+    clearInterval(_desktopPetSetupProgressTimer);
+    _desktopPetSetupProgressTimer=0;
+  }
+}
+
+function _startDesktopPetSetupProgress(options={}){
+  _stopDesktopPetSetupProgress();
+  _desktopPetSetupProgressIndex=0;
+  _desktopPetSetupProgressStartedAt=Date.now();
+  const update=()=>{
+    let key=DESKTOP_PET_SETUP_PROGRESS_KEYS[_desktopPetSetupProgressIndex];
+    let args=[];
+    if(!key){
+      key='settings_desktop_pet_setup_build_elapsed';
+      args=[Math.max(1,Math.floor((Date.now()-_desktopPetSetupProgressStartedAt)/1000))];
+    }
+    _desktopPetSetupProgressIndex+=1;
+    _setDesktopPetInlineStatus(key,{args});
+    _notifyDesktopPetSetup(options,key,11000,args);
+  };
+  update();
+  _desktopPetSetupProgressTimer=setInterval(update,8500);
+}
+
+function _setDesktopPetSwitch(checked, disabled){
+  const toggle=_desktopPetSwitch();
+  if(!toggle) return;
+  toggle.checked=!!checked;
+  if(typeof disabled==='boolean') toggle.disabled=disabled;
+}
+
+async function _refreshDesktopPetPreferenceFromServer(){
+  const toggle=_desktopPetSwitch();
+  if(!toggle) return;
+  if(!_syncDesktopPetAvailabilityUi()){
+    _setDesktopPetSwitch(false,true);
+    _setDesktopPetInlineStatus('cmd_pet_unavailable');
+    return;
+  }
+  try{
+    const result=await api('/api/pet/preference');
+    if(result&&result.ok&&result.configured!==false){
+      _cacheDesktopPetPreference(!!result.enabled);
+      _setDesktopPetSwitch(!!result.enabled,false);
+      if(!result.enabled) _setDesktopPetInlineStatus('');
+    }
+  }catch(_){}
+}
+
+function _scheduleDesktopPetPreferenceRefresh(){
+  const now=Date.now();
+  if(now-_desktopPetPreferenceRefreshAt<800) return;
+  _desktopPetPreferenceRefreshAt=now;
+  _refreshDesktopPetPreferenceFromServer().catch(()=>{});
+}
+
+window.addEventListener('focus',_scheduleDesktopPetPreferenceRefresh);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)_scheduleDesktopPetPreferenceRefresh();});
+
+async function refreshDesktopPetSwitch(){
+  const toggle=_desktopPetSwitch();
+  if(!toggle) return;
+  const available=_syncDesktopPetAvailabilityUi();
+  if(!available){
+    _setDesktopPetSwitch(false,true);
+    _setDesktopPetInlineStatus('cmd_pet_unavailable');
+    return;
+  }
+  const preference=await _desktopPetPreferenceEnabled();
+  _setDesktopPetSwitch(preference,false);
+  try{
+    const status=await api('/api/pet/status',{method:'POST',body:'{}'});
+    if(status&&status.ok){
+      _setDesktopPetInlineStatus(status.running?'settings_desktop_pet_started':'');
+    }
+  }catch(_){}
+}
+
+async function prepareDesktopPetInline(options={}){
+  _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),true);
+  _startDesktopPetSetupProgress(options);
+  try{
+    const result=await Promise.all([
+      api('/api/pet/install',{method:'POST',body:'{}',timeoutMs:600000}),
+      _desktopPetSetupDelay(250),
+    ]).then(values=>values[0]);
+    _stopDesktopPetSetupProgress();
+    if(!result||!result.ok) throw new Error((result&&result.error)||t('settings_desktop_pet_start_failed'));
+    _setDesktopPetInlineStatus('settings_desktop_pet_setup_load');
+    _notifyDesktopPetSetup(options,'settings_desktop_pet_setup_load',12000);
+    await _desktopPetSetupDelay(180);
+    _setDesktopPetInlineStatus('settings_desktop_pet_setup_starting');
+    _notifyDesktopPetSetup(options,'settings_desktop_pet_setup_starting',12000);
+    await launchDesktopPet({fromSetup:true});
+    _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),false);
+    _setDesktopPetInlineStatus('');
+    return true;
+  }catch(e){
+    _stopDesktopPetSetupProgress();
+    _setDesktopPetInlineStatus(`${t('settings_desktop_pet_start_failed')}: ${(e&&e.message)?e.message:e}`,{raw:true});
+    _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),false);
+    throw e;
+  }finally{
+    const toggle=_desktopPetSwitch();
+    if(toggle) toggle.disabled=false;
+  }
+}
+
+async function startDesktopPet(options={}){
+  if(!isDesktopPetAvailableOnThisDevice()){
+    _syncDesktopPetAvailabilityUi();
+    _setDesktopPetInlineStatus('cmd_pet_unavailable');
+    if(typeof showToast==='function') showToast(t('cmd_pet_unavailable'),3000);
+    return false;
+  }
+  _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),true);
+  _setDesktopPetInlineStatus('settings_desktop_pet_setup_starting');
+  try{
+    const status=await api('/api/pet/status',{method:'POST',body:'{}'});
+    if(status&&status.installed){
+      _notifyDesktopPetSetup(options,'settings_desktop_pet_setup_starting',12000);
+      const launched=await launchDesktopPet();
+      _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),false);
+      _setDesktopPetInlineStatus('');
+      return launched!==false;
+    }
+    await prepareDesktopPetInline(options);
+    return true;
+  }catch(e){
+    const message=(e&&e.message)?e.message:String(e||'');
+    _setDesktopPetInlineStatus(`${t('settings_desktop_pet_start_failed')}: ${message}`,{raw:true});
+    if(typeof showToast==='function') showToast(`${t('settings_desktop_pet_start_failed')}: ${message}`,5000);
+    _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),false);
+    return false;
+  }finally{
+    const toggle=_desktopPetSwitch();
+    if(toggle) toggle.disabled=false;
+  }
+}
+
+async function launchDesktopPet(options={}){
+  _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),true);
+  try{
+    const result=await api('/api/pet/launch',{method:'POST',body:'{}'});
+    if(result&&result.ok){
+      await _waitForDesktopPetRunning();
+      _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),false);
+      _setDesktopPetInlineStatus('');
+      return true;
+    }
+    throw new Error((result&&result.error)||t('settings_desktop_pet_start_failed'));
+  }catch(e){
+    const message=(e&&e.message)?e.message:String(e||'');
+    if(options.fromSetup){
+      throw e;
+    }
+    if(typeof showToast==='function') showToast(`${t('settings_desktop_pet_start_failed')}: ${message}`,5000);
+    return false;
+  }finally{
+    const toggle=_desktopPetSwitch();
+    if(toggle) toggle.disabled=false;
+  }
+}
+
+async function closeDesktopPet(){
+  _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),true);
+  try{
+    const result=await api('/api/pet/close',{method:'POST',body:'{}'});
+    if(result&&!result.ok) throw new Error(result.error||t('settings_desktop_pet_start_failed'));
+    _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),false);
+    _setDesktopPetInlineStatus('');
+    return true;
+  }catch(e){
+    const message=(e&&e.message)?e.message:String(e||'');
+    _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),false);
+    _setDesktopPetInlineStatus(`${t('settings_desktop_pet_start_failed')}: ${message}`,{raw:true});
+    if(typeof showToast==='function') showToast(`${t('settings_desktop_pet_start_failed')}: ${message}`,5000);
+    return false;
+  }
+}
+
+async function toggleDesktopPetFromAppearance(enabled, options={}){
+  if(_desktopPetToggleBusy) return false;
+  if(!isDesktopPetAvailableOnThisDevice()){
+    try{await _setDesktopPetPreferenceEnabled(false);}catch(_){}
+    _syncDesktopPetAvailabilityUi();
+    if(typeof showToast==='function') showToast(t('cmd_pet_unavailable'),3000);
+    return false;
+  }
+  _desktopPetToggleBusy=true;
+  try{
+    await _setDesktopPetPreferenceEnabled(!!enabled);
+    _setDesktopPetSwitch(!!enabled,true);
+    if(enabled){
+      return await startDesktopPet(options);
+    }
+    return await closeDesktopPet();
+  }finally{
+    _setDesktopPetSwitch(await _desktopPetPreferenceEnabled(),false);
+    _desktopPetToggleBusy=false;
+  }
+}
+
+async function maybeAutoStartDesktopPetFromPreference(){
+  if(_desktopPetAutostartAttempted) return;
+  _desktopPetAutostartAttempted=true;
+  const available=_syncDesktopPetAvailabilityUi();
+  if(!available) return;
+  if(!await _desktopPetPreferenceEnabled()) return;
+  await startDesktopPet();
+}
+
+window.addEventListener('load',()=>setTimeout(()=>{maybeAutoStartDesktopPetFromPreference().catch(()=>{});},400));
+
 function _setPreferencesAutosaveStatus(state){
   const el=$('settingsPreferencesAutosaveStatus');
   if(!el) return;
@@ -6024,6 +6361,7 @@ async function loadSettingsPanel(){
     _setHiddenTabs(hiddenTabs);
     _applyTabVisibility(hiddenTabs);
     _renderTabVisibilityChips();
+    refreshDesktopPetSwitch();
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
       ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');

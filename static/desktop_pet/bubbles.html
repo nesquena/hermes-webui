@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Hermes Pet Updates</title>
+  <link rel="stylesheet" href="/static/desktop_pet/pet.css?v=__WEBUI_VERSION__&pet_asset=__DESKTOP_PET_ASSET_VERSION__">
+  <script>window.__HERMES_CONFIG__={csrfToken:__CSRF_TOKEN_JSON__};</script>
+</head>
+<body class="pet-bubbles-body">
+  <section class="pet-install" id="petInstall" aria-live="polite" data-tauri-drag-region hidden>
+    <div class="pet-install-card" data-tauri-drag-region>
+      <span class="pet-install-sprite" id="petInstallSprite" aria-hidden="true"></span>
+      <div class="pet-install-copy">
+        <div class="pet-install-title" id="petInstallTitle" data-i18n="desktop_pet_install_title">Starting desktop pet</div>
+        <div class="pet-install-status" id="petInstallStatus" data-i18n="desktop_pet_install_check_webui">Checking WebUI connection</div>
+      </div>
+    </div>
+  </section>
+  <div class="pet-ready-toast" id="petReadyToast" hidden data-i18n="desktop_pet_ready_toast">Ready to use. Drag the pet, right-click to switch skins, and click bubbles to open sessions.</div>
+  <section class="pet-welcome" id="petWelcome" aria-live="polite" hidden>
+    <div class="pet-welcome-card">
+      <div class="pet-welcome-head">
+        <div class="pet-welcome-title" data-i18n="desktop_pet_welcome_title">Hello there</div>
+        <div class="pet-welcome-countdown" id="petWelcomeCountdown">Closing in 30s</div>
+      </div>
+      <div class="pet-welcome-copy" data-i18n="desktop_pet_welcome_copy">I can keep an eye on running sessions, completions, approvals, and quick replies while WebUI stays in your browser.</div>
+      <button class="pet-welcome-action" type="button" id="petWelcomeAction" data-i18n="desktop_pet_welcome_action">Got it</button>
+    </div>
+  </section>
+  <section class="pet-bubbles" id="petBubbles" aria-live="polite" hidden></section>
+  <script src="/static/i18n.js?v=__WEBUI_VERSION__" defer></script>
+  <script src="/static/desktop_pet/bubbles.js?v=__WEBUI_VERSION__&pet_asset=__DESKTOP_PET_ASSET_VERSION__&pet_windows=2" defer></script>
+</body>
+</html>
