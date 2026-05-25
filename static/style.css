@@ -3359,23 +3359,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .project-create-btn:hover{opacity:1;border-color:var(--blue);color:var(--blue);}
 .project-create-input{font-size:10px;padding:3px 8px;border-radius:12px;border:1px solid var(--accent-bg);background:var(--surface);color:var(--text);outline:none;min-width:40px;max-width:180px;width:auto;font-family:inherit;box-shadow:0 0 0 2px var(--accent-bg);}
 
-.skill-chip{
-  font-size:inherit;
-  line-height:inherit;
-  font-weight:inherit;
-  padding:0;
-  border-radius:10px;
-  border:none;
-  box-shadow:0 0 0 1px var(--border2),0 0 0 3px var(--input-bg);
-  background:var(--input-bg);
-  color:var(--muted);
-  transition:all .15s;
-  white-space:nowrap;
-  display:inline-flex;
-  align-items:center;
-  gap:4px;
-  cursor:default;
-}
+.skill-chip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:12px;cursor:default;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;}
 
 .skill-chip:hover{
   background:rgba(255,255,255,.08);

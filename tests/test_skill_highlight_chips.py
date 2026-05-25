@@ -109,24 +109,23 @@ def test_composer_skill_overlay_uses_whitespace_completed_mentions():
     assert "composer-overlay-token" in skills
     assert "composer-overlay-token-raw" not in skills
     assert "rawMatch" not in skills
-    assert "font-size:inherit;" in css
-    assert "font-weight:inherit;" in css
+    assert ".skill-chip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:12px;cursor:default;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;}" in css
     assert ".composer-skill-overlay .skill-chip{vertical-align:baseline;margin:0;}" in css
-    assert "function findCompletedComposerSkillMentions" in skills
-    assert "COMPOSER_SKILL_TOKEN_RE" in skills
-    assert "(?=\\s)" in skills
+    assert "const COMPOSER_SKILL_TOKEN_RE = /(^|\\s)(\\/([A-Za-z0-9][A-Za-z0-9_-]*))(?=\\s)/g;" in skills
+    assert "const raw = m[2] || '';" in skills
+    assert "const token = m[3] || '';" in skills
+    assert "token.appendChild(createSkillChip({name: mention.raw" in skills
     assert "updateComposerSkillPreview();" in boot
     assert "updateComposerSkillPreview({force:true});" not in commands
     assert "replaceChild(textNode,chip)" not in skills
 
 
-def test_composer_overlay_normalizes_completed_slash_skill_mentions():
-    """Completed /skill mentions should normalize the textarea value so overlay width equals caret text."""
+def test_composer_overlay_preserves_direct_slash_skill_mentions():
+    """Completed /skill mentions should remain direct slash tokens so chip width matches caret text."""
     skills = read("static/skills.js")
-    assert "function normalizeCompletedComposerSkillMentions" in skills
-    assert "m.raw && m.raw.startsWith('/')" in skills
-    assert "textarea.setSelectionRange(nextSelection, nextSelection);" in skills
-    assert "normalizeCompletedComposerSkillMentions(textarea);" in skills
+    assert "function normalizeCompletedComposerSkillMentions" not in skills
+    assert "textarea.setSelectionRange(nextSelection, nextSelection);" not in skills
+    assert "normalizeCompletedComposerSkillMentions(textarea);" not in skills
 
 def test_composer_preview_avoids_prefix_overlap_by_waiting_for_whitespace():
     """Prefix-overlapping skills should not mismatch because unfinished tokens are ignored."""

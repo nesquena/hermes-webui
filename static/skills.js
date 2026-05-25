@@ -161,7 +161,7 @@ function highlightSkillsInMessages(container) {
   loadSkillRegistry().then(() => highlightSkillsInRenderedMessages(root));
 }
 
-const COMPOSER_SKILL_TOKEN_RE = /(^|\s)(\/?([A-Za-z0-9][A-Za-z0-9_-]*))(?=\s)/g;
+const COMPOSER_SKILL_TOKEN_RE = /(^|\s)(\/([A-Za-z0-9][A-Za-z0-9_-]*))(?=\s)/g;
 
 function findCompletedComposerSkillMentions(text) {
   const mentions = [];
@@ -175,29 +175,6 @@ function findCompletedComposerSkillMentions(text) {
   return mentions;
 }
 
-function normalizeCompletedComposerSkillMentions(textarea) {
-  if(!textarea) return '';
-  const text = String(textarea.value || '');
-  const mentions = findCompletedComposerSkillMentions(text).filter(m => m.raw && m.raw.startsWith('/'));
-  if(!mentions.length) return text;
-  let next = '';
-  let last = 0;
-  let selectionDelta = 0;
-  const selection = textarea.selectionStart || 0;
-  for(const mention of mentions){
-    next += text.slice(last, mention.start) + mention.token;
-    if(mention.start < selection) selectionDelta += 1;
-    last = mention.end;
-  }
-  next += text.slice(last);
-  if(next !== text){
-    textarea.value = next;
-    const nextSelection = Math.max(0, selection - selectionDelta);
-    textarea.setSelectionRange(nextSelection, nextSelection);
-  }
-  return next;
-}
-
 function appendOverlayText(fragment, text) {
   if(!text) return;
   const span = document.createElement('span');
@@ -206,10 +183,10 @@ function appendOverlayText(fragment, text) {
   fragment.appendChild(span);
 }
 
-function createComposerOverlayToken(skill) {
+function createComposerOverlayToken(mention) {
   const token = document.createElement('span');
   token.className = 'composer-overlay-token';
-  token.appendChild(createSkillChip(skill));
+  token.appendChild(createSkillChip({name: mention.raw, slug: mention.skill.slug}));
   return token;
 }
 
@@ -218,7 +195,7 @@ function renderComposerSkillOverlay(text, mentions) {
   let last = 0;
   for(const mention of mentions){
     appendOverlayText(fragment, text.slice(last, mention.start));
-    fragment.appendChild(createComposerOverlayToken(mention.skill));
+    fragment.appendChild(createComposerOverlayToken(mention));
     last = mention.end;
   }
   appendOverlayText(fragment, text.slice(last));
@@ -232,7 +209,7 @@ async function updateComposerSkillPreview(opts={}) {
   const textarea = (typeof $ === 'function' && $('msg')) || document.getElementById('msg');
   if(!overlay || !textarea) return;
   await loadSkillRegistry();
-  const text = normalizeCompletedComposerSkillMentions(textarea);
+  const text = String(textarea.value || '');
   let mentions = findCompletedComposerSkillMentions(text);
   overlay.innerHTML = '';
   overlay.appendChild(renderComposerSkillOverlay(text, mentions));
