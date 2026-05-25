@@ -1149,11 +1149,14 @@ def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dic
         "source_id": source_id,
         "chunk_id": "cmt-chunk-" + _sha256(f"source_refresh_summary:{source_id}:{content_sha256}")[:24],
         "source_type": "source_refresh_summary",
+        "title": title,
+        "summary": summary,
         "origin_uri": safe_origin_uri,
         "space_id": "",
         "content_sha256": content_sha256,
         "redaction_status": redaction_status,
         "dropped_field_count": dropped_field_count,
+        "metadata_only": True,
         "prompt_preflight_text": "\n".join(part for part in (title_preflight_text, summary) if part),
         "markdown": frontmatter + "\n\n" + body,
     }
@@ -1161,6 +1164,86 @@ def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dic
 
 def _safe_refresh_error(_exc: BaseException) -> str:
     return "refresh failed"
+
+
+def _safe_source_refresh_model_route_resolution(resolution: Any) -> dict[str, Any] | None:
+    if not isinstance(resolution, dict):
+        return None
+    safe_resolution = (
+        resolution.get("resolution")
+        if resolution.get("resolution") in {"configured", "default_fallback"}
+        else "default_fallback"
+    )
+    is_summarize = resolution.get("hint") == "hint:summarize"
+    receipt = {
+        "hint": "hint:summarize" if is_summarize else "hint:reasoning",
+        "label": "Summarize" if is_summarize else "Reasoning",
+        "resolved_provider": (
+            _safe_public_text(resolution.get("resolved_provider"), limit=80)
+            or "current Hermes provider"
+        ),
+        "resolved_model": (
+            _safe_public_text(resolution.get("resolved_model"), limit=80)
+            or "default model"
+        ),
+        "resolution": safe_resolution,
+        "metadata_only": True,
+        "local_only": True,
+    }
+    fallback_reason = resolution.get("fallback_reason")
+    if fallback_reason in {"unknown_hint", "unsafe_config", "unconfigured_hint"}:
+        receipt["fallback_reason"] = fallback_reason
+    return receipt
+
+
+def _source_refresh_preflight_passed(receipt: Any) -> bool:
+    return (
+        isinstance(receipt, dict)
+        and receipt.get("metadata_only") is True
+        and receipt.get("status") == "pass"
+    )
+
+
+def _source_refresh_summarizer_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Return the bounded record shape passed to model-route summarizers."""
+    source_id = _safe_public_id(record.get("source_id"), fallback="source")
+    return {
+        "source_id": source_id,
+        "source_type": _safe_public_text(record.get("source_type"), limit=80) or "source_refresh_summary",
+        "title": _safe_public_text(record.get("title"), limit=200),
+        "summary": _safe_public_text(record.get("summary"), limit=1_200),
+        "origin_uri": _safe_origin_uri(record.get("origin_uri"), source_id=source_id),
+        "redaction_status": _safe_public_text(record.get("redaction_status"), limit=80) or "none",
+        "metadata_only": True,
+    }
+
+
+def _summarized_source_refresh_record(
+    *,
+    source_id: str,
+    origin_uri: str,
+    record: dict[str, Any],
+    summarizer: Any | None,
+    model_route_resolution: dict[str, Any],
+) -> dict[str, Any]:
+    if not callable(summarizer) or model_route_resolution.get("resolution") != "configured":
+        return record
+    summary_record = _source_refresh_summarizer_record(record)
+    safe_model_route = _safe_source_refresh_model_route_resolution(model_route_resolution) or {}
+    summarized = summarizer(record=summary_record, model_route=safe_model_route)
+    if not isinstance(summarized, dict):
+        raise ValueError("refresh result must be a mapping")
+    if summarized.get("metadata_only") is not True:
+        raise ValueError("refresh result must be metadata-only")
+    title = summarized.get("title") or record.get("title")
+    summary = summarized.get("summary") or summarized.get("description") or summarized.get("abstract")
+    return _source_refresh_record(source_id, origin_uri, {
+        "metadata_only": True,
+        "title": title,
+        "summary": summary,
+        "origin_uri": origin_uri,
+        "redaction_status": summarized.get("redaction_status"),
+    })
 
 
 def _source_refresh_progress_run_id(*, source_id: str, job_id: str) -> str:
@@ -1306,7 +1389,13 @@ def _refresh_mark_completing_if_owned(job_id: str, lease_marker: str) -> bool:
         return cursor.rowcount == 1
 
 
-def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None, source_id: str | None = None) -> dict[str, Any]:
+def run_source_refresh_jobs(
+    *,
+    limit: int = 5,
+    fetcher: Any | None = None,
+    source_id: str | None = None,
+    summarizer: Any | None = None,
+) -> dict[str, Any]:
     """Lease queued source.refresh jobs and store sanitized advisory summaries only."""
     target_source_id = _safe_public_id(source_id, fallback="") if source_id is not None else ""
     limit = 1 if target_source_id else max(1, min(int(limit or 5), 25))
@@ -1397,6 +1486,7 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None, sourc
         job_id = _safe_public_id(row.get("job_id"), fallback="")
         lease_marker = str(row.get("lease_marker") or "")
         preflight_receipt: dict[str, Any] | None = None
+        model_route_resolution: dict[str, Any] | None = None
         try:
             payload = json.loads(str(row.get("payload_json") or "{}"))
         except json.JSONDecodeError:
@@ -1409,11 +1499,33 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None, sourc
                 raise ValueError("refresh failed")
             fetched = fetch(source_id=source_id, origin_uri=origin_uri)
             record = _source_refresh_record(source_id, origin_uri, fetched)
-            from api.capy_policy import prompt_preflight
+            from api.capy_policy import prompt_preflight, resolve_model_route_hint
 
-            preflight_receipt = prompt_preflight(record.get("prompt_preflight_text") or record.get("markdown", ""), boundary="auto_fetched_source")
-            if preflight_receipt.get("status") == "block":
+            model_route_resolution = (
+                _safe_source_refresh_model_route_resolution(resolve_model_route_hint("hint:summarize"))
+                or {}
+            )
+            preflight_receipt = prompt_preflight(
+                record.get("prompt_preflight_text") or record.get("markdown", ""),
+                boundary="auto_fetched_source",
+            )
+            if not _source_refresh_preflight_passed(preflight_receipt):
                 raise ValueError("refresh failed")
+            record = _summarized_source_refresh_record(
+                source_id=source_id,
+                origin_uri=origin_uri,
+                record=record,
+                summarizer=summarizer,
+                model_route_resolution=model_route_resolution,
+            )
+            summarized_preflight = prompt_preflight(
+                record.get("prompt_preflight_text") or record.get("markdown", ""),
+                boundary="auto_fetched_source",
+            )
+            if not _source_refresh_preflight_passed(summarized_preflight):
+                preflight_receipt = summarized_preflight
+                raise ValueError("refresh failed")
+            preflight_receipt = summarized_preflight
             if not _refresh_lease_owned(job_id, lease_marker):
                 continue
             if not _refresh_mark_completing_if_owned(job_id, lease_marker):
@@ -1440,14 +1552,17 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None, sourc
                     (completed_at, completed_at, source_id),
                 )
             _record_source_refresh_progress("memory.ingest.completed", source_id=source_id, job_id=job_id)
-            results.append({
+            completed_result = {
                 "job_id": job_id,
                 "source_id": source_id,
                 "status": "completed",
                 "chunk_id": receipt["chunk_id"],
                 "prompt_preflight": preflight_receipt,
                 "metadata_only": True,
-            })
+            }
+            if isinstance(model_route_resolution, dict):
+                completed_result["model_route_resolution"] = model_route_resolution
+            results.append(completed_result)
         except Exception as exc:  # noqa: BLE001 - failures are captured as safe metadata for retry/status.
             error = _safe_refresh_error(exc)
             failed_at = _now_iso()
@@ -1486,6 +1601,8 @@ def run_source_refresh_jobs(*, limit: int = 5, fetcher: Any | None = None, sourc
             }
             if isinstance(preflight_receipt, dict):
                 failure_result["prompt_preflight"] = preflight_receipt
+            if isinstance(model_route_resolution, dict):
+                failure_result["model_route_resolution"] = model_route_resolution
             results.append(failure_result)
     return {
         "local_only": True,
