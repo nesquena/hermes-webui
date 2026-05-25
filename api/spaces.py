@@ -9663,7 +9663,10 @@ def queue_recovery_module_repair_event(
         event_details,
         snapshot=_module_summary(module),
     )
-    progress_event = _record_space_repair_progress_event(_RECOVERY_MODULE_PROGRESS_SPACE_ID)
+    progress_event = _record_space_repair_progress_event(
+        _RECOVERY_MODULE_PROGRESS_SPACE_ID,
+        run_prefix="recovery.module.repair",
+    )
     response = {
         "queued": True,
         "status": "queued",
@@ -10050,6 +10053,9 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "package.import",
         "path.helper",
         "repair",
+        "recovery.space.repair",
+        "recovery.widget.repair",
+        "recovery.module.repair",
         "layout.rearrange",
         "layout.reposition",
         "layout.toggle",
@@ -10108,9 +10114,17 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         }
 
 
-def _record_space_repair_progress_event(space_id: str) -> dict[str, Any]:
+def _record_space_repair_progress_event(space_id: str, *, run_prefix: str = "repair") -> dict[str, Any]:
     """Best-effort metadata-only progress producer for recovery repair queues."""
-    return _record_space_tool_progress_event(space_id, run_prefix="repair")
+    safe_prefix = str(run_prefix or "repair").strip().lower()
+    if safe_prefix not in {
+        "repair",
+        "recovery.space.repair",
+        "recovery.widget.repair",
+        "recovery.module.repair",
+    }:
+        safe_prefix = "repair"
+    return _record_space_tool_progress_event(space_id, run_prefix=safe_prefix)
 
 
 def _space_repair_payload_key_counts(payload: dict[str, Any] | None) -> dict[str, int]:
@@ -10243,7 +10257,7 @@ def queue_space_repair_event(
         event_details,
     )
     _auto_ingest_space_revision_event(event_id)
-    progress_event = _record_space_repair_progress_event(sid)
+    progress_event = _record_space_repair_progress_event(sid, run_prefix="recovery.space.repair")
     output_compaction = _space_repair_output_compaction(
         action=repair_action,
         status="queued",
@@ -10319,7 +10333,7 @@ def queue_recovery_widget_repair_event(
         event_details,
     )
     _auto_ingest_space_widget_event(event_id)
-    progress_event = _record_space_repair_progress_event(sid)
+    progress_event = _record_space_repair_progress_event(sid, run_prefix="recovery.widget.repair")
     output_compaction = _space_repair_output_compaction(
         action=repair_action,
         status="queued",

@@ -13342,7 +13342,7 @@ def test_space_repair_queue_records_metadata_only_progress_event(monkeypatch, tm
             "event_id": scoped["recent_events"][0]["event_id"],
             "event_type": "tool.completed",
             "family": "tool",
-            "run_id": "repair:repair-progress-lab",
+            "run_id": "recovery.space.repair:repair-progress-lab",
             "created_at": scoped["recent_events"][0]["created_at"],
             "space_id": "repair-progress-lab",
         }
@@ -13986,7 +13986,7 @@ def test_recovery_module_tools_record_metadata_only_progress_events(monkeypatch,
     assert enabled["progress_event"]["space_id"] == "recovery-modules"
     assert queued["progress_event"]["event_type"] == "tool.completed"
     assert queued["progress_event"]["family"] == "tool"
-    assert queued["progress_event"]["run_id"] == "repair:recovery-modules"
+    assert queued["progress_event"]["run_id"] == "recovery.module.repair:recovery-modules"
     assert queued["progress_event"]["space_id"] == "recovery-modules"
     assert len(
         {
@@ -13999,7 +13999,7 @@ def test_recovery_module_tools_record_metadata_only_progress_events(monkeypatch,
     assert scoped_progress["recent_event_count"] == 4
     assert scoped_progress["recent_family_counts"] == {"tool": 4}
     assert [event["run_id"] for event in scoped_progress["recent_events"]] == [
-        "repair:recovery-modules",
+        "recovery.module.repair:recovery-modules",
         "recovery.module.enable:recovery-modules",
         "recovery.module.disable:recovery-modules",
         "recovery.module.quarantine:recovery-modules",
@@ -18531,7 +18531,7 @@ def test_recovery_repair_widget_route_queues_metadata_only_event_for_disabled_wi
     assert body["payload_summary"] == {"action": "repair"}
     assert body["progress_event"]["event_type"] == "tool.completed"
     assert body["progress_event"]["family"] == "tool"
-    assert body["progress_event"]["run_id"] == "repair:repair-widget-route"
+    assert body["progress_event"]["run_id"] == "recovery.widget.repair:repair-widget-route"
     assert body["progress_event"]["space_id"] == created["space_id"]
 
     from api.capy_progress import progress_status
@@ -18540,7 +18540,7 @@ def test_recovery_repair_widget_route_queues_metadata_only_event_for_disabled_wi
     assert progress["recent_event_count"] == 2
     assert progress["recent_family_counts"] == {"tool": 2}
     assert progress["recent_events"][0]["event_type"] == "tool.completed"
-    assert progress["recent_events"][0]["run_id"] == "repair:repair-widget-route"
+    assert progress["recent_events"][0]["run_id"] == "recovery.widget.repair:repair-widget-route"
     assert progress["recent_events"][0]["space_id"] == created["space_id"]
     assert progress["recent_events"][1]["run_id"] == "recovery.widget.disable:repair-widget-route"
     assert progress["recent_events"][1]["space_id"] == created["space_id"]
