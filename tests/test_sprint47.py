@@ -12,21 +12,20 @@ import pathlib
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
-SKILLS_JS = (REPO_ROOT / "static" / "skills.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
-def test_skill_commands_are_loaded_from_shared_registry_for_autocomplete():
+def test_skill_commands_are_loaded_from_api_skills_for_autocomplete():
     assert "loadSkillCommands" in COMMANDS_JS
-    assert "loadSkillRegistry" in COMMANDS_JS
-    assert "getSkillAutocompleteEntries()" in COMMANDS_JS
-    assert "source: 'skill'" in SKILLS_JS
-    assert "api('/api/skills')" not in COMMANDS_JS
+    assert "api('/api/skills')" in COMMANDS_JS
+    assert "source:'skill'" in COMMANDS_JS
 
 
 def test_builtin_commands_take_precedence_over_skill_slug_collisions():
-    assert "!COMMANDS.some(c=>c.name===entry.name)" in COMMANDS_JS, \
+    # In the combined implementation, REGISTRY (agent registry + WEBUI_ONLY) wins over skills
+    assert ("if(COMMANDS.some(c=>c.name===slug)) return null;" in COMMANDS_JS or
+            "if(REGISTRY.some(c=>c.name===slug)) return null;" in COMMANDS_JS), \
         "Built-in commands must block skill slug collisions"
 
 

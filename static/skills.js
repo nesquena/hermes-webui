@@ -2,16 +2,6 @@ let _skillRegistryReady = false;
 let _skillRegistryPromise = null;
 let _skillRegistry = new Map();
 
-function normalizeSkillSlug(value) {
-  const raw = String(value || '').trim().toLowerCase().replace(/^\//, '');
-  if(!raw) return '';
-  return raw
-    .replace(/[\s_]+/g, '-')
-    .replace(/[^a-z0-9-]/g, '')
-    .replace(/-{2,}/g, '-')
-    .replace(/^-+|-+$/g, '');
-}
-
 async function loadSkillRegistry(force=false) {
   if(_skillRegistryReady && !force) return _skillRegistry;
   if(_skillRegistryPromise && !force) return _skillRegistryPromise;
@@ -23,15 +13,9 @@ async function loadSkillRegistry(force=false) {
       for(const skill of (data && data.skills) || []){
         if(skill && skill.disabled) continue;
         const name = String(skill && skill.name || '').trim();
-        const slug = normalizeSkillSlug(name);
-        if(!slug) continue;
-        if(!next.has(slug)){
-          next.set(slug, {
-            name,
-            slug,
-            description: String(skill && skill.description || '').trim(),
-            category: String(skill && skill.category || '').trim(),
-          });
+        if(!name) continue;
+        if(!next.has(name)){
+          next.set(name, { name });
         }
       }
       _skillRegistry = next;
@@ -50,21 +34,6 @@ async function loadSkillRegistry(force=false) {
 function getSkillByMentionToken(token) {
   const raw = String(token || '').trim().replace(/^\//, '');
   return _skillRegistry.get(raw) || null;
-}
-
-function getRegisteredSkills() {
-  return Array.from(_skillRegistry.values()).sort((a,b)=>a.name.localeCompare(b.name));
-}
-
-function getSkillAutocompleteEntries() {
-  return Array.from(_skillRegistry.values())
-    .sort((a,b)=>a.slug.localeCompare(b.slug))
-    .map(skill => ({
-      name: skill.slug,
-      desc: skill.description || (typeof t === 'function' ? t('slash_skill_desc') : 'Skill'),
-      source: 'skill',
-      skillName: skill.name,
-    }));
 }
 
 function createSkillChip(skill) {
@@ -118,6 +87,7 @@ function highlightSkillMentionsInTextNode(node) {
     const codeParent = nearestInlineSkillMentionCodeParent(node);
     const isSlashMention = matchedText.startsWith('/');
     if(!isSlashMention && !codeParent) continue;
+
     parts.push(document.createTextNode(text.slice(last, tokenStart)));
     const chip = createSkillChip(skill);
     if(codeParent && codeParent.textContent.trim()===matchedText && text.trim()===matchedText){
@@ -160,9 +130,5 @@ function highlightSkillsInMessages(container) {
   loadSkillRegistry().then(() => highlightSkillsInRenderedMessages(root));
 }
 
-window.normalizeSkillSlug = normalizeSkillSlug;
-window.loadSkillRegistry = loadSkillRegistry;
-window.getSkillByMentionToken = getSkillByMentionToken;
-window.getRegisteredSkills = getRegisteredSkills;
-window.getSkillAutocompleteEntries = getSkillAutocompleteEntries;
 window.highlightSkillsInMessages = highlightSkillsInMessages;
+window.loadSkillRegistry = loadSkillRegistry;

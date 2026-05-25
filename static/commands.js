@@ -709,8 +709,8 @@ async function cmdTheme(args){
 
 async function cmdSkills(args){
   try{
-    if(typeof loadSkillRegistry==='function') await loadSkillRegistry();
-    let skills = (typeof getRegisteredSkills==='function') ? getRegisteredSkills() : [];
+    const data = await api('/api/skills');
+    let skills = data.skills || [];
     if(args){
       const q = args.toLowerCase();
       skills = skills.filter(s =>
@@ -1272,14 +1272,27 @@ async function forkFromMessage(msgIdx){
 let _skillCommandCache=[];
 let _skillCommandLoadPromise=null;
 let _skillCommandCacheReady=false;
+function _skillCommandSlug(name){
+  const raw=String(name||'').trim().toLowerCase();
+  if(!raw)return'';
+  return raw.replace(/[\s_]+/g,'-').replace(/[^a-z0-9-]/g,'').replace(/-{2,}/g,'-').replace(/^-+|-+$/g,'');
+}
+function _buildSkillCommandEntry(skill){
+  const skillName=String(skill&&skill.name||'').trim();
+  const slug=_skillCommandSlug(skillName);
+  if(!slug)return null;
+  if(COMMANDS.some(c=>c.name===slug)) return null;
+  return{name:slug,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
+}
 async function loadSkillCommands(force=false){
   if(_skillCommandCacheReady&&!force)return _skillCommandCache;
   if(_skillCommandLoadPromise&&!force)return _skillCommandLoadPromise;
   _skillCommandLoadPromise=(async()=>{
     try{
-      if(typeof loadSkillRegistry==='function') await loadSkillRegistry(force);
-      const entries=(typeof getSkillAutocompleteEntries==='function')?getSkillAutocompleteEntries():[];
-      _skillCommandCache=entries.filter(entry=>entry&&entry.name&&!COMMANDS.some(c=>c.name===entry.name));
+      const data=await api('/api/skills');
+      const deduped=new Map();
+      for(const skill of (data&&data.skills)||[]){const entry=_buildSkillCommandEntry(skill);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
+      _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
     }catch(_){_skillCommandCache=[];}
     finally{_skillCommandCacheReady=true;_skillCommandLoadPromise=null;}
     return _skillCommandCache;

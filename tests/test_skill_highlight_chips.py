@@ -8,20 +8,14 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
-def test_skill_registry_is_single_api_skills_source():
-    """Skill identity should come from one /api/skills registry, not autocomplete cache ownership."""
+def test_skill_highlighter_loads_current_skills_from_api():
+    """Conversation chips should only match skills returned by /api/skills."""
     skills = read("static/skills.js")
-    commands = read("static/commands.js")
-    ui = read("static/ui.js")
 
     assert "async function loadSkillRegistry" in skills
     assert "await api('/api/skills')" in skills
     assert "function getSkillByMentionToken" in skills
-    assert "function getSkillAutocompleteEntries" in skills
-    assert "window.loadSkillRegistry" in skills
-    assert "getSkillAutocompleteEntries()" in commands
-    assert "await api('/api/skills')" not in commands
-    assert "_skillCommandCache" not in ui
+    assert "window.highlightSkillsInMessages" in skills
 
 
 def test_postprocess_invokes_skill_highlighter():
