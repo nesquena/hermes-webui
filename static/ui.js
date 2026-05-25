@@ -3754,8 +3754,6 @@ function _stripForTTS(text){
   text=text.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
   // Replace MEDIA: paths with a simple label
   text=text.replace(/MEDIA:[^\s]+/g,'a file');
-  // Strip emoji and emoticons
-  text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
   // Strip HTML tags that may leak through markdown
   text=text.replace(/<[^>]+>/g,' ');
   // Collapse whitespace
@@ -3768,8 +3766,8 @@ let _ttsCurrentUtterance=null;
 let _playingEdgeAudio=null;
 
 function speakMessage(btn){
-  // If already speaking this message via Edge TTS, stop
-  if(btn&&btn.dataset.speaking==='1'&&(localStorage.getItem('hermes-tts-engine')||'browser')==='edge'){
+  // If already speaking this message, stop
+  if(btn&&btn.dataset.speaking==='1'){
     stopTTS();
     return;
   }
@@ -3824,27 +3822,32 @@ function _playEdgeTts(text, btn){
   const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
   const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
   const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-  let rateParam='', pitchParam='';
+  const body={text,voice};
   if(!isNaN(savedRate)){
     const pct=Math.round((savedRate-1)*100);
-    const sign=pct>=0?'+':'';
-    rateParam='&rate='+encodeURIComponent(sign+pct+'%');
+    body.rate=(pct>=0?'+':'')+pct+'%';
   }
   if(!isNaN(savedPitch)){
     const hz=Math.round((savedPitch-1)*50);
-    const sign=hz>=0?'+':'';
-    pitchParam='&pitch='+encodeURIComponent(sign+hz+'Hz');
+    body.pitch=(hz>=0?'+':'')+hz+'Hz';
   }
-  const url='/api/tts?text='+encodeURIComponent(text)+'&voice='+encodeURIComponent(voice)+rateParam+pitchParam;
   if(btn) btn.dataset.speaking='1';
   _ttsSpeaking=true;
-  const audio=new Audio(url);
-  _playingEdgeAudio=audio;
-  audio.onended=function(){_ttsSpeaking=false;_playingEdgeAudio=null;if(btn)btn.dataset.speaking='0';};
-  audio.onerror=function(){_ttsSpeaking=false;_playingEdgeAudio=null;if(btn)btn.dataset.speaking='0';};
-  audio.play().catch(function(e){
-    _ttsSpeaking=false;_playingEdgeAudio=null;
-    if(btn)btn.dataset.speaking='0';
+  fetch('/api/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+  .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.blob();})
+  .then(function(blob){
+    const url=URL.createObjectURL(blob);
+    const audio=new Audio(url);
+    _playingEdgeAudio=audio;
+    audio.onended=function(){_ttsSpeaking=false;_playingEdgeAudio=null;if(btn)btn.dataset.speaking='0';URL.revokeObjectURL(url);};
+    audio.onerror=function(){_ttsSpeaking=false;_playingEdgeAudio=null;if(btn)btn.dataset.speaking='0';URL.revokeObjectURL(url);};
+    audio.play().catch(function(e){
+      _ttsSpeaking=false;_playingEdgeAudio=null;if(btn)btn.dataset.speaking='0';
+      showToast('Edge TTS error: '+e.message);
+    });
+  })
+  .catch(function(e){
+    _ttsSpeaking=false;_playingEdgeAudio=null;if(btn)btn.dataset.speaking='0';
     showToast('Edge TTS error: '+e.message);
   });
 }

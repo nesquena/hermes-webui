@@ -730,14 +730,19 @@ window._micPendingSend=window._micPendingSend||false;
       const voice=localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural";
       const savedRate=parseFloat(localStorage.getItem("hermes-tts-rate"));
       const savedPitch=parseFloat(localStorage.getItem("hermes-tts-pitch"));
-      let rateParam='', pitchParam='';
-      if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rateParam='&rate='+encodeURIComponent(sign+pct+'%');}
-      if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitchParam='&pitch='+encodeURIComponent(sign+hz+'Hz');}
-      const url="/api/tts?text="+encodeURIComponent(clean)+"&voice="+encodeURIComponent(voice)+rateParam+pitchParam;
-      const audio=new Audio(url);
-      audio.onended=()=>{if(_voiceModeActive) setTimeout(()=>_startListening(),500);};
-      audio.onerror=()=>{if(_voiceModeActive) setTimeout(()=>_startListening(),1000);};
-      audio.play().catch(()=>{if(_voiceModeActive) setTimeout(()=>_startListening(),1000);});
+      const reqBody={text:clean,voice};
+      if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);reqBody.rate=(pct>=0?'+':'')+pct+'%';}
+      if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);reqBody.pitch=(hz>=0?'+':'')+hz+'Hz';}
+      fetch('/api/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(reqBody)})
+      .then(function(r){if(!r.ok)throw new Error();return r.blob();})
+      .then(function(blob){
+        const url=URL.createObjectURL(blob);
+        const audio=new Audio(url);
+        audio.onended=function(){URL.revokeObjectURL(url);if(_voiceModeActive) setTimeout(()=>_startListening(),500);};
+        audio.onerror=function(){URL.revokeObjectURL(url);if(_voiceModeActive) setTimeout(()=>_startListening(),1000);};
+        audio.play().catch(function(){if(_voiceModeActive) setTimeout(()=>_startListening(),1000);});
+      })
+      .catch(function(){if(_voiceModeActive) setTimeout(()=>_startListening(),1000);});
       return;
     }
     const utter=new SpeechSynthesisUtterance(clean);

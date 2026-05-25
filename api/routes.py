@@ -4144,9 +4144,6 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == '/api/sessions/gateway/stream':
         return _handle_gateway_sse_stream(handler, parsed)
 
-    if parsed.path == "/api/tts":
-        return _handle_tts(handler, parsed)
-
     if parsed.path == "/api/media":
         return _handle_media(handler, parsed)
 
@@ -4446,6 +4443,9 @@ def handle_post(handler, parsed) -> bool:
         if diag:
             diag.finish()
         raise
+
+    if parsed.path == "/api/tts":
+        return _handle_tts(handler, parsed, body)
 
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery
@@ -6500,53 +6500,69 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
 
 
 
-def _handle_tts(handler, parsed):
+def _handle_tts(handler, parsed, body):
     """Generate TTS audio via Edge TTS and return it as audio/mpeg."""
-    from urllib.parse import parse_qs
-    qs = parse_qs(parsed.query)
-    text = qs.get("text", [""])[0].strip()
-    voice = qs.get("voice", ["zh-CN-XiaoxiaoNeural"])[0].strip()
-    rate_str = qs.get("rate", [""])[0].strip()
-    pitch_str = qs.get("pitch", [""])[0].strip()
+    from api.auth import is_auth_enabled, parse_cookie, verify_session
+    if is_auth_enabled():
+        cv = parse_cookie(handler)
+        if not (cv and verify_session(cv)):
+            handler.send_response(401)
+            handler.send_header("Content-Type", "application/json")
+            handler.end_headers()
+            handler.wfile.write(b'{"error":"Authentication required"}')
+            return
+
+    text = (body.get("text") or "").strip()
+    voice = (body.get("voice") or "zh-CN-XiaoxiaoNeural").strip()
+    rate_str = (body.get("rate") or "").strip()
+    pitch_str = (body.get("pitch") or "").strip()
     if not text:
         from api.helpers import bad as _bad
         return _bad(handler, "text parameter required", 400)
     if len(text) > 5000:
         text = text[:5000]
-    import uuid, tempfile
-    from pathlib import Path
-    tmp = Path(tempfile.gettempdir()) / f"hermes_tts_{uuid.uuid4().hex}.mp3"
+
     try:
         import edge_tts
-        kwargs = {}
-        if rate_str:
-            kwargs["rate"] = rate_str
-        if pitch_str:
-            kwargs["pitch"] = pitch_str
-        comm = edge_tts.Communicate(text, voice, **kwargs)
-        comm.save_sync(str(tmp))
-        if not tmp.exists() or tmp.stat().st_size == 0:
+    except ImportError:
+        from api.helpers import bad as _bad
+        return _bad(handler, "Edge TTS is not installed", 503)
+
+    import asyncio, io
+
+    kwargs = {}
+    if rate_str:
+        kwargs["rate"] = rate_str
+    if pitch_str:
+        kwargs["pitch"] = pitch_str
+
+    async def _generate():
+        communicate = edge_tts.Communicate(text, voice, **kwargs)
+        buf = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                buf.write(chunk["data"])
+        return buf
+
+    try:
+        audio_buf = asyncio.run(asyncio.wait_for(_generate(), timeout=30))
+        audio_data = audio_buf.getvalue()
+        if not audio_data:
             from api.helpers import bad as _bad
             return _bad(handler, "TTS generation failed", 500)
         handler.send_response(200)
         handler.send_header("Content-Type", "audio/mpeg")
-        handler.send_header("Content-Length", str(tmp.stat().st_size))
+        handler.send_header("Content-Length", str(len(audio_data)))
         handler.send_header("Cache-Control", "no-store")
-        from api.auth import is_auth_enabled as _auth_enabled
-        from api.auth import parse_cookie as _parse_cookie
-        from api.auth import verify_session as _verify_session
-        if _auth_enabled():
-            cv = _parse_cookie(handler)
-            if cv and _verify_session(cv): pass
         handler.end_headers()
-        handler.wfile.write(tmp.read_bytes())
+        handler.wfile.write(audio_data)
+    except asyncio.TimeoutError:
+        from api.helpers import bad as _bad
+        return _bad(handler, "TTS generation timed out", 500)
     except Exception as e:
         logger.exception("Edge TTS error")
         from api.helpers import bad as _bad
         return _bad(handler, f"TTS error: {e}", 500)
-    finally:
-        try: tmp.unlink(missing_ok=True)
-        except Exception: pass
 
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.

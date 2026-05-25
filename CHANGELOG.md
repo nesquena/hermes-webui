@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **PR #2910** by @liuqiangweb-svg — Add Edge TTS as an alternative speech engine for voice playback. Users can select between Browser speech synthesis and Edge TTS (Microsoft neural voices) in Settings. Supports voice, rate, and pitch configuration. The server endpoint uses POST with JSON body, auth-gated, with async streaming into memory and a 30s timeout. Run `pip install edge-tts` to enable.
+
 ## [v0.51.90] — 2026-05-18 — Release BN (stage-383 — 10-PR full sweep batch — empty-gateway messaging history fix + previous-messaging-sessions setting + Kanban board switcher layout + UI/UX demo theme controls + Slice 3c queue/goal RFC gate + keyless custom endpoints + custom-provider remote model catalog parity + auto-compression elapsed timer + new-conversation cold-start guard + Kanban drag-drop detail open fix)
 
 ### Fixed
