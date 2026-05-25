@@ -6613,7 +6613,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             )
         space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_space_id(data))
         event_id = _space_tool_event_id(data, positional_event_index=1)
-        receipt_action = name if name.startswith("space.admin.recovery.") else "space.recovery.restore"
+        receipt_action = name if name == "space.current.rollback" or name.startswith("space.admin.recovery.") else "space.recovery.restore"
         result = restore_revision(space_id, event_id, action=receipt_action)
         if is_current:
             result["active_space_id"] = space_id
@@ -7251,7 +7251,10 @@ def restore_revision(space_id: str, event_id: str, *, action: str = "space.recov
         "revision_event_id": saved["revision_event_id"],
         "prompt_preflight": _recovery_required_prompt_preflight_receipt(safe_action),
         "autonomy_policy": _recovery_restore_action_policy_receipt(safe_action),
-        "progress_event": _record_space_recovery_progress_event(sid, action="restore"),
+        "progress_event": _record_space_recovery_progress_event(
+            sid,
+            action=safe_action if safe_action.startswith("space.current.") else "restore",
+        ),
     }
 
 
@@ -10050,6 +10053,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "layout.rearrange",
         "layout.reposition",
         "layout.toggle",
+        "space.current.rollback",
         "recovery.disable",
         "recovery.enable",
         "recovery.restore",
@@ -10191,8 +10195,11 @@ def _record_space_recovery_progress_event(space_id: str, *, action: str) -> dict
         "widget.disable",
         "widget.enable",
         "widget.restore",
+        "space.current.rollback",
     }:
         safe_action = "toggle"
+    if safe_action == "space.current.rollback":
+        return _record_space_tool_progress_event(space_id, run_prefix=safe_action)
     return _record_space_tool_progress_event(space_id, run_prefix=f"recovery.{safe_action}")
 
 

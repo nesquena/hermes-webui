@@ -8920,6 +8920,13 @@ def test_space_tool_adapter_current_revisions_and_rollback_use_active_space_meta
             "api_key": "SECRET_VALUE_DO_NOT_LEAK",
         },
     )
+    current_restore_alias = spaces.run_space_tool(
+        "space.current.restore",
+        {
+            "active_space_id": created["space_id"],
+            "event_id": original["revision_event_id"],
+        },
+    )
     with pytest.raises(ValueError, match="Conflicting space selector aliases") as current_conflict_exc_info:
         spaces.run_space_tool(
             "space.current.revisions",
@@ -8940,6 +8947,24 @@ def test_space_tool_adapter_current_revisions_and_rollback_use_active_space_meta
     assert restored["ok"] is True
     assert restored["action"] == "space.current.rollback"
     assert restored["space"]["widgets"][0]["title"] == "Original summary"
+    assert restored["prompt_preflight"]["action"] == "space.current.rollback"
+    assert restored["prompt_preflight"]["boundary"] == "recovery_action"
+    assert restored["prompt_preflight"]["status"] == "required"
+    assert restored["prompt_preflight"]["metadata_only"] is True
+    assert restored["prompt_preflight"]["raw_prompt_stored"] is False
+    assert restored["autonomy_policy"]["action"] == "space.current.rollback"
+    assert restored["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
+    assert restored["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert restored["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert restored["autonomy_policy"]["metadata_only"] is True
+    assert restored["progress_event"]["event_type"] == "tool.completed"
+    assert restored["progress_event"]["run_id"] == "space.current.rollback:current-rollback-lab"
+    assert restored["progress_event"]["space_id"] == created["space_id"]
+    assert restored["progress_event"]["redaction_status"] == "metadata_only"
+    assert current_restore_alias["action"] == "space.current.restore"
+    assert current_restore_alias["prompt_preflight"]["action"] == "space.recovery.restore"
+    assert current_restore_alias["autonomy_policy"]["action"] == "space.recovery.restore"
+    assert current_restore_alias["progress_event"]["run_id"] == "recovery.restore:current-rollback-lab"
     assert spaces.read_space_detail(other["space_id"])["name"] == "Current Rollback Other"
     assert "currentrevisionconflictleak" not in str(current_conflict_exc_info.value).lower()
     assert "secret_value_do_not_leak" not in str(current_conflict_exc_info.value).lower()
