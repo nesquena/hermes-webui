@@ -1175,7 +1175,8 @@ class TestFrontendModelProviderState:
         src = _read("static/sessions.js")
         start = src.index("async function newSession(")
         body = src[start:src.index("const data=await api('/api/session/new'", start)]
-        assert "profile:S.activeProfile||'default'" in body
+        assert "const targetProfile=String(hasOption('profile')?options.profile:(S.activeProfile||'default')).trim()||'default';" in body
+        assert "profile:targetProfile" in body
         assert "model:newModelState.model" not in body
         assert "model_provider:newModelState.model_provider||null" not in body
 

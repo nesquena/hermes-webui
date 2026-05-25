@@ -118,6 +118,13 @@ def test_avatar_presence_layout_setting_is_in_appearance_surface():
     assert 'id="avatarPresencePickerGrid"' in INDEX_HTML
     assert 'data-avatar-presence-layout-val="thread"' in INDEX_HTML
     assert 'data-avatar-presence-layout-val="composer"' in INDEX_HTML
+    assert 'data-i18n-title="settings_avatar_presence_thread"' in INDEX_HTML
+    assert 'data-i18n-aria-label="settings_avatar_presence_thread"' in INDEX_HTML
+    assert 'data-i18n-title="settings_avatar_presence_composer"' in INDEX_HTML
+    assert 'data-i18n-aria-label="settings_avatar_presence_composer"' in INDEX_HTML
+    assert 'data-i18n-title="composer_presence_switch_profile"' in INDEX_HTML
+    assert 'data-i18n-aria-label="composer_presence_switch_profile"' in INDEX_HTML
+    assert I18N_JS.count("composer_presence_switch_profile") >= 12
     assert "_pickAvatarPresenceLayout('thread')" in INDEX_HTML
     assert "_pickAvatarPresenceLayout('composer')" in INDEX_HTML
     assert "hermes-avatar-presence-layout" in INDEX_HTML

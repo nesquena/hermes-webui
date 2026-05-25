@@ -288,19 +288,22 @@ def _migrate_profile_workspaces_into_global(global_workspaces: list) -> list:
             continue
         legacy_lists.append(_read_workspace_file(ws_path))
     merged = _merge_workspace_lists(cleaned_global, *legacy_lists)
+    migration_persisted = merged == cleaned_global
     if merged != cleaned_global:
         try:
             _GLOBAL_WS_FILE.parent.mkdir(parents=True, exist_ok=True)
             _GLOBAL_WS_FILE.write_text(
                 json.dumps(merged, ensure_ascii=False, indent=2), encoding='utf-8'
             )
+            migration_persisted = True
         except Exception:
             logger.debug("Failed to persist migrated global workspace list")
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text('1', encoding='utf-8')
-    except Exception:
-        logger.debug("Failed to persist profile workspace migration marker")
+    if migration_persisted:
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text('1', encoding='utf-8')
+        except Exception:
+            logger.debug("Failed to persist profile workspace migration marker")
     return merged
 
 

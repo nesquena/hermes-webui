@@ -75,11 +75,11 @@ def test_session_sidebar_js_has_dynamic_relative_time_helpers():
 
 
 def test_session_sidebar_renders_relative_time_and_meta_rows():
-    # session-time element was removed from sessions.js in v0.50.40 to
-    # give session titles full width — the CSS class is kept but set to display:none.
-    # session-meta / metaBits were removed when we dropped message-count, model, and
-    # source-tag badges from the sidebar (design round 2).
-    assert "orderedSessions" in SESSIONS_JS
+    assert "function renderSessionListFromCache()" in SESSIONS_JS
+    assert "ts.className='session-time'" in SESSIONS_JS
+    assert "ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);" in SESSIONS_JS
+    assert "const metaBits=[];" in SESSIONS_JS
+    assert "meta.className='session-meta';" in SESSIONS_JS
     assert ".session-time" in STYLE_CSS
     assert ".session-title-row" in STYLE_CSS
     assert ".session-item.active .session-title" in STYLE_CSS

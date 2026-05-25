@@ -233,8 +233,9 @@ def test_syncTopbar_early_return_updates_profile_chip():
         "syncTopbar() early-return block (!S.session) must update profileChipLabel. "
         "Without this, switching profiles with no active session leaves the chip stale."
     )
-    assert "S.activeProfile" in early_block, (
-        "profileChipLabel update in early-return block must read S.activeProfile"
+    helper_block = ui_js[fn_start:early_ret_start]
+    assert "S.activeProfile" in helper_block and "profileChipName()" in early_block, (
+        "profileChipLabel update in early-return block must use the safe active-profile fallback"
     )
 
 

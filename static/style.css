@@ -8,6 +8,7 @@
     --input-bg:rgba(0,0,0,.03);--hover-bg:rgba(0,0,0,.05);
     --strong:#0F0D08;--em:#5C5344;--code-text:#8b4513;--code-inline-bg:rgba(0,0,0,.06);--pre-text:#1A1610;
     --accent-hover:#996F08;--accent-bg:rgba(184,134,11,0.08);--accent-bg-strong:rgba(184,134,11,0.15);--accent-text:#8B6508;
+    --pf-primary-foreground:#ffffff;
     --error:#C62828;--success:#3D8B40;--warning:#E68A00;--info:#0288A8;
     --radius-sm:4px;--radius-md:8px;--radius-card:8px;--radius-lg:12px;--radius-pill:999px;
     --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;
@@ -91,6 +92,7 @@
     --input-bg:rgba(255,255,255,.04);--hover-bg:rgba(255,255,255,.06);
     --strong:#fff;--em:#C0C0C0;--code-text:#f0c27f;--code-inline-bg:rgba(0,0,0,.35);--pre-text:#e2e8f0;
     --accent-hover:#FFBF00;--accent-bg:rgba(255,215,0,0.08);--accent-bg-strong:rgba(255,215,0,0.15);--accent-text:#FFD700;
+    --pf-primary-foreground:#111111;
     --error:#EF5350;--success:#4CAF50;--warning:#FFA726;--info:#4DD0E1;
     --surface-subtle:rgba(255,255,255,.025);--surface-subtle-hover:rgba(255,255,255,.045);
     --border-subtle:rgba(255,255,255,.075);--border-muted:rgba(255,255,255,.12);
@@ -353,6 +355,7 @@
     --border:#eaeaea;--border2:#d4d4d4;--border-subtle:#ededed;--border-muted:#d4d4d4;
     --text:#111111;--strong:#000000;--muted:#666666;--em:#444444;
     --accent:#0070f3;--accent-hover:#005bd1;--accent-bg:rgba(0,112,243,.075);--accent-bg-strong:rgba(0,112,243,.16);--accent-text:#005bd1;
+    --pf-primary-foreground:#ffffff;
     --blue:#0070f3;--gold:#111111;--focus-ring:rgba(0,112,243,.28);--focus-glow:rgba(0,112,243,.08);
     --input-bg:#ffffff;--hover-bg:#f5f5f5;--code-bg:#fafafa;--code-inline-bg:#f5f5f5;--code-text:#111111;--pre-text:#111111;
     --error:#e5484d;--success:#007a45;--warning:#b45309;--info:#0070f3;
@@ -366,6 +369,7 @@
     --border:#262626;--border2:#3f3f3f;--border-subtle:#171717;--border-muted:#2a2a2a;
     --text:#ededed;--strong:#ffffff;--muted:#a1a1a1;--em:#d4d4d4;
     --accent:#FFF175;--accent-hover:#fff7a8;--accent-bg:rgba(255,241,117,.075);--accent-bg-strong:rgba(255,241,117,.14);--accent-text:#f5e65f;
+    --pf-primary-foreground:#050505;
     --blue:#FFF175;--gold:#FFF175;--focus-ring:rgba(255,241,117,.34);--focus-glow:rgba(255,241,117,.10);
     --input-bg:#0a0a0a;--hover-bg:#111111;--code-bg:#0a0a0a;--code-inline-bg:#171717;--code-text:#f5f5f5;--pre-text:#ededed;
     --error:#ff6369;--success:#3dd68c;--warning:#f5a524;--info:#FFF175;
@@ -1097,7 +1101,7 @@
      and Linear's rail tooltips also skip the arrow. Spatial proximity (8px
      gap) is enough to associate the tooltip with the trigger. */
   .has-tooltip{position:relative;}
-  .has-tooltip::after{content:attr(data-tooltip);position:absolute;left:calc(100% + 8px);top:50%;transform:translateY(-50%);background:var(--surface);border:1px solid var(--accent-bg-strong);color:var(--text);font-size:11.5px;font-weight:600;letter-spacing:.02em;padding:5px 10px;border-radius:6px;white-space:nowrap;pointer-events:none;z-index:1500;box-shadow:0 8px 24px rgba(0,0,0,.65),0 0 0 1px rgba(0,0,0,.35),0 1px 0 rgba(255,255,255,.04) inset;opacity:0;transition:opacity .14s ease;transition-delay:0s;}
+  .has-tooltip::after{content:attr(data-tooltip);position:absolute;left:calc(100% + 8px);top:50%;transform:translateY(-50%);width:max-content;max-width:320px;background:var(--surface);border:1px solid var(--accent-bg-strong);color:var(--text);font-size:11.5px;font-weight:600;letter-spacing:.02em;line-height:1.35;padding:5px 10px;border-radius:6px;white-space:nowrap;pointer-events:none;z-index:1500;box-shadow:0 8px 24px rgba(0,0,0,.65),0 0 0 1px rgba(0,0,0,.35),0 1px 0 rgba(255,255,255,.04) inset;opacity:0;transition:opacity .14s ease;transition-delay:0s;}
   .has-tooltip:hover::after,.has-tooltip:focus-visible::after{opacity:1;transition-delay:.15s;}
   /* For bottom-positioned tooltips (panel header buttons, non-rail elements) */
   .has-tooltip--bottom::after{left:50%;top:auto;bottom:auto;transform:translateX(-50%);top:calc(100% + 8px);}
@@ -1113,7 +1117,7 @@
   /* Multiline variant — for triggers whose data-tooltip is a sentence/paragraph
      (gateway error details, etc.) rather than a short label. Default tooltip
      uses white-space:nowrap which overflows the viewport on long strings. */
-  .has-tooltip--wrap::after{white-space:normal;max-width:320px;width:max-content;line-height:1.35;}
+  .has-tooltip--wrap::after{max-width:320px;width:max-content;overflow-wrap:anywhere;word-break:break-word;white-space:normal;}
   @media(prefers-reduced-motion:reduce){.has-tooltip::after{transition:none;transition-delay:0s;}}
 .rail-spacer{flex:1;min-height:8px;}
 .rail .nav-tab{flex:0 0 auto;padding:0;font-size:inherit;border-bottom:none;overflow:visible;}
@@ -1395,12 +1399,12 @@
   /* ── Composer ── */
   .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
   .composer-box{max-width:clamp(780px,60vw,1100px);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
-  .composer-presence-row{max-width:780px;margin:0 auto;position:relative;}
+  .composer-presence-row{max-width:clamp(780px,60vw,1100px);margin:0 auto;position:relative;}
   .composer-presence-row .composer-box{max-width:none;margin:0;width:100%;}
   .composer-presence-avatar{display:none;box-sizing:border-box;background:transparent;border:0;padding:0;color:inherit;}
   .composer-presence-avatar .profile-avatar--composer{width:var(--composer-presence-avatar-size,56px);height:var(--composer-presence-avatar-size,56px);font-size:calc(var(--composer-presence-avatar-size,56px) * .38);background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
-  :root[data-avatar-presence="composer"] .composer-presence-row{max-width:var(--msg-max);display:grid;grid-template-columns:var(--composer-presence-avatar-size,56px) minmax(0,calc(var(--msg-max) - var(--composer-presence-avatar-size,56px) - 6px));align-items:end;gap:6px;}
-  :root[data-avatar-presence="composer"] .composer-presence-row .composer-box{min-width:0;}
+  :root[data-avatar-presence="composer"] .composer-presence-row{width:100%;max-width:min(var(--msg-max),100%);display:grid;grid-template-columns:var(--composer-presence-avatar-size,56px) minmax(0,1fr);align-items:end;gap:6px;}
+  :root[data-avatar-presence="composer"] .composer-presence-row .composer-box{width:100%;max-width:none;min-width:0;}
   :root[data-avatar-presence="composer"] .composer-presence-avatar{display:flex;width:var(--composer-presence-avatar-size,56px);height:var(--composer-presence-avatar-size,56px);align-items:center;justify-content:center;cursor:pointer;-webkit-tap-highlight-color:transparent;}
   :root[data-avatar-presence="composer"] .composer-presence-avatar:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:999px;}
   :root[data-avatar-presence="composer"] .msg-role.assistant .profile-avatar--message{display:none!important;}
@@ -1470,8 +1474,9 @@
   .composer-reasoning-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .composer-reasoning-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;min-width:140px;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;padding:4px;overflow:hidden;}
   .composer-reasoning-dropdown.open{display:block;}
-  .reasoning-option{padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;color:var(--text);white-space:nowrap;transition:background-color .12s;}
+  .reasoning-option{padding:8px 14px;border:0;background:transparent;width:100%;text-align:left;border-radius:6px;cursor:pointer;font:inherit;font-size:13px;color:var(--text);white-space:nowrap;transition:background-color .12s;}
   .reasoning-option:hover{background:rgba(255,255,255,.07);}
+  .reasoning-option:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
   .reasoning-option.selected{background:var(--accent-bg);}
   /* Toolsets chip — session-level toolset override (#493) */
   .composer-toolsets-wrap{display:none;}
@@ -1842,15 +1847,18 @@
     .composer-divider{display:none;}
   }
 
-  @media(min-width:641px){
+  @container composer-footer (min-width: 521px){
     :root[data-avatar-presence="composer"] .composer-workspace-label,
     :root[data-avatar-presence="composer"] #composerWorkspaceLabel,
     :root[data-avatar-presence="composer"] .composer-model-label,
-    :root[data-avatar-presence="composer"] #composerModelLabel{display:inline;}
+    :root[data-avatar-presence="composer"] #composerModelLabel,
+    :root[data-avatar-presence="composer"] .composer-reasoning-label,
+    :root[data-avatar-presence="composer"] #composerReasoningLabel{display:inline;}
     :root[data-avatar-presence="composer"] .composer-model-chevron{display:inline-flex;}
     :root[data-avatar-presence="composer"] .composer-workspace-group{max-width:284px;min-height:0;}
     :root[data-avatar-presence="composer"] .composer-workspace-chip{max-width:200px;min-width:0;min-height:0;padding:8px 12px 8px 10px;justify-content:flex-start;gap:8px;font-size:inherit;}
     :root[data-avatar-presence="composer"] .composer-model-chip{max-width:280px;min-width:0;min-height:0;padding:8px 10px 8px 12px;justify-content:flex-start;gap:8px;font-size:inherit;}
+    :root[data-avatar-presence="composer"] .composer-reasoning-chip{max-width:180px;min-width:0;min-height:0;padding:8px 10px 8px 12px;justify-content:flex-start;gap:8px;font-size:inherit;}
     :root[data-avatar-presence="composer"] .composer-workspace-files-btn{min-width:0;padding:8px 10px 8px 12px;}
     :root[data-avatar-presence="composer"] .composer-divider{display:block;}
   }
@@ -2207,7 +2215,7 @@
 .profile-inline-status[data-tone="warning"]{color:var(--warning,#E0B15D);}
 .profile-inline-status[data-tone="error"]{color:var(--danger,#F87171);}
 .profile-avatar-dialog[hidden]{display:none;}
-.profile-avatar-dialog{position:fixed;z-index:1000;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(3,7,18,.56);backdrop-filter:blur(2px);}
+.profile-avatar-dialog{position:fixed;z-index:1100;inset:0;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(3,7,18,.56);backdrop-filter:blur(2px);}
 .profile-avatar-dialog-card{width:min(940px,calc(100vw - 32px));max-height:min(820px,calc(100vh - 40px));overflow:hidden;background:var(--surface);border:1px solid var(--border2);border-radius:14px;box-shadow:0 18px 50px rgba(0,0,0,.45);display:flex;flex-direction:column;}
 .profile-avatar-dialog-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;padding:16px 18px;border-bottom:1px solid var(--border);}
 .profile-avatar-dialog-title{font-size:15px;font-weight:750;color:var(--text);line-height:1.2;}
@@ -2353,7 +2361,7 @@
 @media (max-width:760px){.profile-ops-grid,.profile-runtime-controls,.profile-ops-files-grid{grid-template-columns:1fr;}.profile-avatar-frame,.profile-avatar-preview{width:132px;}.profile-avatar-preview{height:132px;}}
 
 /* ── Per-profile Skills manager (modal opened from the Skills tile) ── */
-.profile-skills-manager-overlay{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);}
+.profile-skills-manager-overlay{position:fixed;inset:0;z-index:1100;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);}
 .profile-skills-manager-card{width:min(720px,100%);max-height:min(82vh,840px);display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:0 30px 80px rgba(0,0,0,.55);overflow:hidden;}
 .profile-skills-manager-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:16px 18px 8px;border-bottom:1px solid var(--border);}
 .profile-skills-manager-head-text{min-width:0;flex:1;}
@@ -4618,6 +4626,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   box-shadow:0 8px 18px rgba(0,0,0,.28);
 }
 .profile-hero-avatar-edit:hover{background:var(--accent-bg);}
+.profile-hero-avatar-edit:focus-visible{outline:2px solid var(--accent);outline-offset:2px;background:var(--accent-bg);}
 .profile-hero-body{display:flex;flex-direction:column;min-width:0;height:100%;}
 .profile-hero-name{
   font-size:32px;font-weight:830;letter-spacing:-.02em;line-height:1.05;
@@ -4792,7 +4801,12 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .profile-status-dot[data-state="starting"],
 .profile-status-dot[data-state="stopping"]{
   background:var(--warn,#f59e0b);
-  animation:profile-gateway-pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: no-preference){
+  .profile-status-dot[data-state="starting"],
+  .profile-status-dot[data-state="stopping"]{
+    animation:profile-gateway-pulse 1.4s ease-in-out infinite;
+  }
 }
 .profile-status-dot[data-state="failed"]{background:var(--danger,#E76F51);}
 
@@ -4840,7 +4854,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   display:inline-flex;align-items:center;gap:10px;
   padding:6px 10px;border-radius:999px;
   background:transparent;border:1px solid var(--border);
-  color:var(--fg, #e8e8e8);cursor:pointer;font:inherit;
+  color:var(--text);cursor:pointer;font:inherit;
   transition:background-color .2s,border-color .2s,opacity .2s;
 }
 .profile-gateway-toggle:focus-visible{
@@ -4855,7 +4869,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 }
 .profile-gateway-toggle-thumb{
   position:absolute;top:1px;left:1px;width:16px;height:16px;border-radius:50%;
-  background:var(--fg, #e8e8e8);
+  background:var(--text);
   transition:transform .2s ease;
   box-shadow:0 1px 2px rgba(0,0,0,.4);
 }
@@ -4864,7 +4878,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   border-color:color-mix(in srgb,var(--success) 80%,transparent);
 }
 .profile-gateway-toggle[data-state="running"] .profile-gateway-toggle-thumb{
-  transform:translateX(18px);background:#fff;
+  transform:translateX(18px);background:var(--strong);
 }
 .profile-gateway-toggle[data-state="starting"] .profile-gateway-toggle-thumb,
 .profile-gateway-toggle[data-state="stopping"] .profile-gateway-toggle-thumb{
@@ -4891,7 +4905,10 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 }
 .profile-gateway-toggle-label{
   font-size:12px;font-weight:600;letter-spacing:.02em;
-  color:var(--fg, #e8e8e8);
+  color:var(--text);
+}
+.profile-gateway-toggle[data-state="running"] .profile-gateway-toggle-label{
+  color:var(--success);
 }
 .profile-gateway-toggle[data-state="failed"] .profile-gateway-toggle-label,
 .profile-gateway-toggle[data-state="unknown"] .profile-gateway-toggle-label{
@@ -5054,8 +5071,8 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   font:inherit;font-size:13px;transition:background 120ms,border-color 120ms,color 120ms;
 }
 .pf-btn:hover{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--accent-text);}
-.pf-btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
-.pf-btn.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#fff;}
+.pf-btn.primary{background:var(--accent);border-color:var(--accent);color:var(--pf-primary-foreground);}
+.pf-btn.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:var(--pf-primary-foreground);}
 .pf-btn.primary:disabled{opacity:.6;cursor:not-allowed;}
 .pf-btn.danger{color:var(--error,#C62828);border-color:var(--border);}
 .pf-btn.danger:hover{background:rgba(198,40,40,.08);border-color:var(--error,#C62828);color:var(--error,#C62828);}

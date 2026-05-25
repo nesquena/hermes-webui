@@ -65,6 +65,29 @@ def test_load_workspaces_merges_legacy_profile_spaces_into_global(tmp_path, monk
     assert json.loads(global_ws_file.read_text(encoding="utf-8")) == loaded
 
 
+def test_profile_workspace_migration_marker_waits_for_global_write_success(tmp_path, monkeypatch):
+    global_state = tmp_path / "webui"
+    global_state.mkdir()
+    blocking_directory = global_state / "workspaces.json"
+    blocking_directory.mkdir()
+    profile_state = tmp_path / "profiles" / "coder" / "webui_state"
+    profile_state.mkdir(parents=True)
+    coder = tmp_path / "coder"
+    coder.mkdir()
+    (profile_state / "workspaces.json").write_text(
+        json.dumps([{"path": str(coder), "name": "Coder"}]),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(workspace, "_GLOBAL_WS_FILE", blocking_directory)
+    monkeypatch.setattr(workspace, "_legacy_profile_state_dirs", lambda: [profile_state])
+
+    loaded = workspace._migrate_profile_workspaces_into_global([])
+
+    assert loaded == [{"path": str(coder.resolve()), "name": "Coder"}]
+    assert not workspace._profile_workspace_migration_marker().exists()
+
+
 def test_global_last_workspace_wins_over_legacy_profile_last_workspace(tmp_path, monkeypatch):
     global_state = tmp_path / "webui"
     global_state.mkdir()

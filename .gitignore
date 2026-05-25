@@ -6,6 +6,7 @@ __pycache__/
 
 # Backup and temporary files
 *.bak
+*.bak-*
 *.swp
 *.swo
 

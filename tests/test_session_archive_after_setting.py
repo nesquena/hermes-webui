@@ -77,7 +77,8 @@ def test_archive_cutoff_setting_is_registered_and_wired_through_ui():
     assert "payload.session_archive_after_days=parseInt(archiveAfterSel.value,10)" in PANELS_JS
     assert "settings.session_archive_after_days" in PANELS_JS
 
-    assert "window._sessionArchiveAfterDays=parseInt(s.session_archive_after_days||7,10)||7" in BOOT_JS
+    assert "const _archiveAfterRaw=s.session_archive_after_days==null?7:s.session_archive_after_days;" in BOOT_JS
+    assert "window._sessionArchiveAfterDays=Number.isFinite(_archiveAfterParsed)&&_archiveAfterParsed>=0?_archiveAfterParsed:7" in BOOT_JS
 
     for key in (
         "settings_label_archive_after_days",

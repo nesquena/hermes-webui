@@ -117,7 +117,7 @@ def test_messaging_dedupe_profile_aware_contract(monkeypatch):
     src = ROUTES.read_text(encoding="utf-8")
     assert "profile_aware: bool = False" in src
     assert 'dedupe_key = f"{profile_key}\\x1f{key}" if profile_aware else key' in src
-    assert "profile_key = _safe_first(session.get(\"profile\"))" in src
+    assert "profile_key = _profile_dedupe_key(session.get(\"profile\"))" in src
 
     monkeypatch.setattr(routes, "_load_gateway_session_identity_map", lambda: {})
     rows = [
@@ -145,6 +145,37 @@ def test_messaging_dedupe_profile_aware_contract(monkeypatch):
         profile_aware=True,
     )
     assert {row["session_id"] for row in profile_aware} == {"old_default", "new_haku"}
+
+
+def test_profile_aware_dedupe_treats_root_profile_aliases_as_one(monkeypatch):
+    import api.profiles as profiles
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_load_gateway_session_identity_map", lambda: {})
+    monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name in {"default", "kinni"})
+    rows = [
+        {
+            "session_id": "old_default",
+            "profile": "default",
+            "raw_source": "telegram",
+            "user_id": "same-user",
+            "updated_at": 10,
+        },
+        {
+            "session_id": "new_renamed_root",
+            "profile": "kinni",
+            "raw_source": "telegram",
+            "user_id": "same-user",
+            "updated_at": 20,
+        },
+    ]
+
+    profile_aware = routes._keep_latest_messaging_session_per_source(
+        rows,
+        profile_aware=True,
+    )
+
+    assert [row["session_id"] for row in profile_aware] == ["new_renamed_root"]
 
 
 def test_profile_aware_dedupe_does_not_hide_stale_rows_for_other_profiles(monkeypatch):

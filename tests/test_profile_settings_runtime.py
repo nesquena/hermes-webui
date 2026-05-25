@@ -443,6 +443,85 @@ def test_profile_summary_includes_reactive_idle_payload_for_mode_switching():
         )
 
 
+def test_renamed_root_profile_is_active_when_active_alias_is_default():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        base.mkdir(parents=True)
+
+        hermes_cli_pkg = types.ModuleType("hermes_cli")
+        hermes_cli_profiles = types.ModuleType("hermes_cli.profiles")
+        hermes_cli_profiles.list_profiles = lambda: [
+            SimpleNamespace(
+                name="kinni",
+                path=base,
+                is_default=True,
+                gateway_running=False,
+                model="x",
+                provider=None,
+                has_env=False,
+                skill_count=0,
+            )
+        ]
+        saved_hermes_cli = {
+            name: sys.modules[name]
+            for name in ("hermes_cli", "hermes_cli.profiles")
+            if name in sys.modules
+        }
+        sys.modules["hermes_cli"] = hermes_cli_pkg
+        sys.modules["hermes_cli.profiles"] = hermes_cli_profiles
+        try:
+            profiles = _reload_profiles_module(base)
+            previous_active = profiles._active_profile
+            profiles._active_profile = "default"
+            summary = profiles.list_profiles_api()[0]
+            profiles._active_profile = previous_active
+        finally:
+            for name in ("hermes_cli", "hermes_cli.profiles"):
+                if name in saved_hermes_cli:
+                    sys.modules[name] = saved_hermes_cli[name]
+                else:
+                    sys.modules.pop(name, None)
+
+        assert summary["name"] == "kinni"
+        assert summary["is_default"] is True
+        assert summary["is_active"] is True
+
+
+def test_update_profile_model_allows_catalog_miss_for_operator_recovery(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile_dir = _seed_profile(
+            base,
+            "coder",
+            {"model": {"provider": "openai", "default": "gpt-4o"}},
+        )
+        profiles = _reload_profiles_module(base)
+        monkeypatch.setattr(
+            profiles,
+            "_get_available_models_for_profile_validation",
+            lambda: {
+                "groups": [
+                    {
+                        "provider_id": "openai",
+                        "models": [{"id": "gpt-4o"}],
+                    }
+                ]
+            },
+        )
+
+        result = profiles.update_profile_settings_api(
+            "coder",
+            provider="openai-codex",
+            model="gpt-5.5",
+        )
+
+        cfg = yaml.safe_load((profile_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert cfg["model"] == {"provider": "openai-codex", "default": "gpt-5.5"}
+        assert result["provider"] == "openai-codex"
+        assert result["model"] == "gpt-5.5"
+
+
 def test_reactive_avatar_upload_rejects_spoofed_webp_without_state_change():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"

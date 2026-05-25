@@ -53,14 +53,14 @@ def test_active_session_idle_reconcile_clears_stale_busy_and_inflight_state():
 
 
 def test_session_list_payload_reconciles_active_idle_state_before_optimistic_merge_and_render():
-    body = _function_body(SESSIONS_SRC, "function _applySessionListPayload(")
+    body = _function_body(SESSIONS_SRC, "function _applySessionIndexPayload(")
 
-    reconcile_pos = body.find("_reconcileActiveSessionIdleStateFromList(sessData.sessions||[])")
+    reconcile_pos = body.find("_reconcileActiveSessionIdleStateFromList(sessionRows)")
     merge_pos = body.find("_allSessions = _mergeOptimisticFirstTurnSessions")
     render_pos = body.find("renderSessionListFromCache()")
 
     assert reconcile_pos != -1, "active-session idle reconciliation must run for refreshed rows"
-    assert merge_pos != -1, "session rows must still be applied from /api/sessions"
+    assert merge_pos != -1, "session rows must still be applied from /api/session-index"
     assert render_pos != -1, "payload application must still render from cache"
     assert reconcile_pos < merge_pos < render_pos, (
         "local S.busy/INFLIGHT state must be reconciled against raw server rows "

@@ -69,6 +69,14 @@ class TestSyncWorkspaceDisplaysFallback:
             "composerChip.disabled must not use !hasSession — this was the regression"
         )
 
+    def test_load_workspace_list_preserves_explicit_empty_last_workspace(self):
+        src = read('static/panels.js')
+        fn = function_body(src, 'loadWorkspaceList')
+        assert "S._profileDefaultWorkspace = Object.prototype.hasOwnProperty.call(data,'last') ? data.last : ''" in fn, (
+            "loadWorkspaceList must accept data.last='' so explicit workspace clears "
+            "do not leave stale S._profileDefaultWorkspace state"
+        )
+
 
 class TestBootJsProfileDefaultWorkspace:
     """boot.js must read default_workspace from /api/settings into S._profileDefaultWorkspace."""

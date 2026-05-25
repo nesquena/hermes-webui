@@ -592,4 +592,3 @@ def test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_ex
         'should advance to the newer tag, not silently fall through to '
         'origin/<branch>. Regression for Opus-flagged drift in #2855.'
     )
-

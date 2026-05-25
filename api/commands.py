@@ -30,6 +30,7 @@ def list_commands(_registry=None) -> list[dict[str, Any]]:
         _registry: Optional injected registry for testing. When None
             (production), imports COMMAND_REGISTRY from hermes_cli.
     """
+    include_plugins = _registry is None
     if _registry is None:
         try:
             from hermes_cli.commands import COMMAND_REGISTRY as _registry
@@ -54,26 +55,29 @@ def list_commands(_registry=None) -> list[dict[str, Any]]:
             'gateway_only': bool(cmd.gateway_only),
         })
 
-    # Include plugin-registered slash commands
-    try:
-        from hermes_cli.plugins import get_plugin_commands
-        plugin_cmds = get_plugin_commands() or {}
-        existing_names = {c['name'] for c in out}
-        for cmd_name, cmd_info in plugin_cmds.items():
-            if cmd_name in existing_names or cmd_name in _NEVER_EXPOSE:
-                continue
-            out.append({
-                'name': cmd_name,
-                'description': str(cmd_info.get('description', 'Plugin command')),
-                'category': 'Plugin',
-                'aliases': [],
-                'args_hint': str(cmd_info.get('args_hint', '')),
-                'subcommands': [],
-                'cli_only': False,
-                'gateway_only': False,
-            })
-    except Exception:
-        pass
+    if include_plugins:
+        # Include plugin-registered slash commands only for the production
+        # registry path. Tests that inject a registry need deterministic output
+        # regardless of locally installed plugins.
+        try:
+            from hermes_cli.plugins import get_plugin_commands
+            plugin_cmds = get_plugin_commands() or {}
+            existing_names = {c['name'] for c in out}
+            for cmd_name, cmd_info in plugin_cmds.items():
+                if cmd_name in existing_names or cmd_name in _NEVER_EXPOSE:
+                    continue
+                out.append({
+                    'name': cmd_name,
+                    'description': str(cmd_info.get('description', 'Plugin command')),
+                    'category': 'Plugin',
+                    'aliases': [],
+                    'args_hint': str(cmd_info.get('args_hint', '')),
+                    'subcommands': [],
+                    'cli_only': False,
+                    'gateway_only': False,
+                })
+        except Exception:
+            pass
 
     return out
 

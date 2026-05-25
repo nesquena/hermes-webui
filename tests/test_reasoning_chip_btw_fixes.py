@@ -343,13 +343,25 @@ class TestResizeHandlerSymmetry:
     def test_resize_repositions_reasoning_dropdown(self):
         # The global resize handler must handle both composerModelDropdown AND
         # composerReasoningDropdown to keep them aligned when the window resizes.
-        m = re.search(
+        handlers = [
+            m.group(0)
+            for m in re.finditer(
             r"window\.addEventListener\(\s*['\"]resize['\"][\s\S]*?\}\s*\)\s*;",
             UI_JS,
-        )
-        assert m, "window resize handler not found in ui.js"
-        handler = m.group(0)
-        assert "composerReasoningDropdown" in handler, (
+            )
+        ]
+        assert handlers, "window resize handler not found in ui.js"
+        assert any("composerReasoningDropdown" in handler for handler in handlers), (
             "window resize handler must also re-position composerReasoningDropdown "
             "while it's open (symmetric with the existing model-dropdown branch)"
         )
+
+    def test_reasoning_options_are_keyboard_focusable_controls(self):
+        render_start = UI_JS.find("function renderReasoningDropdown(")
+        assert render_start != -1, "renderReasoningDropdown not found"
+        render_body = UI_JS[render_start:UI_JS.find("function _applyReasoningChip", render_start)]
+
+        assert '<button type="button" class="reasoning-option' in render_body
+        assert "aria-pressed=" in render_body
+        assert "row.onkeydown" in render_body
+        assert "ev.key==='Enter'||ev.key===' '||ev.key==='Spacebar'" in render_body

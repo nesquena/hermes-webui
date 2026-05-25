@@ -15,18 +15,28 @@ if str(REPO_ROOT) not in sys.path:
 
 
 def _reload_profiles_module(base_home: Path):
+    env_keys = ("HERMES_BASE_HOME", "HERMES_HOME", "HERMES_WEBUI_STATE_DIR")
+    original_env = {key: os.environ.get(key) for key in env_keys}
     os.environ["HERMES_BASE_HOME"] = str(base_home)
     os.environ["HERMES_HOME"] = str(base_home)
+    os.environ.pop("HERMES_WEBUI_STATE_DIR", None)
     _saved = {n: sys.modules[n] for n in ("api.config", "api.profiles") if n in sys.modules}
     for n in ("api.config", "api.profiles"):
         if n in sys.modules:
             del sys.modules[n]
-    profiles = importlib.import_module("api.profiles")
-    sys.modules.update(_saved)
-    api_pkg = sys.modules.get("api")
-    if api_pkg is not None:
-        for name, module in _saved.items():
-            setattr(api_pkg, name.rsplit(".", 1)[-1], module)
+    try:
+        profiles = importlib.import_module("api.profiles")
+    finally:
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        sys.modules.update(_saved)
+        api_pkg = sys.modules.get("api")
+        if api_pkg is not None:
+            for name, module in _saved.items():
+                setattr(api_pkg, name.rsplit(".", 1)[-1], module)
     return profiles
 
 
@@ -53,6 +63,26 @@ def test_write_gateway_phase_preserves_last_run_at():
         data = json.loads((home / ".gateway-state.json").read_text(encoding="utf-8"))
         assert data["last_run_at"] == "2026-05-15T10:00:00Z"
         assert data["phase"] == "starting"
+
+
+def test_write_gateway_last_run_preserves_phase_fields():
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td)
+        profiles = _reload_profiles_module(home)
+        profiles._write_gateway_phase(home, "starting", started_at="2026-05-15T10:00:00Z")
+        profiles._write_gateway_last_run(home)
+        data = json.loads((home / ".gateway-state.json").read_text(encoding="utf-8"))
+        assert data["phase"] == "starting"
+        assert data["phase_started_at"] == "2026-05-15T10:00:00Z"
+        assert data["desired_enabled"] is True
+        assert data["last_run_at"].endswith("Z")
+
+
+def test_gateway_state_mutations_use_exclusive_file_lock():
+    src = (REPO_ROOT / "api" / "profiles.py").read_text(encoding="utf-8")
+    assert "def _mutate_gateway_state_file" in src
+    assert "flock(fh.fileno(), _fcntl.LOCK_EX)" in src
+    assert "os.fsync(fh.fileno())" in src
 
 
 def test_write_gateway_phase_stopped_clears_phase_fields():

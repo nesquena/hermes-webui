@@ -76,4 +76,11 @@ def test_same_session_force_reload_preserves_non_empty_composer_input():
     assert "function _restoreComposerDraft(draft, targetSid, opts={})" in SESSIONS_JS
     assert "const preserveActiveInput = !!(opts && opts.preserveActiveInput);" in SESSIONS_JS
     assert "if (preserveActiveInput && current && current !== text) return;" in SESSIONS_JS
-    assert "_restoreComposerDraft(_draft, sid, {preserveActiveInput:currentSid===sid&&forceReload});" in SESSIONS_JS
+    assert "const preserveDraftInput=(currentSid===sid&&forceReload)||(!currentSid&&!S._bootReady);" in SESSIONS_JS
+    assert "_restoreComposerDraft(_draft, sid, {preserveActiveInput:preserveDraftInput});" in SESSIONS_JS
+
+
+def test_initial_boot_draft_restore_preserves_pre_boot_user_input():
+    """Typing during saved-session boot must not be cleared by empty draft restore."""
+    assert "const preserveDraftInput=(currentSid===sid&&forceReload)||(!currentSid&&!S._bootReady);" in SESSIONS_JS
+    assert "_restoreComposerDraft(_draft, sid, {preserveActiveInput:preserveDraftInput});" in SESSIONS_JS

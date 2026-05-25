@@ -249,6 +249,13 @@ def test_reactive_avatar_dialog_uses_polished_editor_chrome():
     assert "profile-avatar-preview-summary" in dialog
 
 
+def test_profile_modal_overlays_share_dialog_stacking_layer():
+    assert re.search(r"\.profile-avatar-dialog\s*\{[^}]*z-index:1100", STYLE_CSS), \
+        "profile avatar dialog should sit on the shared app dialog layer"
+    assert re.search(r"\.profile-skills-manager-overlay\s*\{[^}]*z-index:1100", STYLE_CSS), \
+        "profile skills/platforms overlay should sit on the shared app dialog layer"
+
+
 def test_reactive_avatar_uploads_hide_native_file_inputs():
     dialog = _extract_function(PANELS_JS, "_profileOpsAvatarDialog")
     assert "profile-reactive-file-input" in dialog
@@ -467,7 +474,7 @@ def test_composer_presence_avatar_uses_current_session_profile_resolver():
     assert "_activeProfileAvatarMarkupForState" not in fn
 
 
-def test_composer_presence_reactive_refreshes_visible_avatar_only_in_composer_mode():
+def test_composer_presence_reactive_refreshes_composer_then_transcript_avatars():
     needed = _extract_function(UI_JS, "_assistantAvatarRefreshNeeded")
     refresh = _extract_function(UI_JS, "refreshAssistantProfileAvatars")
     assert "function _isComposerPresenceLayoutActive()" in UI_JS
@@ -478,7 +485,8 @@ def test_composer_presence_reactive_refreshes_visible_avatar_only_in_composer_mo
         refresh.find("if(_isComposerPresenceLayoutActive())"):
         refresh.find("document.querySelectorAll(selector)")
     ]
-    assert "return;" in composer_branch
+    assert "return;" not in composer_branch
+    assert "const selector=opts.liveOnly" in refresh
 
 
 def test_composer_presence_forces_repaint_when_active_avatar_payload_changes():
@@ -612,6 +620,17 @@ def test_live_avatar_refresh_needed_detects_session_profile_mismatch():
     assert "data-avatar-profile" in fn
     assert "node.getAttribute('data-avatar-profile')!==profileName" in fn, \
         "same-state repairs should also catch avatars from a previous session profile"
+    assert "return composerNeeds||Array.from(nodes).some" in fn, \
+        "composer-presence mode must still inspect transcript avatars for stale live nodes"
+
+
+def test_composer_presence_refresh_does_not_skip_transcript_avatar_updates():
+    fn = _extract_function(UI_JS, "refreshAssistantProfileAvatars")
+    active_idx = fn.find("if(_isComposerPresenceLayoutActive())")
+    selector_idx = fn.find("const selector=opts.liveOnly")
+    assert active_idx != -1 and selector_idx != -1
+    assert "return;" not in fn[active_idx:selector_idx], \
+        "refreshing the composer avatar must not return before transcript avatars are repaired"
 
 
 def test_reactive_avatar_stream_state_changes_are_session_owned():
@@ -1255,6 +1274,14 @@ def test_auxiliary_models_screen_reuses_model_picker():
     assert "auxiliary_models" in persist
 
 
+def test_profile_runtime_controls_use_theme_contrast_variables():
+    assert "color:var(--fg" not in STYLE_CSS
+    assert "background:var(--fg" not in STYLE_CSS
+    assert ".pf-btn.primary{background:var(--accent);border-color:var(--accent);color:var(--pf-primary-foreground);}" in STYLE_CSS
+    assert ":root.dark[data-skin=\"geist-contrast\"]" in STYLE_CSS
+    assert "--pf-primary-foreground:#050505" in STYLE_CSS
+
+
 # ── Gateway tile ──────────────────────────────────────────────────────────
 
 
@@ -1314,6 +1341,14 @@ def test_files_section_drops_single_letter_badges():
     # in the live helper.
     for letter in ("'S'", "'M'", "'U'", "'E'", "'Y'"):
         assert f"icon: {letter}" not in fn, f"v2 letter badge still present: icon: {letter}"
+
+
+def test_sensitive_profile_file_reads_are_not_editable_in_generic_editor():
+    fn = _extract_function(PANELS_JS, "_openProfileFileEditor")
+
+    assert "data.redacted" in fn
+    assert "saveButton = redacted ? ''" in fn
+    assert "readonly aria-readonly=\"true\"" in fn
 
 
 # ── Bindings ──────────────────────────────────────────────────────────────

@@ -70,11 +70,9 @@ def test_boot_does_not_block_session_restore_on_model_catalog():
 
 def test_boot_primes_model_catalog_without_awaiting_it():
     """The boot-time prime must NOT await the model-catalog hydration before
-    rendering the session list. A later awaited hydration inside the saved-
-    session restore path at ``if(S.session) await _startBootModelDropdown();``
-    is intentional — that one re-applies the saved session's model after the
-    live catalog hydrates so the chip never shows a stale static default
-    (see comment in static/boot.js next to the saved-session restore).
+    rendering the session list. Saved-session restore also stays non-blocking:
+    it injects the saved model into the static dropdown before boot-ready, then
+    lets the live catalog hydrate in the background.
     """
     src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 

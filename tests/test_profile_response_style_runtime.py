@@ -91,8 +91,8 @@ def test_profile_response_style_uses_session_profile_and_updates_cached_agent(tm
     (beta_home / "SOUL.md").write_text("BETA_SOUL", encoding="utf-8")
     _write_profile_config(base_home / "config.yaml", {"agent": {"personality": "hype"}})
     personalities = {
-        "kawaii": "STALE_SESSION_KAWAII_SHOULD_NOT_APPLY",
         "custom": "CUSTOM_SESSION_PERSONALITY_APPLIES",
+        "technical": "CUSTOM_TECHNICAL_PERSONALITY_APPLIES",
     }
     _write_profile_config(
         alpha_home / "config.yaml",
@@ -200,7 +200,7 @@ def test_profile_response_style_uses_session_profile_and_updates_cached_agent(tm
 
     fake_session.personality = "kawaii"
     run_turn("alpha", "response-style-stream-1", "first turn")
-    fake_session.personality = "custom"
+    fake_session.personality = "technical"
     _write_profile_config(
         alpha_home / "config.yaml",
         {"agent": {"personality": "teacher", "personalities": personalities}},
@@ -218,9 +218,17 @@ def test_profile_response_style_uses_session_profile_and_updates_cached_agent(tm
     assert "teacherly response style" in ephemeral_used_for_runs[1]
     assert "playful, cute, upbeat response style" in ephemeral_used_for_runs[2]
     assert "STALE_SESSION_KAWAII_SHOULD_NOT_APPLY" not in ephemeral_used_for_runs[0]
-    assert "CUSTOM_SESSION_PERSONALITY_APPLIES" in ephemeral_used_for_runs[1]
+    assert "CUSTOM_TECHNICAL_PERSONALITY_APPLIES" in ephemeral_used_for_runs[1]
     assert all("high-energy, encouraging response style" not in prompt for prompt in ephemeral_used_for_runs)
     assert all("WebUI progress contract" in prompt for prompt in ephemeral_used_for_runs)
+
+
+def test_credential_self_heal_reapplies_webui_ephemeral_prompt_to_rebuilt_agents():
+    """Auth self-heal retries must keep response-style and progress overlays."""
+    src = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
+    assert "def _apply_webui_ephemeral_prompt(_agent):" in src
+    assert "_apply_webui_ephemeral_prompt(agent)" in src
+    assert "_apply_webui_ephemeral_prompt(_heal_agent)" in src
 
 
 @pytest.mark.parametrize(

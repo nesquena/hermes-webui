@@ -1020,7 +1020,10 @@ function _profileAvatarEntryForName(profileName){
 }
 function _currentConversationProfileName(){
   try{
-    if(typeof currentSessionProfile==='function') return currentSessionProfile();
+    if(typeof currentSessionProfile==='function'){
+      const profile=currentSessionProfile();
+      if(profile) return profile;
+    }
   }catch(_){}
   return (S.session&&S.session.profile)||S.activeProfile||'default';
 }
@@ -1318,18 +1321,21 @@ function setReactiveAvatarState(state='idle', opts={}){
 function _assistantAvatarRefreshNeeded(state='idle', liveOnly=false){
   const normalized=_PROFILE_REACTIVE_AVATAR_STATES.includes(state)?state:'idle';
   const profileName=_currentConversationProfileName();
+  let composerNeeds=false;
   if(_isComposerPresenceLayoutActive()){
     const host=$('composerPresenceAvatar');
     const node=document.querySelector('#composerPresenceAvatar .profile-avatar--composer');
-    if(!node) return !!host;
-    return node.getAttribute('data-avatar-state')!==normalized||node.getAttribute('data-avatar-profile')!==profileName;
+    composerNeeds=!node ? !!host : (
+      node.getAttribute('data-avatar-state')!==normalized
+      || node.getAttribute('data-avatar-profile')!==profileName
+    );
   }
   const selector=liveOnly
     ? '#liveAssistantTurn .msg-role.assistant .role-icon.assistant'
     : '.msg-role.assistant .role-icon.assistant';
   const nodes=document.querySelectorAll(selector);
-  if(!nodes.length) return false;
-  return Array.from(nodes).some(node=>node.getAttribute('data-avatar-state')!==normalized||node.getAttribute('data-avatar-profile')!==profileName);
+  if(!nodes.length) return composerNeeds;
+  return composerNeeds||Array.from(nodes).some(node=>node.getAttribute('data-avatar-state')!==normalized||node.getAttribute('data-avatar-profile')!==profileName);
 }
 function refreshAssistantProfileAvatars(opts={}){
   const label=window._botName||'Hermes';
@@ -1339,9 +1345,9 @@ function refreshAssistantProfileAvatars(opts={}){
   const profileName=_currentConversationProfileName();
   if(_isComposerPresenceLayoutActive()){
     refreshComposerPresenceAvatar({state,force:!!opts.force});
-    return;
+  } else {
+    refreshComposerPresenceAvatar({state,force:true});
   }
-  refreshComposerPresenceAvatar({state,force:true});
   const selector=opts.liveOnly
     ? '#liveAssistantTurn .msg-role.assistant .role-icon.assistant'
     : '.msg-role.assistant .role-icon.assistant';
@@ -2140,6 +2146,14 @@ function renderModelDropdown(){
   const sel = (opts && opts.select) || $('modelSelect');
   const onSelect = (opts && typeof opts.onSelect === 'function') ? opts.onSelect : selectModelFromDropdown;
   const onClose = (opts && typeof opts.onClose === 'function') ? opts.onClose : closeModelDropdown;
+  const hasCustomSelect = !!(opts && typeof opts.onSelect === 'function');
+  const commitModelSelection = (value) => {
+    const result = onSelect(value);
+    const closeAfterSelect = () => { if(hasCustomSelect) onClose(); };
+    if(result && typeof result.then === 'function') return result.then(closeAfterSelect);
+    closeAfterSelect();
+    return result;
+  };
   const scopeNoteText = (opts && typeof opts.scopeNote === 'string')
     ? opts.scopeNote
     : (t('model_scope_advisory') || 'Applies to this conversation from your next message.');
@@ -2291,7 +2305,7 @@ function renderModelDropdown(){
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
         row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-        row.onclick=()=>onSelect(m.value);
+        row.onclick=()=>commitModelSelection(m.value);
         dd.appendChild(row);
       }
     }
@@ -2330,7 +2344,7 @@ function renderModelDropdown(){
       // Inline provider chip on every row that has a group (#1425)
       const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
       row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-      row.onclick=()=>onSelect(m.value);
+      row.onclick=()=>commitModelSelection(m.value);
       dd.appendChild(row);
     }
     // Show "No results" if filtered and nothing matched
@@ -2354,7 +2368,7 @@ function renderModelDropdown(){
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
   // Event handlers for custom input
-  const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;onSelect(v);_ci.value='';};
+  const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;commitModelSelection(v);_ci.value='';};
   _cb.onclick=_applyCustom;
   _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){onClose();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
@@ -2493,17 +2507,24 @@ function renderReasoningDropdown(opts){
     return _cap(value);
   };
   dd.innerHTML = REASONING_OPTS.map(([value]) =>
-    `<div class="reasoning-option${value === current ? ' selected' : ''}" data-effort="${esc(value)}">${esc(_labelFor(value))}</div>`
+    `<button type="button" class="reasoning-option${value === current ? ' selected' : ''}" data-effort="${esc(value)}" aria-pressed="${value === current ? 'true' : 'false'}">${esc(_labelFor(value))}</button>`
   ).join('');
   // When opts.onSelect is supplied, the foreign surface owns the click path —
   // attach its handler AND stop propagation so the composer's document-level
   // listener doesn't double-fire and POST to /api/reasoning.
   if(onSelect){
     dd.querySelectorAll('.reasoning-option').forEach(row => {
-      row.onclick = (ev) => {
+      const activate = (ev) => {
         ev.stopPropagation();
         const v = row.dataset.effort || '';
         onSelect(v);
+      };
+      row.onclick = activate;
+      row.onkeydown = (ev) => {
+        if(ev.key==='Enter'||ev.key===' '||ev.key==='Spacebar'){
+          ev.preventDefault();
+          activate(ev);
+        }
       };
     });
   }
@@ -5893,6 +5914,15 @@ async function checkInflightOnBoot(sid) {
 }
 
 function syncTopbar(){
+  const profileChipName=()=>{
+    try{
+      if(typeof currentSessionProfile==='function'){
+        const profile=currentSessionProfile();
+        if(profile) return profile;
+      }
+    }catch(_){}
+    return (S.session&&S.session.profile)||S.activeProfile||'default';
+  };
   if(!S.session){
     document.title=assistantDisplayName();
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
@@ -5909,7 +5939,7 @@ function syncTopbar(){
     if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     // Update profile chip even when no session is active (e.g. right after profile switch)
     const _profileLabel=$('profileChipLabel');
-    if(_profileLabel) _profileLabel.textContent=(typeof currentSessionProfile==='function'?currentSessionProfile():(S.activeProfile||'default'));
+    if(_profileLabel) _profileLabel.textContent=profileChipName();
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -6020,7 +6050,7 @@ function syncTopbar(){
   // modelSelect already set above
   // Update profile chip label
   const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=(typeof currentSessionProfile==='function'?currentSessionProfile():(S.activeProfile||'default'));
+  if(profileLabel) profileLabel.textContent=profileChipName();
 }
 
 function msgContent(m){

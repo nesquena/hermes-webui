@@ -120,26 +120,26 @@ def test_static_sessions_js_no_cli_session_bypass():
     )
 
 
-def test_static_sessions_js_uses_all_profiles_query_when_toggle_on():
-    """Frontend must request /api/sessions?all_profiles=1 when _showAllProfiles is true.
+def test_static_sessions_js_uses_session_index_all_profiles_contract():
+    """The session-index sidebar path must request the aggregate profile view.
 
-    Without this, flipping the toggle just re-renders client-cached rows that
-    may not contain cross-profile data (since the server scoped on first fetch).
+    The redesigned sidebar no longer flips /api/sessions with all_profiles=1
+    from the client. Instead, /api/session-index is the aggregate sidebar API
+    and the backend opts into profile-aware dedupe for every index request.
     """
     from pathlib import Path
 
     repo_root = Path(__file__).parent.parent
-    src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
+    sessions_src = (repo_root / 'static' / 'sessions.js').read_text(encoding='utf-8')
+    routes_src = (repo_root / 'api' / 'routes.py').read_text(encoding='utf-8')
 
-    assert "_showAllProfiles ? '?all_profiles=1' : ''" in src, (
-        "Expected fetch path to flip on the toggle state"
-    )
-    assert "api('/api/sessions' + allProfilesQS)" in src, (
-        "Expected /api/sessions fetch to use the variant query"
-    )
-    assert "api('/api/projects' + allProfilesQS)" in src, (
-        "Expected /api/projects fetch to use the variant query"
-    )
+    assert "api('/api/session-index' + (qs?('?'+qs):''))" in sessions_src
+    index_idx = routes_src.find('parsed.path == "/api/session-index":')
+    archive_idx = routes_src.find('parsed.path == "/api/session-index/archive":', index_idx)
+    assert index_idx > 0 and archive_idx > index_idx
+    index_block = routes_src[index_idx:archive_idx]
+    assert "all_profiles=True" in index_block
+    assert "profile_aware_dedupe=True" in index_block
 
 
 # ── SHOULD-FIX #2: profile filter must run BEFORE messaging-source dedupe ──

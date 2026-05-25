@@ -397,6 +397,24 @@ def test_archive_page_stale_cursor_uses_keyset_boundary(tmp_path):
     assert [row["session_id"] for row in second["sessions"]] == ["middle"]
 
 
+def test_archive_page_malformed_cursor_starts_from_first_row():
+    rows = [
+        _row("newest", workspace_group="chats", age_days=10),
+        _row("older", workspace_group="chats", age_days=11),
+    ]
+
+    page = build_session_archive_page(
+        rows,
+        group_id="chats",
+        server_time=1_700_000_000.0,
+        session_archive_after_days=7,
+        limit=1,
+        cursor="not-valid-base64!!!",
+    )
+
+    assert [row["session_id"] for row in page["sessions"]] == ["newest"]
+
+
 @pytest.mark.parametrize("limit", ["bad", 0, -10, None])
 def test_archive_page_bad_or_non_positive_limit_defaults(limit):
     rows = [

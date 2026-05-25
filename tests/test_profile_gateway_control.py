@@ -1,7 +1,7 @@
 """Tests for profile-scoped gateway control endpoint.
 
 Plan reference: Phase 1C. The endpoint must:
-  * validate action in {start, restart, stop}
+  * validate action in {start, stop}
   * call a profile-scoped runner with the action and profile name
   * return a structured unavailable response when the backend is missing
   * never leak secret-looking strings from runner output
@@ -24,6 +24,8 @@ if str(REPO_ROOT) not in sys.path:
 
 
 def _reload_profiles_module(base_home: Path):
+    env_keys = ("HERMES_BASE_HOME", "HERMES_HOME")
+    original_env = {key: os.environ.get(key) for key in env_keys}
     os.environ["HERMES_BASE_HOME"] = str(base_home)
     os.environ["HERMES_HOME"] = str(base_home)
 
@@ -33,17 +35,24 @@ def _reload_profiles_module(base_home: Path):
         if name in sys.modules:
             del sys.modules[name]
 
-    profiles = importlib.import_module("api.profiles")
+    try:
+        profiles = importlib.import_module("api.profiles")
+    finally:
+        for key, value in original_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
-    # Restore original modules and package attributes so this temporary import
-    # does not leave api.profiles pointing at a module that is no longer present
-    # in sys.modules. Later tests call importlib.reload(api.profiles), which
-    # requires those references to remain consistent.
-    sys.modules.update(_saved)
-    api_pkg = sys.modules.get("api")
-    if api_pkg is not None:
-        for name, module in _saved.items():
-            setattr(api_pkg, name.rsplit(".", 1)[-1], module)
+        # Restore original modules and package attributes so this temporary import
+        # does not leave api.profiles pointing at a module that is no longer present
+        # in sys.modules. Later tests call importlib.reload(api.profiles), which
+        # requires those references to remain consistent.
+        sys.modules.update(_saved)
+        api_pkg = sys.modules.get("api")
+        if api_pkg is not None:
+            for name, module in _saved.items():
+                setattr(api_pkg, name.rsplit(".", 1)[-1], module)
     return profiles
 
 

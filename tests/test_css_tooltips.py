@@ -216,6 +216,28 @@ class TestStyleCSSTooltipClasses(unittest.TestCase):
             ".has-tooltip::after does not use content:attr(data-tooltip)",
         )
 
+    def test_default_tooltip_after_stays_single_line_horizontal(self):
+        """.has-tooltip::after must not collapse ordinary labels into columns."""
+        rule = re.search(r'\.has-tooltip::after\s*\{([^}]*)\}', self.css, re.DOTALL)
+        self.assertIsNotNone(rule, ".has-tooltip::after rule missing")
+        body = rule.group(1)
+        self.assertRegex(body, r"white-space\s*:\s*nowrap")
+        self.assertNotRegex(body, r"overflow-wrap\s*:\s*anywhere")
+        self.assertNotRegex(body, r"word-break\s*:\s*break-word")
+
+    def test_wrap_tooltip_variant_wraps_long_tokens(self):
+        """.has-tooltip--wrap::after may wrap long URLs/error IDs."""
+        rule = re.search(r'\.has-tooltip--wrap::after\s*\{([^}]*)\}', self.css, re.DOTALL)
+        self.assertIsNotNone(rule, ".has-tooltip--wrap::after rule missing")
+        body = rule.group(1)
+        for prop in (
+            r"max-width\s*:\s*320px",
+            r"overflow-wrap\s*:\s*anywhere",
+            r"word-break\s*:\s*break-word",
+            r"white-space\s*:\s*normal",
+        ):
+            self.assertRegex(body, prop)
+
     def test_has_tooltip_bottom_defined(self):
         """The .has-tooltip--bottom modifier class must be defined."""
         self.assertRegex(

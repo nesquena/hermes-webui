@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import math
 from pathlib import Path
@@ -359,7 +360,7 @@ def _decode_cursor(cursor: str | None) -> tuple[float, str] | None:
         if not math.isfinite(activity_ts):
             return None
         return (activity_ts, str(payload["session_id"]))
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    except (binascii.Error, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
 

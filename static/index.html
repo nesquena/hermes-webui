@@ -544,7 +544,7 @@
         <button id="queuePill" class="queue-pill" aria-label="Show queued messages" type="button"></button>
       </div>
       <div class="composer-presence-row" id="composerPresenceRow">
-        <button id="composerPresenceAvatar" class="composer-presence-avatar" type="button" onclick="toggleComposerAvatarProfileDropdown(event)" title="Switch profile" aria-label="Switch profile" aria-haspopup="true" aria-expanded="false" aria-controls="profileDropdown"></button>
+        <button id="composerPresenceAvatar" class="composer-presence-avatar" type="button" onclick="toggleComposerAvatarProfileDropdown(event)" title="Switch profile" aria-label="Switch profile" data-i18n-title="composer_presence_switch_profile" data-i18n-aria-label="composer_presence_switch_profile" aria-haspopup="true" aria-expanded="false" aria-controls="profileDropdown"></button>
         <div class="composer-box" id="composerBox">
         <div class="cmd-dropdown" id="cmdDropdown"></div>
         <div class="drop-hint" id="dropHint">
@@ -962,21 +962,21 @@
               <input type="hidden" id="settingsFontSize" value="default">
             </div>
             <div class="settings-field">
-              <label>Agent avatar placement</label>
+              <label data-i18n="settings_label_avatar_presence_layout">Agent avatar placement</label>
               <div id="avatarPresencePickerGrid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:4px">
-                <button type="button" data-avatar-presence-layout-val="thread" onclick="_pickAvatarPresenceLayout('thread')" class="avatar-presence-pick-btn" aria-pressed="true" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                <button type="button" data-avatar-presence-layout-val="thread" onclick="_pickAvatarPresenceLayout('thread')" class="avatar-presence-pick-btn" aria-pressed="true" title="Thread" aria-label="Thread" data-i18n-title="settings_avatar_presence_thread" data-i18n-aria-label="settings_avatar_presence_thread" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
                   <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center;gap:5px;color:var(--muted)">
                     <span style="width:10px;height:10px;border-radius:50%;background:var(--accent-bg-strong);display:inline-block"></span>
                     <span style="width:38px;height:16px;border-radius:6px;border:1px solid var(--border2);display:inline-block"></span>
                   </div>
-                  <span style="font-size:12px;font-weight:500;color:var(--text)">Thread</span>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)" data-i18n="settings_avatar_presence_thread">Thread</span>
                 </button>
-                <button type="button" data-avatar-presence-layout-val="composer" onclick="_pickAvatarPresenceLayout('composer')" class="avatar-presence-pick-btn" aria-pressed="false" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                <button type="button" data-avatar-presence-layout-val="composer" onclick="_pickAvatarPresenceLayout('composer')" class="avatar-presence-pick-btn" aria-pressed="false" title="Composer" aria-label="Composer" data-i18n-title="settings_avatar_presence_composer" data-i18n-aria-label="settings_avatar_presence_composer" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
                   <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center;gap:5px;color:var(--muted)">
                     <span style="width:22px;height:22px;border-radius:8px;background:var(--accent-bg-strong);display:inline-block"></span>
                     <span style="width:42px;height:22px;border-radius:8px;border:1px solid var(--border2);display:inline-block"></span>
                   </div>
-                  <span style="font-size:12px;font-weight:500;color:var(--text)">Composer</span>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)" data-i18n="settings_avatar_presence_composer">Composer</span>
                 </button>
               </div>
               <input type="hidden" id="settingsAvatarPresenceLayout" value="thread">

@@ -126,7 +126,7 @@ class TestSidebarFirstTurnVisibility:
             "the server has saved pending state, and replacing _allSessions would hide the "
             "new in-flight chat until the stream finishes."
         )
-        apply_start = src.index("function _applySessionListPayload")
+        apply_start = src.index("function _applySessionIndexPayload")
         apply_end = src.index("async function renderSessionList", apply_start)
         apply_body = src[apply_start:apply_end]
         assign_idx = apply_body.index("_allSessions =")

@@ -4317,15 +4317,26 @@ def _run_agent_streaming(
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
             _personality_prompt = None
             _pname = getattr(s, 'personality', None)
-            if isinstance(_pname, str) and _pname.strip().lower() in _PROFILE_RESPONSE_STYLE_MODES:
+            _agent_cfg = _profile_cfg.get('agent', {}) if isinstance(_profile_cfg, dict) else {}
+            _personalities = _agent_cfg.get('personalities', {})
+            if not isinstance(_personalities, dict):
+                _personalities = {}
+            if isinstance(_pname, str):
+                _pname = _pname.strip() or None
+            if (
+                isinstance(_pname, str)
+                and _pname.lower() in _PROFILE_RESPONSE_STYLE_MODES
+                and _pname not in _personalities
+                and _pname.lower() not in _personalities
+            ):
                 # Built-in response styles are profile-level settings.  Older
                 # WebUI builds could persist them into Session.personality from
                 # legacy display.personality, which made stale sessions keep
                 # forcing e.g. kawaii even after the profile was Soul-driven.
+                # A profile may still intentionally define a custom personality
+                # with the same name; preserve that user-authored overlay.
                 _pname = None
             if _pname:
-                _agent_cfg = _profile_cfg.get('agent', {}) if isinstance(_profile_cfg, dict) else {}
-                _personalities = _agent_cfg.get('personalities', {})
                 if isinstance(_personalities, dict) and _pname in _personalities:
                     _pval = _personalities[_pname]
                     if isinstance(_pval, dict):
@@ -4338,15 +4349,19 @@ def _run_agent_streaming(
                     else:
                         _personality_prompt = str(_pval)
             _response_style_prompt = _profile_response_style_prompt(_profile_cfg)
+
+            def _apply_webui_ephemeral_prompt(_agent):
+                _agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
+                    _personality_prompt,
+                    _response_style_prompt,
+                )
+
             # Pass WebUI-only runtime guidance via ephemeral_system_prompt
             # (agent's own mechanism). This preserves SOUL.md and any selected
             # session personality, layers the profile response-style override
             # only when configured, and keeps long tool runs emitting real
             # user-visible interim text through interim_assistant_callback.
-            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
-                _personality_prompt,
-                _response_style_prompt,
-            )
+            _apply_webui_ephemeral_prompt(agent)
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
             # fallback to now only for recovered/legacy flows where that marker is absent
@@ -4636,6 +4651,7 @@ def _run_agent_streaming(
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                             agent = _AIAgent(**_agent_kwargs)
+                            _apply_webui_ephemeral_prompt(agent)
                             with STREAMS_LOCK:
                                 AGENT_INSTANCES[stream_id] = agent
                             from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
@@ -5468,6 +5484,7 @@ def _run_agent_streaming(
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                     _heal_agent = _AIAgent(**_heal_kwargs)
+                    _apply_webui_ephemeral_prompt(_heal_agent)
                     with STREAMS_LOCK:
                         AGENT_INSTANCES[stream_id] = _heal_agent
                     from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L

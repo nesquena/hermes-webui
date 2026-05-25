@@ -862,7 +862,8 @@ async function loadSession(sid){
   // against stale writes from slow responses racing to restore the previous draft).
   const _draft = S.session && S.session.composer_draft;
   if (_draft && (typeof _restoreComposerDraft === 'function')) {
-    _restoreComposerDraft(_draft, sid, {preserveActiveInput:currentSid===sid&&forceReload});
+    const preserveDraftInput=(currentSid===sid&&forceReload)||(!currentSid&&!S._bootReady);
+    _restoreComposerDraft(_draft, sid, {preserveActiveInput:preserveDraftInput});
   }
 
   _resolveSessionModelForDisplaySoon(sid);

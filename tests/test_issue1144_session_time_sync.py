@@ -479,8 +479,8 @@ def test_sessions_js_has_server_time_compensation_vars():
 
 
 def test_sessions_js_captures_server_time_on_fetch():
-    assert "sessData.server_time" in SESSIONS_JS
-    assert "sessData.server_tz" in SESSIONS_JS
+    assert "indexData.server_time" in SESSIONS_JS
+    assert "indexData.server_tz" in SESSIONS_JS
     assert "_serverTimeDelta = Date.now()" in SESSIONS_JS
 
 

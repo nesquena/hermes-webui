@@ -69,9 +69,9 @@ def _composer_phone_media_block():
 
 
 def _composer_presence_desktop_media_block():
-    for block in _min_width_media_blocks(641):
-        if 'data-avatar-presence="composer"' in block and ".composer-workspace-label" in block:
-            return block
+    block = _container_query_block(CSS, "composer-footer (min-width: 521px)")
+    if 'data-avatar-presence="composer"' in block and ".composer-workspace-label" in block:
+        return block
     raise AssertionError("Missing composer presence desktop label override")
 
 
@@ -961,22 +961,25 @@ def test_composer_presence_css_preserves_default_and_enables_opt_in_layout():
 
     assert root_vars.get("--composer-presence-avatar-size") == "56px"
     assert "--msg-max: 780px" in CSS or "--msg-max:780px" in CSS
-    assert default_row.get("max-width") == "780px"
+    assert default_row.get("max-width") == "clamp(780px,60vw,1100px)"
     assert default_row.get("margin") == "0 auto"
     assert "display" not in default_row, "composer row layout display must be opt-in"
     assert _display_hidden(default_avatar)
     assert active_row.get("display") == "grid"
-    assert active_row.get("max-width") == "var(--msg-max)", \
+    assert active_row.get("width") == "100%"
+    assert active_row.get("max-width") == "min(var(--msg-max),100%)", \
         "desktop composer-avatar mode should align the combined avatar+composer row to the message column"
     assert active_row.get("grid-template-columns") == \
-        "var(--composer-presence-avatar-size,56px) minmax(0,calc(var(--msg-max) - var(--composer-presence-avatar-size,56px) - 6px))", \
-        "desktop composer column must be shortened by the avatar column and gap"
+        "var(--composer-presence-avatar-size,56px) minmax(0,1fr)", \
+        "composer column must shrink inside the row instead of overflowing narrow containers"
     assert active_row.get("align-items") == "end", \
         "avatar must stay bottom-aligned when the composer grows with a long draft"
     assert active_row.get("gap") == "6px"
     assert active_avatar.get("display") == "flex"
     assert active_avatar.get("width") == "var(--composer-presence-avatar-size,56px)"
     assert active_avatar.get("height") == "var(--composer-presence-avatar-size,56px)"
+    assert active_box.get("width") == "100%"
+    assert active_box.get("max-width") == "none"
     assert active_box.get("min-width") == "0"
     assert composer_inner.get("width") == "var(--composer-presence-avatar-size,56px)"
     assert composer_inner.get("height") == "var(--composer-presence-avatar-size,56px)"
@@ -986,12 +989,18 @@ def test_composer_presence_css_preserves_default_and_enables_opt_in_layout():
 def test_composer_presence_desktop_keeps_workspace_and_model_values_visible():
     """Desktop composer-avatar mode must not collapse value-bearing chips to icons."""
     desktop = _composer_presence_desktop_media_block()
+    assert "composer-footer (min-width: 521px)" in CSS, (
+        "composer-avatar desktop mode should restore labels as soon as the full "
+        "icon-only mobile fallback is no longer active"
+    )
 
     for selector in (
         ':root[data-avatar-presence="composer"] .composer-workspace-label',
         ':root[data-avatar-presence="composer"] #composerWorkspaceLabel',
         ':root[data-avatar-presence="composer"] .composer-model-label',
         ':root[data-avatar-presence="composer"] #composerModelLabel',
+        ':root[data-avatar-presence="composer"] .composer-reasoning-label',
+        ':root[data-avatar-presence="composer"] #composerReasoningLabel',
     ):
         declarations = _declarations(_rule_body(desktop, selector))
         assert declarations.get("display") == "inline", \
@@ -1062,6 +1071,8 @@ def test_composer_presence_avatar_opens_profile_menu_on_mobile():
     assert 'onclick="toggleComposerAvatarProfileDropdown(event)"' in avatar_html
     assert 'aria-controls="profileDropdown"' in avatar_html
     assert 'aria-haspopup="true"' in avatar_html
+    assert 'data-i18n-title="composer_presence_switch_profile"' in avatar_html
+    assert 'data-i18n-aria-label="composer_presence_switch_profile"' in avatar_html
 
     panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
     assert "function toggleComposerAvatarProfileDropdown" in panels_js

@@ -123,8 +123,8 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     assert render_idx != -1, "renderSessionList not found"
     render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("// ── Gateway session SSE", render_idx)]
 
-    apply_idx = SESSIONS_JS.find("function _applySessionListPayload(")
-    assert apply_idx != -1, "_applySessionListPayload not found"
+    apply_idx = SESSIONS_JS.find("function _applySessionIndexPayload(")
+    assert apply_idx != -1, "_applySessionIndexPayload not found"
     apply_block = SESSIONS_JS[apply_idx:render_idx]
 
     assert "const _sessionStreamingById = new Map();" in SESSIONS_JS
@@ -136,7 +136,7 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     )
     assert "_markSessionCompletionUnread(sid, s.message_count);" in transition_block
     assert "_sessionStreamingById.set(sid, isStreaming);" in transition_block
-    assert "_applySessionListPayload(sessData,projData);" in render_block
+    assert "_applySessionIndexPayload(indexData);" in render_block
     assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block
 
 

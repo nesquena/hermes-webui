@@ -11,6 +11,11 @@
 
 ### Fixed
 
+- Profile source-file editing now restores the intended WebUI access to
+  profile-owned `.env` and `config.yaml` files, while keeping the editor limited
+  to its explicit filename allowlist. Existing profile model settings can also
+  be corrected even when the current model catalog is stale or missing the
+  desired provider/model pair.
 - Profile Gateway cards now show where their running/stopped state came from, profile runtime settings hydrate from a per-profile cache to avoid visible cross-profile lag, and idle active-session metadata polling skips full transcript reads when the profile-aware `state.db` summary proves there is no external update.
 - Profile response style now applies as a profile-scoped WebUI runtime overlay
   for new and continued chats. Soul-driven profiles inject no extra style, and
@@ -27,8 +32,10 @@
 - Picking a different Space from the chat composer now changes only the open conversation's Space; the active/default Space changes only through the explicit Spaces panel activation action.
 - Project Archive subsections in the chat sidebar are indented under their parent group so the hierarchy reads more clearly.
 - The general Chats section in the chat sidebar can now be collapsed and expanded like workspace Projects, with the collapsed state remembered locally.
-- Composer-adjacent avatar mode now aligns the combined desktop avatar+composer row to the chat message column, shortens the composer by the avatar width, keeps desktop workspace/model values visible inside the narrower composer, keeps the avatar bottom-aligned as long drafts grow the composer, lets the mobile settings submenu expand across the avatar row instead of staying composer-width, keeps the Context section visible in that submenu before token usage data arrives, replaces the mobile inline profile chip with the Space files shortcut while making the avatar open profile switching, and keeps the mobile model/reasoning/settings control fixed beside Send instead of letting it slide into the scrollable tool strip.
+- Composer-adjacent avatar mode now aligns the combined desktop avatar+composer row to the chat message column, shortens the composer by the avatar width, keeps desktop workspace/model/reasoning values visible inside the narrower composer, keeps the avatar bottom-aligned as long drafts grow the composer, lets the mobile settings submenu expand across the avatar row instead of staying composer-width, keeps the Context section visible in that submenu before token usage data arrives, replaces the mobile inline profile chip with the Space files shortcut while making the avatar open profile switching, and keeps the mobile model/reasoning/settings control fixed beside Send instead of letting it slide into the scrollable tool strip.
 - Reactive avatar same-state events now clear stale queued state changes, so a reaffirmed current animation is not followed by an older queued transition.
+- Restoring a saved session on launch no longer waits for live model-catalog hydration before revealing the composer workspace/model/reasoning labels, and typing into the composer during boot is no longer cleared by an empty saved draft restore.
+- Button tooltips now keep ordinary labels on one horizontal line again; long diagnostic text still wraps only on the explicit multiline tooltip variant.
 
 ## [v0.51.130] — 2026-05-24 — Release DB (stage-batch12 — 3-PR profile-isolation + boot-precedence + workspace Artifacts tab)
 

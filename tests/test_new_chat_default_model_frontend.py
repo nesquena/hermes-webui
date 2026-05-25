@@ -56,15 +56,18 @@ def test_boot_model_hydration_prefers_active_session_over_persisted_model():
     )
 
 
-def test_hard_refresh_hydrates_saved_session_model_before_revealing_model_chip():
+def test_hard_refresh_primes_saved_session_model_before_revealing_model_chip_without_blocking_catalog():
     boot_js = Path("static/boot.js").read_text(encoding="utf-8")
     load_marker = "await loadSession(saved);"
     assert load_marker in boot_js
     saved_restore = boot_js[boot_js.index(load_marker) : boot_js.index("await checkInflightOnBoot(saved);return;", boot_js.index(load_marker))]
-    assert "await _startBootModelDropdown();" in saved_restore
-    assert saved_restore.index("await _startBootModelDropdown();") > saved_restore.index(load_marker)
-    assert saved_restore.index("await _startBootModelDropdown();") < saved_restore.index("S._bootReady=true;"), (
-        "hard refresh must hydrate/re-apply the active session model before S._bootReady lets syncModelChip display stale static HTML defaults"
+    assert "function _primeActiveSessionModelForBootReady()" in boot_js
+    assert "_ensureModelOptionInDropdown(S.session.model,$('modelSelect'),S.session.model_provider||null);" in boot_js
+    assert "if(S.session) _primeActiveSessionModelForBootReady();" in saved_restore
+    before_ready = saved_restore[: saved_restore.index("S._bootReady=true;")]
+    assert "await _startBootModelDropdown();" not in before_ready, (
+        "hard refresh must not block S._bootReady on the live model catalog; "
+        "the saved session model should be injected locally before labels are revealed"
     )
 
 

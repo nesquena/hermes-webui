@@ -1530,7 +1530,9 @@ function _deferBootHydration(fn){
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
-    window._sessionArchiveAfterDays=parseInt(s.session_archive_after_days||7,10)||7;
+    const _archiveAfterRaw=s.session_archive_after_days==null?7:s.session_archive_after_days;
+    const _archiveAfterParsed=parseInt(_archiveAfterRaw,10);
+    window._sessionArchiveAfterDays=Number.isFinite(_archiveAfterParsed)&&_archiveAfterParsed>=0?_archiveAfterParsed:7;
     window._inflightStateLimits={
       maxSessions:parseInt(s.inflight_state_max_sessions||8,10)||8,
       messages:parseInt(s.inflight_state_max_messages||24,10)||24,
@@ -1630,7 +1632,9 @@ function _deferBootHydration(fn){
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
-    window._sessionArchiveAfterDays=7;
+    const _archiveAfterRaw=localStorage.getItem('hermes-pref-session_archive_after_days');
+    const _archiveAfterParsed=parseInt(_archiveAfterRaw==null?7:_archiveAfterRaw,10);
+    window._sessionArchiveAfterDays=Number.isFinite(_archiveAfterParsed)&&_archiveAfterParsed>=0?_archiveAfterParsed:7;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';
@@ -1714,6 +1718,12 @@ function _deferBootHydration(fn){
     window._modelDropdownReady=next;
     return next;
   };
+  function _primeActiveSessionModelForBootReady(){
+    if(S.session&&S.session.model&&$('modelSelect')&&typeof _ensureModelOptionInDropdown==='function'){
+      _ensureModelOptionInDropdown(S.session.model,$('modelSelect'),S.session.model_provider||null);
+    }
+    try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+  }
   window._modelDropdownReady=null;
   window._ensureModelDropdownReady=_startBootModelDropdown;
   // Kick model dropdown hydration off eagerly but non-blocking — first call
@@ -1757,7 +1767,7 @@ function _deferBootHydration(fn){
   if(pwaLaunchAction==='new-chat'){
     try{
       await newSession(true);
-      if(S.session) await _startBootModelDropdown();
+      if(S.session) _primeActiveSessionModelForBootReady();
       S._bootReady=true;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();return;
     }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
@@ -1777,12 +1787,12 @@ function _deferBootHydration(fn){
         return;
       }
       await loadSession(saved);
-      // Hard refresh starts from the static HTML model list. Hydrate the live
-      // catalog after the saved session is known, then re-apply that session's
-      // model before S._bootReady lets syncModelChip reveal the composer label.
-      // Otherwise the chip can display the static default (e.g. GPT-5.4 Mini)
-      // even though S.session already points at the Codex/current model.
-      if(S.session) await _startBootModelDropdown();
+      // Hard refresh starts from the static HTML model list. Inject the saved
+      // session's model locally before S._bootReady reveals the composer label,
+      // then let the live provider catalog hydrate in the background. Otherwise
+      // a cold /api/models path can delay the whole composer even though the
+      // saved session already has the correct model metadata.
+      if(S.session) _primeActiveSessionModelForBootReady();
       // If the restored session has no messages it is an ephemeral scratch pad —
       // treat the page as a fresh start rather than resuming a blank conversation.
       // loadSession() already ran, so loadDir() has populated the workspace file tree.

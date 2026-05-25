@@ -131,6 +131,20 @@ def test_compute_activity_treats_missing_profile_field_as_default():
         assert result["sessions_week"] == 1
 
 
+def test_compute_activity_matches_renamed_root_profile_alias(monkeypatch):
+    rows = [
+        _row("default", age_days=1),
+        _row("coder", age_days=1),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profiles = _reload_profiles_module(base)
+        monkeypatch.setattr(profiles, "_is_root_profile", lambda name: name in {"default", "kinni"})
+        result = profiles._compute_profile_activity(rows, "kinni", now=_now())
+        assert result["sessions_week"] == 1
+
+
 def test_compute_activity_last_used_is_unbounded_by_week_window():
     """Regression for validator F#15: a profile last touched outside the 7-day
     window must still report a non-null last_used_at — only sessions_week is

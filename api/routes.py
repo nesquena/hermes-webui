@@ -473,6 +473,18 @@ def _safe_first(*values):
     return ""
 
 
+def _profile_dedupe_key(value) -> str:
+    profile = _safe_first(value) or "default"
+    try:
+        from api.profiles import _is_root_profile
+
+        if _is_root_profile(profile):
+            return "default"
+    except Exception:
+        pass
+    return profile
+
+
 def _gateway_session_metadata_path():
     try:
         from api.profiles import get_active_hermes_home
@@ -1960,7 +1972,7 @@ def _should_hide_stale_messaging_session(
     if not active_gateway_session_ids:
         return False
     if profile_aware:
-        profile_key = _safe_first(session.get("profile"))
+        profile_key = _profile_dedupe_key(session.get("profile"))
         profile_sources = active_gateway_profile_sources or set()
         if (profile_key, raw_source) not in profile_sources:
             return False
@@ -2310,7 +2322,7 @@ def _keep_latest_messaging_session_per_source(
             continue
         active_gateway_sources.add(source)
         session = sessions_by_id.get(sid) or {}
-        profile_key = _safe_first(meta.get("profile"), session.get("profile"))
+        profile_key = _profile_dedupe_key(_safe_first(meta.get("profile"), session.get("profile")))
         active_gateway_profile_sources.add((profile_key, source))
 
     kept_sources: set[str] = set()
@@ -2321,7 +2333,7 @@ def _keep_latest_messaging_session_per_source(
         if not key:
             kept.append(session)
             continue
-        profile_key = _safe_first(session.get("profile"))
+        profile_key = _profile_dedupe_key(session.get("profile"))
         dedupe_key = f"{profile_key}\x1f{key}" if profile_aware else key
         if _should_hide_stale_messaging_session(
             session,
@@ -8858,7 +8870,14 @@ def _handle_memory_read(handler):
 
 # ── Profile file read/write ──────────────────────────────────────────────────
 
-_PROFILE_FILE_WHITELIST = {"SOUL.md", "config.yaml", ".env", "memories/MEMORY.md", "memories/USER.md"}
+_PROFILE_FILE_EDITABLE = {
+    "SOUL.md",
+    "config.yaml",
+    ".env",
+    "memories/MEMORY.md",
+    "memories/USER.md",
+}
+_PROFILE_FILE_WHITELIST = _PROFILE_FILE_EDITABLE
 
 
 def _handle_profile_file_read(handler, parsed):
@@ -8881,9 +8900,9 @@ def _handle_profile_file_read(handler, parsed):
         target.relative_to(profile_home.resolve())
     except ValueError:
         return bad(handler, "Invalid file path", 403)
-    if not target.exists():
-        return j(handler, {"content": "", "file": filename, "profile": name or "default", "exists": False})
     try:
+        if not target.exists():
+            return j(handler, {"content": "", "file": filename, "profile": name or "default", "exists": False})
         content = target.read_text(encoding="utf-8", errors="replace")
         return j(handler, {"content": content, "file": filename, "profile": name or "default", "exists": True})
     except (PermissionError, OSError) as e:

@@ -33,6 +33,7 @@ def run_ctl(
         {
             "HOME": str(home),
             "HERMES_HOME": str(home / ".hermes"),
+            "HERMES_WEBUI_STATE_DIR": str(home / ".hermes" / "webui"),
             "PATH": os.environ.get("PATH", ""),
         }
     )
@@ -136,6 +137,13 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
         assert stop.returncode == 0, stop.stderr + stop.stdout
         assert_process_exits(pid)
         assert not pid_file.exists()
+
+
+def test_start_uses_nohup_so_daemon_survives_launcher_exit():
+    ctl_text = CTL.read_text(encoding="utf-8")
+
+    assert "trap '' HUP" in ctl_text
+    assert 'exec nohup "${python_exe}"' in ctl_text
 
 
 def test_start_command_does_not_invoke_gateway_runner():

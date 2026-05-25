@@ -264,6 +264,12 @@ def test_platforms_modal_inner_buttons_stop_propagation():
     )
 
 
+def test_platforms_modal_handlers_are_bound_idempotently():
+    bind_fn = _extract_function(PANELS_JS, "_bindPlatformsManagerHandlers")
+    assert "dataset.platformsBound" in bind_fn
+    assert "_bindPlatformsManagerHandlers(profileName, fresh)" in PANELS_JS
+
+
 def test_platforms_css_classes_are_defined():
     """The modal-card classes referenced in the mockup must exist in style.css."""
     for selector in (

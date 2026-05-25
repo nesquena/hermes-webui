@@ -2295,7 +2295,7 @@ def _compute_profile_activity(rows, name: str, *, now: float) -> dict:
         if not isinstance(r, dict):
             continue
         row_profile = r.get('profile') or 'default'
-        if row_profile != name:
+        if not _profiles_match(row_profile, name):
             continue
         ts = r.get('updated_at')
         if not isinstance(ts, (int, float)):
@@ -2341,6 +2341,48 @@ GATEWAY_START_GRACE_SECONDS = 8
 GATEWAY_STOP_GRACE_SECONDS = 12
 
 
+def _mutate_gateway_state_file(profile_home: Path, mutator, *, error_message: str) -> None:
+    """Serialize read/modify/write updates to a profile gateway state file."""
+    state_path = profile_home / '.gateway-state.json'
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        with state_path.open('a+', encoding='utf-8') as fh:
+            try:
+                import fcntl as _fcntl  # POSIX/WSL; absent on native Windows.
+            except Exception:
+                _fcntl = None
+            try:
+                if _fcntl is not None:
+                    _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+                fh.seek(0)
+                raw = fh.read()
+                payload: dict = {}
+                if raw.strip():
+                    try:
+                        existing = json.loads(raw)
+                        if isinstance(existing, dict):
+                            payload = existing
+                    except ValueError:
+                        payload = {}
+                mutator(payload)
+                fh.seek(0)
+                fh.truncate()
+                fh.write(json.dumps(payload))
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
+            finally:
+                if _fcntl is not None:
+                    try:
+                        _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+    except OSError:
+        logger.debug(error_message, exc_info=True)
+
+
 def _write_gateway_phase(
     profile_home: Path,
     phase: str,
@@ -2365,46 +2407,40 @@ def _write_gateway_phase(
     regardless of ``started_at``.
     """
     import datetime as _dt
-    state_path = profile_home / '.gateway-state.json'
-    payload: dict = {}
-    if state_path.exists():
-        try:
-            existing = json.loads(state_path.read_text(encoding='utf-8'))
-            if isinstance(existing, dict):
-                payload = existing
-        except (ValueError, OSError):
-            payload = {}
 
     now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat().replace('+00:00', 'Z')
     timestamp = started_at if started_at else now_iso
 
-    if phase == 'stopped':
-        payload['desired_enabled'] = False
-        payload['phase'] = None
-        payload['phase_started_at'] = None
-        payload['last_error'] = None
-    elif phase == 'failed':
-        payload['desired_enabled'] = False
-        payload['phase'] = 'failed'
-        payload['phase_started_at'] = timestamp
-        payload['last_error'] = last_error
-    elif phase in ('starting', 'running'):
-        payload['desired_enabled'] = True
-        payload['phase'] = phase
-        payload['phase_started_at'] = timestamp
-        payload['last_error'] = None
-    elif phase == 'stopping':
-        payload['desired_enabled'] = False
-        payload['phase'] = phase
-        payload['phase_started_at'] = timestamp
-        payload['last_error'] = None
-    else:
+    if phase not in ('stopped', 'failed', 'starting', 'running', 'stopping'):
         raise ValueError(f"unknown gateway phase: {phase!r}")
 
-    try:
-        state_path.write_text(json.dumps(payload), encoding='utf-8')
-    except OSError:
-        logger.debug("Failed to write gateway phase state", exc_info=True)
+    def _apply(payload: dict) -> None:
+        if phase == 'stopped':
+            payload['desired_enabled'] = False
+            payload['phase'] = None
+            payload['phase_started_at'] = None
+            payload['last_error'] = None
+        elif phase == 'failed':
+            payload['desired_enabled'] = False
+            payload['phase'] = 'failed'
+            payload['phase_started_at'] = timestamp
+            payload['last_error'] = last_error
+        elif phase in ('starting', 'running'):
+            payload['desired_enabled'] = True
+            payload['phase'] = phase
+            payload['phase_started_at'] = timestamp
+            payload['last_error'] = None
+        elif phase == 'stopping':
+            payload['desired_enabled'] = False
+            payload['phase'] = phase
+            payload['phase_started_at'] = timestamp
+            payload['last_error'] = None
+
+    _mutate_gateway_state_file(
+        profile_home,
+        _apply,
+        error_message="Failed to write gateway phase state",
+    )
 
 
 def _load_session_index_rows() -> list:
@@ -2582,7 +2618,7 @@ def list_profiles_api(include_skill_counts: bool = False,
             'name': p.name,
             'path': str(p.path),
             'is_default': p.is_default,
-            'is_active': p.name == active,
+            'is_active': p.name == active or (p.is_default and active == 'default'),
             'gateway_running': p.gateway_running,
             'model': p.model,
             'provider': p.provider,
@@ -4522,24 +4558,20 @@ def _write_gateway_last_run(profile_home: Path) -> None:
     failed. The activity line reads this back via :func:`_read_gateway_state`.
     """
     import datetime as _dt
-    state_path = profile_home / '.gateway-state.json'
-    try:
-        payload: dict = {}
-        if state_path.exists():
-            try:
-                existing = json.loads(state_path.read_text(encoding='utf-8'))
-                if isinstance(existing, dict):
-                    payload = existing
-            except (ValueError, OSError):
-                payload = {}
-        payload['last_run_at'] = (
-            _dt.datetime.now(_dt.timezone.utc)
-            .isoformat()
-            .replace('+00:00', 'Z')
-        )
-        state_path.write_text(json.dumps(payload), encoding='utf-8')
-    except OSError:
-        logger.debug("Failed to write gateway last_run_at state", exc_info=True)
+    timestamp = (
+        _dt.datetime.now(_dt.timezone.utc)
+        .isoformat()
+        .replace('+00:00', 'Z')
+    )
+
+    def _apply(payload: dict) -> None:
+        payload['last_run_at'] = timestamp
+
+    _mutate_gateway_state_file(
+        profile_home,
+        _apply,
+        error_message="Failed to write gateway last_run_at state",
+    )
 
 
 _SECRET_PATTERN = re.compile(

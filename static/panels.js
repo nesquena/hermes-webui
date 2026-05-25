@@ -4128,7 +4128,7 @@ async function loadWorkspaceList(){
   try{
     const data = await api('/api/workspaces');
     _workspaceList = data.workspaces || [];
-    if(data.last) S._profileDefaultWorkspace = data.last;
+    S._profileDefaultWorkspace = Object.prototype.hasOwnProperty.call(data,'last') ? data.last : '';
     syncWorkspaceDisplays();
     return data;
   }catch(e){ return {workspaces:[], last:''}; }
@@ -5263,18 +5263,19 @@ function _handleProfileAvatarUpload(file){
 function _handleReactiveAvatarUpload(slot,file){
   const slotInfo=PROFILE_REACTIVE_AVATAR_SLOTS.find(s=>s.key===slot);
   if(!slotInfo) return;
+  const prior=_profileReactiveAvatarUploads[slot];
   try{
     if(!file) throw new Error('Choose an image, GIF, or WebP file.');
     if(!_profileAvatarUploadTypeAllowed(file)) throw new Error('Reactive avatars must be PNG, JPEG, GIF, or WebP.');
     if(file.size>PROFILE_REACTIVE_AVATAR_UPLOAD_MAX_BYTES) throw new Error('Reactive avatar uploads must be 5 MB or smaller.');
-    const prior=_profileReactiveAvatarUploads[slot];
     if(prior&&prior.previewUrl) try{URL.revokeObjectURL(prior.previewUrl);}catch(_){}
     _profileReactiveAvatarUploads[slot]={file,previewUrl:URL.createObjectURL(file)};
     _profileReactiveAvatarClearSlots.delete(slot);
     _setProfileAvatarDialogMessage(`${slotInfo.label} animation selected. Save avatar to apply it.`,'success');
     _refreshProfileAvatarDialogPreview();
   }catch(e){
-    delete _profileReactiveAvatarUploads[slot];
+    if(prior) _profileReactiveAvatarUploads[slot]=prior;
+    else delete _profileReactiveAvatarUploads[slot];
     _setProfileAvatarDialogMessage(e.message||String(e),'error');
     if(typeof showToast==='function') showToast(e.message||String(e),4000,'error');
     _refreshProfileAvatarDialogPreview();
@@ -6318,6 +6319,8 @@ function _paintPlatformsManagerBody(profileName, payload){
 
 function _bindPlatformsManagerHandlers(profileName, body){
   body.querySelectorAll('[data-platforms-toggle]').forEach(head => {
+    if (head.dataset.platformsBound === '1') return;
+    head.dataset.platformsBound = '1';
     head.addEventListener('click', (ev) => {
       ev.stopPropagation();
       const card = head.closest('.platforms-card');
@@ -6325,6 +6328,8 @@ function _bindPlatformsManagerHandlers(profileName, body){
     });
   });
   body.querySelectorAll('[data-pf-replace]').forEach(btn => {
+    if (btn.dataset.platformsBound === '1') return;
+    btn.dataset.platformsBound = '1';
     btn.addEventListener('click', (ev) => {
       ev.stopPropagation();
       const varName = btn.getAttribute('data-pf-replace') || '';
@@ -6338,6 +6343,8 @@ function _bindPlatformsManagerHandlers(profileName, body){
     });
   });
   body.querySelectorAll('[data-platform-cancel]').forEach(btn => {
+    if (btn.dataset.platformsBound === '1') return;
+    btn.dataset.platformsBound = '1';
     btn.addEventListener('click', (ev) => {
       ev.stopPropagation();
       const card = btn.closest('.platforms-card');
@@ -6354,7 +6361,7 @@ function _bindPlatformsManagerHandlers(profileName, body){
         const fresh = tmp.firstElementChild;
         if (fresh) {
           card.replaceWith(fresh);
-          _bindPlatformsManagerHandlers(profileName, body);
+          _bindPlatformsManagerHandlers(profileName, fresh);
         }
       } else {
         card.classList.remove('open');
@@ -6362,6 +6369,8 @@ function _bindPlatformsManagerHandlers(profileName, body){
     });
   });
   body.querySelectorAll('[data-platform-save]').forEach(btn => {
+    if (btn.dataset.platformsBound === '1') return;
+    btn.dataset.platformsBound = '1';
     btn.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       const key = btn.getAttribute('data-platform-save') || '';
@@ -8875,7 +8884,10 @@ async function _openProfileFileEditor(profileName, filename) {
   try {
     const qs = new URLSearchParams({name: profileName, file: filename});
     const data = await api('/api/profile/files?' + qs);
-    const fileContent = (data && data.content != null) ? data.content : '';
+    const redacted = !!(data && data.redacted);
+    const fileContent = redacted
+      ? (data.message || 'Sensitive file contents are hidden in this editor.')
+      : ((data && data.content != null) ? data.content : '');
     const placeholder = filename === 'SOUL.md'
       ? 'Define the agent personality, mission, and behavioral rules...'
       : filename === 'config.yaml'
@@ -8885,16 +8897,18 @@ async function _openProfileFileEditor(profileName, filename) {
       : filename === 'memories/USER.md'
       ? 'User profile - preferences, communication style, personal context...'
       : 'Environment variables (KEY=value per line)...';
+    const saveButton = redacted ? '' : `
+            <button id="btnSaveProfileFile" class="panel-head-btn primary profile-file-editor-action has-tooltip has-tooltip--bottom" data-tooltip="Save" onclick="_saveProfileFile('${esc(profileName)}','${esc(filename)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg><span class="panel-head-btn-label">Save</span></button>`;
     body.innerHTML = `
       <div class="main-view-content">
         <div class="detail-card">
           <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px">
             <button class="panel-head-btn profile-file-editor-action has-tooltip has-tooltip--bottom" data-tooltip="Back" onclick="openProfileDetail('${esc(profileName)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg><span class="panel-head-btn-label">Back</span></button>
-            <button id="btnSaveProfileFile" class="panel-head-btn primary profile-file-editor-action has-tooltip has-tooltip--bottom" data-tooltip="Save" onclick="_saveProfileFile('${esc(profileName)}','${esc(filename)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg><span class="panel-head-btn-label">Save</span></button>
+${saveButton}
           </div>
           <textarea id="profileFileEditor" rows="24" spellcheck="false"
             style="width:100%;resize:vertical;font-family:var(--font-mono,monospace);font-size:13px;line-height:1.5;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg)"
-            placeholder="${esc(placeholder)}">${esc(fileContent)}</textarea>
+            placeholder="${esc(placeholder)}"${redacted?' readonly aria-readonly="true"':''}>${esc(fileContent)}</textarea>
         </div>
       </div>`;
   } catch (e) {
@@ -9057,6 +9071,7 @@ function toggleProfileDropdown(opts) {
   const anchor=opts&&opts.anchor==='composerAvatar'?'composerAvatar':'profileChip';
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
+  if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   api('/api/profiles').then(data => {
     window._profileDropdownAnchor=anchor;
     renderProfileDropdown(data);
