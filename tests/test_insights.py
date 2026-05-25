@@ -415,8 +415,14 @@ def test_insights_frontend_exposes_webui_global_scope_toggle():
     assert 'id="insightsScopeToggle"' in INDEX_HTML
     assert 'data-scope="webui"' in INDEX_HTML
     assert 'data-scope="global"' in INDEX_HTML
+    # Locate the segmented control's body and assert pressed-state semantics
+    # without pinning the assertion to a specific surrounding indent so the
+    # sidebar layout can evolve without breaking the contract.
     scope_start = INDEX_HTML.index('id="insightsScopeToggle"')
-    scope_end = INDEX_HTML.index('</div>\n        </div>', scope_start)
+    # The segmented control's own </div> closes the toggle; everything between
+    # the opening tag and that close is the scope toggle body (label + buttons).
+    after_open = INDEX_HTML.index('>', scope_start) + 1
+    scope_end = INDEX_HTML.index('</div>', after_open)
     scope_markup = INDEX_HTML[scope_start:scope_end]
     assert 'aria-pressed="true"' in scope_markup
     assert 'role="tab"' not in scope_markup
@@ -425,25 +431,41 @@ def test_insights_frontend_exposes_webui_global_scope_toggle():
     assert "insights_scope_webui" in INDEX_HTML
     assert "insights_scope_global" in INDEX_HTML
     assert "setInsightsScope" in INDEX_HTML
+    # Sidebar control panel layout: Period select sits above the scope toggle
+    # in a stacked label+control rhythm that mirrors the Logs control panel,
+    # so both controls share the same starting x and the period select is no
+    # longer floating tight against the panel header. (#2943)
+    assert 'class="insights-control-panel"' in INDEX_HTML
+    assert 'insights_period_label' in INDEX_HTML
+    assert 'for="insightsPeriod"' in INDEX_HTML
 
     # JS: state, setter, fetch param, fallback sync
     assert "let _insightsScope" in PANELS_JS
     assert "function setInsightsScope" in PANELS_JS
     assert "_syncInsightsScopeUI" in PANELS_JS
     assert "let _insightsRequestSeq" in PANELS_JS
-    assert "requestSeq !== _insightsRequestSeq" in PANELS_JS
+    # Both success and error paths must drop stale responses after a newer
+    # period/scope request starts; otherwise an old failure can overwrite
+    # fresh data with an error banner.
+    assert PANELS_JS.count("requestSeq !== _insightsRequestSeq") >= 2
     assert "aria-pressed" in PANELS_JS
     assert "scope_available" in PANELS_JS  # frontend reads the fallback flag
     assert "insights_scope_note" in PANELS_JS
     assert "insights-scope-note" in PANELS_JS
+    assert "insights_cache_read_tokens" in PANELS_JS
+    assert "insights_cache_write_tokens" in PANELS_JS
+    assert "insights_cache_tokens_note" not in PANELS_JS
     assert "localStorage.setItem('insightsScope'" in PANELS_JS  # persisted preference
 
-    # CSS: segmented control styling
-    assert ".insights-scope-toggle" in STYLE_CSS
+    # CSS: segmented control + sidebar control panel styling
+    assert ".insights-control-panel" in STYLE_CSS
+    assert ".insights-control-label" in STYLE_CSS
     assert ".insights-scope-segmented" in STYLE_CSS
     assert ".insights-scope-btn" in STYLE_CSS
     assert ".insights-scope-btn.is-active" in STYLE_CSS
     assert ".insights-scope-note" in STYLE_CSS
+    assert ".insights-token-subrow" in STYLE_CSS
+    assert ".insights-cache-note" not in STYLE_CSS
 
 
 def test_insights_i18n_scope_keys_present_in_every_locale():
@@ -473,6 +495,8 @@ def test_insights_i18n_scope_keys_present_in_every_locale():
         "insights_scope_global:",          # trailing colon disambiguates from _global_unavailable
         "insights_scope_global_unavailable",
         "insights_scope_note",
+        "insights_cache_read_tokens",
+        "insights_cache_write_tokens",
     )
     for name, start, end in finalized:
         block = text[start:end]
