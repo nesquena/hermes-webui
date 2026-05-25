@@ -291,7 +291,8 @@ class TestProviderListFilter:
             "Settings → Providers panel. The filter must be 'filter(p=>p.configurable||p.is_oauth)'."
         )
         fixed_filter_idx = self.JS.find("filter(p=>p.configurable||p.is_oauth)")
-        assert fixed_filter_idx != -1, (
-            "The provider filter 'filter(p=>p.configurable||p.is_oauth)' is missing from panels.js. "
+        extended_filter_idx = self.JS.find("filter(p=>p.configurable||p.is_oauth||p.is_custom)")
+        assert fixed_filter_idx != -1 or extended_filter_idx != -1, (
+            "The provider filter must include p.is_oauth in panels.js. "
             "OAuth providers will not appear in Settings → Providers."
         )

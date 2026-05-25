@@ -16,6 +16,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "static" / "manifest.json"
 SW = ROOT / "static" / "sw.js"
+PWA_STARTUP = ROOT / "static" / "pwa-startup.js"
+BOOT = ROOT / "static" / "boot.js"
 INDEX = ROOT / "static" / "index.html"
 ROUTES = ROOT / "api" / "routes.py"
 AUTH = ROOT / "api" / "auth.py"
@@ -117,7 +119,7 @@ class TestServiceWorker:
         """
         src = SW.read_text(encoding="utf-8")
         assert "Shell assets: network-first with cache fallback" in src
-        assert "fetch(event.request).then((response)" in src
+        assert "fetch(new Request(event.request, { cache: 'no-store' })).then((response)" in src
         assert "caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone))" in src
         assert ".catch(() => caches.match(event.request)" in src
         assert "if (cached) return cached;" not in src, (
@@ -281,9 +283,64 @@ class TestIndexHtmlIntegration:
         marker = "// Shell assets: network-first with cache fallback"
         assert marker in src
         block = src[src.find(marker):src.find(marker) + 900]
-        assert "fetch(event.request).then" in block
+        assert "fetch(new Request(event.request, { cache: 'no-store' })).then" in block
         assert "caches.match(event.request)" in block
         assert "caches.match(event.request).then((cached)" not in block[:250]
+
+    def test_index_loads_pwa_startup_helper_early(self):
+        """The installed-app shell should classify standalone/offline mode before
+        the main UI bundle hydrates, so native chrome and safe-area affordances
+        are present on first paint.
+        """
+        src = INDEX.read_text(encoding="utf-8")
+        preload_pos = src.find('href="static/pwa-startup.js?v=__WEBUI_VERSION__"')
+        script_pos = src.find('src="static/pwa-startup.js?v=__WEBUI_VERSION__"')
+        ui_pos = src.find('static/ui.js?v=__WEBUI_VERSION__')
+        assert preload_pos != -1, "index.html must preload the PWA startup helper"
+        assert script_pos != -1, "index.html must load the PWA startup helper"
+        assert ui_pos != -1, "index.html must load the main UI bundle"
+        assert preload_pos < ui_pos and script_pos < ui_pos, (
+            "pwa-startup.js must run before ui.js so standalone/offline classes "
+            "are available before the app shell paints"
+        )
+
+    def test_sw_precaches_pwa_startup_helper(self):
+        src = SW.read_text(encoding="utf-8")
+        assert "pwa-startup.js' + VQ" in src or 'pwa-startup.js" + VQ' in src, (
+            "sw.js SHELL_ASSETS must pre-cache pwa-startup.js with the same "
+            "version query used by index.html"
+        )
+
+    def test_manifest_has_native_launch_fields(self):
+        data = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        assert data.get("id") == "./"
+        assert data.get("scope") == "./"
+        assert data.get("start_url") == "./?source=pwa"
+        assert "standalone" in data.get("display_override", []), (
+            "manifest.display_override should preserve standalone as a native "
+            "launch fallback"
+        )
+        shortcuts = data.get("shortcuts") or []
+        assert any(shortcut.get("url") == "./?source=pwa&action=new-chat" for shortcut in shortcuts), (
+            "manifest should expose a native shortcut for starting a new chat"
+        )
+
+    def test_pwa_startup_detects_standalone_and_install_events(self):
+        src = PWA_STARTUP.read_text(encoding="utf-8")
+        assert "pwa-standalone" in src
+        assert "pwa-browser" in src
+        assert "beforeinstallprompt" in src
+        assert "appinstalled" in src
+        assert "HermesPWA" in src
+        assert "launchAction" in src
+        assert "promptInstall" in src
+
+    def test_pwa_new_chat_shortcut_is_handled_at_boot(self):
+        src = BOOT.read_text(encoding="utf-8")
+        assert "pwaLaunchAction" in src
+        assert "launchAction()" in src
+        assert "pwaLaunchAction==='new-chat'" in src
+        assert "await newSession(true)" in src
 
     def test_index_route_url_encodes_asset_version(self):
         src = ROUTES.read_text(encoding="utf-8")

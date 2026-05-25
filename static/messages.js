@@ -187,7 +187,44 @@ if(typeof document!=='undefined'){
 // (e.g. queue drain + user click) can both pass the S.busy check because
 // setBusy(true) is only called after the first await inside send().
 let _sendInProgress = false;
+let _sendInProgressSid = null;  // session_id of the in-flight send
 const _sessionTitleProvisionalBySid = new Map();
+
+function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
+  if(!S||!S.busy||compressionRunning) return false;
+  const session=S.session||{};
+  const sid=session.session_id||'';
+  const hasRuntimeConfirmation=Boolean(
+    S.activeStreamId||
+    session.active_stream_id||
+    session.pending_user_message||
+    session.pending_started_at
+  );
+  if(hasRuntimeConfirmation) return false;
+  if(typeof INFLIGHT==='object'&&INFLIGHT&&sid&&INFLIGHT[sid]){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
+  S.activeStreamId=null;
+  if(session) session.active_stream_id=null;
+  if(typeof setBusy==='function') setBusy(false);
+  else S.busy=false;
+  if(typeof setComposerStatus==='function') setComposerStatus('');
+  if(typeof setStatus==='function') setStatus('');
+  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(sid&&typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(sid);
+  return true;
+}
+
+function _runOptionalPreStartUiStep(label, fn){
+  try{
+    return typeof fn==='function'?fn():undefined;
+  }catch(e){
+    const message=e&&e.message?e.message:String(e||'unknown error');
+    try{console.warn('[webui] optional pre-start UI step failed', label, message);}catch(_){ }
+    return undefined;
+  }
+}
 
 function _sessionTitleLooksDefaultOrProvisional(titleText, provisionalText){
   const title=String(titleText||'').replace(/\s+/g,' ').trim();
@@ -236,11 +273,14 @@ async function send(){
   // instead of silently dropping it.
   if (_sendInProgress) {
     const _text=$('msg').value.trim();
-    if(_text && S.session && S.session.session_id){
-      queueSessionMessage(S.session.session_id,{text:_text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||null,profile:S.activeProfile||'default'});
+    // Use the in-flight session's sid, not the currently viewed session,
+    // so the queued message goes to the chat that owns the active stream.
+    const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
+    if(_text && _targetSid){
+      queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||null,profile:S.activeProfile||'default'});
       $('msg').value='';autoResize();
       S.pendingFiles=[];renderTray();
-      updateQueueBadge(S.session.session_id);
+      updateQueueBadge(_targetSid);
       showToast(`Queued: "${_text.slice(0,40)}${_text.length>40?'…':''}"`,2000);
     }
     return;
@@ -248,9 +288,9 @@ async function send(){
   _sendInProgress = true;
   try{
   const text=$('msg').value.trim();
-  if(!text&&!S.pendingFiles.length)return;
+  if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
-  if(document.querySelector('.msg-edit-area'))return;
+  if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
 
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
@@ -258,6 +298,7 @@ async function send(){
   }
 
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on busy_input_mode
   if(S.busy||compressionRunning){
     if(text){
@@ -380,6 +421,7 @@ async function send(){
   if(!S.session){await newSession();await renderSessionList();}
 
   const activeSid=S.session.session_id;
+  _sendInProgressSid=activeSid;
 
   setComposerStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'');
   let uploaded=[];
@@ -404,38 +446,68 @@ async function send(){
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
-  S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);
-  // First optimistic pass: make the local user turn visible before /api/chat/start
-  // can save pending state on the server.
-  if(typeof upsertActiveSessionForLocalTurn==='function'){
-    upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
-  }
-  INFLIGHT[activeSid]={messages:[...S.messages],uploaded:uploadedNames,toolCalls:[]};
-  if(typeof saveInflightState==='function'){
-    saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
-  }
-  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
-  startApprovalPolling(activeSid);
-  startClarifyPolling(activeSid);
-  _fetchYoloState(activeSid);  // sync YOLO pill with backend state
-  S.activeStreamId = null;  // will be set after stream starts
-  if(typeof updateSendBtn==='function') updateSendBtn();
-
-  // Set provisional title from user message immediately so session appears
-  // in the sidebar right away with a meaningful name. /api/chat/start persists
-  // the server-side provisional title and may refine this optimistic text.
-  if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
-    const provisionalTitle=displayText.slice(0,64);
-    applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
-    if(typeof upsertActiveSessionForLocalTurn==='function'){
-      // Second optimistic pass: carry the provisional title into the cached row
-      // without re-fetching /api/sessions before pending state exists server-side.
-      upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
+  let optimisticMessages;
+  try{
+    S.messages.push(userMsg);renderMessages();appendThinking('',{pending:true});setBusy(true);
+    // First optimistic pass: make the local user turn visible before /api/chat/start
+    // can save pending state on the server.
+    _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.initial', ()=>{
+      if(typeof upsertActiveSessionForLocalTurn==='function'){
+        upsertActiveSessionForLocalTurn({title:displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+      }
+    });
+    optimisticMessages=[...S.messages];
+    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    if(typeof saveInflightState==='function'){
+      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
     }
-  } else if(typeof upsertActiveSessionForLocalTurn==='function'){
-    upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
-  } else {
-    renderSessionListFromCache();  // ensure it's visible even if already titled
+    _runOptionalPreStartUiStep('renderSessionListFromCache.initial', ()=>{
+      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+    });
+    _runOptionalPreStartUiStep('startApprovalPolling.prestart', ()=>startApprovalPolling(activeSid));
+    _runOptionalPreStartUiStep('startClarifyPolling.prestart', ()=>startClarifyPolling(activeSid));
+    _runOptionalPreStartUiStep('fetchYoloState.prestart', ()=>_fetchYoloState(activeSid));  // sync YOLO pill with backend state
+    S.activeStreamId = null;  // will be set after stream starts
+    _runOptionalPreStartUiStep('updateSendBtn.prestart', ()=>{
+      if(typeof updateSendBtn==='function') updateSendBtn();
+    });
+
+    // Set provisional title from user message immediately so session appears
+    // in the sidebar right away with a meaningful name. /api/chat/start persists
+    // the server-side provisional title and may refine this optimistic text.
+    if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
+      const provisionalTitle=displayText.slice(0,64);
+      _runOptionalPreStartUiStep('applySessionTitleUpdate.provisional', ()=>{
+        applySessionTitleUpdate(activeSid, provisionalTitle, {force:true, rememberProvisional:true});
+      });
+      _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.provisional', ()=>{
+        if(typeof upsertActiveSessionForLocalTurn==='function'){
+          // Second optimistic pass: carry the provisional title into the cached row
+          // without re-fetching /api/sessions before pending state exists server-side.
+          upsertActiveSessionForLocalTurn({title:provisionalTitle,messageCount:S.messages.length,timestampMs:Date.now()});
+        }
+      });
+    } else if(typeof upsertActiveSessionForLocalTurn==='function'){
+      _runOptionalPreStartUiStep('upsertActiveSessionForLocalTurn.titled', ()=>{
+        upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
+      });
+    } else {
+      _runOptionalPreStartUiStep('renderSessionListFromCache.prestart', ()=>{
+        renderSessionListFromCache();  // ensure it's visible even if already titled
+      });
+    }
+  }catch(preStartError){
+    // The user turn must reach /api/chat/start even if local optimistic UI
+    // bookkeeping (render cache, storage quota, sidebar reconciliation, etc.)
+    // throws. Otherwise the pane can show a user bubble + spinner while the
+    // backend never receives the turn.
+    const message=preStartError&&preStartError.message?preStartError.message:String(preStartError||'unknown error');
+    try{console.warn('[webui] pre-start optimistic UI failed; continuing to /api/chat/start', message);}catch(_){ }
+    if(!S.messages.includes(userMsg)) S.messages.push(userMsg);
+    optimisticMessages=[...S.messages];
+    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    try{setBusy(true);}catch(_){S.busy=true;}
+    S.activeStreamId=null;
   }
 
   // Start the agent via POST, get a stream_id back
@@ -481,9 +553,13 @@ async function send(){
       // against real active-stream metadata before the background refresh lands.
       upsertActiveSessionForLocalTurn({title:S.session&&S.session.title||displayText.slice(0,64),messageCount:S.messages.length,timestampMs:Date.now()});
     }
+    if(!INFLIGHT[activeSid]){
+      INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    }
+    const currentInflight=INFLIGHT[activeSid];
     markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:INFLIGHT[activeSid].toolCalls||[]});
+      saveInflightState(activeSid,{streamId,messages:currentInflight.messages||optimisticMessages,uploaded:uploadedNames,toolCalls:currentInflight.toolCalls||[]});
     }
     // Refresh session list so background streaming indicators appear immediately for the
     // session that was just started and any others that may already be running.
@@ -528,7 +604,7 @@ async function send(){
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
-  }finally{ _sendInProgress=false; }
+  }finally{ _sendInProgress=false; _sendInProgressSid=null; }
 }
 
 const LIVE_STREAMS={};
@@ -585,6 +661,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _smdParser=null;     // current smd parser instance (null until first content)
   let _smdWrittenLen=0;    // how many chars of displayText have been fed to smd parser
   let _smdWrittenText='';  // exact displayText snapshot used for prefix-alignment checks
+  let _streamingKatexTimer=null; // throttles live KaTeX scans while smd writes deltas
   // On reconnect, the assistantBody already has partial smd-rendered content.
   // We clear it on first new token and restart the parser from the reconnect point.
   let _smdReconnect=reconnecting;
@@ -930,6 +1007,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   // Helper: end the current smd parser (flushes remaining state) and null it out.
   function _smdEndParser(){
+    if(_streamingKatexTimer){clearTimeout(_streamingKatexTimer);_streamingKatexTimer=null;}
     if(_smdParser&&window.smd){
       try{window.smd.parser_end(_smdParser);}catch(_){}
       // parser_end may flush remaining markdown that creates new links/images —
@@ -939,6 +1017,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdParser=null;
     _smdWrittenLen=0;
     _smdWrittenText='';
+  }
+  function _scheduleStreamingKatex(){
+    if(_streamingKatexTimer) return;
+    _streamingKatexTimer=setTimeout(()=>{
+      _streamingKatexTimer=null;
+      if(assistantBody&&typeof renderKatexBlocks==='function') renderKatexBlocks(assistantBody);
+    },150);
   }
   // Helper: feed new displayText delta to the smd parser.
   // Only feeds chars beyond what has already been written (_smdWrittenLen).
@@ -964,21 +1049,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // streaming-markdown does NOT sanitize URL schemes. The default live path
     // scans after writes; fade mode blocks unsafe href/src in its renderer.set_attr.
     if(assistantBody&&!fade){_sanitizeSmdLinks(assistantBody);}
+    _scheduleStreamingKatex();
   }
   // Allowed URL schemes for anchors and images rendered from agent-streamed markdown.
-  // Matches the effective allowlist of renderMd() (http/https via regex + relative).
-  const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.)/i;
+  // Raw file:// anchors are rewritten to /api/media before the user can click them.
+  const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.|api)/i;
+  const _SMD_SAFE_IMG_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.)/i;
+  function _smdFileHref(raw){
+    const href=String(raw||'');
+    if(!/^file:\/\//i.test(href)) return href;
+    try{
+      const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
+      return 'api/media?path='+encodeURIComponent(path)+'&inline=1';
+    }catch(_){
+      return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1';
+    }
+  }
   function _sanitizeSmdLinks(root){
     if(!root||!root.querySelectorAll) return;
     const _a=root.querySelectorAll('a[href]');
     for(let i=0;i<_a.length;i++){
       const n=_a[i],v=n.getAttribute('href')||'';
+      if(/^file:\/\//i.test(v)){n.setAttribute('href',_smdFileHref(v));continue;}
       if(!_SMD_SAFE_URL_RE.test(v)){n.removeAttribute('href');n.setAttribute('data-blocked-scheme','1');}
     }
     const _im=root.querySelectorAll('img[src]');
     for(let i=0;i<_im.length;i++){
       const n=_im[i],v=n.getAttribute('src')||'';
-      if(!_SMD_SAFE_URL_RE.test(v)){n.removeAttribute('src');n.setAttribute('data-blocked-scheme','1');}
+      if(!_SMD_SAFE_IMG_URL_RE.test(v)){n.removeAttribute('src');n.setAttribute('data-blocked-scheme','1');}
     }
   }
 
@@ -1082,7 +1180,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     renderer.set_attr=(data,attr,value)=>{
       const isHref=window.smd&&attr===window.smd.HREF;
       const isSrc=window.smd&&attr===window.smd.SRC;
-      if((isHref||isSrc)&&!_SMD_SAFE_URL_RE.test(String(value||''))){
+      const safeUrl=isSrc?_SMD_SAFE_IMG_URL_RE:_SMD_SAFE_URL_RE;
+      if(isHref&&/^file:\/\//i.test(String(value||''))){
+        baseSetAttr(data,attr,_smdFileHref(value));
+        return;
+      }
+      if((isHref||isSrc)&&!safeUrl.test(String(value||''))){
         const node=data&&data.nodes&&data.nodes[data.index];
         if(node&&node.setAttribute) node.setAttribute('data-blocked-scheme','1');
         return;
@@ -1248,18 +1351,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     step();
   }
-  function _closeCurrentLiveActivityGroup(){
-    const turn=$('liveAssistantTurn');
-    if(turn){
-      turn.querySelectorAll('.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
-        group.removeAttribute('data-live-activity-current');
-      });
+  function _flushPendingSegmentRender(){
+    if(!assistantBody||!_renderPending) return;
+    _cancelAnimationFramePendingStreamRender();
+    const displayText=segmentStart===0
+      ? _parseStreamState().displayText
+      : _stripXmlToolCalls(assistantText.slice(segmentStart));
+    if(_smdParser){
+      _smdWrite(displayText);
+    } else if(renderMd){
+      assistantBody.innerHTML=renderMd(displayText);
+    } else {
+      assistantBody.innerHTML=esc(displayText);
     }
   }
   function _resetAssistantSegment(){
-    const options=arguments[0]||{};
-    const closeActivity=!!(options&&options.closeActivity);
-    if(closeActivity) _closeCurrentLiveActivityGroup();
     assistantRow=null;
     assistantBody=null;
     segmentStart=assistantText.length;
@@ -1384,9 +1490,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!visible){
         return;
       }
+      reasoningText='';
+      liveReasoningText='';
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid) return;
-        _resetAssistantSegment({closeActivity:true});
+        _resetAssistantSegment();
         return;
       }
       assistantText += assistantText ? `\n\n${visible}` : visible;
@@ -1397,8 +1505,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof updateThinking==='function') updateThinking(_liveThinkingText());
         else appendThinking(_liveThinkingText());
       }
+      _flushPendingSegmentRender();
       ensureAssistantRow(true);
-      _resetAssistantSegment({closeActivity:true});
+      _resetAssistantSegment();
       _scheduleRender();
     });
 
@@ -1434,6 +1543,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       S.toolCalls=INFLIGHT[activeSid].toolCalls;
       persistInflightState();
 
+      if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
       // NOTE: don't removeThinking() here — keep the thinking card visible
       // above the tool card so the turn reads top-to-bottom as:
@@ -1441,12 +1551,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // to be re-created below everything when reasoning resumed post-tool.
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       liveReasoningText='';
+      reasoningText='';
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
       snapshotLiveTurn();
       // Reset the live assistant row reference so that any text tokens arriving
       // after this tool call create a NEW segment appended below the tool card,
       // rather than updating the old segment that sits above it in the DOM.
+      _flushPendingSegmentRender();
       _freshSegment=true;
       _smdEndParser();
       _resetAssistantSegment();
@@ -1478,6 +1590,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(d.duration!==undefined) tc.duration=d.duration;
       S.toolCalls=inflight.toolCalls;
       persistInflightState();
+      if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
       appendLiveToolCard(tc);
       snapshotLiveTurn();
@@ -1518,6 +1631,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           session_id:String(d.session_id||activeSid)
         });
       }catch(_){}
+    });
+
+    source.addEventListener('context_status',e=>{
+      let d={};
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){}
+      if((d.session_id||activeSid)!==activeSid) return;
+      const prefill=d.prefill||{};
+      const status=String(prefill.status||'not_configured');
+      const label=String(prefill.label||'session recall');
+      if(status==='loaded'){
+        setComposerStatus(`Context loaded: ${label}`);
+      }else if(status==='error'){
+        setComposerStatus(`Context unavailable: ${label}`);
+        if(typeof showToast==='function') showToast(`Context unavailable: ${String(prefill.error||label)}`,3600,'warning');
+      }
     });
 
     function _resolveGoalMessage(d){
@@ -1571,6 +1699,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('done',e=>{
+      if(_streamFinalized) return;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       const _doneData=JSON.parse(e.data);
@@ -1664,6 +1793,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
                   estimated_cost:Math.max(0,curCost-prevCost),
                   cache_read_tokens:Math.max(0,curCacheRead-_prevCacheRead),
                   cache_write_tokens:Math.max(0,curCacheWrite-_prevCacheWrite),
+                  cache_hit_percent:d.usage.turn_cache_hit_percent,
                 };
               }
               if(typeof d.usage.duration_seconds==='number'){
@@ -1680,11 +1810,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               }
             }
           }
-          if(d.session.tool_calls&&d.session.tool_calls.length){
+          const hasMessageToolMetadata=S.messages.some(m=>{
+            if(!m||m.role!=='assistant') return false;
+            const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+            const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+            const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+            return hasTc||hasPartialTc||hasTu;
+          });
+          if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
             S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
           } else {
-            S.toolCalls=S.toolCalls.map(tc=>({...tc,done:true}));
+            S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
           }
+          if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
           if(typeof _copyActivityDisclosureState==='function'&&lastAsst){
             const assistantIdx=S.messages.indexOf(lastAsst);
             if(assistantIdx>=0) _copyActivityDisclosureState('live:'+streamId, 'assistant:'+assistantIdx);
@@ -1740,12 +1878,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _finishDone();
     });
 
-    source.addEventListener('stream_end',e=>{
+    source.addEventListener('stream_end',async e=>{
+      if(_streamFinalized){
+        source.close();
+        return;
+      }
       _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
       }catch(_){}
+      // Some replay/journal paths can deliver stream_end without a preceding
+      // done event. In that case closing the EventSource is not enough: the
+      // live DOM/inflight state remains projected and can duplicate Thinking or
+      // assistant content until a later session switch. Settle from the persisted
+      // session before closing so the pane converges on canonical state.
+      if(await _restoreSettledSession()){
+        source.close();
+        return;
+      }
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _streamFinalized=true;
+      _cancelAnimationFramePendingStreamRender();
+      _streamFadeCleanupReduceMotionListener();
+      _smdEndParser();
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       source.close();
     });
 
@@ -1806,10 +1963,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Context was auto-compressed during this turn. Render it through the
       // same transient compression-card path as manual /compress, without
       // inserting a fake assistant message into history or model context.
-      if(!S.session||S.session.session_id!==activeSid) return;
+      if(!S.session) return;
+      const currentSid=S.session.session_id;
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
-      if(d.session_id&&d.session_id!==activeSid) return;
+      const eventSid=d.old_session_id||d.session_id||activeSid;
+      const continuationSid=d.new_session_id||d.continuation_session_id||'';
+      const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||d.new_session_id===currentSid||d.continuation_session_id===currentSid));
+      if(!eventMatchesCurrent) return;
+      const displaySid=currentSid;
       const message=String(d.message||'Context auto-compressed to continue the conversation').trim();
       if(d.usage&&typeof _syncCtxIndicator==='function'){
         S.lastUsage={...(S.lastUsage||{}),...d.usage};
@@ -1817,11 +1979,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(typeof setCompressionUi==='function'){
         const state={
-          sessionId:activeSid,
+          sessionId:displaySid,
           phase:'done',
           automatic:true,
           message,
+          engine:d.engine,
+          mode:d.mode,
+          details:d.details,
           summary:{headline:message},
+          continuationSessionId:continuationSid,
         };
         setCompressionUi(state);
         const appended=typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state);
@@ -1914,13 +2080,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('error',async e=>{
-      source.close();
-      if(_deferStreamErrorIfOffline()) return;
-      if(_deferStreamErrorIfPageHidden()) return;
       if(_terminalStateReached || _streamFinalized){
         _closeSource();
         return;
       }
+      if(typeof recordClientSSEError==='function') recordClientSSEError('chat-response',{ready_state:source?source.readyState:null,session_id:activeSid,stream_id:streamId,reason:'chat EventSource.onerror'});
+      source.close();
+      if(_deferStreamErrorIfOffline()) return;
+      if(_deferStreamErrorIfPageHidden()) return;
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
@@ -1986,7 +2153,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Fallback to local cancel message if API fails
           if(S.session&&S.session.session_id===activeSid){
             clearLiveToolCards();if(!assistantText)removeThinking();
-            const cancelAgentName=((window._botName||'Hermes')+'').trim()||'Hermes';
+            const cancelAgentName=(assistantDisplayName()+'').trim()||'Hermes';
             S.messages.push({role:'assistant',content:`**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.*`,provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});renderMessages({preserveScroll:true});
             _markSessionViewed(activeSid, S.messages.length);
           }
@@ -1996,7 +2163,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _setActivePaneIdleIfOwner();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }
@@ -2004,9 +2171,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   async function _restoreSettledSession(){
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      // Opus #2852 race-fix: if a late `done` event ran the finalize path while
+      // we were awaiting the network roundtrip, bail out — done already settled.
+      if(_streamFinalized) return true;
       const session=data&&data.session;
       if(!session) return false;
       if(session.active_stream_id||session.pending_user_message) return false;
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
+      _streamFinalized=true;
+      _cancelAnimationFramePendingStreamRender();
+      _streamFadeCleanupReduceMotionListener();
+      _smdEndParser();
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       _clearOwnerInflightState();
       _closeSource();
       _clearApprovalForOwner();
@@ -2070,12 +2246,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
-      S.messages.push({role:'assistant',content:'**Error:** Connection lost'});renderMessages({preserveScroll:true});
+      S.messages.push({role:'assistant',content:'**Connection interrupted:** The browser lost the live SSE connection before the response finished. If the worker completed, reopening this session should restore the settled transcript.'});renderMessages({preserveScroll:true});
       _markSessionViewed(activeSid, S.messages.length);
     }else{
       if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
-        trackBackgroundError(activeSid,_errTitle,'Connection lost');
+        trackBackgroundError(activeSid,_errTitle,'Connection interrupted');
       }
     }
     _setActivePaneIdleIfOwner();
@@ -2300,7 +2476,9 @@ function showApprovalCard(pending, pendingCount) {
   card.classList.add("visible");
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   const onceBtn = $("approvalBtnOnce");
-  if (onceBtn) setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
+  if (onceBtn && document.activeElement !== $('msg')) {
+    setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
+  }
 }
 
 async function respondApproval(choice) {
@@ -2402,6 +2580,7 @@ let _clarifyHideTimer = null;
 let _clarifyVisibleSince = 0;
 let _clarifySignature = '';
 let _clarifySessionId = null;
+let _clarifyId = null;
 let _clarifyMissingEndpointWarned = false;
 let _clarifyCountdownTimer = null;
 let _clarifyExpiresAt = 0;
@@ -2465,6 +2644,7 @@ function _ensureClarifyCardDom() {
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17h.01"/><path d="M9.09 9a3 3 0 1 1 5.82 1c0 2-3 2-3 4"/><circle cx="12" cy="12" r="10"/></svg>
         <span id="clarifyHeading" data-i18n="clarify_heading">Clarification needed</span>
         <span class="clarify-countdown" id="clarifyCountdown"></span>
+        <button type="button" class="clarify-collapse" id="clarifyCollapse" aria-expanded="true" aria-label="Collapse clarification" aria-controls="clarifyQuestion clarifyChoices clarifyInput clarifyHint" onclick="toggleClarifyCardCollapsed()" title="Collapse clarification"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
       </div>
       <div class="clarify-question" id="clarifyQuestion"></div>
       <div class="clarify-choices" id="clarifyChoices"></div>
@@ -2478,8 +2658,31 @@ function _ensureClarifyCardDom() {
   host.appendChild(card);
   const submit = $("clarifySubmit");
   if (submit) submit.onclick = () => respondClarify();
+  const collapse = $("clarifyCollapse");
+  if (collapse) collapse.onclick = () => toggleClarifyCardCollapsed();
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   return card;
+}
+
+function _syncClarifyCollapseButton(card) {
+  const collapse = $("clarifyCollapse");
+  if (!collapse || !card) return;
+  const collapsed = card.classList.contains("collapsed");
+  collapse.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  // Icon swap: chevron-down when expanded (click to collapse), chevron-up when collapsed (click to expand)
+  const polyline = collapse.querySelector("svg polyline");
+  if (polyline) polyline.setAttribute("points", collapsed ? "18 15 12 9 6 15" : "6 9 12 15 18 9");
+  const label = collapsed ? "Expand clarification" : "Collapse clarification";
+  collapse.setAttribute("aria-label", label);
+  collapse.title = label;
+}
+
+function toggleClarifyCardCollapsed(forceCollapsed) {
+  const card = $("clarifyCard");
+  if (!card) return;
+  const collapsed = typeof forceCollapsed === "boolean" ? forceCollapsed : !card.classList.contains("collapsed");
+  card.classList.toggle("collapsed", collapsed);
+  _syncClarifyCollapseButton(card);
 }
 
 function _clearClarifyHideTimer() {
@@ -2566,6 +2769,7 @@ function _resetClarifyCardState() {
   _clearClarifyCountdownTimer();
   _clarifyVisibleSince = 0;
   _clarifySignature = '';
+  _clarifyId = null;
 }
 
 function hideClarifyCard(force=false, reason="dismissed") {
@@ -2641,11 +2845,13 @@ function showClarifyCard(pending) {
   const input = $("clarifyInput");
   const sameClarify = card.classList.contains("visible") && _clarifySignature === sig;
   _clarifySessionId = sid;
+  _clarifyId = pending.clarify_id || null;
   _clarifySignature = sig;
   _startClarifyCountdown(pending);
   if (!sameClarify) {
     _clarifyVisibleSince = Date.now();
     _clearClarifyHideTimer();
+    card.classList.remove("collapsed");
   }
   if (questionEl) questionEl.textContent = question;
   if (choicesEl) {
@@ -2706,8 +2912,13 @@ function showClarifyCard(pending) {
   }
   _clarifySetControlsDisabled(false, false);
   card.classList.add("visible");
+  _syncClarifyCollapseButton(card);
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
-  if (input && !sameClarify) setTimeout(() => input.focus({preventScroll: true}), 50);
+  // Move focus to clarify input synchronously (not in setTimeout) and
+  // only if the user wasn't mid-type in the composer textarea.
+  if (input && !sameClarify && document.activeElement !== $('msg')) {
+    input.focus({preventScroll: true});
+  }
 }
 
 async function respondClarify(response) {
@@ -2720,16 +2931,60 @@ async function respondClarify(response) {
     if (input) input.focus();
     return;
   }
-  _clarifySessionId = null;
-  _clearClarifyPendingForSession(sid);
+  const clarifyId = _clarifyId;
+  // Keep a draft copy so we can restore the input on failure (issue #2639).
+  const draft = value;
   _clarifySetControlsDisabled(true, true);
-  hideClarifyCard(true, 'sent');
   try {
-    await api("/api/clarify/respond", {
+    const result = await api("/api/clarify/respond", {
       method: "POST",
-      body: JSON.stringify({ session_id: sid, response: value })
+      body: JSON.stringify({ session_id: sid, response: value, clarify_id: clarifyId || "" })
     });
-  } catch(e) { setStatus(t("clarify_responding") + " " + e.message); }
+    if (result && result.ok) {
+      // Only clear/hide if the visible prompt still matches what was just
+      // submitted.  If a parallel SSE event already loaded the next queued
+      // prompt, erasing the session cache would leave the agent waiting
+      // until timeout (codex review P1, issue #2639).
+      if (_clarifyId === clarifyId) {
+        _clarifySessionId = null;
+        _clarifyId = null;
+        _clearClarifyPendingForSession(sid);
+        hideClarifyCard(true, 'sent');
+        // Echo the user's clarify choice as a visible message in the conversation
+        if (S.session && S.session.session_id === sid) {
+          S.messages.push({
+            role: 'user',
+            content: value,
+            _clarify_response: true,
+            _ts: Date.now() / 1000,
+          });
+          if (typeof renderMessages === 'function') renderMessages({preserveScroll: true});
+        }
+      }
+    } else {
+      // Stale / expired / wrong session — keep the card and draft visible.
+      _clarifySetControlsDisabled(false, false);
+      if (input) {
+        input.value = draft;
+        input.focus();
+      }
+      const errMsg = (result && result.error) || "Clarification response not accepted — the agent may have already proceeded.";
+      if (typeof showToast === "function") showToast(errMsg, 5000);
+      if (typeof setStatus === "function") setStatus(errMsg);
+    }
+  } catch(e) {
+    // Stale (409) or network error — keep the card and draft visible so the user can retry.
+    _clarifySetControlsDisabled(false, false);
+    if (input) {
+      input.value = draft;
+      input.focus();
+    }
+    const errMsg = (e && e.status === 409)
+      ? (e.message || "Clarification prompt expired or not found.")
+      : ((e && e.message) || "Failed to deliver clarification response.");
+    if (typeof setStatus === "function") setStatus("Clarify: " + errMsg);
+    if (typeof showToast === "function") showToast(errMsg, 5000);
+  }
 }
 
 var _clarifyEventSource = null;
@@ -2852,7 +3107,7 @@ function playNotificationSound(){
 function sendBrowserNotification(title,body){
   if(!window._notificationsEnabled||!document.hidden) return;
   if(!('Notification' in window)) return;
-  const botName=window._botName||'Hermes';
+  const botName=assistantDisplayName();
   if(Notification.permission==='granted'){
     new Notification(title||botName,{body:body});
   }else if(Notification.permission!=='denied'){

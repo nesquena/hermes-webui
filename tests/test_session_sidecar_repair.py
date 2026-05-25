@@ -48,11 +48,13 @@ def _isolate_stream_state():
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
     config.STREAM_PARTIAL_TEXT.clear()
+    config.ACTIVE_RUNS.clear()
     yield
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
     config.STREAM_PARTIAL_TEXT.clear()
+    config.ACTIVE_RUNS.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -109,6 +111,11 @@ def _register_active_stream(stream_id):
     """Register stream_id as live in the same state _run_agent_streaming uses."""
     with config.STREAMS_LOCK:
         config.STREAMS[stream_id] = queue.Queue()
+
+
+def _register_active_run(stream_id):
+    """Register stream_id as an active worker without an attached SSE stream."""
+    config.register_active_run(stream_id, session_id="stale_sid", phase="running")
 
 
 class TestRepairStalePendingNoDeadlock:
@@ -312,8 +319,17 @@ class TestDraftRecovery:
             f"Error marker should not say 'preserved as a draft', got: {content}"
         )
         assert "Response interrupted" in content
-        assert "WebUI process restarted" in content
-        assert "user message above was preserved" in content
+        assert "live response stream stopped" in content
+        assert "WebUI process restarted" not in content
+        # The marker now arms the lazy-retry hook when a stream id is known
+        # ("Recovering the partial output… reload to retry."). The legacy
+        # "user message above was preserved" wording is reserved for the
+        # no-stream-id repair case; the post-retry-give-up case demotes to
+        # the neutral "Partial output may have been lost." wording instead.
+        assert (
+            "user message above was preserved" in content
+            or "Recovering the partial output" in content
+        )
         assert error_msgs[0].get("type") == "interrupted"
 
     def test_pending_attachments_recovered(self, hermes_home, monkeypatch):
@@ -609,7 +625,8 @@ class TestNonEmptyMessagesPendingCleared:
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
         assert "Response interrupted" in error_msgs[0]["content"]
-        assert "WebUI process restarted" in error_msgs[0]["content"]
+        assert "live response stream stopped" in error_msgs[0]["content"]
+        assert "WebUI process restarted" not in error_msgs[0]["content"]
         assert error_msgs[0].get("type") == "interrupted"
 
         # Pending fields fully cleared
@@ -705,7 +722,14 @@ class TestNonEmptyMessagesPendingCleared:
         assert not any("private scratchpad text" in c for c in contents)
         error_msgs = [m for m in s.messages if m.get("_error")]
         assert len(error_msgs) == 1
-        assert "no agent output was recovered" in error_msgs[0]["content"]
+        # Reasoning-only events do not count as visible output, so the marker
+        # arms the lazy-retry hook (stream id is known, journal may have more
+        # events appear on a later read). The legacy "no agent output was
+        # recovered" wording is now reserved for the no-stream-id case.
+        assert error_msgs[0].get("_pending_journal_recovery") is True
+        assert error_msgs[0].get("_journal_retry_stream_id") == "reasoning_only_stream"
+        assert "no agent output was recovered" not in error_msgs[0]["content"]
+        assert "Recovering the partial output" in error_msgs[0]["content"]
 
     def test_journal_recovery_keeps_consecutive_tools_on_one_anchor(self, hermes_home, monkeypatch):
         """Consecutive journaled tools without an intervening visible update
@@ -807,6 +831,52 @@ class TestNonEmptyMessagesPendingCleared:
         assert "partial output above was recovered" in error_msgs[0]["content"]
         assert s.pending_user_message is None
         assert s.active_stream_id is None
+
+    def test_finished_worker_can_supersede_its_own_interrupted_marker(self):
+        """A live worker that finishes after stale repair should be allowed to
+        replace the recovery marker for the same user turn."""
+        s = _make_session(
+            messages=[
+                {"role": "user", "content": "deploy"},
+                models._interrupted_recovery_marker(),
+            ]
+        )
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = []
+
+        assert streaming._stream_writeback_can_supersede_recovery_marker(s, "deploy")
+
+    def test_finished_worker_does_not_supersede_after_newer_turn_appended(self):
+        """Once a follow-up turn changes the visible tail, stale writeback stays
+        blocked so old workers cannot overwrite newer transcript state."""
+        s = _make_session(
+            messages=[
+                {"role": "user", "content": "deploy"},
+                models._interrupted_recovery_marker(),
+                {"role": "user", "content": "what happened?"},
+                {"role": "assistant", "content": "I checked the deployment status."},
+            ]
+        )
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = []
+
+        assert not streaming._stream_writeback_can_supersede_recovery_marker(s, "deploy")
+
+    def test_finished_worker_does_not_supersede_different_user_turn(self):
+        """The supersede path is tied to the pending prompt that was repaired."""
+        s = _make_session(
+            messages=[
+                {"role": "user", "content": "deploy"},
+                models._interrupted_recovery_marker(),
+            ]
+        )
+        s.active_stream_id = None
+        s.pending_user_message = None
+        s.pending_attachments = []
+
+        assert not streaming._stream_writeback_can_supersede_recovery_marker(s, "ship it")
 
     def test_core_sync_branch_does_not_duplicate_journal_output_already_in_core(
         self, hermes_home, monkeypatch
@@ -1047,6 +1117,25 @@ class TestRepairStalePendingIntegration:
             with config.STREAMS_LOCK:
                 config.STREAMS.pop("live_stream", None)
 
+    def test_skips_when_worker_alive_without_sse_stream(self, hermes_home, monkeypatch):
+        """Pre-check: if ACTIVE_RUNS still owns the worker, repair is skipped.
+
+        STREAMS is the browser/SSE observation layer and may disappear while the
+        backend worker is still running. A detached-but-active worker must not be
+        mistaken for a WebUI restart or crashed turn.
+        """
+        s = _make_stale_session(stream_id="detached_stream")
+        s.save()
+
+        _register_active_run("detached_stream")
+
+        assert "detached_stream" in _active_stream_ids()
+        result = _repair_stale_pending(s)
+        assert result is False
+        assert s.pending_user_message == "Hello hermes"
+        assert s.active_stream_id == "detached_stream"
+        assert s.messages == []
+
     def test_skips_when_no_pending(self, hermes_home, monkeypatch):
         """Pre-check: if pending_user_message is None, repair is skipped."""
         s = _make_session(messages=[])
@@ -1107,3 +1196,536 @@ class TestCoreSyncMetadata:
         assert len(user_msgs) == 1
         assert user_msgs[0]["content"] == "My question"
         assert user_msgs[0].get("_recovered") is True
+
+
+# ── Lazy run-journal recovery (read-side self-heal) ─────────────────────────
+
+class TestInterruptedRecoveryMarker:
+    """Pure-function tests for _interrupted_recovery_marker(pending_retry=…)."""
+
+    def test_marker_recovered_output_excludes_pending_retry_flag(self):
+        marker = models._interrupted_recovery_marker(recovered_output=True)
+        assert marker["_error"] is True
+        assert marker["type"] == "interrupted"
+        assert "_pending_journal_recovery" not in marker
+        assert "recovered from the run journal" in marker["content"]
+
+    def test_marker_pending_retry_sets_flag_and_wording(self):
+        marker = models._interrupted_recovery_marker(pending_retry=True)
+        assert marker.get("_pending_journal_recovery") is True
+        assert "Recovering the partial output" in marker["content"]
+        assert "no agent output was recovered" not in marker["content"]
+
+    def test_marker_recovered_output_beats_pending_retry(self):
+        marker = models._interrupted_recovery_marker(
+            recovered_output=True, pending_retry=True,
+        )
+        assert "_pending_journal_recovery" not in marker
+        assert "recovered from the run journal" in marker["content"]
+
+    def test_marker_default_wording_unchanged_for_no_output_no_retry(self):
+        marker = models._interrupted_recovery_marker()
+        assert "_pending_journal_recovery" not in marker
+        assert "no agent output was recovered" in marker["content"]
+
+
+class TestRetryJournalRecoveryInPlace:
+    """In-place retry helper: promote / increment / give up."""
+
+    def _make_pending_session(self, hermes_home, stream_id="lazy_stream",
+                              attempts=0, first_seen_ts=None):
+        s = _make_session(messages=[
+            {"role": "user", "content": "earlier turn"},
+            {"role": "assistant", "content": "earlier reply"},
+            {"role": "user", "content": "Stuck draft", "_recovered": True},
+        ])
+        marker = models._interrupted_recovery_marker(pending_retry=True)
+        marker["_journal_retry_stream_id"] = stream_id
+        marker["_journal_retry_attempts"] = attempts
+        marker["_journal_retry_first_seen_ts"] = (
+            first_seen_ts if first_seen_ts is not None else int(time.time())
+        )
+        s.messages.append(marker)
+        s.save()
+        return s
+
+    def test_promotes_marker_when_journal_now_available(self, hermes_home, monkeypatch):
+        stream_id = "lazy_stream_promote"
+        s = self._make_pending_session(hermes_home, stream_id=stream_id)
+        marker_before = s.messages[-1]
+
+        append_run_event(s.session_id, stream_id, "token", {"text": "Late tokens."})
+        append_run_event(
+            s.session_id, stream_id, "tool",
+            {"name": "terminal", "preview": "echo", "args": {"cmd": "echo"}},
+        )
+
+        ok = models._retry_journal_recovery_in_place(s)
+        assert ok is True
+
+        # Marker promoted in place and meta stripped
+        marker_idx = next(
+            i for i, m in enumerate(s.messages)
+            if m.get("type") == "interrupted" and m.get("_error")
+        )
+        promoted = s.messages[marker_idx]
+        assert promoted is marker_before
+        assert "recovered from the run journal" in promoted["content"]
+        assert "_pending_journal_recovery" not in promoted
+        assert "_journal_retry_stream_id" not in promoted
+        assert "_journal_retry_attempts" not in promoted
+        assert "_journal_retry_first_seen_ts" not in promoted
+
+        # Journaled rows reordered ABOVE the marker, preserving order
+        before_marker = s.messages[:marker_idx]
+        recovered = [m for m in before_marker if m.get("_recovered_from_run_journal")]
+        assert recovered, "journaled assistant rows must sit above the marker"
+        assert any("Late tokens." in m.get("content", "") for m in recovered)
+        # tool_call.assistant_msg_idx still points into the valid range
+        for tc in s.tool_calls or []:
+            idx = tc.get("assistant_msg_idx")
+            if isinstance(idx, int):
+                assert 0 <= idx < len(s.messages)
+
+    def test_increments_attempts_when_journal_still_empty(self, hermes_home, monkeypatch):
+        stream_id = "lazy_stream_increment"
+        s = self._make_pending_session(hermes_home, stream_id=stream_id)
+        # No append_run_event — journal stays empty.
+        ok = models._retry_journal_recovery_in_place(s)
+        assert ok is False
+        marker = s.messages[-1]
+        assert marker.get("_pending_journal_recovery") is True
+        assert marker.get("_journal_retry_attempts") == 1
+        assert "Recovering the partial output" in marker["content"]
+
+    def test_demotes_to_neutral_after_max_attempts(self, hermes_home, monkeypatch):
+        stream_id = "lazy_stream_giveup_attempts"
+        s = self._make_pending_session(
+            hermes_home, stream_id=stream_id,
+            attempts=models._JOURNAL_RETRY_MAX_ATTEMPTS,
+        )
+        ok = models._retry_journal_recovery_in_place(s)
+        assert ok is False
+        marker = s.messages[-1]
+        assert "_pending_journal_recovery" not in marker
+        assert "_journal_retry_stream_id" not in marker
+        assert "_journal_retry_attempts" not in marker
+        assert "_journal_retry_first_seen_ts" not in marker
+        assert "Partial output may have been lost" in marker["content"]
+        assert "Recovering the partial output" not in marker["content"]
+
+    def test_demotes_to_neutral_after_giveup_seconds(self, hermes_home, monkeypatch):
+        stream_id = "lazy_stream_giveup_age"
+        first_seen = int(time.time()) - (models._JOURNAL_RETRY_GIVEUP_SECONDS + 60)
+        s = self._make_pending_session(
+            hermes_home, stream_id=stream_id, first_seen_ts=first_seen,
+        )
+        ok = models._retry_journal_recovery_in_place(s)
+        assert ok is False
+        marker = s.messages[-1]
+        assert "_pending_journal_recovery" not in marker
+        assert "Partial output may have been lost" in marker["content"]
+
+    def test_noop_when_no_pending_marker(self, hermes_home, monkeypatch):
+        s = _make_session(messages=[
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "y"},
+        ])
+        s.save()
+        spy = []
+        original = models._append_journaled_partial_output
+
+        def _spy(*a, **kw):
+            spy.append(1)
+            return original(*a, **kw)
+
+        monkeypatch.setattr(models, "_append_journaled_partial_output", _spy)
+        ok = models._retry_journal_recovery_in_place(s)
+        assert ok is False
+        assert spy == [], "no pending marker → must not call recovery"
+
+    def test_short_circuit_helper_detects_pending_marker(self, hermes_home, monkeypatch):
+        s = _make_session(messages=[
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "y"},
+        ])
+        assert models._session_has_pending_journal_retry(s) is False
+        marker = models._interrupted_recovery_marker(pending_retry=True)
+        marker["_journal_retry_stream_id"] = "abc"
+        marker["_journal_retry_attempts"] = 0
+        marker["_journal_retry_first_seen_ts"] = int(time.time())
+        s.messages.append(marker)
+        assert models._session_has_pending_journal_retry(s) is True
+
+    def test_short_circuit_helper_stops_at_normal_assistant(self, hermes_home, monkeypatch):
+        s = _make_session(messages=[
+            {"role": "user", "content": "x"},
+        ])
+        # An old, already-promoted marker followed by a normal assistant turn —
+        # the pending flag belongs to a prior turn that was healed; helper must
+        # not loop back into it.
+        marker = models._interrupted_recovery_marker(pending_retry=True)
+        marker["_journal_retry_stream_id"] = "abc"
+        marker["_journal_retry_attempts"] = 0
+        marker["_journal_retry_first_seen_ts"] = int(time.time())
+        s.messages.append(marker)
+        s.messages.append({"role": "user", "content": "later"})
+        s.messages.append({"role": "assistant", "content": "later reply"})
+        assert models._session_has_pending_journal_retry(s) is False
+
+
+class TestGetSessionLazyRetryHook:
+    """get_session() must trigger _retry_journal_recovery_in_place on both
+    cache-hit and cold-load paths when a pending marker exists, and skip
+    quickly when nothing is pending."""
+
+    def _make_session_with_pending_marker(self, sid="lazy_get", stream_id="st"):
+        s = _make_session(session_id=sid, messages=[
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": "a"},
+            {"role": "user", "content": "u2", "_recovered": True},
+        ])
+        marker = models._interrupted_recovery_marker(pending_retry=True)
+        marker["_journal_retry_stream_id"] = stream_id
+        marker["_journal_retry_attempts"] = 0
+        marker["_journal_retry_first_seen_ts"] = int(time.time())
+        s.messages.append(marker)
+        return s
+
+    def test_triggers_retry_on_cache_hit(self, hermes_home, monkeypatch):
+        sid = "lazy_get_cache"
+        stream_id = "stream_cache"
+        s = self._make_session_with_pending_marker(sid=sid, stream_id=stream_id)
+        s.save()
+        models.SESSIONS[sid] = s
+        append_run_event(sid, stream_id, "token", {"text": "Late."})
+
+        reloaded = models.get_session(sid)
+        assert reloaded is s
+        marker = s.messages[-1] if "Recovering" in s.messages[-1]["content"] else next(
+            m for m in s.messages
+            if m.get("type") == "interrupted" and m.get("_error")
+        )
+        assert "recovered from the run journal" in marker["content"]
+        assert "_pending_journal_recovery" not in marker
+
+    def test_triggers_retry_on_cold_load(self, hermes_home, monkeypatch):
+        sid = "lazy_get_cold"
+        stream_id = "stream_cold"
+        s = self._make_session_with_pending_marker(sid=sid, stream_id=stream_id)
+        s.save()
+        models.SESSIONS.pop(sid, None)
+        append_run_event(sid, stream_id, "token", {"text": "Late."})
+
+        reloaded = models.get_session(sid)
+        marker = next(
+            m for m in reloaded.messages
+            if m.get("type") == "interrupted" and m.get("_error")
+        )
+        assert "recovered from the run journal" in marker["content"]
+        assert "_pending_journal_recovery" not in marker
+
+    def test_short_circuit_when_no_pending_marker(self, hermes_home, monkeypatch):
+        sid = "lazy_get_no_pending"
+        s = _make_session(session_id=sid, messages=[
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "y"},
+        ])
+        s.save()
+        models.SESSIONS[sid] = s
+        spy = []
+        monkeypatch.setattr(
+            models, "_retry_journal_recovery_in_place",
+            lambda session: spy.append(1) or False,
+        )
+        models.get_session(sid)
+        assert spy == []
+
+    def test_metadata_only_skips_retry(self, hermes_home, monkeypatch):
+        sid = "lazy_get_meta"
+        stream_id = "stream_meta"
+        s = self._make_session_with_pending_marker(sid=sid, stream_id=stream_id)
+        s.save()
+        models.SESSIONS[sid] = s
+        spy = []
+        monkeypatch.setattr(
+            models, "_retry_journal_recovery_in_place",
+            lambda session: spy.append(1) or False,
+        )
+        models.get_session(sid, metadata_only=True)
+        assert spy == [], "metadata_only must skip the lazy-retry helper"
+
+
+class TestLazyRetryBackwardsCompat:
+    """Pre-fix session shapes must continue to work."""
+
+    def test_legacy_marker_without_flag_unchanged(self, hermes_home, monkeypatch):
+        """An old session whose marker carries the legacy 'no agent output'
+        wording (no flag) must not be touched by get_session()."""
+        sid = "legacy_marker_sid"
+        s = _make_session(session_id=sid, messages=[
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "y"},
+            {"role": "user", "content": "later", "_recovered": True},
+        ])
+        legacy = models._interrupted_recovery_marker(recovered_output=False)
+        s.messages.append(legacy)
+        s.save()
+        models.SESSIONS.pop(sid, None)
+        spy = []
+        original = models._append_journaled_partial_output
+        monkeypatch.setattr(
+            models, "_append_journaled_partial_output",
+            lambda *a, **kw: spy.append(1) or original(*a, **kw),
+        )
+        models.get_session(sid)
+        assert spy == [], "legacy marker (no flag) must not re-trigger recovery"
+
+    def test_pending_retry_marker_round_trips_through_session_save_and_load(
+            self, hermes_home, monkeypatch):
+        """All four retry meta keys must survive Session.save() / Session.load()."""
+        sid = "round_trip_sid"
+        s = _make_session(session_id=sid, messages=[
+            {"role": "user", "content": "x"},
+        ])
+        marker = models._interrupted_recovery_marker(pending_retry=True)
+        marker["_journal_retry_stream_id"] = "abc"
+        marker["_journal_retry_attempts"] = 3
+        marker["_journal_retry_first_seen_ts"] = 1779200000
+        s.messages.append(marker)
+        s.save()
+        models.SESSIONS.pop(sid, None)
+
+        reloaded = Session.load(sid)
+        last = reloaded.messages[-1]
+        assert last.get("_pending_journal_recovery") is True
+        assert last.get("_journal_retry_stream_id") == "abc"
+        assert last.get("_journal_retry_attempts") == 3
+        assert last.get("_journal_retry_first_seen_ts") == 1779200000
+
+
+class TestJournalToolDedupeScoping:
+    """`_journal_tool_already_present` must only collapse against tool cards
+    recovered from the same stream — a repeated tool (e.g. ``terminal: ls``)
+    in a previous turn must NOT pre-empt this turn's recovery."""
+
+    def test_repeated_tool_in_earlier_turn_does_not_block_recovery(self, hermes_home, monkeypatch):
+        sid = "dedupe_scope_sid"
+        stream_id = "dedupe_scope_stream"
+        s = _make_session(session_id=sid, messages=[
+            {"role": "user", "content": "earlier turn"},
+            {"role": "assistant", "content": "earlier reply"},
+            {"role": "user", "content": "later turn", "_recovered": True},
+        ])
+        # Pre-existing tool card from an earlier turn with same (name, preview)
+        # but a different recovered-stream-id. The retry must NOT see this as a
+        # hit when dedupe_existing is asked to scope to ``stream_id``.
+        s.tool_calls = [
+            {
+                "name": "terminal",
+                "preview": "ls",
+                "snippet": "ls",
+                "tid": "old-1",
+                "_recovered_from_run_journal": True,
+                "_recovered_stream_id": "earlier_stream",
+                "done": True,
+            }
+        ]
+        marker = models._interrupted_recovery_marker(pending_retry=True)
+        marker["_journal_retry_stream_id"] = stream_id
+        marker["_journal_retry_attempts"] = 0
+        marker["_journal_retry_first_seen_ts"] = int(time.time())
+        s.messages.append(marker)
+        s.save()
+        append_run_event(sid, stream_id, "token", {"text": "Listing."})
+        append_run_event(
+            sid, stream_id, "tool",
+            {"name": "terminal", "preview": "ls", "args": {"cmd": "ls"}},
+        )
+
+        ok = models._retry_journal_recovery_in_place(s)
+        assert ok is True
+
+        # Two tool cards now: the old one untouched, plus a new one for this
+        # stream. If dedupe were session-wide the new one would be dropped.
+        scoped = [
+            tc for tc in s.tool_calls
+            if tc.get("_recovered_stream_id") == stream_id
+        ]
+        assert len(scoped) == 1
+        assert scoped[0]["name"] == "terminal"
+        assert scoped[0]["preview"] == "ls"
+        # Old tool card is preserved.
+        assert any(
+            tc.get("_recovered_stream_id") == "earlier_stream"
+            for tc in s.tool_calls
+        )
+
+    def test_untagged_tool_still_matches_for_core_transcript_invariant(self, hermes_home, monkeypatch):
+        """Tool cards without ``_recovered_stream_id`` (live tools, or tools
+        carried over from the core transcript) match regardless of the
+        ``stream_id`` argument. This preserves the "core transcript already
+        contains this tool, don't duplicate it" invariant the original repair
+        path relies on."""
+        s = _make_session(messages=[
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "y"},
+        ])
+        s.tool_calls = [
+            {"name": "terminal", "preview": "ls", "snippet": "ls"},
+        ]
+        # No stream_id → legacy session-wide check returns True.
+        assert models._journal_tool_already_present(s, "terminal", "ls") is True
+        # With a stream_id, untagged tool cards still match (different stream
+        # ids only override the match decision when the existing card itself
+        # is tagged with a stream id that disagrees).
+        assert models._journal_tool_already_present(
+            s, "terminal", "ls", stream_id="some_stream",
+        ) is True
+
+    def test_tagged_tool_with_different_stream_does_not_match(self, hermes_home, monkeypatch):
+        """A tool card tagged with a different recovered_stream_id must NOT
+        be considered a duplicate when the retry is scoped to a different
+        stream."""
+        s = _make_session(messages=[
+            {"role": "user", "content": "x"},
+        ])
+        s.tool_calls = [
+            {
+                "name": "terminal",
+                "preview": "ls",
+                "snippet": "ls",
+                "_recovered_stream_id": "other_stream",
+            },
+        ]
+        assert models._journal_tool_already_present(
+            s, "terminal", "ls", stream_id="this_stream",
+        ) is False
+        # But scoping to the same stream id matches.
+        assert models._journal_tool_already_present(
+            s, "terminal", "ls", stream_id="other_stream",
+        ) is True
+
+
+class TestWslPageCacheRace:
+    """Cover the WSL2 / network-FS shape: read_run_events returns empty / errors
+    first, recovers on a later call."""
+
+    def test_first_read_raises_oserror_second_read_succeeds(self, hermes_home, monkeypatch):
+        sid = "wsl_race_sid"
+        stream_id = "wsl_race_stream"
+        s = _make_session(session_id=sid, messages=[
+            {"role": "user", "content": "x"},
+        ])
+        s.pending_user_message = "Keep going"
+        s.pending_started_at = time.time() - 120
+        s.active_stream_id = stream_id
+
+        # Simulate first read raising IOError, then succeeding.
+        import api.run_journal as run_journal
+        real = run_journal.read_run_events
+        attempts = {"n": 0}
+
+        def flaky_read(sid_, run_id, **kw):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise OSError("EIO simulated by test")
+            return real(sid_, run_id, **kw)
+
+        monkeypatch.setattr(run_journal, "read_run_events", flaky_read)
+
+        core_path = hermes_home / "sessions" / f"session_{sid}.json"
+        result = _apply_core_sync_or_error_marker(
+            s, core_path, stream_id_for_recheck=stream_id,
+        )
+        assert result is True
+        marker = next(m for m in s.messages if m.get("type") == "interrupted")
+        assert marker.get("_pending_journal_recovery") is True
+
+        # Now write journal events; the next retry call will read them.
+        append_run_event(sid, stream_id, "token", {"text": "Came back."})
+        ok = models._retry_journal_recovery_in_place(s)
+        assert ok is True
+        marker_after = next(m for m in s.messages if m.get("type") == "interrupted")
+        assert "recovered from the run journal" in marker_after["content"]
+        assert "_pending_journal_recovery" not in marker_after
+
+    def test_journal_grows_between_reads(self, hermes_home, monkeypatch):
+        sid = "wsl_grow_sid"
+        stream_id = "wsl_grow_stream"
+        s = _make_session(session_id=sid, messages=[
+            {"role": "user", "content": "x"},
+        ])
+        s.pending_user_message = "Keep going"
+        s.pending_started_at = time.time() - 120
+        s.active_stream_id = stream_id
+
+        # First repair pass: nothing visible yet.
+        core_path = hermes_home / "sessions" / f"session_{sid}.json"
+        result = _apply_core_sync_or_error_marker(
+            s, core_path, stream_id_for_recheck=stream_id,
+        )
+        assert result is True
+        marker = next(m for m in s.messages if m.get("type") == "interrupted")
+        assert marker.get("_pending_journal_recovery") is True
+
+        # Journal grows.
+        append_run_event(sid, stream_id, "token", {"text": "Partial 1."})
+        append_run_event(sid, stream_id, "token", {"text": " Partial 2."})
+        append_run_event(
+            sid, stream_id, "tool",
+            {"name": "terminal", "preview": "ls", "args": {"cmd": "ls"}},
+        )
+
+        ok = models._retry_journal_recovery_in_place(s)
+        assert ok is True
+        marker_after = next(m for m in s.messages if m.get("type") == "interrupted")
+        assert "recovered from the run journal" in marker_after["content"]
+        # Both tokens recovered, in order, before the marker.
+        marker_idx = s.messages.index(marker_after)
+        recovered_text = " ".join(
+            m.get("content", "") for m in s.messages[:marker_idx]
+            if m.get("_recovered_from_run_journal")
+        )
+        assert "Partial 1." in recovered_text and "Partial 2." in recovered_text
+
+    def test_concurrent_get_session_calls_idempotent(self, hermes_home, monkeypatch):
+        sid = "wsl_concurrent_sid"
+        stream_id = "wsl_concurrent_stream"
+        s = _make_session(session_id=sid, messages=[
+            {"role": "user", "content": "x"},
+            {"role": "assistant", "content": "y"},
+            {"role": "user", "content": "later", "_recovered": True},
+        ])
+        marker = models._interrupted_recovery_marker(pending_retry=True)
+        marker["_journal_retry_stream_id"] = stream_id
+        marker["_journal_retry_attempts"] = 0
+        marker["_journal_retry_first_seen_ts"] = int(time.time())
+        s.messages.append(marker)
+        s.save()
+        append_run_event(sid, stream_id, "token", {"text": "ConcurrentTokens"})
+        models.SESSIONS[sid] = s
+
+        results = []
+
+        def _worker():
+            try:
+                models.get_session(sid)
+                results.append("ok")
+            except Exception as exc:  # noqa: BLE001
+                results.append(exc)
+
+        threads = [threading.Thread(target=_worker, daemon=True) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        assert results.count("ok") == 2, f"both workers must succeed: {results}"
+
+        # Exactly one interrupted marker remains, exactly one journal-recovered
+        # body (deduped by dedupe_existing=True).
+        interrupted_markers = [m for m in s.messages if m.get("type") == "interrupted"]
+        assert len(interrupted_markers) == 1
+        recovered = [m for m in s.messages if m.get("_recovered_from_run_journal")]
+        assert sum(1 for m in recovered if "ConcurrentTokens" in m.get("content", "")) == 1

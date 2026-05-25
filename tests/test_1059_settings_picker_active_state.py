@@ -67,18 +67,26 @@ class TestSettingsPickerActiveState:
         assert ".skin-pick-btn.active" in STYLE_CSS, (
             "style.css must have a .skin-pick-btn.active rule"
         )
-        # The active rule must use !important to beat the base !important rule
-        idx = STYLE_CSS.find(".theme-pick-btn.active")
-        rule = STYLE_CSS[idx:idx + 200]
+        # The active rule must use !important to beat the base !important rule.
+        # Search for the GLOBAL #mainSettings-scoped rule (skin-specific overrides
+        # like `:root[data-skin="geist-contrast"] .theme-pick-btn.active` are
+        # allowed to use their own values and would otherwise be the first match).
+        idx = STYLE_CSS.find("#mainSettings .theme-pick-btn.active")
+        assert idx != -1, "Could not find global #mainSettings .theme-pick-btn.active rule"
+        rule = STYLE_CSS[idx:idx + 300]
         assert "!important" in rule, (
-            ".theme-pick-btn.active must use !important to override "
+            "#mainSettings .theme-pick-btn.active must use !important to override "
             "the base border-color:var(--border)!important rule"
         )
 
     def test_active_rule_uses_accent_color(self):
         """The .active rule must apply the accent color to make selection visible."""
-        idx = STYLE_CSS.find(".theme-pick-btn.active")
-        rule = STYLE_CSS[idx:idx + 200]
+        # Use the global #mainSettings-scoped rule (skin-specific overrides like
+        # `:root[data-skin="geist-contrast"] .theme-pick-btn.active` use their
+        # own palette values and would otherwise be the first match).
+        idx = STYLE_CSS.find("#mainSettings .theme-pick-btn.active")
+        assert idx != -1, "Could not find global #mainSettings .theme-pick-btn.active rule"
+        rule = STYLE_CSS[idx:idx + 300]
         assert "var(--accent)" in rule, (
-            ".theme-pick-btn.active must set border-color to var(--accent)"
+            "#mainSettings .theme-pick-btn.active must set border-color to var(--accent)"
         )

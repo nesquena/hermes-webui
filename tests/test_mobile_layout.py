@@ -665,6 +665,11 @@ def test_100dvh_viewport_height():
         "style.css must use 100dvh for correct mobile viewport height (100vh hides content under address bar)"
 
 
+def test_viewport_disables_page_zoom_for_native_pwa_shell():
+    """Installed PWA launches should not rubber-band into browser-style page zoom."""
+    assert 'name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"' in HTML
+
+
 def test_pwa_safe_area_top_stays_scoped_to_installed_modes():
     """The PWA shell should not opt into cover-mode geometry for every browser surface."""
     assert 'viewport-fit=cover' not in HTML
@@ -699,6 +704,20 @@ def test_safe_area_variables_available_for_pwa_shell():
     assert "padding:8px 10px 12px!important" in CSS, (
         "Phone composer should keep the proven pre-cover-mode padding contract"
     )
+
+
+def test_pwa_startup_classes_have_native_shell_affordances():
+    """The JS-startup fallback classes should mirror browser display-mode CSS.
+
+    iOS and embedded webviews do not always evaluate display-mode media queries
+    the same way as Chromium. pwa-startup.js adds classes early, so CSS should
+    provide the same native-feel affordances through those classes.
+    """
+    assert ".pwa-standalone" in CSS
+    assert ".pwa-standalone .app-titlebar-reload" in CSS
+    assert "overscroll-behavior:none" in CSS
+    assert ".pwa-offline .app-titlebar::after" in CSS
+    assert "pwa-title-resume" in CSS
 
 
 def test_composer_touch_target_size():
@@ -1186,6 +1205,24 @@ def test_mobile_enter_newline_uses_match_media():
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
     assert "matchMedia('(pointer:coarse)')" in boot_js or 'matchMedia("(pointer:coarse)")' in boot_js, \
         "boot.js must use matchMedia('(pointer:coarse)') for mobile detection"
+
+
+def test_mobile_enter_newline_checks_virtual_keyboard_viewport():
+    """Touch devices should only force newline while the software keyboard is likely open."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "function _isVirtualKeyboardLikelyOpen()" in boot_js, \
+        "boot.js must isolate the software-keyboard viewport heuristic"
+    assert "window.visualViewport" in boot_js and "window.innerHeight-vv.height>120" in boot_js, \
+        "software-keyboard detection must compare visualViewport height against window.innerHeight"
+    assert "&&_isVirtualKeyboardLikelyOpen()" in boot_js, \
+        "mobile Enter newline override must not apply when a hardware keyboard leaves the viewport unshrunk"
+
+
+def test_mobile_enter_newline_preserves_legacy_fallback_without_visual_viewport():
+    """Browsers without visualViewport should keep the previous touch Enter=newline behavior."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "if(!vv||!window.innerHeight)return true;" in boot_js, \
+        "missing visualViewport support must preserve the legacy touch-primary newline fallback"
 
 
 def test_mobile_enter_newline_only_overrides_enter_default():

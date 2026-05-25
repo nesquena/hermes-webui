@@ -53,6 +53,29 @@ def _content_has_part_type(content, part_types):
     )
 
 
+def is_context_compression_marker(message):
+    """Return true for synthetic compression/reference cards, not user turns."""
+    if not isinstance(message, dict):
+        return False
+    role = message.get("role")
+    if not role or role == "tool":
+        return False
+    text = _content_text(
+        message.get("content", ""),
+        part_types={"text", "input_text", "output_text"},
+    ).lower().lstrip()
+    return (
+        text.startswith("[context compaction")
+        or text.startswith("context compaction")
+        or text.startswith("[your active task list was preserved across context compression]")
+    )
+
+
+def _is_context_compression_marker(message):
+    """Backward-compatible alias for callers that have not switched yet."""
+    return is_context_compression_marker(message)
+
+
 def visible_messages_for_anchor(messages, *, auto_compression: bool = False):
     """Return transcript messages that can anchor compression UI metadata.
 
@@ -69,6 +92,8 @@ def visible_messages_for_anchor(messages, *, auto_compression: bool = False):
             continue
         role = message.get("role")
         if not role or role == "tool":
+            continue
+        if _is_context_compression_marker(message):
             continue
 
         content = message.get("content", "")

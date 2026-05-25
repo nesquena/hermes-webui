@@ -85,6 +85,41 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 
 ---
 
+## "Response interrupted." marker keeps saying "no agent output was recovered"
+
+**Symptom.** After a live response stream stops before a turn completes (manual restart, OOM, crash, browser/SSE disconnect, lost worker bookkeeping, …), the affected chat shows an `**Response interrupted.**` marker. If the run-journal for that turn is already visible on disk, the marker says the partial output was recovered; if not, it preserves the user turn and says no agent output was recovered yet.
+
+**Why.** Sidecar repair re-checks the run-journal after it detects a stale stream and uses the result as a one-shot signal. On WSL2 (9p / DrvFs) and on some network-backed setups, the run-journal `.jsonl` is written by the stopped worker but the WebUI process reads it through a page-cache state that has not yet seen those writes — recovery returns "empty" and the marker would otherwise be baked permanently. The fix introduces a *lazy* retry path: when sidecar repair cannot read visible output but knows the stream id, it stores a `_pending_journal_recovery` flag on the marker and re-attempts recovery from `get_session()` until the journal becomes readable (or the retry budget is exhausted).
+
+**Interruption classes.** The WebUI now keeps the user-facing cases separate instead of implying every stale stream was a restart:
+
+- **Browser/SSE connection interrupted** — the live browser `EventSource` transport dropped. The UI reports `Connection interrupted` and tries status/replay/session restore before showing the final browser-side notice. Chat and gateway SSE errors also POST a small sanitized diagnostic event to `/api/client-events/log` (source, session id, stream id, readyState, visibility, online state, path without query string) so server logs can distinguish browser transport loss from backend worker loss.
+- **Lost worker bookkeeping** — the stream id is gone and the worker registry no longer has an active run. Recovery markers carry `interruption_cause: "lost_worker_bookkeeping"` and `/api/chat/stream/status` reports `terminal_state: "lost-worker-bookkeeping"` for non-terminal journals that are no longer active.
+- **Stream/run split-brain** — the stream is gone but `ACTIVE_RUNS` still lists the worker. Recovery markers carry `interruption_cause: "stream_run_split_brain"` so the transcript says this is a bookkeeping split-brain rather than a restart.
+- **Process crash/restart** — `SERVER_START_TIME` is newer than `pending_started_at`, meaning the WebUI process started after the turn began. Recovery markers carry `interruption_cause: "process_restart"` and explicitly say the process-start evidence points to a crash or restart.
+
+**Diagnostic.**
+
+The on-disk locations below assume the default `~/.hermes/webui` state directory. If you override it via `HERMES_WEBUI_STATE_DIR`, substitute that path for `~/.hermes/webui` in every step.
+
+1. Identify the affected session id and stream id from the marker. The marker JSON lives at `~/.hermes/webui/sessions/<sid>.json`; after the fix it shows them on the `_journal_retry_stream_id` key. Pre-fix sessions only carry the legacy wording, with no retry meta.
+2. Check whether the run-journal contains real events:
+   ```bash
+   ls -la ~/.hermes/webui/sessions/_run_journal/<sid>/<stream_id>.jsonl
+   head -2 ~/.hermes/webui/sessions/_run_journal/<sid>/<stream_id>.jsonl
+   ```
+   If the file exists and contains `token` / `tool` events, the lazy-retry path will pick them up the next time the session is opened.
+
+**Fix.** Reload the session in the browser. On the next `get_session()` call the marker is re-evaluated; if the journaled events are visible on disk the marker promotes to *"The partial output above was recovered from the run journal …"* wording and the journaled assistant text + tool cards land above the marker in chronological order. No manual sidecar editing is required.
+
+**Trigger.** Sidebar metadata polling is intentionally not enough to run this self-heal. Requests such as `/api/session?messages=0&resolve_model=0` load the session with `metadata_only=True`, skip the full messages array, and therefore skip the lazy journal retry helper. Click/open the affected conversation so the message panel performs a full `messages=1` load; that full render is what re-checks the journal and can promote the marker.
+
+**Caps.** The lazy retry path gives up after 12 failed attempts or 24h of wall-clock age, at which point the marker is demoted to a neutral *"Partial output may have been lost."* wording so the "reload to retry" prompt doesn't linger forever for genuinely lost journals.
+
+**When to file a bug.** If, after the fix, you see the lazy-retry wording (*"Recovering the partial output from the run journal — reload this session to retry."*) but reloading the session never promotes it to the recovered wording even though the `.jsonl` clearly contains `token` events, capture the marker JSON and the run-journal file and file a bug.
+
+---
+
 ## Other troubleshooting
 
 This document grows over time. If a recurring failure mode isn't covered here yet, add it via PR. The format for each entry: **Symptom → Why → Diagnostic commands → Fix → When to file a bug**.

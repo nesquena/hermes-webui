@@ -650,6 +650,23 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     )
 
 
+def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
+    """Uploaded-file turns render optimistically before the server stores the
+    final pending text with an `[Attached files: ...]` suffix.  The INFLIGHT
+    merge must treat those as the same user turn instead of rendering both.
+    """
+    src = (REPO_ROOT / "static/sessions.js").read_text()
+    assert "function _stripAttachedFilesMarker" in src, (
+        "sessions.js must normalize the server-side attached-files suffix before deduping user turns"
+    )
+    assert "_stripAttachedFilesMarker(aText)===_stripAttachedFilesMarker(bText)" in src, (
+        "INFLIGHT user-message comparison should dedupe optimistic upload text against final pending text"
+    )
+    assert "role==='user'" in src, (
+        "attached-files normalization should be limited to user turns"
+    )
+
+
 def test_loadSession_inflight_sets_active_stream_before_replaying_live_tool_cards(cleanup_test_sessions):
     """#1715: returning to an active chat must replay persisted tool cards.
 

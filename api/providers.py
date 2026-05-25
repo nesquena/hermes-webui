@@ -692,6 +692,7 @@ _OAUTH_PROVIDERS = frozenset({
     "nous",
     "openai-codex",
     "qwen-oauth",
+    "xai-oauth",
 })
 
 # SECTION: Helper functions
@@ -1866,6 +1867,14 @@ def get_providers() -> dict[str, Any]:
             if live_models:
                 models = live_models
                 models_total = len(models)
+        if pid == "xai-oauth":
+            live_models = _models_from_live_provider_ids(
+                pid,
+                _read_live_provider_model_ids("xai-oauth"),
+            )
+            if live_models:
+                models = live_models
+                models_total = len(models)
         # Nous Portal: prefer the live catalog so the providers card matches
         # the dropdown picker (#1538). Same fallback shape as the static-only
         # case below — when hermes_cli is unavailable or its lookup raises,
@@ -1975,8 +1984,10 @@ def get_providers() -> dict[str, Any]:
                 "display_name": cp_name,
                 "has_key": cp_has_key,
                 "configurable": False,  # custom providers managed via config.yaml
+                "is_custom": True,
                 "key_source": "config_yaml" if cp_has_key else "none",
                 "models": cp_models,
+                "models_total": len(cp_models),
             })
 
     # Determine active provider
@@ -1984,6 +1995,18 @@ def get_providers() -> dict[str, Any]:
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
         active_provider = model_cfg.get("provider")
+
+    # Sort providers: active first, then custom:*, then has_key, then rest.
+    def _provider_sort_key(p):
+        pid = p.get("id") or ""
+        if pid == active_provider:
+            return (0, pid)
+        if pid.startswith("custom:"):
+            return (1, pid)
+        if p.get("has_key"):
+            return (2, pid)
+        return (3, pid)
+    providers.sort(key=_provider_sort_key)
 
     return {
         "providers": providers,

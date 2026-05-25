@@ -509,6 +509,18 @@ def test_cancel_copy_uses_configured_bot_name(monkeypatch):
     )
 
 
+def test_cancel_copy_uses_profile_name_for_non_default_profile(monkeypatch):
+    """Persisted cancellation copy should use profile names outside literal default."""
+    import api.streaming as streaming
+
+    monkeypatch.setattr(streaming, 'load_settings', lambda: {'bot_name': 'Obryn'})
+
+    session = type('Session', (), {'profile': 'research'})()
+    name = streaming._preferred_agent_display_name_for_session(session)
+    assert name == 'Research'
+    assert 'before Research finished' in streaming._cancelled_turn_content(agent_name=name)
+
+
 def test_cancel_copy_falls_back_to_hermes_for_blank_bot_name(monkeypatch):
     """Blank or missing bot_name should not leak old persona copy."""
     import api.streaming as streaming

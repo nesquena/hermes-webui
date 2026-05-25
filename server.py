@@ -115,7 +115,7 @@ from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import j, get_profile_cookie
 from api.profiles import set_request_profile, clear_request_profile
-from api.routes import handle_delete, handle_get, handle_patch, handle_post
+from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 
@@ -170,6 +170,13 @@ class QuietHTTPServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
+    # HTTP/1.1 enables keep-alive connection reuse — major latency win on
+    # high-RTT links where every saved TCP handshake is 2×RTT. Each response
+    # MUST declare framing (Content-Length, Transfer-Encoding: chunked, or
+    # Connection: close) so the client knows where the message ends. Helpers
+    # j()/t() emit Content-Length; SSE/streaming endpoints emit
+    # Connection: close because the body has no terminator. See PR notes.
+    protocol_version = "HTTP/1.1"
     timeout = 30  # seconds — kills idle/incomplete connections to prevent thread exhaustion
     
     def setup(self):
@@ -232,8 +239,8 @@ class Handler(BaseHTTPRequestHandler):
         duration_ms = round((time.time() - getattr(self, '_req_t0', time.time())) * 1000, 1)
         record = _json.dumps({
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-            'method': self.command or '-',
-            'path': self.path or '-',
+            'method': getattr(self, 'command', None) or '-',
+            'path': getattr(self, 'path', None) or '-',
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
         })
@@ -251,6 +258,11 @@ class Handler(BaseHTTPRequestHandler):
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The browser/client closed the socket while we were writing the
+            # response. This is expected for probes, tab closes, and SSE
+            # reconnect races; do not convert it into a misleading server 500.
+            return
         except Exception as e:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
             return j(self, {'error': 'Internal server error'}, status=500)
@@ -277,6 +289,11 @@ class Handler(BaseHTTPRequestHandler):
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The browser/client closed the socket while we were writing the
+            # response. This is expected for probes, tab closes, and SSE
+            # reconnect races; do not convert it into a misleading server 500.
+            return
         except Exception as e:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
             return j(self, {'error': 'Internal server error'}, status=500)
@@ -286,8 +303,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._handle_write(handle_post)
 
+    def do_PUT(self) -> None:
+        self._handle_write(handle_put)
+
     def do_PATCH(self) -> None:
         self._handle_write(handle_patch)
+
+    def do_OPTIONS(self) -> None:
+        """Handle CORS preflight requests."""
+        self._req_t0 = time.time()
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.end_headers()
 
     def do_DELETE(self) -> None:
         self._handle_write(handle_delete)
