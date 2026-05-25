@@ -4884,6 +4884,8 @@ async function switchToWorkspace(path,name){
       session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
     })});
     S.session.workspace=path;
+    // Trigger a sidebar re-render when the per-workspace filter is active (#2549).
+    if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
@@ -5835,6 +5837,8 @@ function _preferencesPayloadFromUi(){
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
   const showCliCb=$('settingsShowCliSessions');
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
+  const showAllWsCb=$('settingsShowAllWorkspaces');
+  if(showAllWsCb) payload.show_all_workspaces=showAllWsCb.checked;
   const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
@@ -6130,6 +6134,8 @@ async function loadSettingsPanel(){
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb){showCliCb.checked=!!settings.show_cli_sessions;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const showAllWsCb=$('settingsShowAllWorkspaces');
+    if(showAllWsCb){showAllWsCb.checked=settings.show_all_workspaces!==false;showAllWsCb.addEventListener('change',()=>{window._showAllWorkspaces=showAllWsCb.checked;if(typeof renderSessionListFromCache==='function')renderSessionListFromCache();_schedulePreferencesAutosave();},{once:false});}
     const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
@@ -7026,6 +7032,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._showTps=showTps;
   window._fadeTextEffect=!!fadeTextEffect;
   window._showCliSessions=showCliSessions;
+  window._showAllWorkspaces=body.show_all_workspaces!==false;
   window._showPreviousMessagingSessions=!!body.show_previous_messaging_sessions;
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
@@ -7374,6 +7381,7 @@ async function saveSettings(andClose){
   body.simplified_tool_calling=!!($('settingsSimplifiedToolCalling')||{}).checked;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
+  body.show_all_workspaces=!!(($('settingsShowAllWorkspaces')||{checked:true}).checked);
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;

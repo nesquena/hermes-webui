@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- New Settings > Preferences toggle "Show sessions from all workspaces" (default on). When off, the sidebar only lists sessions whose stored workspace path matches the active workspace, matching how `show_cli_sessions` and `_showAllProfiles` already scope the list along other axes. (#2549)
+
 ## [v0.51.137] — 2026-05-25 — Release DI (stage-batch19 — 6-PR medium-risk batch)
 
 ### Added
