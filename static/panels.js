@@ -5219,6 +5219,7 @@ async function switchToProfile(name) {
     if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
     else localStorage.removeItem('hermes-webui-model');
     _skillsData = null;
+    if (typeof resetSkillRegistry === 'function') resetSkillRegistry();
     _workspaceList = null;
     if (data.default_model) window._defaultModel = data.default_model;
     if (data.default_model_provider) window._activeProvider = data.default_model_provider;

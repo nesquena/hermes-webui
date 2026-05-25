@@ -31,6 +31,12 @@ async function loadSkillRegistry() {
   return _skillRegistryPromise;
 }
 
+function resetSkillRegistry() {
+  _skillRegistryReady = false;
+  _skillRegistryPromise = null;
+  _skillRegistry = new Map();
+}
+
 function getSkillByMentionToken(token) {
   const raw = String(token || '').trim().replace(/^\//, '');
   return _skillRegistry.get(raw) || null;
@@ -90,7 +96,7 @@ function highlightSkillMentionsInTextNode(node) {
 
     parts.push(document.createTextNode(text.slice(last, tokenStart)));
     const chip = createSkillChip(skill);
-    if(codeParent && codeParent.textContent.trim()===matchedText && text.trim()===matchedText){
+    if(codeParent && codeParent.textContent.trim()===matchedText){
       codeParent.parentNode.replaceChild(chip, codeParent);
       return true;
     }
@@ -131,3 +137,4 @@ function highlightSkillsInMessages(container) {
 }
 
 window.highlightSkillsInMessages = highlightSkillsInMessages;
+window.resetSkillRegistry = resetSkillRegistry;

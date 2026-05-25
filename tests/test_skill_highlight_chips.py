@@ -48,7 +48,22 @@ def test_inline_code_wrapper_is_replaced_by_skill_chip():
     """Inline code skill mentions should not leave a <code> wrapper around the chip."""
     skills = read("static/skills.js")
     assert "const codeParent = nearestInlineSkillMentionCodeParent(node);" in skills
+    assert "if(codeParent && codeParent.textContent.trim()===matchedText){" in skills
+    assert "&& text.trim()===matchedText" not in skills
     assert "codeParent.parentNode.replaceChild(chip, codeParent);" in skills
+
+
+def test_profile_switch_resets_skill_registry_cache():
+    """Profile switches should invalidate conversation skill chips' cached /api/skills data."""
+    skills = read("static/skills.js")
+    panels = read("static/panels.js")
+
+    assert "function resetSkillRegistry()" in skills
+    assert "_skillRegistryReady = false;" in skills
+    assert "_skillRegistryPromise = null;" in skills
+    assert "_skillRegistry = new Map();" in skills
+    assert "window.resetSkillRegistry = resetSkillRegistry;" in skills
+    assert "if (typeof resetSkillRegistry === 'function') resetSkillRegistry();" in panels
 
 
 def test_skill_highlighter_allows_inline_code_but_skips_blocks_and_links():
