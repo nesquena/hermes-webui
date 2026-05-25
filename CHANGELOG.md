@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Arrow-key navigation in the model picker. Up/Down moves the highlight through the visible (and filter-narrowed) model rows, Enter selects the highlighted row, and Escape still closes the dropdown.
+
 ## [v0.51.137] — 2026-05-25 — Release DI (stage-batch19 — 6-PR medium-risk batch)
 
 ### Added
