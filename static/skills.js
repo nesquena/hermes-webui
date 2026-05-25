@@ -219,9 +219,11 @@ async function updateComposerSkillPreview(opts={}) {
   const text = String(textarea.value || '');
   let mentions = findCompletedComposerSkillMentions(text);
   if(opts && opts.force && !mentions.length){
-    const forcedToken = text.trim().replace(/^\//, '');
+    const rawMatch = text.trim();
+    const forcedToken = rawMatch.replace(/^\//, '');
     const forcedSkill = getSkillByMentionToken(forcedToken);
-    if(forcedSkill) mentions = [{token: forcedToken, skill: forcedSkill, start: text.indexOf(forcedToken), end: text.indexOf(forcedToken) + forcedToken.length}];
+    const start = rawMatch ? text.indexOf(rawMatch) : -1;
+    if(forcedSkill && start >= 0) mentions = [{token: forcedToken, skill: forcedSkill, start, end: start + rawMatch.length}];
   }
   overlay.innerHTML = '';
   overlay.appendChild(renderComposerSkillOverlay(text, mentions));

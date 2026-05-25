@@ -108,8 +108,9 @@ def test_composer_skill_overlay_uses_whitespace_completed_mentions():
     assert "function renderComposerSkillOverlay" in skills
     assert "composer-overlay-token" in skills
     assert "composer-overlay-token-raw" in skills
-    assert "position:absolute" in css
-    assert "visibility:hidden" in css
+    assert "rawMatch" in skills
+    assert "width:100%" in css
+    assert "justify-content:center" in css
     assert "function findCompletedComposerSkillMentions" in skills
     assert "COMPOSER_SKILL_TOKEN_RE" in skills
     assert "(?=\\s)" in skills
