@@ -268,6 +268,34 @@ let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
   _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+  _clearRenderCache();
+}
+
+// ── renderMd / _renderUserFencedBlocks cache ──────────────────────────────
+// Long sessions re-render the same messages on every renderMessages() call.
+// Cache the rendered HTML so unchanged messages skip the expensive regex
+// pipeline entirely.  ~95% of messages are identical between renders.
+const _renderCache = new Map();
+const _renderCacheMax = 300;
+function _clearRenderCache(){ _renderCache.clear(); }
+function _renderCacheKey(text, isUser){
+  const p = isUser ? 'u' : 'a';
+  // Short content: use the full string as key (cheap Map lookup).
+  // Long content: length + prefix + suffix is good enough — collisions on
+  // 20-char prefix+suffix are vanishingly rare for chat messages.
+  if(text.length <= 500) return p + ':' + text;
+  return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
+}
+function _getCachedRender(text, isUser){
+  const key = _renderCacheKey(text, isUser);
+  const hit = _renderCache.get(key);
+  if(hit !== undefined) return hit;
+  const rendered = isUser
+    ? _renderUserFencedBlocks(text)
+    : renderMd(_stripXmlToolCallsDisplay(String(text)));
+  if(_renderCache.size > _renderCacheMax) _renderCache.clear();
+  _renderCache.set(key, rendered);
+  return rendered;
 }
 function _currentMessageRenderWindowSize(){
   return Math.max(
@@ -6236,7 +6264,7 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    let bodyHtml = isUser ? _renderUserFencedBlocks(displayContent) : renderMd(_stripXmlToolCallsDisplay(String(displayContent)));
+    let bodyHtml = _getCachedRender(displayContent, isUser);
     if(!isUser&&m.provider_details){
       const summary=m.provider_details_label||'Provider details';
       bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
@@ -7017,11 +7045,22 @@ function postProcessRenderedMessages(container) {
 }
 
 function highlightCode(container) {
-  // Apply Prism.js syntax highlighting to all code blocks in container (or whole messages area)
-  if(typeof Prism === 'undefined' || !Prism.highlightAllUnder) return;
+  // Apply Prism.js syntax highlighting only to *new* code blocks.
+  // Previously every renderMessages() called Prism.highlightAllUnder() which
+  // re-scanned and re-highlighted every <pre> in the container — expensive in
+  // long sessions with dozens of code blocks.  Now we only touch blocks that
+  // don't already have the data-highlighted marker.
+  if(typeof Prism === 'undefined') return;
   const el = container || $('msgInner');
   if(!el) return;
-  Prism.highlightAllUnder(el);
+  // Prefer per-element highlight (avoids the full DOM walk of highlightAllUnder)
+  const blocks = el.querySelectorAll('pre code:not([data-highlighted])');
+  if(blocks.length === 0) return;
+  for(let i = 0; i < blocks.length; i++){
+    const block = blocks[i];
+    if(typeof Prism.highlightElement === 'function') Prism.highlightElement(block);
+    block.dataset.highlighted = '1';
+  }
 }
 
 // Lazy load js-yaml for YAML tree view support
