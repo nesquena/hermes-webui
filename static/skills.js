@@ -119,9 +119,11 @@ function highlightSkillMentionsInTextNode(node) {
     if(!skill) continue;
 
     const tokenEnd = tokenStart + matchedText.length;
+    const codeParent = nearestInlineSkillMentionCodeParent(node);
+    const isSlashMention = matchedText.startsWith('/') || matchedText.startsWith('`/');
+    if(!isSlashMention && !codeParent) continue;
     parts.push(document.createTextNode(text.slice(last, tokenStart)));
     const chip = createSkillChip(skill);
-    const codeParent = nearestInlineSkillMentionCodeParent(node);
     if(codeParent && codeParent.textContent.trim()===matchedText && text.trim()===matchedText){
       codeParent.parentNode.replaceChild(chip, codeParent);
       return true;
