@@ -4509,3 +4509,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
   text-align:left;
   unicode-bidi:isolate;
 }
+
+/* Cap composer width on very wide displays so the chip-cluster gap stays bounded */
+@media (min-width:1600px) {
+  .composer-box{max-width:1600px;margin:0 auto;}
+}
