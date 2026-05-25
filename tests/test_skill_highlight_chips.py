@@ -109,8 +109,9 @@ def test_composer_skill_overlay_uses_whitespace_completed_mentions():
     assert "composer-overlay-token" in skills
     assert "composer-overlay-token-raw" not in skills
     assert "rawMatch" not in skills
-    assert ".composer-overlay-token{display:inline;vertical-align:baseline;}" in css
-    assert "composer-overlay-token-chip" not in css
+    assert "font-size:inherit;" in css
+    assert "font-weight:inherit;" in css
+    assert ".composer-skill-overlay .skill-chip{vertical-align:baseline;margin:0;}" in css
     assert "function findCompletedComposerSkillMentions" in skills
     assert "COMPOSER_SKILL_TOKEN_RE" in skills
     assert "(?=\\s)" in skills
@@ -118,6 +119,14 @@ def test_composer_skill_overlay_uses_whitespace_completed_mentions():
     assert "updateComposerSkillPreview({force:true});" not in commands
     assert "replaceChild(textNode,chip)" not in skills
 
+
+def test_composer_overlay_normalizes_completed_slash_skill_mentions():
+    """Completed /skill mentions should normalize the textarea value so overlay width equals caret text."""
+    skills = read("static/skills.js")
+    assert "function normalizeCompletedComposerSkillMentions" in skills
+    assert "m.raw && m.raw.startsWith('/')" in skills
+    assert "textarea.setSelectionRange(nextSelection, nextSelection);" in skills
+    assert "normalizeCompletedComposerSkillMentions(textarea);" in skills
 
 def test_composer_preview_avoids_prefix_overlap_by_waiting_for_whitespace():
     """Prefix-overlapping skills should not mismatch because unfinished tokens are ignored."""

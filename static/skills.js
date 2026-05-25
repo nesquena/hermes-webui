@@ -161,17 +161,41 @@ function highlightSkillsInMessages(container) {
   loadSkillRegistry().then(() => highlightSkillsInRenderedMessages(root));
 }
 
-const COMPOSER_SKILL_TOKEN_RE = /(^|\s)\/?([A-Za-z0-9][A-Za-z0-9_-]*)(?=\s)/g;
+const COMPOSER_SKILL_TOKEN_RE = /(^|\s)(\/?([A-Za-z0-9][A-Za-z0-9_-]*))(?=\s)/g;
 
 function findCompletedComposerSkillMentions(text) {
   const mentions = [];
   COMPOSER_SKILL_TOKEN_RE.lastIndex = 0;
   for(let m=COMPOSER_SKILL_TOKEN_RE.exec(String(text || '')); m; m=COMPOSER_SKILL_TOKEN_RE.exec(String(text || ''))){
-    const token = m[2] || '';
+    const raw = m[2] || '';
+    const token = m[3] || '';
     const skill = getSkillByMentionToken(token);
-    if(skill) mentions.push({token, skill, start: m.index + (m[1] || '').length, end: COMPOSER_SKILL_TOKEN_RE.lastIndex});
+    if(skill) mentions.push({raw, token, skill, start: m.index + (m[1] || '').length, end: COMPOSER_SKILL_TOKEN_RE.lastIndex});
   }
   return mentions;
+}
+
+function normalizeCompletedComposerSkillMentions(textarea) {
+  if(!textarea) return '';
+  const text = String(textarea.value || '');
+  const mentions = findCompletedComposerSkillMentions(text).filter(m => m.raw && m.raw.startsWith('/'));
+  if(!mentions.length) return text;
+  let next = '';
+  let last = 0;
+  let selectionDelta = 0;
+  const selection = textarea.selectionStart || 0;
+  for(const mention of mentions){
+    next += text.slice(last, mention.start) + mention.token;
+    if(mention.start < selection) selectionDelta += 1;
+    last = mention.end;
+  }
+  next += text.slice(last);
+  if(next !== text){
+    textarea.value = next;
+    const nextSelection = Math.max(0, selection - selectionDelta);
+    textarea.setSelectionRange(nextSelection, nextSelection);
+  }
+  return next;
 }
 
 function appendOverlayText(fragment, text) {
@@ -208,7 +232,7 @@ async function updateComposerSkillPreview(opts={}) {
   const textarea = (typeof $ === 'function' && $('msg')) || document.getElementById('msg');
   if(!overlay || !textarea) return;
   await loadSkillRegistry();
-  const text = String(textarea.value || '');
+  const text = normalizeCompletedComposerSkillMentions(textarea);
   let mentions = findCompletedComposerSkillMentions(text);
   overlay.innerHTML = '';
   overlay.appendChild(renderComposerSkillOverlay(text, mentions));
