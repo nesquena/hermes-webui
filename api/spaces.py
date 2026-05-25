@@ -5712,6 +5712,14 @@ def _browser_surface_tool_kind(action: str) -> str:
         return "open"
     if safe_action.endswith(".snapshot"):
         return "snapshot"
+    if safe_action.endswith(".back"):
+        return "back"
+    if safe_action.endswith(".forward"):
+        return "forward"
+    if safe_action.endswith(".press") or safe_action.endswith(".key") or safe_action.endswith(".press_key") or safe_action.endswith(".presskey"):
+        return "press"
+    if safe_action.endswith(".scroll"):
+        return "scroll"
     if safe_action.endswith(".click_ref") or safe_action.endswith(".clickref"):
         return "click_ref"
     if safe_action.endswith(".type_ref") or safe_action.endswith(".typeref"):
@@ -5787,6 +5795,12 @@ def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[
         surface.update(_browser_surface_url_metadata(payload.get("url") or payload.get("href") or payload.get("target")))
     if kind == "snapshot":
         surface["dom_stored"] = False
+    if kind in {"back", "forward"}:
+        surface["history_stored"] = False
+    if kind == "press":
+        surface["key_stored"] = False
+    if kind == "scroll":
+        surface["scroll_request_stored"] = False
     if kind in {"click_ref", "type_ref"}:
         surface["ref_provided"] = bool(str(payload.get("ref") or payload.get("element_ref") or payload.get("elementRef") or "").strip())
     if kind == "type_ref":
@@ -5991,6 +6005,20 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.browser.open",
         "browser.snapshot",
         "space.browser.snapshot",
+        "browser.back",
+        "space.browser.back",
+        "browser.forward",
+        "space.browser.forward",
+        "browser.press",
+        "space.browser.press",
+        "browser.key",
+        "space.browser.key",
+        "browser.press_key",
+        "space.browser.press_key",
+        "browser.presskey",
+        "space.browser.presskey",
+        "browser.scroll",
+        "space.browser.scroll",
         "browser.click_ref",
         "space.browser.click_ref",
         "browser.clickref",
@@ -10183,6 +10211,10 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "camera.stream.add",
         "browser.open",
         "browser.snapshot",
+        "browser.back",
+        "browser.forward",
+        "browser.press",
+        "browser.scroll",
         "browser.click_ref",
         "browser.type_ref",
         "checkpoint",
