@@ -31,21 +31,20 @@ def test_postprocess_invokes_skill_highlighter():
 
 
 def test_skill_highlighter_supports_requested_token_forms():
-    """Conversation matcher should support slash, bare, and inline-code skill mentions."""
+    """Conversation matcher should support slash and rendered inline-code skill mentions."""
     skills = read("static/skills.js")
 
-    assert "`\\/?([A-Za-z0-9][A-Za-z0-9_-]*)`" in skills
     assert "\\/?([A-Za-z0-9][A-Za-z0-9_-]*)" in skills
     assert "const matchedText = m[2] || '';" in skills
-    assert "const skillName = m[3] || m[4] || '';" in skills
+    assert "const skillName = m[3] || '';" in skills
 
 
 def test_skill_highlighter_requires_explicit_slash_or_inline_code_mentions():
     """Conversation matcher should not chip bare prose words, case variants, or slash/path substrings."""
     skills = read("static/skills.js")
 
-    assert "const SKILL_MENTION_TOKEN_RE = /(^|\\s)(`\\/?([A-Za-z0-9][A-Za-z0-9_-]*)`|\\/?([A-Za-z0-9][A-Za-z0-9_-]*))(?=$|\\s)/g;" in skills
-    assert "const isSlashMention = matchedText.startsWith('/') || matchedText.startsWith('`/');" in skills
+    assert "const SKILL_MENTION_TOKEN_RE = /(^|\\s)(\\/?([A-Za-z0-9][A-Za-z0-9_-]*))(?=$|\\s)/g;" in skills
+    assert "const isSlashMention = matchedText.startsWith('/');" in skills
     assert "if(!isSlashMention && !codeParent) continue;" in skills
     assert "function getSkillByMentionToken(token)" in skills
     assert "const raw = String(token || '').trim().replace(/^\\//, '');" in skills

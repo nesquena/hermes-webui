@@ -47,10 +47,6 @@ async function loadSkillRegistry(force=false) {
   return _skillRegistryPromise;
 }
 
-function getSkillBySlug(slug) {
-  return _skillRegistry.get(normalizeSkillSlug(slug)) || null;
-}
-
 function getSkillByMentionToken(token) {
   const raw = String(token || '').trim().replace(/^\//, '');
   return _skillRegistry.get(raw) || null;
@@ -81,7 +77,7 @@ function createSkillChip(skill) {
 }
 
 const SKILL_MENTION_SKIP_TAGS = new Set(['PRE', 'A', 'SCRIPT', 'STYLE', 'TEXTAREA', 'INPUT', 'BUTTON']);
-const SKILL_MENTION_TOKEN_RE = /(^|\s)(`\/?([A-Za-z0-9][A-Za-z0-9_-]*)`|\/?([A-Za-z0-9][A-Za-z0-9_-]*))(?=$|\s)/g;
+const SKILL_MENTION_TOKEN_RE = /(^|\s)(\/?([A-Za-z0-9][A-Za-z0-9_-]*))(?=$|\s)/g;
 
 function shouldSkipSkillMentionNode(node) {
   for(let parent=node.parentNode; parent&&parent.nodeType===1; parent=parent.parentNode){
@@ -114,13 +110,13 @@ function highlightSkillMentionsInTextNode(node) {
     const prefix = m[1] || '';
     const tokenStart = m.index + prefix.length;
     const matchedText = m[2] || '';
-    const skillName = m[3] || m[4] || '';
+    const skillName = m[3] || '';
     const skill = getSkillByMentionToken(skillName);
     if(!skill) continue;
 
     const tokenEnd = tokenStart + matchedText.length;
     const codeParent = nearestInlineSkillMentionCodeParent(node);
-    const isSlashMention = matchedText.startsWith('/') || matchedText.startsWith('`/');
+    const isSlashMention = matchedText.startsWith('/');
     if(!isSlashMention && !codeParent) continue;
     parts.push(document.createTextNode(text.slice(last, tokenStart)));
     const chip = createSkillChip(skill);
@@ -166,7 +162,6 @@ function highlightSkillsInMessages(container) {
 
 window.normalizeSkillSlug = normalizeSkillSlug;
 window.loadSkillRegistry = loadSkillRegistry;
-window.getSkillBySlug = getSkillBySlug;
 window.getSkillByMentionToken = getSkillByMentionToken;
 window.getRegisteredSkills = getRegisteredSkills;
 window.getSkillAutocompleteEntries = getSkillAutocompleteEntries;
