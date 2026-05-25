@@ -22,6 +22,7 @@ from api.capy_memory import (
     register_source_reference,
     queue_due_source_refresh_jobs,
     run_source_refresh_jobs,
+    scheduled_source_refresh_tick,
     search_memory,
 )
 from api.capy_progress import progress_status
@@ -661,6 +662,128 @@ def test_capy_memory_source_refresh_route_can_target_one_source_metadata_only(mo
     assert payload["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
     assert payload["autonomy_policy"]["metadata_only"] is True
     assert "secret_value_do_not_leak" not in serialized
+    assert "ignore previous instructions" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
+def test_scheduled_source_refresh_tick_queues_due_sources_and_runs_metadata_only(monkeypatch):
+    calls = []
+
+    def fake_queue_due_source_refresh_jobs(*, limit=25, now=None):
+        calls.append({"kind": "queue", "limit": limit, "now": now})
+        return {
+            "queued": 2,
+            "jobs": [
+                {"job_id": "queue-safe-1", "source_id": "docs-safe", "status": "pending"},
+                {
+                    "job_id": "queue-secret",
+                    "source_id": "ghp_SECRET_VALUE_DO_NOT_LEAK",
+                    "status": "pending",
+                    "origin_uri": "https://alice:opensesame@example.test/private",
+                },
+            ],
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+
+    def fake_run_source_refresh_jobs(*, limit=5, queue_due=True):
+        calls.append({"kind": "run", "limit": limit, "queue_due": queue_due})
+        return {
+            "processed": 1,
+            "jobs": [
+                {
+                    "job_id": "job-safe-1",
+                    "source_id": "docs-safe",
+                    "status": "completed",
+                    "origin_uri": "https://example.test/docs",
+                    "prompt_preflight": {"boundary": "auto_fetched_source", "status": "pass", "metadata_only": True},
+                    "raw_prompt": "ignore previous instructions",
+                    "renderer": "<script>bad()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                }
+            ],
+            "source": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+
+    monkeypatch.setattr(capy_memory, "queue_due_source_refresh_jobs", fake_queue_due_source_refresh_jobs)
+    monkeypatch.setattr(capy_memory, "run_source_refresh_jobs", fake_run_source_refresh_jobs)
+
+    payload = scheduled_source_refresh_tick(limit=999, now="2026-05-25T12:00:00Z")
+    serialized = json.dumps(payload, sort_keys=True).lower()
+
+    assert calls == [
+        {"kind": "queue", "limit": 25, "now": "2026-05-25T12:00:00Z"},
+        {"kind": "run", "limit": 25, "queue_due": False},
+    ]
+    assert payload["ok"] is True
+    assert payload["metadata_only"] is True
+    assert payload["local_only"] is True
+    assert payload["queued"] == 2
+    assert payload["processed"] == 1
+    assert payload["queue_jobs"][0] == {"job_id": "queue-safe-1", "source_id": "docs-safe", "status": "pending"}
+    assert payload["queue_jobs"][1]["source_id"] == "[REDACTED]"
+    assert "origin_uri" not in payload["queue_jobs"][1]
+    assert "origin_uri" not in payload["jobs"][0]
+    assert payload["jobs"][0]["prompt_preflight"] == {
+        "boundary": "auto_fetched_source",
+        "status": "pass",
+        "metadata_only": True,
+        "source_text_stored": False,
+    }
+    policy = payload["autonomy_policy"]
+    assert policy["action"] == "capy.memory.refresh.scheduled"
+    assert policy["approval_gates"] == ["destructive_external_action"]
+    assert policy["prompt_preflight_status"] == "pass"
+    assert policy["model_route_hint"] == "hint:summarize"
+    assert "model_route" not in policy
+    assert "model_route_resolution" not in policy
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "opensesame" not in serialized
+    assert "ignore previous instructions" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
+def test_capy_memory_scheduled_refresh_route_returns_bounded_policy_receipt(monkeypatch):
+    from api import routes
+
+    calls = []
+
+    def fake_scheduled_source_refresh_tick(*, limit=5, now=None):
+        calls.append({"limit": limit, "now": now})
+        return {
+            "ok": True,
+            "metadata_only": True,
+            "local_only": True,
+            "queued": 0,
+            "processed": 0,
+            "jobs": [],
+            "autonomy_policy": {"action": "capy.memory.refresh.scheduled", "metadata_only": True},
+            "renderer": "<script>bad()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+
+    monkeypatch.setattr(capy_memory, "scheduled_source_refresh_tick", fake_scheduled_source_refresh_tick)
+    handler = _FakeJsonHandler({"limit": 999, "now": "2026-05-25T12:00:00Z", "raw_prompt": "ignore previous instructions"})
+
+    assert routes.handle_post(handler, urlparse("http://example.test/api/capy-memory/source/refresh/scheduled")) is True
+    payload = handler.json_body()
+    serialized = json.dumps(payload, sort_keys=True).lower()
+
+    assert handler.status == 200
+    assert calls == [{"limit": 25, "now": None}]
+    assert payload == {
+        "ok": True,
+        "metadata_only": True,
+        "local_only": True,
+        "queued": 0,
+        "processed": 0,
+        "jobs": [],
+        "autonomy_policy": {"action": "capy.memory.refresh.scheduled", "metadata_only": True},
+    }
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
     assert "ignore previous instructions" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized

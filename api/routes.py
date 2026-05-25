@@ -4395,6 +4395,56 @@ def handle_post(handler, parsed) -> bool:
             logger.exception("Capy memory source registration failed")
             return bad(handler, _sanitize_error(exc), status=500)
 
+    if parsed.path == "/api/capy-memory/source/refresh/scheduled":
+        try:
+            from api.capy_memory import _safe_source_refresh_public_jobs, scheduled_source_refresh_tick
+
+            try:
+                limit = int(body.get("limit", 25))
+            except (TypeError, ValueError):
+                limit = 25
+            limit = max(1, min(limit, 25))
+            result = scheduled_source_refresh_tick(limit=limit)
+            safe_payload = {}
+            if isinstance(result, dict):
+                for key in ("ok", "metadata_only", "local_only"):
+                    if result.get(key) is True:
+                        safe_payload[key] = True
+                for key in ("queued", "processed"):
+                    try:
+                        safe_payload[key] = max(0, min(int(result.get(key, 0)), limit))
+                    except (TypeError, ValueError):
+                        safe_payload[key] = 0
+                if "queue_jobs" in result:
+                    safe_payload["queue_jobs"] = _safe_source_refresh_public_jobs(result.get("queue_jobs"), limit=limit)
+                safe_payload["jobs"] = _safe_source_refresh_public_jobs(result.get("jobs", []), limit=limit)
+                policy = result.get("autonomy_policy")
+                if isinstance(policy, dict) and policy.get("action") == "capy.memory.refresh.scheduled":
+                    safe_payload["autonomy_policy"] = {
+                        key: value
+                        for key, value in policy.items()
+                        if key
+                        in {
+                            "available",
+                            "action",
+                            "mode",
+                            "label",
+                            "approval_required",
+                            "approval_gates",
+                            "prompt_preflight_status",
+                            "model_route_hint",
+                            "metadata_only",
+                            "local_only",
+                        }
+                    }
+            j(handler, safe_payload)
+            return True
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        except Exception as exc:
+            logger.exception("Capy memory scheduled source refresh failed")
+            return bad(handler, _sanitize_error(exc), status=500)
+
     if parsed.path == "/api/capy-memory/source/refresh":
         try:
             from api.capy_memory import _safe_public_id, run_source_refresh_jobs

@@ -1495,6 +1495,7 @@ def run_source_refresh_jobs(
     fetcher: Any | None = None,
     source_id: str | None = None,
     summarizer: Any | None = None,
+    queue_due: bool = True,
 ) -> dict[str, Any]:
     """Lease queued source.refresh jobs and store sanitized advisory summaries only."""
     target_source_id = _safe_public_id(source_id, fallback="") if source_id is not None else ""
@@ -1524,7 +1525,7 @@ def run_source_refresh_jobs(
                     """,
                     (force_queued_at, target_source_id),
                 )
-    else:
+    elif queue_due:
         queue_due_source_refresh_jobs(limit=limit)
     now = _now_iso()
     query_args: list[Any] = []
@@ -1713,6 +1714,123 @@ def run_source_refresh_jobs(
         "limit": limit,
         "processed": len(results),
         "jobs": results,
+    }
+
+
+def _safe_source_refresh_public_value(value: Any, *, kind: str = "text", limit: int = 240) -> str:
+    if kind == "id":
+        safe = _safe_public_id(value, fallback="")
+    else:
+        safe = _safe_public_text(value, limit=limit)
+    if safe:
+        return safe
+    return "[REDACTED]" if _is_present_public_value(value) else ""
+
+
+def _safe_source_refresh_public_preflight(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    status = _safe_text(value.get("status"), limit=40).lower()
+    boundary = _safe_text(value.get("boundary"), limit=80).lower()
+    if status not in {"pass", "warn", "block"}:
+        return None
+    if boundary not in {"auto_fetched_source", "memory_context", "creator_preview", "creator_commit", "widget_runtime_prompt"}:
+        return None
+    return {
+        "boundary": boundary,
+        "status": status,
+        "metadata_only": value.get("metadata_only") is True,
+        "source_text_stored": False,
+    }
+
+
+def _safe_source_refresh_public_jobs(jobs: Any, *, limit: int) -> list[dict[str, Any]]:
+    if not isinstance(jobs, list):
+        return []
+    safe_jobs: list[dict[str, Any]] = []
+    for job in jobs[: max(0, limit)]:
+        if not isinstance(job, dict):
+            continue
+        safe_job: dict[str, Any] = {}
+        for key, kind in (
+            ("job_id", "id"),
+            ("source_id", "id"),
+            ("status", "text"),
+        ):
+            value = job.get(key)
+            if not _is_present_public_value(value):
+                continue
+            safe_value = _safe_source_refresh_public_value(value, kind=kind)
+            if safe_value:
+                safe_job[key] = safe_value
+        preflight = _safe_source_refresh_public_preflight(job.get("prompt_preflight"))
+        if preflight:
+            safe_job["prompt_preflight"] = preflight
+        if safe_job:
+            safe_jobs.append(safe_job)
+    return safe_jobs
+
+
+def _source_refresh_preflight_status(jobs: list[dict[str, Any]]) -> str:
+    statuses = [
+        job.get("prompt_preflight", {}).get("status")
+        for job in jobs
+        if isinstance(job.get("prompt_preflight"), dict)
+    ]
+    if "block" in statuses:
+        return "block"
+    if "warn" in statuses:
+        return "warn"
+    if "pass" in statuses:
+        return "pass"
+    return "required"
+
+
+def scheduled_source_refresh_tick(*, limit: int = 25, now: str | None = None) -> dict[str, Any]:
+    """Queue due source refreshes and run a bounded local metadata-only scheduler tick."""
+    try:
+        safe_limit = int(limit or 25)
+    except (TypeError, ValueError):
+        safe_limit = 25
+    safe_limit = max(1, min(safe_limit, 25))
+    queue_result = queue_due_source_refresh_jobs(limit=safe_limit, now=now)
+    run_result = run_source_refresh_jobs(limit=safe_limit, queue_due=False)
+    queue_jobs = _safe_source_refresh_public_jobs(
+        queue_result.get("jobs", []) if isinstance(queue_result, dict) else [],
+        limit=safe_limit,
+    )
+    jobs = _safe_source_refresh_public_jobs(
+        run_result.get("jobs", []) if isinstance(run_result, dict) else [],
+        limit=safe_limit,
+    )
+    try:
+        queued = int(queue_result.get("queued", 0) if isinstance(queue_result, dict) else 0)
+    except (TypeError, ValueError):
+        queued = 0
+    try:
+        processed = int(run_result.get("processed", 0) if isinstance(run_result, dict) else 0)
+    except (TypeError, ValueError):
+        processed = 0
+    from api.capy_policy import action_policy_receipt
+
+    policy = action_policy_receipt(
+        "capy.memory.refresh.scheduled",
+        approval_gates=["destructive_external_action"],
+        prompt_preflight_status=_source_refresh_preflight_status(jobs),
+        model_route_hint="hint:summarize",
+    )
+    policy.pop("model_route", None)
+    policy.pop("model_route_resolution", None)
+    return {
+        "ok": True,
+        "local_only": True,
+        "metadata_only": True,
+        "limit": safe_limit,
+        "queued": max(0, min(queued, safe_limit)),
+        "processed": max(0, min(processed, safe_limit)),
+        "queue_jobs": queue_jobs,
+        "jobs": jobs,
+        "autonomy_policy": policy,
     }
 
 
