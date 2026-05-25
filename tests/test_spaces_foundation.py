@@ -3435,6 +3435,63 @@ def test_widget_recovery_enable_disable_tools_record_metadata_only_progress_even
     assert "renderer" not in serialized
 
 
+def test_widget_recovery_toggle_outputs_include_compaction_receipts_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-recovery-compaction-lab", "name": "Widget Recovery Compaction Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "broken-panel",
+            "kind": "html",
+            "title": "Broken Panel",
+            "renderer": "<script>stored()</script>",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    disabled = spaces.disable_widget_for_recovery(
+        created["space_id"],
+        "broken-panel",
+        reason="broken renderer <script>bad()</script> with SECRET_VALUE_DO_NOT_LEAK",
+    )
+    enabled = spaces.enable_widget_for_recovery(
+        created["space_id"],
+        "broken-panel",
+        reason="safe after renderer cleanup with bearer placeholder",
+    )
+    serialized = json.dumps({"disabled": disabled, "enabled": enabled}, sort_keys=True).lower()
+
+    for result, action in [
+        (disabled, "space.widget.recovery.disable"),
+        (enabled, "space.widget.recovery.enable"),
+    ]:
+        compaction = result["output_compaction"]
+        assert compaction["tool"] == "capy-spaces-recovery-toggle"
+        assert compaction["command"] == action
+        assert compaction["metadata_only"] is True
+        assert compaction["original_chars"] > 0
+        assert compaction["compacted_chars"] <= 700
+        assert compaction["redaction_status"] == "metadata_only"
+        assert compaction["rules_applied"]
+        text = compaction["text"].lower()
+        assert f"action: {action}" in text
+        assert "space_id: widget-recovery-compaction-lab" in text
+        assert "target_id: broken-panel" in text
+        assert "raw_prompt_stored: false" in text
+        assert "broken renderer" not in text
+        assert "safe after" not in text
+        handles = compaction["retained_artifact_handles"]
+        assert any(handle.get("handle") == "space:widget-recovery-compaction-lab" for handle in handles)
+        assert any(handle.get("handle") == "widget:widget-recovery-compaction-lab:broken-panel" for handle in handles)
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "bearer" not in serialized
+
+
 def test_recovery_module_enable_disable_tools_record_metadata_only_progress_events(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     quarantined = spaces.upsert_recovery_module(

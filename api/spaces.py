@@ -643,6 +643,85 @@ def _recovery_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
     }
 
 
+def _recovery_toggle_output_compaction_receipt(
+    *,
+    action: str,
+    space_id: str,
+    target_kind: str,
+    target_id: str | None = None,
+    disabled: bool | None = None,
+    revision_event_id: str | None = None,
+    prompt_preflight: dict[str, Any] | None = None,
+    autonomy_policy: dict[str, Any] | None = None,
+    progress_event: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return bounded metadata-only compaction evidence for recovery toggles.
+
+    Recovery toggles may operate on manifests that retain generated renderer,
+    source, data, or module bodies on disk for later repair. The receipt is
+    intentionally reconstructed from allow-listed IDs/status/policy metadata so
+    model context and UI surfaces can prove the action happened without copying
+    raw generated content or operator-provided reasons.
+    """
+    from api.capy_compaction import compact_output
+
+    safe_action = _context_value(action, 120) or "space.recovery.action"
+    safe_space_id = _context_value(space_id, 120) or "unknown-space"
+    safe_target_kind = _context_value(target_kind, 40) or "space"
+    safe_target_id = _context_value(target_id, 120) if target_id is not None else None
+    lines = [
+        "recovery_toggle: recorded",
+        "metadata_only: true",
+        "raw_prompt_stored: false",
+        f"action: {safe_action}",
+        f"space_id: {safe_space_id}",
+        f"target_kind: {safe_target_kind}",
+    ]
+    if safe_target_id:
+        lines.append(f"target_id: {safe_target_id}")
+    if disabled is not None:
+        lines.append(f"disabled: {bool(disabled)}")
+    public_revision_event_id = _public_revision_event_id(revision_event_id)
+    if public_revision_event_id:
+        lines.append(f"revision_event_id: {public_revision_event_id}")
+    if isinstance(prompt_preflight, dict):
+        lines.append(f"prompt_preflight_status: {_payload_text_summary(prompt_preflight.get('status') or 'required', 40) or 'required'}")
+    if isinstance(autonomy_policy, dict):
+        lines.append(f"autonomy_action: {_payload_text_summary(autonomy_policy.get('action') or safe_action, 120) or safe_action}")
+        lines.append(f"model_route_hint: {_payload_text_summary(autonomy_policy.get('model_route_hint') or 'hint:reasoning', 80) or 'hint:reasoning'}")
+    if isinstance(progress_event, dict):
+        lines.append(f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or f'recovery:{safe_space_id}', 160) or f'recovery:{safe_space_id}'}")
+        lines.append(f"progress_status: {_payload_text_summary(progress_event.get('status') or 'completed', 40) or 'completed'}")
+
+    artifact_handles = [
+        {
+            "kind": "space",
+            "handle": f"space:{safe_space_id}",
+            "label": "Recovery space metadata",
+        }
+    ]
+    if safe_target_id and safe_target_kind != "space":
+        artifact_handles.append(
+            {
+                "kind": safe_target_kind,
+                "handle": f"{safe_target_kind}:{safe_space_id}:{safe_target_id}",
+                "label": f"Recovery {safe_target_kind} metadata",
+            }
+        )
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-recovery-toggle",
+        command=safe_action,
+        exit_status=0,
+        max_chars=700,
+        artifact_handles=artifact_handles,
+    )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
 def _recovery_restore_action_policy_receipt(action: str = "space.recovery.restore") -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
@@ -9633,14 +9712,28 @@ def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = 
     saved = _write_manifest(space, "widget.recovery_disabled", {"widget_id": wid, "reason": recovery["disabled_reason"]})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.disable")
     action = "space.widget.recovery.disable"
+    prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(action)
+    output_compaction = _recovery_toggle_output_compaction_receipt(
+        action=action,
+        space_id=saved["space_id"],
+        target_kind="widget",
+        target_id=wid,
+        disabled=True,
+        revision_event_id=saved["revision_event_id"],
+        prompt_preflight=prompt_preflight,
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_event,
+    )
     return {
         "disabled": True,
         "space_id": saved["space_id"],
         "widget_id": wid,
         "revision_event_id": saved["revision_event_id"],
-        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
+        "prompt_preflight": prompt_preflight,
         "progress_event": progress_event,
-        "autonomy_policy": _recovery_toggle_action_policy_receipt(action),
+        "autonomy_policy": autonomy_policy,
+        "output_compaction": output_compaction,
     }
 
 
@@ -9664,14 +9757,28 @@ def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "
     saved = _write_manifest(space, "widget.recovery_enabled", {"widget_id": wid, "reason": detail_reason})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.enable")
     action = "space.widget.recovery.enable"
+    prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(action)
+    output_compaction = _recovery_toggle_output_compaction_receipt(
+        action=action,
+        space_id=saved["space_id"],
+        target_kind="widget",
+        target_id=wid,
+        disabled=False,
+        revision_event_id=saved["revision_event_id"],
+        prompt_preflight=prompt_preflight,
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_event,
+    )
     return {
         "disabled": False,
         "space_id": saved["space_id"],
         "widget_id": wid,
         "revision_event_id": saved["revision_event_id"],
-        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
+        "prompt_preflight": prompt_preflight,
         "progress_event": progress_event,
-        "autonomy_policy": _recovery_toggle_action_policy_receipt(action),
+        "autonomy_policy": autonomy_policy,
+        "output_compaction": output_compaction,
     }
 
 
