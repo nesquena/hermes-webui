@@ -58,7 +58,7 @@ Delivered:
 - `api/capy_compaction.py` implements `compact_output(...)` with bounded receipts, unsafe-marker redaction, path collapsing, repeated-line dedupe, approval-prompt preservation, error-block preservation, invalid-cap rejection, and `rules_applied` metadata.
 - `tests/test_capy_output_compaction.py` verifies size accounting, error/approval preservation, redaction status, cap enforcement, and unsafe-marker omission.
 - `space_demo_run_all()` now emits a metadata-only `output_compaction` receipt built from allow-listed demo-suite summary lines, so the existing Spaces UI can show original/compacted character counts, redaction status, and allow-listed rules without rendering raw output, prompts, widget bodies, or credentials.
-- Individual demo smokes, creator preview/commit receipts, active-space context receipts, and scoped progress status receipts now reuse the same product-visible compaction evidence pattern without rendering raw prompts, generated bodies, renderer/source/API-auth fields, scripts, credentials, or exception text.
+- Individual demo smokes, creator preview/commit receipts, active-space context receipts, Research Harness artifact completion receipts, and scoped progress status receipts now reuse the same product-visible compaction evidence pattern without rendering raw prompts, markdown bodies, generated bodies, renderer/source/API-auth fields, scripts, credentials, or exception text.
 
 Remaining:
 - Extend compaction receipts to remaining long external tool/subagent/browser/development/recovery-output boundaries where they add product value.

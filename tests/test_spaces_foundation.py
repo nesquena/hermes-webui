@@ -10116,6 +10116,20 @@ def test_spaces_research_artifact_route_marks_summary_export_ready_metadata_only
     assert body["autonomy_policy"]["approval_gates"] == ["creator_commit"]
     assert body["autonomy_policy"]["prompt_preflight_status"] == "pass"
     assert body["autonomy_policy"]["model_route_hint"] == "hint:summarize"
+    compaction = body["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-research"
+    assert compaction["command"] == "space.research.artifact"
+    assert compaction["exit_status"] == 0
+    assert "retain_artifact_handles" in compaction["rules_applied"]
+    assert compaction["retained_artifact_handles"] == [
+        {
+            "kind": "artifact",
+            "handle": "artifact:research-artifact-route:research-summary",
+            "label": "Research summary metadata",
+        }
+    ]
+    assert compaction["original_chars"] > 0
+    assert compaction["compacted_chars"] > 0
     assert detail["metadata"]["export"]["pdf"] == "ready-for-user-request"
     assert data_slot == body["artifact"]
     assert "public facts only" not in serialized

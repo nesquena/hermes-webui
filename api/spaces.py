@@ -3199,6 +3199,58 @@ def _research_artifact_action_policy_receipt(preflight_receipt: dict[str, Any] |
     )
 
 
+def _research_artifact_output_compaction_receipt(
+    space_id: str,
+    artifact_value: dict[str, Any],
+    *,
+    revision_event_id: str,
+    prompt_preflight: dict[str, Any] | None,
+    autonomy_policy: dict[str, Any] | None,
+    progress_event: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return metadata-only compaction evidence for Research Harness artifacts.
+
+    The raw markdown body is deliberately excluded. The compacted input is built
+    from allow-listed artifact/provenance fields already safe for public
+    receipts, plus a stable artifact handle for later lookup.
+    """
+    from api.capy_compaction import compact_output
+
+    lines = [
+        "research_artifact: ready",
+        f"space_id: {space_id}",
+        "artifact_key: research-summary",
+        f"title: {_payload_text_summary(artifact_value.get('title') or 'Research report', 160) or 'Research report'}",
+        f"format: {_payload_text_summary(artifact_value.get('format') or 'markdown', 40) or 'markdown'}",
+        f"status: {_payload_text_summary(artifact_value.get('status') or 'ready', 40) or 'ready'}",
+        f"char_count: {max(0, int(artifact_value.get('char_count') or 0))}",
+        f"line_count: {max(0, int(artifact_value.get('line_count') or 0))}",
+        f"word_count: {max(0, int(artifact_value.get('word_count') or 0))}",
+        f"revision_event_id: {_public_revision_event_id(revision_event_id) or 'none'}",
+    ]
+    if isinstance(prompt_preflight, dict):
+        lines.append(f"prompt_preflight_status: {_payload_text_summary(prompt_preflight.get('status') or 'required', 40) or 'required'}")
+    if isinstance(autonomy_policy, dict):
+        lines.append(f"autonomy_action: {_payload_text_summary(autonomy_policy.get('action') or 'space.research.artifact', 80) or 'space.research.artifact'}")
+        lines.append(f"model_route_hint: {_payload_text_summary(autonomy_policy.get('model_route_hint') or 'hint:summarize', 80) or 'hint:summarize'}")
+    if isinstance(progress_event, dict):
+        lines.append(f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or f'research-artifact:{space_id}', 120) or f'research-artifact:{space_id}'}")
+    return compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-research",
+        command="space.research.artifact",
+        exit_status=0,
+        max_chars=700,
+        artifact_handles=[
+            {
+                "kind": "artifact",
+                "handle": f"artifact:{space_id}:research-summary",
+                "label": "Research summary metadata",
+            }
+        ],
+    )
+
+
 def _record_research_progress_event(space_id: str, *, source_count: int, note_count: int) -> dict[str, Any]:
     """Best-effort metadata-only producer event for Research Harness progress."""
     run_id = f"research:{space_id}"
@@ -3371,6 +3423,14 @@ def set_research_artifact(space_id: str, title: Any, markdown: Any) -> dict[str,
         },
     )
     progress_event = _record_research_artifact_progress_event(sid)
+    output_compaction = _research_artifact_output_compaction_receipt(
+        sid,
+        artifact_value,
+        revision_event_id=widget_result["revision_event_id"],
+        prompt_preflight=prompt_preflight,
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_event,
+    )
     return {
         "space_id": sid,
         "artifact": artifact,
@@ -3379,6 +3439,7 @@ def set_research_artifact(space_id: str, title: Any, markdown: Any) -> dict[str,
         "progress_event": progress_event,
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
+        "output_compaction": output_compaction,
     }
 
 
