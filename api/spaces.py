@@ -9579,6 +9579,17 @@ def queue_recovery_module_repair_event(
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
         "progress_event": progress_event,
+        "output_compaction": _space_repair_output_compaction(
+            action=repair_action,
+            status="queued",
+            target_kind="module",
+            target_handle=f"module:{mid}",
+            event_id=event_id,
+            preflight_receipt=preflight_receipt,
+            autonomy_policy_receipt=autonomy_policy_receipt,
+            progress_event=progress_event,
+            payload=payload,
+        ),
     }
     if preflight_receipt:
         response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
@@ -10007,6 +10018,75 @@ def _record_space_repair_progress_event(space_id: str) -> dict[str, Any]:
     return _record_space_tool_progress_event(space_id, run_prefix="repair")
 
 
+def _space_repair_payload_key_counts(payload: dict[str, Any] | None) -> dict[str, int]:
+    """Return payload key counts without retaining raw payload keys or values."""
+    raw_payload = payload if isinstance(payload, dict) else {}
+    total = len(raw_payload)
+    safe = sum(1 for key in raw_payload if _space_repair_payload_key_is_safe(str(key)))
+    return {
+        "total": total,
+        "safe": safe,
+        "omitted": max(0, total - safe),
+    }
+
+
+def _space_repair_output_compaction(
+    *,
+    action: str,
+    status: str,
+    target_kind: str,
+    target_handle: str,
+    event_id: str,
+    preflight_receipt: dict[str, Any] | None,
+    autonomy_policy_receipt: dict[str, Any] | None,
+    progress_event: dict[str, Any] | None,
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build metadata-only compaction evidence for high-risk repair queues."""
+    from api.capy_compaction import compact_output
+
+    safe_action = _context_value(action, 120) or "space.repair.queue"
+    safe_status = _context_value(status, 40) or "queued"
+    safe_target_kind = _context_value(target_kind, 40) or "target"
+    safe_target_handle = _space_repair_text_summary(target_handle, 180) or "[REDACTED]"
+    safe_event_id = _context_value(event_id, 120) or "[REDACTED]"
+    preflight_status = _context_value((preflight_receipt or {}).get("status"), 80) or "required"
+    policy_action = _context_value((autonomy_policy_receipt or {}).get("action"), 120) or safe_action
+    progress_run_id = _space_repair_text_summary((progress_event or {}).get("run_id"), 160) or "[REDACTED]"
+    payload_counts = _space_repair_payload_key_counts(payload)
+    lines = [
+        "Capy Spaces recovery repair queue metadata-only receipt",
+        f"status: {safe_status}",
+        f"target_kind: {safe_target_kind}",
+        f"target_handle: {safe_target_handle}",
+        f"event_id: {safe_event_id}",
+        "exit_status: 0" if safe_status == "queued" else "exit_status: 1",
+        f"prompt_preflight_status: {preflight_status}",
+        f"policy_action: {policy_action}",
+        f"progress_run_id: {progress_run_id}",
+        f"payload_key_total: {payload_counts['total']}",
+        f"payload_key_safe: {payload_counts['safe']}",
+        f"payload_key_omitted: {payload_counts['omitted']}",
+    ]
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-recovery-repair",
+        command=safe_action,
+        exit_status=0 if safe_status == "queued" else 1,
+        max_chars=700,
+        artifact_handles=[
+            {
+                "kind": safe_target_kind,
+                "handle": safe_target_handle,
+                "label": safe_target_handle,
+            }
+        ],
+    )
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
 def _record_space_recovery_progress_event(space_id: str, *, action: str) -> dict[str, Any]:
     """Best-effort metadata-only progress producer for recovery admin actions."""
     safe_action = str(action or "").strip().lower()
@@ -10066,6 +10146,17 @@ def queue_space_repair_event(
     )
     _auto_ingest_space_revision_event(event_id)
     progress_event = _record_space_repair_progress_event(sid)
+    output_compaction = _space_repair_output_compaction(
+        action=repair_action,
+        status="queued",
+        target_kind="space",
+        target_handle=f"space:{sid}",
+        event_id=event_id,
+        preflight_receipt=preflight_receipt,
+        autonomy_policy_receipt=autonomy_policy_receipt,
+        progress_event=progress_event,
+        payload=payload,
+    )
     return {
         "queued": True,
         "status": "queued",
@@ -10075,6 +10166,7 @@ def queue_space_repair_event(
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
         "progress_event": progress_event,
+        "output_compaction": output_compaction,
         **({"prompt_preflight": copy.deepcopy(preflight_receipt)} if preflight_receipt else {}),
         **({"autonomy_policy": copy.deepcopy(autonomy_policy_receipt)} if autonomy_policy_receipt else {}),
     }
@@ -10130,6 +10222,17 @@ def queue_recovery_widget_repair_event(
     )
     _auto_ingest_space_widget_event(event_id)
     progress_event = _record_space_repair_progress_event(sid)
+    output_compaction = _space_repair_output_compaction(
+        action=repair_action,
+        status="queued",
+        target_kind="widget",
+        target_handle=f"widget:{sid}/{wid}",
+        event_id=event_id,
+        preflight_receipt=preflight_receipt,
+        autonomy_policy_receipt=autonomy_policy_receipt,
+        progress_event=progress_event,
+        payload=payload,
+    )
     return {
         "queued": True,
         "status": "queued",
@@ -10140,6 +10243,7 @@ def queue_recovery_widget_repair_event(
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
         "progress_event": progress_event,
+        "output_compaction": output_compaction,
         **({"prompt_preflight": copy.deepcopy(preflight_receipt)} if preflight_receipt else {}),
         **({"autonomy_policy": copy.deepcopy(autonomy_policy_receipt)} if autonomy_policy_receipt else {}),
     }

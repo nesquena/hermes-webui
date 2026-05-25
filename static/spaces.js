@@ -1300,10 +1300,11 @@
     const preflight = renderPromptPreflightEvidence(result.prompt_preflight);
     const policy = renderActionPolicyEvidence(result.autonomy_policy);
     const progress = renderPackageProgressEvidence(result.progress_event, 'Recovery progress');
-    if (!preflight && !policy && !progress) return '';
+    const compaction = renderCompactionEvidence(result.output_compaction || result.compaction);
+    if (!preflight && !policy && !progress && !compaction) return '';
     return '<div class="capy-spaces-card" role="status"><h3>Recovery action receipt</h3>' +
       '<div class="capy-spaces-muted">Confirmed recovery action completed with metadata-only policy and progress evidence. Raw widget bodies, prompts, implementation fields, and secrets stay omitted.</div>' +
-      preflight + policy + progress + '</div>';
+      preflight + policy + progress + compaction + '</div>';
   }
 
   function prependRecoveryActionReceipt(data){

@@ -286,6 +286,21 @@ def test_repair_events_return_metadata_only_preflight_and_policy_receipts(monkey
         assert result["autonomy_policy"]["prompt_preflight_status"] == "pass"
         assert result["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
         assert result["autonomy_policy"]["metadata_only"] is True
+        compaction = result["output_compaction"]
+        assert compaction["tool"] == "capy-spaces-recovery-repair"
+        assert compaction["command"] == action
+        assert compaction["original_chars"] >= compaction["compacted_chars"]
+        assert compaction["redaction_status"] in {"redacted", "metadata_only"}
+        assert compaction["rules_applied"]
+        compaction_text = json.dumps(compaction, sort_keys=True).lower()
+        assert "secret_value_do_not_leak" not in compaction_text
+        assert "<script" not in compaction_text
+        assert "renderer" not in compaction_text
+        assert "api_key" not in compaction_text
+        assert "html" not in compaction_text
+        assert "source" not in compaction_text
+        assert "repair the safe metadata-only" not in compaction_text
+        assert "session secret_value_do_not_leak" not in compaction_text
     assert "secret_value_do_not_leak" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized

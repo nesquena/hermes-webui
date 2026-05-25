@@ -1812,6 +1812,22 @@ global.fetch = async function(path, opts = {}) {
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       },
+      output_compaction: {
+        tool: 'capy-spaces-recovery-repair',
+        command: 'space.module.repair.queue',
+        exit_status: 0,
+        original_chars: 640,
+        compacted_chars: 188,
+        compacted: true,
+        rules_applied: ['redact_unsafe_markers', 'cap_section_chars'],
+        redaction_status: 'redacted',
+        redacted_count: 3,
+        retained_artifact_handles: [
+          { kind: 'module', handle: 'module:safe-module', label: 'Safe Module' },
+          { kind: 'renderer', handle: '/Users/bschmidy10/SECRET_VALUE_DO_NOT_LEAK', label: '<script>bad()</script>' }
+        ],
+        text: 'queued module repair metadata only\nraw prompt SECRET_VALUE_DO_NOT_LEAK\nrenderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK source html token'
+      },
       renderer: '<script>bad()</script>',
       api_key: 'SECRET'
     });
@@ -6514,6 +6530,11 @@ def test_spaces_ui_recovery_repair_module_queues_metadata_only_event_from_safe_p
     assert "prompt_injection_scan" in out["recoveryHtml"]
     assert "Action policy" in out["recoveryHtml"]
     assert "Recovery progress" in out["recoveryHtml"]
+    assert "Compaction evidence" in out["recoveryHtml"]
+    assert "Original output: 640 chars · Compacted output: 188 chars · Redaction: redacted" in out["recoveryHtml"]
+    assert "Rules: redact_unsafe_markers, cap_section_chars" in out["recoveryHtml"]
+    assert "module · module:safe-module · Safe Module" in out["recoveryHtml"]
+    assert "Raw output, prompt bodies, widget bodies, and credentials remain omitted" in out["recoveryHtml"]
     assert "raw prompt not stored" in out["recoveryHtml"]
     assert "source" not in out["recoveryHtml"].lower()
     assert "<script>" not in out["recoveryHtml"]
