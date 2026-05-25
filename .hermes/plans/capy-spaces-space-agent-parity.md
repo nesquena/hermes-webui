@@ -9,9 +9,9 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-24 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-25 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the OpenHuman-inspired Capy Memory Tree / compaction / source freshness / policy / progress MVP surfaces are implemented as metadata-only foundations, with recent expansion through source-style current-space viewport/reposition prompt-preflight/action-policy/progress receipts, logical storage path-helper policy/progress receipts, and source-style Space open/reload navigation policy/progress receipts. This plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, model-route invocation, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the OpenHuman-inspired Capy Memory Tree / compaction / source freshness / policy / progress MVP surfaces are implemented as metadata-only foundations, with recent expansion through source-style current-space viewport/reposition prompt-preflight/action-policy/progress receipts, logical storage path-helper policy/progress receipts, source-style Space open/reload navigation policy/progress receipts, and widget reload/refresh required-preflight/action-policy receipts. This plan now points upcoming sprints at the remaining advisory-context, compaction, source-refresh, model-route invocation, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
 
 ## OpenHuman-Inspired Expansion Track
 
@@ -37,6 +37,10 @@ Roadmap priority for upcoming autonomous sprints:
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
 
 Recent completed slices:
+
+- `feat(spaces): require widget reload policy receipts`
+  - Added RED/GREEN backend coverage proving widget reload/refresh aliases without a free-form prompt or reason still return metadata-only `required` prompt-preflight and action-policy receipts beside structured progress events.
+  - Persisted the same required-preflight/action-policy evidence on queued widget refresh events while keeping hostile renderer/script/API-key/token fixture markers out of responses, event summaries, and progress telemetry.
 
 - `feat(spaces): add local service template policy receipts`
   - Added RED/GREEN backend coverage proving the Local Service Dashboard template install boundary returns metadata-only prompt-preflight and `space.template.install.local_service` autonomy-policy receipts for direct, route, and tool-adapter installs while preserving redaction of renderer/html/source/API-key/token/password/secret fields.

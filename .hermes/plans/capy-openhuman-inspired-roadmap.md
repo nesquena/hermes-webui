@@ -94,7 +94,7 @@ Remaining:
 
 ### Phase 5 — Autonomy policy, prompt-injection preflight, model-routing hints
 
-Status: **metadata-only status surface plus creator preview/commit, active-space instruction/context, repair prompt, source-refresh preflight, camera-stream tool receipts, package policy receipts, logical path-helper policy receipts, and safe model-route resolution receipts implemented; broader per-action enforcement and actual model invocation routing remain**.
+Status: **metadata-only status surface plus creator preview/commit, active-space instruction/context, repair prompt, source-refresh preflight, camera-stream tool receipts, package policy receipts, logical path-helper policy receipts, widget reload/refresh required-preflight receipts, and safe model-route resolution receipts implemented; broader per-action enforcement and actual model invocation routing remain**.
 
 Delivered:
 - `api/capy_policy.py` exposes allow-listed autonomy modes, approval gates, prompt-preflight status, model-routing hints, and bounded/deduplicated action-policy receipts without echoing raw env/provider/model secrets.
@@ -114,10 +114,10 @@ Delivered:
 - Space Agent package export responses now include a metadata-only `space.agent.export` autonomy-policy receipt with supervised-mode approval gates, required prompt-preflight status, and `hint:reasoning` model-route evidence; the export UI renders the policy beside package progress without displaying package YAML, widget bodies, renderer/source/API-auth fields, prompts, scripts, archives, or credentials.
 - Space Agent package import tool aliases now return per-invocation metadata-only autonomy-policy receipts, so `space.import`, `space.package.import`, and `space.agent.import` can be distinguished in product/tool evidence while preserving prompt-preflight status, approval gates, model-route hints, and import quarantine redaction.
 - Action-policy receipts now include a metadata-only `model_route_resolution` decision derived from safe configured route fields or deterministic default fallbacks, and Spaces UI receipts render the selected route plus fallback reason without exposing raw provider config, API-auth fields, renderer/source/script markers, prompts, or credentials.
-- Active-space context receipts, repair prompts and empty-prompt whole-Space/widget/module repair queues, widget-runtime prompts (including direct sandbox queue-status UI receipts), source-style widget definition/blueprint preview/source helpers, and source-refresh ingestion paths now use protected prompt-preflight boundaries before advisory context or user-provided instructions can influence an agent/tool action.
+- Active-space context receipts, repair prompts and empty-prompt whole-Space/widget/module repair queues, widget-runtime prompts (including direct sandbox queue-status UI receipts), fixed widget reload/refresh events without free-form prompts, source-style widget definition/blueprint preview/source helpers, and source-refresh ingestion paths now use protected prompt-preflight boundaries before advisory context or user-provided instructions can influence an agent/tool action.
 
 Remaining:
-- Extend pass/warn/block preflight and action-policy receipts to additional high-risk browser/development/recovery/tool boundaries beyond the current creator/context/repair/source-refresh/camera/package-export coverage.
+- Extend pass/warn/block preflight and action-policy receipts to additional high-risk browser/development/recovery/tool boundaries beyond the current creator/context/repair/widget-refresh/source-refresh/camera/package-export coverage.
 - Wire model-routing resolution into actual Capy/Hermes invocation selection while preserving Brendan's provider-agnostic OpenAI/xAI/LM Studio setup.
 
 ### Phase 6 — Structured progress events

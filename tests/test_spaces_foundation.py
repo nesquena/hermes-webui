@@ -1928,6 +1928,48 @@ def test_space_tool_adapter_supports_source_current_reload_widget_alias_metadata
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_reload_widget_alias_without_prompt_returns_required_policy_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "reload-required-policy-lab", "name": "Reload Required Policy Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "weather-card", "kind": "weather", "title": "Weather Card"})
+
+    reloaded = spaces.run_space_tool(
+        "space.current.reloadWidget",
+        {
+            "activeSpaceId": created["space_id"],
+            "widgetId": "weather-card",
+            "payload": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "renderer": "<script>steal()</script>"},
+            "token": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "weather-card")
+    serialized = json.dumps({"reloaded": reloaded, "events": events}, sort_keys=True).lower()
+
+    assert reloaded["ok"] is True
+    assert reloaded["prompt_preflight"]["boundary"] == "widget_runtime_prompt"
+    assert reloaded["prompt_preflight"]["status"] == "required"
+    assert reloaded["prompt_preflight"]["metadata_only"] is True
+    assert reloaded["prompt_preflight"]["raw_prompt_stored"] is False
+    assert reloaded["autonomy_policy"]["action"] == "space.current.reloadwidget"
+    assert reloaded["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+    assert reloaded["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert reloaded["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert reloaded["autonomy_policy"]["metadata_only"] is True
+    assert reloaded["progress_event"]["event_type"] == "tool.completed"
+    assert reloaded["progress_event"]["run_id"].startswith("widget-event:")
+    assert events[0]["prompt_preflight"]["status"] == "required"
+    assert events[0]["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert events[0]["payload_summary"] == {"action": "reload"}
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret...leak" not in serialized
+    assert "secret" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+
+
 def test_space_tool_adapter_blocks_hostile_reload_widget_prompt_before_queueing(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "current-reload-block-lab", "name": "Current Reload Block Lab"})

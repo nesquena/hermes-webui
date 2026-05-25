@@ -496,6 +496,29 @@ def _is_widget_reload_event(event_name: str) -> bool:
     }
 
 
+def _widget_reload_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only evidence that widget reload remains preflight-gated.
+
+    Reload/refresh aliases may queue a fixed metadata-only event without a
+    free-form prompt or reason. They still cross a widget runtime boundary, so
+    expose prompt-injection preflight as a required upstream gate instead of
+    omitting policy evidence.
+    """
+    safe_action = _context_value(action, 120) or "space.widget.refresh"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "widget_runtime_prompt",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["generated_widget_execution_approval_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
 def _widget_reload_prompt_preflight_receipt(prompt: str, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Preflight explicit widget reload/refresh prompts before queueing events.
 
@@ -508,7 +531,7 @@ def _widget_reload_prompt_preflight_receipt(prompt: str, payload: dict[str, Any]
     if reason_text:
         prompt_parts.append(reason_text)
     if not prompt_parts:
-        return None
+        return _widget_reload_required_prompt_preflight_receipt("space.widget.refresh")
     from api.capy_policy import prompt_preflight
 
     receipt = prompt_preflight("\n".join(prompt_parts), boundary="widget_runtime_prompt")
