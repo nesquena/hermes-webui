@@ -6178,9 +6178,19 @@ function renderMessages(options){
   }
   let _prevSepKey=null;
   let currentAssistantTurn=null;
+  // Only build question→assistant mapping for the visible window, not the
+  // full visWithIdx.  The jump-to-question button is only rendered for
+  // assistant messages that appear in the current render window anyway.
   const questionRawIdxByAssistantRawIdx=new Map();
+  // Seed lastQuestionRawIdx from hidden messages so the first visible
+  // assistant message still gets a valid jump target even when its
+  // corresponding user message sits just before the render window.
   let lastQuestionRawIdx=-1;
-  for(const entry of visWithIdx){
+  for(let i=0;i<windowStart;i++){
+    const role=visWithIdx[i]?.m?.role;
+    if(role==='user') lastQuestionRawIdx=visWithIdx[i].rawIdx;
+  }
+  for(const entry of renderVisWithIdx){
     const role=entry&&entry.m&&entry.m.role;
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
     else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
@@ -6188,11 +6198,19 @@ function renderMessages(options){
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
+  // Only collect tool-call assistant indices for messages that are actually
+  // rendered in the current window.  S.toolCalls can grow large in long turns,
+  // but we only need the ones whose assistant_msg_idx falls inside the visible
+  // range.
   const toolCallAssistantIdxs=new Set();
   if(Array.isArray(S.toolCalls)){
+    const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
     for(const tc of S.toolCalls){
       if(!tc) continue;
-      toolCallAssistantIdxs.add(tc.assistant_msg_idx!==undefined?tc.assistant_msg_idx:-1);
+      const idx=tc.assistant_msg_idx;
+      if(idx!==undefined && renderedRawIdxs.has(idx)){
+        toolCallAssistantIdxs.add(idx);
+      }
     }
   }
   // Windowed render loop replaces the legacy full loop:
