@@ -3211,12 +3211,63 @@ def _session_message_visible_key(msg: dict):
     )
 
 
-def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]):
+def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], _cache=None):
+    """Check if ``visible_key`` has a fuzzy duplicate in ``visible_keys``.
+
+    The exact-key set lookup runs first and answers the common case in O(1).
+    The slow path (substring + loose-content match) only runs on miss.
+
+    Performance: ``merge_session_messages_append_only`` calls this O(n) per
+    state.db row across the full sidecar visible-keys set, which on large
+    sessions with long tool output is the dominant cost in the merge. When
+    callers pass ``_cache`` (a ``dict[role, list[(content, content_len)]]``
+    pre-built from ``visible_keys``), we restrict the slow scan to entries
+    sharing the same role and apply cheap length-ratio guards before any
+    substring/loose comparison. Loose-content normalization is computed
+    lazily so the regex only runs when a candidate survives the guards.
+
+    Callers that pass no ``_cache`` keep the legacy O(n) behavior — the
+    helper is also reachable from outside the merge loop.
+    """
     if visible_key in visible_keys:
         return visible_key
     role, content = visible_key
     if not content:
         return None
+    content_len = len(content)
+    if _cache is not None:
+        role_entries = _cache.get(role)
+        if not role_entries:
+            return None
+        loose_content = None  # lazy: only if a candidate survives length guard
+        for existing_content, existing_len in role_entries:
+            if not existing_content:
+                continue
+            # Substring is only possible if one string fits inside the other.
+            if content_len <= existing_len:
+                if content in existing_content:
+                    return (role, existing_content)
+            elif existing_len <= content_len:
+                if existing_content in content:
+                    return (role, existing_content)
+            # Loose-match guard: skip pairs whose lengths differ by >3x. The
+            # exact-key lookup at the top already handles equal content; this
+            # guard avoids the regex+casefold cost for obviously different
+            # tool outputs while keeping the same conservative behavior the
+            # legacy path had on similarly-sized strings.
+            if existing_len > 3 * content_len or content_len > 3 * existing_len:
+                continue
+            if loose_content is None:
+                loose_content = _loose_session_message_content(content)
+            if not loose_content:
+                continue
+            existing_loose = _loose_session_message_content(existing_content)
+            if not existing_loose:
+                continue
+            if loose_content in existing_loose or existing_loose in loose_content:
+                return (role, existing_content)
+        return None
+    # Legacy O(n) path for callers that did not build the cache.
     for existing_role, existing_content in visible_keys:
         if role != existing_role or not existing_content:
             continue
@@ -3315,6 +3366,15 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
         sidecar_visible_counts[visible_key] = sidecar_visible_counts.get(visible_key, 0) + 1
         sidecar_visible_sequence.append(visible_key)
         merged_messages.append(msg)
+    # Pre-build a role-indexed cache of (content, content_len) so the inner
+    # _matching_visible_duplicate scan can skip unrelated roles and apply
+    # cheap length guards before any substring/loose comparison. The legacy
+    # path scanned the entire sidecar_visible_keys set per state row, which
+    # on large sessions (long tool output, many state rows) was the dominant
+    # cost in this merge.
+    _visible_cache: dict[str, list[tuple[str, int]]] = {}
+    for vk_role, vk_content in sidecar_visible_keys:
+        _visible_cache.setdefault(vk_role, []).append((vk_content, len(vk_content)))
     state_replay_idx = 0
     skipped_state_visible_counts = {}
     for msg in state_messages:
@@ -3324,13 +3384,25 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
         replays_sidecar_prefix = False
         if state_replay_idx < len(sidecar_visible_sequence):
             expected_visible_key = sidecar_visible_sequence[state_replay_idx]
-            if visible_key == expected_visible_key or _has_visible_duplicate(
-                visible_key, {expected_visible_key}
-            ):
+            if visible_key == expected_visible_key:
                 replays_sidecar_prefix = True
                 state_replay_idx += 1
+            elif visible_key[0] == expected_visible_key[0]:
+                # Roles match — only attempt the fuzzy single-key duplicate
+                # check when the two contents are within 3x of each other.
+                # Without this guard the substring scan can degrade to a full
+                # large-string match against every state row when sidecar
+                # contains huge tool output, which is a real hot spot.
+                vk_len = len(visible_key[1]) if visible_key[1] else 0
+                exp_len = len(expected_visible_key[1]) if expected_visible_key[1] else 0
+                if vk_len and exp_len and min(vk_len, exp_len) * 3 >= max(vk_len, exp_len):
+                    if _has_visible_duplicate(visible_key, {expected_visible_key}):
+                        replays_sidecar_prefix = True
+                        state_replay_idx += 1
         if replays_sidecar_prefix:
-            matched_visible_key = _matching_visible_duplicate(visible_key, sidecar_visible_keys)
+            matched_visible_key = _matching_visible_duplicate(
+                visible_key, sidecar_visible_keys, _cache=_visible_cache
+            )
             if matched_visible_key is not None:
                 skipped_state_visible_counts[matched_visible_key] = (
                     skipped_state_visible_counts.get(matched_visible_key, 0) + 1
@@ -3343,7 +3415,9 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
                 continue
         if key in seen_message_keys:
             continue
-        matched_visible_key = _matching_visible_duplicate(visible_key, sidecar_visible_keys)
+        matched_visible_key = _matching_visible_duplicate(
+            visible_key, sidecar_visible_keys, _cache=_visible_cache
+        )
         if matched_visible_key is not None:
             skipped_count = skipped_state_visible_counts.get(matched_visible_key, 0)
             sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)
