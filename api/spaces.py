@@ -5706,6 +5706,103 @@ def _space_browser_navigation_action_policy_receipt(action: str) -> dict[str, An
     )
 
 
+def _browser_surface_tool_kind(action: str) -> str:
+    safe_action = str(action or "").strip().lower()
+    if safe_action.endswith(".open"):
+        return "open"
+    if safe_action.endswith(".snapshot"):
+        return "snapshot"
+    if safe_action.endswith(".click_ref") or safe_action.endswith(".clickref"):
+        return "click_ref"
+    if safe_action.endswith(".type_ref") or safe_action.endswith(".typeref"):
+        return "type_ref"
+    return "browser"
+
+
+def _browser_surface_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    safe_action = _context_value(action, 120) or "browser.surface.action"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "browser_surface",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["browser_control_approval_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _browser_surface_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
+    return action_policy_receipt(
+        action,
+        approval_gates=["destructive_external_action"],
+        prompt_preflight_status=status,
+        model_route_hint="hint:fast",
+    )
+
+
+def _browser_surface_url_metadata(raw_url: Any) -> dict[str, str]:
+    try:
+        parsed = urlparse(str(raw_url or ""))
+    except ValueError:
+        return {"url_scheme": "other", "url_host_class": "none"}
+    scheme = parsed.scheme.lower() if parsed.scheme else "none"
+    if scheme not in {"http", "https"}:
+        scheme = "other" if scheme != "none" else "none"
+    host = (parsed.hostname or "").strip().lower()
+    host_class = "none"
+    if host:
+        host_class = "external"
+        if host in {"localhost", "local"} or host.endswith(".local"):
+            host_class = "local"
+        else:
+            try:
+                ip = ipaddress.ip_address(host)
+                if ip.is_private or ip.is_loopback or ip.is_link_local:
+                    host_class = "local"
+            except ValueError:
+                host_class = "external"
+    return {"url_scheme": scheme, "url_host_class": host_class}
+
+
+def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    space_id = validate_space_id(_space_tool_current_id(payload))
+    kind = _browser_surface_tool_kind(action)
+    surface: dict[str, Any] = {
+        "mode": "metadata-only",
+        "requested_action": kind,
+        "executed": False,
+        "approval_required": True,
+        "raw_request_stored": False,
+    }
+    if kind == "open":
+        surface.update(_browser_surface_url_metadata(payload.get("url") or payload.get("href") or payload.get("target")))
+    if kind == "snapshot":
+        surface["dom_stored"] = False
+    if kind in {"click_ref", "type_ref"}:
+        surface["ref_provided"] = bool(str(payload.get("ref") or payload.get("element_ref") or payload.get("elementRef") or "").strip())
+    if kind == "type_ref":
+        surface["typed_text_stored"] = False
+    preflight = _browser_surface_required_prompt_preflight_receipt(action)
+    return {
+        "ok": True,
+        "action": action,
+        "active_space_id": space_id,
+        "browser_surface": surface,
+        "prompt_preflight": preflight,
+        "autonomy_policy": _browser_surface_action_policy_receipt(action, preflight),
+        "progress_event": _record_space_tool_progress_event(space_id, run_prefix=f"browser.{kind}"),
+    }
+
+
 def _space_resolve_app_url_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
     """Return metadata-only evidence that app URL resolution stays browser-gated."""
     safe_action = _context_value(action, 120) or "space.spaces.resolveappurl"
@@ -5889,6 +5986,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         current_id = _space_tool_current_id(data)
         space_id = validate_space_id(current_id) if current_id else None
         return {"ok": True, "action": name, "active_space_id": space_id, "current_id": space_id}
+    if name in {
+        "browser.open",
+        "space.browser.open",
+        "browser.snapshot",
+        "space.browser.snapshot",
+        "browser.click_ref",
+        "space.browser.click_ref",
+        "browser.clickref",
+        "space.browser.clickref",
+        "browser.type_ref",
+        "space.browser.type_ref",
+        "browser.typeref",
+        "space.browser.typeref",
+    }:
+        return _browser_surface_tool_receipt(name, data)
     if name in {"space.current.context", "space.context", "space.current.prompt_context"}:
         current_id = _space_tool_current_id(data)
         context_status = _space_demo_context_status()
@@ -10069,6 +10181,10 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
     safe_prefix = str(run_prefix or "tool").strip().lower()
     if safe_prefix not in {
         "camera.stream.add",
+        "browser.open",
+        "browser.snapshot",
+        "browser.click_ref",
+        "browser.type_ref",
         "checkpoint",
         "context",
         "package.export",
