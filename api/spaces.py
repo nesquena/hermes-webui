@@ -5683,16 +5683,56 @@ def _space_browser_navigation_action_policy_receipt(action: str) -> dict[str, An
     )
 
 
-def _space_resolve_app_url_action_policy_receipt(action: str) -> dict[str, Any]:
+def _space_resolve_app_url_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only evidence that app URL resolution stays browser-gated."""
+    safe_action = _context_value(action, 120) or "space.spaces.resolveappurl"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "browser_surface",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["browser_navigation_approval_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _space_resolve_app_url_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return metadata-only policy evidence for browser-surface app URL resolution."""
     from api.capy_policy import action_policy_receipt
 
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
     return action_policy_receipt(
         action,
         approval_gates=["destructive_external_action"],
-        prompt_preflight_status="required",
+        prompt_preflight_status=status,
         model_route_hint="hint:fast",
     )
+
+
+def _record_resolve_app_url_progress_event(action: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress receipt for browser app URL resolution."""
+    safe_action = _context_value(action, 120) or "space.spaces.resolveappurl"
+    run_id = f"resolve-app-url:{safe_action}"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({"event_type": "tool.completed", "run_id": run_id})
+    except Exception:
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": "tool.completed",
+            "family": "tool",
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+            "error": "progress event recording unavailable",
+        }
 
 
 def _space_path_helper_action_policy_receipt(action: str) -> dict[str, Any]:
@@ -6014,12 +6054,17 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         kind = "space" if name.endswith("spaceid") else "widget"
         return {"ok": True, "action": name, **_space_tool_normalize_id_payload(kind, data)}
     if name == "space.spaces.resolveappurl":
+        prompt_preflight = _space_resolve_app_url_required_prompt_preflight_receipt(name)
+        resolved_url = _space_tool_resolve_app_url(data)
+        progress_event = _record_resolve_app_url_progress_event(name)
         return {
             "ok": True,
             "action": name,
-            "url": _space_tool_resolve_app_url(data),
+            "url": resolved_url,
             "resolve": {"mode": "metadata-only"},
-            "autonomy_policy": _space_resolve_app_url_action_policy_receipt(name),
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": _space_resolve_app_url_action_policy_receipt(name, prompt_preflight),
+            "progress_event": progress_event,
         }
     if name == "space.spaces.sizetotoken":
         return {"ok": True, "action": name, **_space_tool_size_to_token(data), "mode": "metadata-only"}

@@ -6093,6 +6093,7 @@ def test_creator_commit_redacts_generated_html_values_under_safe_metadata_keys(m
 
 def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    from api.capy_progress import progress_status
 
     home_url = spaces.run_space_tool("space.spaces.resolveAppUrl", {"logicalPath": "~", "api_key": "***"})
     widget_url = spaces.run_space_tool(
@@ -6101,24 +6102,40 @@ def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only
     )
     app_url = spaces.run_space_tool("space.spaces.resolveAppUrl", {"path": "/app/L0/_all/mod/_core/spaces/view.html"})
     layer_url = spaces.run_space_tool("space.spaces.resolveAppUrl", {"path": "L0/_all/mod/_core/spaces/store.js"})
-    serialized = json.dumps([home_url, widget_url, app_url, layer_url]).lower()
+    status = progress_status()
+    serialized = json.dumps([home_url, widget_url, app_url, layer_url, status]).lower()
 
     assert home_url["ok"] is True
     assert home_url["action"] == "space.spaces.resolveappurl"
     assert home_url["url"] == "/~/"
     assert home_url["resolve"] == {"mode": "metadata-only"}
+    assert home_url["prompt_preflight"]["action"] == "space.spaces.resolveappurl"
+    assert home_url["prompt_preflight"]["boundary"] == "browser_surface"
+    assert home_url["prompt_preflight"]["status"] == "required"
+    assert home_url["prompt_preflight"]["metadata_only"] is True
+    assert home_url["prompt_preflight"]["raw_prompt_stored"] is False
     assert home_url["autonomy_policy"]["action"] == "space.spaces.resolveappurl"
     assert home_url["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
-    assert home_url["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert home_url["autonomy_policy"]["prompt_preflight_status"] == home_url["prompt_preflight"]["status"]
     assert home_url["autonomy_policy"]["metadata_only"] is True
+    assert home_url["progress_event"]["event_type"] == "tool.completed"
+    assert home_url["progress_event"]["family"] == "tool"
+    assert home_url["progress_event"]["run_id"] == "resolve-app-url:space.spaces.resolveappurl"
+    assert home_url["progress_event"]["redaction_status"] == "metadata_only"
+    assert widget_url["prompt_preflight"]["boundary"] == "browser_surface"
     assert widget_url["autonomy_policy"]["action"] == "space.spaces.resolveappurl"
+    assert widget_url["progress_event"]["run_id"] == "resolve-app-url:space.spaces.resolveappurl"
+    assert any(event["run_id"] == "resolve-app-url:space.spaces.resolveappurl" for event in status["recent_events"])
     assert widget_url["url"] == "/~/spaces/weather/widgets/card.yaml"
     assert app_url["url"] == "/L0/_all/mod/_core/spaces/view.html"
     assert layer_url["url"] == "/L0/_all/mod/_core/spaces/store.js"
     assert "api_key" not in serialized
     assert "secret" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
     assert '"source":' not in serialized
 
+    before_rejected_resolve_count = progress_status()["recent_event_count"]
     for unsafe_path in [
         "javascript:alert(1)",
         "https://example.com/app.js",
@@ -6129,6 +6146,7 @@ def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only
         with pytest.raises(ValueError, match="Unsupported app path") as exc:
             spaces.run_space_tool("space.spaces.resolveAppUrl", {"path": unsafe_path, "token": "***"})
         assert unsafe_path not in str(exc.value)
+    assert progress_status()["recent_event_count"] == before_rejected_resolve_count
 
 
 
