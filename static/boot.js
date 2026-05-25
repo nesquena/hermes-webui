@@ -1,3 +1,13 @@
+(function(){
+  // Clear stale stop-server flag on successful page load (server is reachable)
+  localStorage.removeItem('hermes-webui-server-stopped');
+  // Listen for shutdown broadcast from other tabs
+  try {
+    var _stopChan = new BroadcastChannel('hermes-webui-shutdown');
+    _stopChan.onmessage = function() { _showServerStopped(); };
+  } catch(_) {}
+})();
+
 async function cancelStream(){
   const streamId = S.activeStreamId;
   if(!streamId) return;
@@ -227,6 +237,71 @@ function closeMobileSidebar(){
   if(sidebar)sidebar.classList.remove('mobile-open');
   if(overlay)overlay.classList.remove('visible');
 }
+
+const _PWA_SIDEBAR_SWIPE_EDGE=28;
+const _PWA_SIDEBAR_SWIPE_TRIGGER=72;
+const _PWA_SIDEBAR_SWIPE_MAX_VERTICAL=48;
+let _pwaSidebarSwipe=null;
+
+function _isPwaStandalone(){
+  try{
+    return document.documentElement.classList.contains('pwa-standalone')
+      || window.matchMedia('(display-mode: standalone)').matches
+      || window.navigator.standalone===true;
+  }catch(_){return false;}
+}
+
+function _isInteractiveSwipeTarget(target){
+  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel'));}
+  catch(_){return false;}
+}
+
+function _openMobileSidebarFromGesture(){
+  if(_isDesktopWidth())return;
+  const sidebar=document.querySelector('.sidebar');
+  const overlay=$('mobileOverlay');
+  if(!sidebar)return;
+  const layout=document.querySelector('.layout');
+  if(layout)layout.classList.remove('sidebar-collapsed');
+  sidebar.classList.remove('sidebar-collapsed');
+  try{document.documentElement.removeAttribute('data-sidebar-collapsed');}catch(_){}
+  sidebar.classList.add('mobile-open');
+  if(overlay)overlay.classList.add('visible');
+}
+
+function _onPwaSidebarSwipeStart(e){
+  if(!_isPwaStandalone()||_isDesktopWidth())return;
+  if(e.pointerType==='mouse'||(e.pointerType&&e.pointerType!=='touch'&&e.pointerType!=='pen'))return;
+  if(document.querySelector('.sidebar')?.classList.contains('mobile-open'))return;
+  const clientX=Number(e.clientX)||0;
+  if(clientX>_PWA_SIDEBAR_SWIPE_EDGE)return;
+  if(_isInteractiveSwipeTarget(e.target))return;
+  _pwaSidebarSwipe={startX:clientX,startY:Number(e.clientY)||0,active:true,opened:false};
+}
+
+function _onPwaSidebarSwipeMove(e){
+  const swipe=_pwaSidebarSwipe;
+  if(!swipe||!swipe.active||swipe.opened)return;
+  const dx=(Number(e.clientX)||0)-swipe.startX;
+  const dy=(Number(e.clientY)||0)-swipe.startY;
+  if(dx<0||Math.abs(dy)>_PWA_SIDEBAR_SWIPE_MAX_VERTICAL*1.5){_pwaSidebarSwipe=null;return;}
+  if(dx>=_PWA_SIDEBAR_SWIPE_TRIGGER&&Math.abs(dy)<=_PWA_SIDEBAR_SWIPE_MAX_VERTICAL&&dx>Math.abs(dy)*1.5){
+    if(e.cancelable)e.preventDefault();
+    swipe.opened=true;
+    _openMobileSidebarFromGesture();
+  }
+}
+
+function _onPwaSidebarSwipeEnd(){_pwaSidebarSwipe=null;}
+function _onPwaSidebarSwipeCancel(){_pwaSidebarSwipe=null;}
+
+function _installPwaSidebarSwipeGesture(){
+  window.addEventListener('pointerdown', _onPwaSidebarSwipeStart, {passive:true});
+  window.addEventListener('pointermove', _onPwaSidebarSwipeMove, {passive:false});
+  window.addEventListener('pointerup', _onPwaSidebarSwipeEnd, {passive:true});
+  window.addEventListener('pointercancel', _onPwaSidebarSwipeCancel, {passive:true});
+}
+_installPwaSidebarSwipeGesture();
 
 // ── Desktop sidebar collapse toggle ────────────────────────────────────────
 // Two discoverability paths into the same state:
@@ -1477,12 +1552,8 @@ function applyBotName(){
       if(sel&&typeof _applyModelToDropdown==='function'){
         // Fresh page boot must prefer the profile/server default over stale
         // browser-persisted model state. A restored session can still apply its
-        // own persisted model later through loadSession().
-        if(typeof _clearPersistedModelState==='function') _clearPersistedModelState();
-        else {
-          localStorage.removeItem('hermes-webui-model');
-          localStorage.removeItem('hermes-webui-model-state');
-        }
+        // own persisted model later through loadSession(). Preserve the browser
+        // keys for legacy/no-default fallback paths instead of deleting them.
         const existingDefaultOpt=Array.from(sel.options).find(o=>o.value===s.default_model);
         if(existingDefaultOpt&&window._activeProvider&&!existingDefaultOpt.dataset.provider){
           existingDefaultOpt.dataset.provider=window._activeProvider;
@@ -1590,7 +1661,7 @@ function applyBotName(){
   // Fetch available models without blocking session restore. The static HTML
   // options are enough for first paint; the dynamic provider list can settle
   // after the saved session is visible.
-  const _hydrateBootModelDropdown=()=>populateModelDropdown().then(()=>{
+  const _hydrateBootModelDropdown=()=>populateModelDropdown({preferProfileDefaultOnFreshBoot:true}).then(()=>{
     const sessionModelState=S.session&&S.session.model
       ? {model:S.session.model,model_provider:S.session.model_provider||null}
       : null;
@@ -1624,7 +1695,10 @@ function applyBotName(){
       else if(typeof syncModelChip==='function') syncModelChip();
     }
     if(S.session) syncTopbar();
-  }).catch(()=>{});
+  }).catch(e=>{
+    window._modelDropdownReady=null;
+    throw e;
+  });
   const _startBootModelDropdown=()=>{
     const ready=window._modelDropdownReady;
     if(ready&&typeof ready.then==='function') return ready;
@@ -1634,6 +1708,9 @@ function applyBotName(){
   };
   window._modelDropdownReady=null;
   window._ensureModelDropdownReady=_startBootModelDropdown;
+  setTimeout(()=>{
+    try{Promise.resolve(_startBootModelDropdown()).catch(()=>{});}catch(_){}
+  },0);
   // Start independent boot fetches without holding the conversation list behind
   // them. The sidebar can render from /api/sessions while workspace/onboarding
   // metadata settles in parallel.
@@ -1656,6 +1733,17 @@ function applyBotName(){
   if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
+  const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
+    ? window.HermesPWA.launchAction()
+    : null;
+  if(pwaLaunchAction==='new-chat'){
+    try{
+      await newSession(true);
+      if(S.session) await _startBootModelDropdown();
+      S._bootReady=true;
+      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();return;
+    }catch(e){console.warn('[pwa] new-chat launch action failed', e);}
+  }
   const savedLocal=localStorage.getItem('hermes-webui-session');
   const saved=urlSession||savedLocal;
   if(saved){
@@ -1782,3 +1870,22 @@ window.addEventListener('pageshow', async (event) => {
     } catch (_) {}
   }
 });
+
+async function shutdownServer() {
+  const ok = await showConfirmDialog({
+    title: (typeof t === 'function' ? t('settings_shutdown_confirm_title') : 'Stop Hermes WebUI'),
+    message: (typeof t === 'function' ? t('settings_shutdown_confirm_message') : 'Stop the Hermes WebUI server?'),
+    confirmLabel: (typeof t === 'function' ? t('settings_shutdown_confirm_btn') : 'Stop'),
+    danger: true,
+  });
+  if (!ok) return;
+  localStorage.setItem('hermes-webui-server-stopped', '1');
+  try { var bc = new BroadcastChannel('hermes-webui-shutdown'); bc.postMessage('stop'); bc.close(); } catch(_) {}
+  _showServerStopped();
+  try { await api('/api/shutdown', { method: 'POST' }); } catch (_) {}
+}
+
+function _showServerStopped() {
+  var stoppedMsg = (typeof t === 'function' ? t('settings_shutdown_stopped_message') : 'Server stopped. You can close this tab.');
+  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:var(--muted);font-family:system-ui,ui-sans-serif;font-size:14px"><p>' + stoppedMsg + '</p></div>';
+}

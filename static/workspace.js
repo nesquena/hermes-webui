@@ -85,6 +85,23 @@ async function api(path,opts={}){
   throw lastErr;
 }
 
+function recordClientSSEError(source, details={}){
+  try{
+    const payload={
+      event:'sse_error',
+      source:String(source||'unknown'),
+      ready_state:details.ready_state,
+      session_id:details.session_id||null,
+      stream_id:details.stream_id||null,
+      visibility_state:(typeof document!=='undefined'&&document.visibilityState)||'unknown',
+      online:(typeof navigator!=='undefined'&&typeof navigator.onLine==='boolean')?navigator.onLine:null,
+      url_path:(typeof location!=='undefined'&&location.pathname)||'/',
+      reason:details.reason||'EventSource.onerror',
+    };
+    void api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000}).catch(()=>{});
+  }catch(_){}
+}
+
 // Persist/restore expanded directory state per workspace in localStorage
 function _wsExpandKey(){
   const ws=S.session&&S.session.workspace;
@@ -103,16 +120,162 @@ function _restoreExpandedDirs(){
   }catch(e){S._expandedDirs=new Set();}
 }
 
+let _workspacePanelActiveTab = 'files';
+let _renderSessionArtifactsTimer = null;
+
+function _setWorkspacePanelTabDataset(){
+  const panel = document.querySelector('.rightpanel');
+  if(panel) panel.dataset.activeTab = _workspacePanelActiveTab;
+}
+
+function scheduleRenderSessionArtifacts(){
+  if(_renderSessionArtifactsTimer) clearTimeout(_renderSessionArtifactsTimer);
+  _renderSessionArtifactsTimer = setTimeout(()=>{
+    _renderSessionArtifactsTimer = null;
+    renderSessionArtifacts();
+  }, 100);
+}
+
+if(typeof document !== 'undefined'){
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _setWorkspacePanelTabDataset, {once:true});
+  else _setWorkspacePanelTabDataset();
+}
+
+function switchWorkspacePanelTab(tab){
+  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : 'files';
+  _setWorkspacePanelTabDataset();
+  const filesTab = $('workspaceFilesTab');
+  const artifactsTab = $('workspaceArtifactsTab');
+  if(filesTab){
+    filesTab.classList.toggle('active', _workspacePanelActiveTab === 'files');
+    filesTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'files' ? 'true' : 'false');
+  }
+  if(artifactsTab){
+    artifactsTab.classList.toggle('active', _workspacePanelActiveTab === 'artifacts');
+    artifactsTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'artifacts' ? 'true' : 'false');
+  }
+  const artifacts = $('workspaceArtifacts');
+  if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
+  if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
+}
+
+const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
+// Canonical Hermes mutators plus MCP filesystem aliases that can create/edit files.
+const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
+
+function _normalizeArtifactPath(path){
+  if(!path) return '';
+  path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
+  if(!path || path.length > 240 || path.includes('://')) return '';
+  if(ARTIFACT_IGNORE_RE.test(path)) return '';
+  if(!/[./]/.test(path)) return '';
+  return path;
+}
+
+function _artifactCandidatesFromText(text){
+  if(!text || typeof text !== 'string') return [];
+  const out = [];
+  const seen = new Set();
+  const add = (path) => {
+    path = _normalizeArtifactPath(path);
+    if(!path || seen.has(path)) return;
+    seen.add(path); out.push({path, kind:'diff'});
+  };
+  // Fallback text mining is intentionally narrow: only diff/patch fences imply
+  // the session changed a file. Prose mentions such as "edited package.json" are
+  // too noisy for an Artifacts list that should track write/edit outputs.
+  const fenced = /```(?:diff|patch)\s*\n[\s\S]*?```/gi;
+  let m;
+  while((m = fenced.exec(text))){
+    const block = m[0];
+    const fm = block.match(/(?:^|\n)(?:\+\+\+|---)\s+(?:[ab]\/)?([^\n\t]+)/);
+    if(fm) add(fm[1].trim());
+  }
+  return out;
+}
+
+function _artifactCandidatesFromToolCall(tc){
+  if(!tc) return [];
+  const name = String(tc.name || '').replace(/^functions\./,'');
+  const args = tc.arguments || tc.args || tc.input || {};
+  const result = tc.result || tc.output || tc.snippet || '';
+  const out = [];
+  const add = (path, source=name || 'tool') => {
+    path = _normalizeArtifactPath(path);
+    if(path) out.push({path, kind:source});
+  };
+  if(ARTIFACT_MUTATION_TOOLS.has(name) && args && typeof args === 'object'){
+    for(const key of ['path','file_path','source','destination']) add(args[key]);
+    if(Array.isArray(args.paths)) args.paths.forEach(p=>add(p));
+    if(Array.isArray(args.edits)) args.edits.forEach(e=>add(e&&e.path));
+  }
+  const resultText = typeof result === 'string' ? result : (result ? JSON.stringify(result) : '');
+  // Tool results may include unified diffs from patch-style tools; scan those
+  // narrowly after structured args so diff headers can still contribute paths.
+  for(const a of _artifactCandidatesFromText(resultText)) out.push(a);
+  if(!out.length && ARTIFACT_MUTATION_TOOLS.has(name)){
+    const argsText = typeof args === 'string' ? args : JSON.stringify(args || {});
+    for(const a of _artifactCandidatesFromText(argsText)) out.push(a);
+  }
+  return out;
+}
+
+function collectSessionArtifacts(){
+  const items = [];
+  const seen = new Set();
+  const push = (path, source) => {
+    path = _normalizeArtifactPath(path);
+    if(!path || seen.has(path)) return;
+    seen.add(path); items.push({path, source});
+  };
+  for(const tc of (S.toolCalls || [])){
+    for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
+  }
+  for(const msg of (S.messages || [])){
+    const text = msg && (msg.content || msg.text || msg.message || '');
+    for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
+  }
+  return items.slice(0, 50);
+}
+
+function renderSessionArtifacts(){
+  const root = $('workspaceArtifacts');
+  const count = $('workspaceArtifactsCount');
+  if(!root) return;
+  const items = collectSessionArtifacts();
+  if(count) count.textContent = String(items.length);
+  if(!S.session){
+    root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
+    return;
+  }
+  if(!items.length){
+    root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
+    return;
+  }
+  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+}
+
+function openArtifactPath(path){
+  if(!path) return;
+  switchWorkspacePanelTab('files');
+  const rel = path.replace(/^~\//,'').replace(/^\.\//,'');
+  openFile(rel);
+}
+
 async function loadDir(path){
   if(!S.session)return;
+  const sessionId=S.session.session_id;
   try{
     if(!path||path==='.'){
       S._dirCache={};
       _restoreExpandedDirs();  // restore per-workspace expanded state on root load
     }
     S.currentDir=path||'.';
-    const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
+    const data=await api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}`);
+    if(!S.session||S.session.session_id!==sessionId)return;
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
+    // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
+    if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
     if(!path||path==='.'){
@@ -120,10 +283,11 @@ async function loadDir(path){
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
       if(pending.length){
         const results=await Promise.all(pending.map(dirPath=>
-          api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dirPath)}`)
+          api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(dirPath)}`)
             .then(dc=>({dirPath,entries:dc.entries||[]}))
             .catch(()=>({dirPath,entries:[]}))
         ));
+        if(!S.session||S.session.session_id!==sessionId)return;
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
       if(expanded.size>0)renderFileTree();
@@ -143,8 +307,10 @@ async function loadDir(path){
 async function _refreshGitBadge(){
   const badge=$('gitBadge');
   if(!badge||!S.session)return;
+  const sessionId=S.session.session_id;
   try{
-    const data=await api(`/api/git-info?session_id=${encodeURIComponent(S.session.session_id)}`);
+    const data=await api(`/api/git-info?session_id=${encodeURIComponent(sessionId)}`);
+    if(!S.session||S.session.session_id!==sessionId)return;
     if(data.git&&data.git.is_git){
       const g=data.git;
       let text=g.branch||'git';
@@ -158,7 +324,10 @@ async function _refreshGitBadge(){
       badge.style.display='none';
       badge.textContent='';
     }
-  }catch(e){badge.style.display='none';}
+  }catch(e){
+    if(!S.session||S.session.session_id!==sessionId)return;
+    badge.style.display='none';
+  }
 }
 
 function navigateUp(){
@@ -175,6 +344,8 @@ const HTML_EXTS   = new Set(['.html','.htm']);
 const PDF_EXTS    = new Set(['.pdf']);
 const AUDIO_EXTS  = new Set(['.mp3','.wav','.m4a','.aac','.ogg','.oga','.opus','.flac']);
 const VIDEO_EXTS  = new Set(['.mp4','.mov','.m4v','.webm','.ogv','.avi','.mkv']);
+const MD_PREVIEW_RICH_RENDER_MAX_BYTES = 64 * 1024;
+const MD_PREVIEW_RICH_RENDER_MAX_LINES = 1500;
 // Binary formats that should download rather than preview
 const DOWNLOAD_EXTS = new Set([
   '.docx','.doc','.xlsx','.xls','.pptx','.ppt','.odt','.ods','.odp',
@@ -185,6 +356,31 @@ const DOWNLOAD_EXTS = new Set([
 ]);
 
 function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }
+
+function markdownPreviewByteLength(content){
+  const text=String(content||'');
+  if(typeof Blob==='function') return new Blob([text]).size;
+  if(typeof TextEncoder==='function') return new TextEncoder().encode(text).length;
+  return unescape(encodeURIComponent(text)).length;
+}
+
+function markdownPreviewLineCount(content){
+  const text=String(content||'');
+  if(!text) return 1;
+  return text.split('\n').length;
+}
+
+function shouldRenderMarkdownPreviewAsPlainText(content){
+  return markdownPreviewByteLength(content)>MD_PREVIEW_RICH_RENDER_MAX_BYTES
+    || markdownPreviewLineCount(content)>MD_PREVIEW_RICH_RENDER_MAX_LINES;
+}
+
+function largeMarkdownPlainTextStatus(content){
+  const bytes=markdownPreviewByteLength(content);
+  const lines=markdownPreviewLineCount(content);
+  const sizeLabel=bytes>=1024?`${Math.round(bytes/1024)} KB`:`${bytes} B`;
+  return `Large markdown file (${sizeLabel}, ${lines} lines) shown as plain text. Click Edit to view raw.`;
+}
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
 let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
@@ -317,8 +513,14 @@ async function openFile(path){
     // Markdown: fetch text, render with renderMd, display as formatted HTML
     try{
       const data=await api(`/api/file?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
-      showPreview('md');
       _previewRawContent = data.content;
+      if(shouldRenderMarkdownPreviewAsPlainText(data.content)){
+        showPreview('code');
+        $('previewCode').textContent=data.content;
+        setStatus(largeMarkdownPlainTextStatus(data.content));
+        return;
+      }
+      showPreview('md');
       $('previewMd').innerHTML=renderMd(data.content);
       requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
     }catch(e){setStatus(t('file_open_failed'));}

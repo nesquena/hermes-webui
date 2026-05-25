@@ -112,6 +112,18 @@ class TestLoadRepoDotenv:
         self._run(tmp_path, "HERMES_WEBUI_HOST=0.0.0.0\n")
         assert os.environ.get("HERMES_WEBUI_HOST") == "0.0.0.0"
 
+    def test_preserve_existing_env_keeps_ctl_overrides(self, tmp_path):
+        """ctl.sh can ask bootstrap.py to keep wrapper-provided env values."""
+        os.environ["HERMES_WEBUI_PRESERVE_ENV"] = "1"
+        os.environ["HERMES_HOME"] = "/runtime/hermesOne"
+        os.environ["HERMES_WEBUI_PASSWORD"] = ""
+        self._run(
+            tmp_path,
+            "HERMES_HOME=/repo/default\nHERMES_WEBUI_PASSWORD=repo-password\n",
+        )
+        assert os.environ.get("HERMES_HOME") == "/runtime/hermesOne"
+        assert os.environ.get("HERMES_WEBUI_PASSWORD") == ""
+
     def test_does_not_set_empty_values(self, tmp_path):
         """A key whose value is empty after stripping is not set to a non-empty string."""
         os.environ.pop("HERMES_EMPTY_KEY", None)

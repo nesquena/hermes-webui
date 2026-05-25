@@ -1,4 +1,9 @@
+import os
 import subprocess
+import threading
+import time
+
+import pytest
 
 import api.terminal as terminal
 
@@ -27,7 +32,19 @@ class _FakeProc:
         return 0
 
 
-def test_terminal_shell_uses_parent_death_signal_preexec(monkeypatch, tmp_path):
+def test_terminal_shell_does_not_use_pdeathsig_preexec(monkeypatch, tmp_path):
+    """Regression for #2853.
+
+    The previous implementation passed a ``preexec_fn`` that called
+    ``prctl(PR_SET_PDEATHSIG, SIGTERM)``.  Because that signal is *per-thread*
+    and WebUI's ``ThreadingHTTPServer`` spawns a new thread for every HTTP
+    request, the PTY shell registered the request-handler thread as its
+    parent and was killed within ~10 ms of being created on Linux.
+
+    The fix is to spawn the shell without ``preexec_fn`` at all.  Graceful
+    shutdown remains covered by ``atexit.register(close_all_terminals)`` and
+    the explicit ``close_terminal`` paths.
+    """
     captured = {}
     proc = _FakeProc()
 
@@ -40,15 +57,59 @@ def test_terminal_shell_uses_parent_death_signal_preexec(monkeypatch, tmp_path):
     monkeypatch.setattr(terminal.threading, "Thread", _DummyThread)
     monkeypatch.setattr(terminal, "_set_size", lambda *args, **kwargs: None)
 
-    term = terminal.start_terminal("term-preexec", tmp_path)
+    term = terminal.start_terminal("term-no-preexec", tmp_path)
 
     try:
         assert term.proc is proc
-        assert captured["kwargs"]["preexec_fn"] is terminal._terminal_shell_preexec_fn
+        assert "preexec_fn" not in captured["kwargs"], (
+            "preexec_fn must not be set — the PR_SET_PDEATHSIG implementation "
+            "killed every Linux user's terminal (#2853). See module-level note."
+        )
         assert captured["kwargs"]["start_new_session"] is True
         assert captured["kwargs"]["stdin"] == captured["kwargs"]["stdout"] == captured["kwargs"]["stderr"]
     finally:
-        terminal.close_terminal("term-preexec")
+        terminal.close_terminal("term-no-preexec")
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "openpty") or os.name != "posix",
+    reason="PTY-spawn test requires a POSIX host",
+)
+def test_pty_shell_survives_when_spawning_thread_exits(tmp_path):
+    """End-to-end regression for #2853.
+
+    Spawn a real PTY shell via ``start_terminal`` from inside a worker thread
+    that then exits.  The shell must remain alive after the spawning thread
+    joins, otherwise we've regressed back to the PR_SET_PDEATHSIG behaviour
+    that killed every Linux user's embedded terminal.
+    """
+    sid = "term-thread-survival"
+    holder: dict = {}
+
+    def worker():
+        try:
+            holder["term"] = terminal.start_terminal(sid, tmp_path)
+        except Exception as exc:  # pragma: no cover - surface in assertion
+            holder["error"] = exc
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(timeout=5)
+    assert not t.is_alive(), "spawn worker thread should have exited"
+    assert "error" not in holder, holder.get("error")
+    term = holder["term"]
+
+    try:
+        # Give the kernel a beat — if PR_SET_PDEATHSIG were re-introduced the
+        # shell would receive SIGTERM right about now.
+        time.sleep(0.5)
+        assert term.proc.poll() is None, (
+            "PTY shell exited after the spawning thread joined — likely a "
+            "PR_SET_PDEATHSIG regression (#2853). "
+            f"exit_code={term.proc.poll()!r}"
+        )
+    finally:
+        terminal.close_terminal(sid)
 
 
 def test_close_terminal_waits_again_after_sigkill(monkeypatch):
@@ -96,8 +157,11 @@ def test_close_all_terminals_closes_snapshot(monkeypatch):
 
 
 def test_terminal_module_registers_graceful_shutdown_reaper():
+    """atexit is still the reap path; pdeathsig must NOT be re-introduced."""
     src = terminal.Path(terminal.__file__).read_text()
 
     assert "atexit.register(close_all_terminals)" in src
-    assert "preexec_fn=_terminal_shell_preexec_fn" in src
-    assert "libc.prctl(1, signal.SIGTERM)" in src
+    # The PR_SET_PDEATHSIG implementation broke every Linux user (#2853);
+    # guard against accidentally bringing it back.
+    assert "preexec_fn=_terminal_shell_preexec_fn" not in src
+    assert "libc.prctl(1, signal.SIGTERM)" not in src

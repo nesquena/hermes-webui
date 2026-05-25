@@ -1,11 +1,16 @@
-from api.models import Session, reconciled_state_db_messages_for_session
 import contextlib
+import io
+import json
+import sys
 from types import SimpleNamespace
+
+from api.models import Session, reconciled_state_db_messages_for_session, state_db_delta_after_context
 
 from api.streaming import (
     _assistant_reply_added_after_current_turn,
     _context_messages_for_new_turn,
     _dedupe_replayed_active_context,
+    _dedupe_replayed_context_messages,
     _merge_display_messages_after_agent_result,
     _new_turn_context_from_messages,
     _sanitize_messages_for_api,
@@ -308,6 +313,332 @@ def test_repeated_user_text_after_compaction_is_not_dropped():
         "continue",
         "new answer",
     ]
+
+
+def test_near_duplicate_session_arc_summary_is_not_replayed_in_context():
+    summary_a = {
+        "role": "user",
+        "content": "[Session Arc Summary (d1, node 39)]\n"
+        + "same recovered LCM context\n" * 260
+        + "expand hint: old node",
+    }
+    summary_b = {
+        "role": "user",
+        "content": "[Session Arc Summary (d1, node 39)]\n"
+        + "same recovered LCM context\n" * 260
+        + "expand hint: refreshed node",
+    }
+    previous_context = [summary_a, {"role": "user", "content": "choose agent"}]
+    result_messages = previous_context + [
+        {"role": "assistant", "content": "agent answer"},
+        summary_b,
+        {"role": "user", "content": "next question"},
+    ]
+
+    next_context = _dedupe_replayed_context_messages(previous_context, result_messages)
+
+    assert [m["content"] for m in next_context] == [
+        summary_a["content"],
+        "choose agent",
+        "agent answer",
+        "next question",
+    ]
+
+
+def test_non_adjacent_replayed_context_block_is_not_appended_again():
+    previous_context = [
+        {"role": "user", "content": "older setup"},
+        {"role": "user", "content": "choose agent"},
+        {"role": "assistant", "content": "checking agents"},
+        {"role": "tool", "content": "agent list"},
+        {"role": "assistant", "content": "agent answer"},
+    ]
+    result_messages = previous_context + [
+        {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] compacted"},
+        {"role": "user", "content": "choose agent"},
+        {"role": "assistant", "content": "checking agents"},
+        {"role": "tool", "content": "agent list"},
+        {"role": "assistant", "content": "agent answer"},
+        {"role": "user", "content": "next question"},
+    ]
+
+    next_context = _dedupe_replayed_context_messages(previous_context, result_messages)
+
+    assert [m["content"] for m in next_context] == [
+        "older setup",
+        "choose agent",
+        "checking agents",
+        "agent list",
+        "agent answer",
+        "[CONTEXT COMPACTION — REFERENCE ONLY] compacted",
+        "next question",
+    ]
+
+
+
+
+def test_prefer_context_reconcile_strips_state_db_mirrored_prefix():
+    sidecar_context = [
+        {"role": "assistant", "content": "cron banner"},
+        {"role": "user", "content": "[Session Arc Summary]"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "latest saved question", "timestamp": 200.0},
+        {"role": "assistant", "content": "latest saved answer", "timestamp": 201.0},
+    ]
+    state_messages = [
+        {"role": "assistant", "content": "cron banner", "timestamp": 100.0},
+        {"role": "user", "content": "[Session Arc Summary]", "timestamp": 101.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 102.0},
+        {"role": "user", "content": "latest saved question", "timestamp": 200.0},
+        {"role": "assistant", "content": "latest saved answer", "timestamp": 201.0},
+        {"role": "user", "content": "continue", "timestamp": 300.0},
+    ]
+    session = SimpleNamespace(
+        session_id="prefix-replay",
+        context_messages=sidecar_context,
+        messages=[],
+    )
+
+    reconciled = reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state_messages
+    )
+
+    assert reconciled == sidecar_context + [
+        {"role": "user", "content": "continue", "timestamp": 300.0},
+    ]
+
+
+def test_prefer_context_reconcile_keeps_state_delta_when_no_mirrored_prefix():
+    sidecar_context = [
+        {"role": "user", "content": "summary"},
+        {"role": "assistant", "content": "saved answer"},
+    ]
+    state_messages = [
+        {"role": "user", "content": "fresh question", "timestamp": 300.0},
+        {"role": "assistant", "content": "fresh answer", "timestamp": 301.0},
+    ]
+    session = SimpleNamespace(
+        session_id="fresh-delta",
+        context_messages=sidecar_context,
+        messages=[],
+    )
+
+    reconciled = reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state_messages
+    )
+
+    assert reconciled == sidecar_context + state_messages
+
+
+def test_prefer_context_reconcile_strips_small_mirrored_context_prefix():
+    sidecar_context = [
+        {"role": "user", "content": "[Session Arc Summary] compacted"},
+        {"role": "assistant", "content": "last compacted answer"},
+    ]
+    state_messages = [
+        {"role": "user", "content": "[Session Arc Summary] compacted", "timestamp": 100.0},
+        {"role": "assistant", "content": "last compacted answer", "timestamp": 101.0},
+        {"role": "user", "content": "fresh follow-up", "timestamp": 200.0},
+    ]
+    session = SimpleNamespace(
+        session_id="small-context-prefix",
+        context_messages=sidecar_context,
+        messages=[],
+    )
+
+    reconciled = reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state_messages
+    )
+
+    assert reconciled == sidecar_context + [
+        {"role": "user", "content": "fresh follow-up", "timestamp": 200.0},
+    ]
+
+
+def test_prefer_context_reconcile_strips_mirrored_rows_without_sidecar_timestamps():
+    sidecar_context = [
+        {"role": "assistant", "content": "cron banner"},
+        {"role": "user", "content": "summary"},
+        {"role": "assistant", "content": "older answer"},
+        {"role": "user", "content": "already saved"},
+    ]
+    state_messages = [
+        {"role": "assistant", "content": "cron banner", "timestamp": 100.0},
+        {"role": "user", "content": "summary", "timestamp": 101.0},
+        {"role": "assistant", "content": "older answer", "timestamp": 102.0},
+        {"role": "user", "content": "already saved", "timestamp": 500.0},
+        {"role": "user", "content": "new after sidecar", "timestamp": 600.0},
+    ]
+    session = SimpleNamespace(
+        session_id="untimestamped-context",
+        context_messages=sidecar_context,
+        messages=[],
+    )
+
+    reconciled = reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state_messages
+    )
+
+    assert reconciled == sidecar_context + [
+        {"role": "user", "content": "new after sidecar", "timestamp": 600.0},
+    ]
+
+
+def test_prefer_context_reconcile_starts_after_last_state_row_seen_in_context():
+    sidecar_context = [
+        {"role": "assistant", "content": "cron banner"},
+        {"role": "user", "content": "summary"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "assistant", "content": "later represented row"},
+    ]
+    state_messages = [
+        {"role": "assistant", "content": "cron banner", "timestamp": 100.0},
+        {"role": "user", "content": "summary", "timestamp": 101.0},
+        {"role": "assistant", "content": "old answer", "timestamp": 102.0},
+        {"role": "tool", "content": "state-only stale tool", "timestamp": 103.0},
+        {"role": "assistant", "content": "later represented row", "timestamp": 104.0},
+        {"role": "user", "content": "new after represented boundary", "timestamp": 200.0},
+    ]
+    session = SimpleNamespace(
+        session_id="represented-boundary",
+        context_messages=sidecar_context,
+        messages=[],
+    )
+
+    reconciled = reconciled_state_db_messages_for_session(
+        session, prefer_context=True, state_messages=state_messages
+    )
+
+    assert reconciled == sidecar_context + [
+        {"role": "user", "content": "new after represented boundary", "timestamp": 200.0},
+    ]
+
+
+
+def test_state_db_delta_preserves_fresh_rows_before_repeated_context_message():
+    sidecar_context = [
+        {"role": "user", "content": "ok"},
+        {"role": "assistant", "content": "ready"},
+    ]
+    state_messages = [
+        {"role": "user", "content": "ok", "timestamp": 1.0},
+        {"role": "assistant", "content": "ready", "timestamp": 2.0},
+        {"role": "user", "content": "fresh question", "timestamp": 3.0},
+        {"role": "user", "content": "ok", "timestamp": 4.0},
+        {"role": "assistant", "content": "after repeat", "timestamp": 5.0},
+    ]
+
+    delta = state_db_delta_after_context(sidecar_context, state_messages)
+
+    assert [m["content"] for m in delta] == ["fresh question", "ok", "after repeat"]
+
+
+def test_non_streaming_chat_writeback_dedupes_full_context_replay():
+    previous_context = [
+        {"role": "assistant", "content": "cron banner"},
+        {"role": "user", "content": "[Session Arc Summary (d1, node 39)]\n" + "old context\n" * 400},
+        {"role": "assistant", "content": "previous answer"},
+    ]
+    result_messages = previous_context + previous_context + [
+        {"role": "user", "content": "simple follow-up"},
+        {"role": "assistant", "content": "short answer"},
+    ]
+
+    next_context = _dedupe_replayed_context_messages(previous_context, result_messages)
+
+    assert next_context == previous_context + [
+        {"role": "user", "content": "simple follow-up"},
+        {"role": "assistant", "content": "short answer"},
+    ]
+
+class _FakePostHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.body = bytearray()
+        self.wfile = self
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.headers[name] = value
+
+    def end_headers(self):
+        pass
+
+    def write(self, data):
+        self.body.extend(data)
+
+    def json_body(self):
+        return json.loads(bytes(self.body).decode("utf-8"))
+
+
+def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkeypatch):
+    import api.config as config
+    import api.models as models
+    import api.routes as routes
+
+    state_dir = tmp_path / "state"
+    session_dir = state_dir / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+    monkeypatch.setattr(routes, "get_session", models.get_session)
+    monkeypatch.setattr(routes, "title_from", models.title_from)
+    monkeypatch.setattr(config, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
+    monkeypatch.setattr(routes, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
+    monkeypatch.setattr(routes, "load_settings", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
+
+    previous_context = [
+        {"role": "assistant", "content": "cron banner"},
+        {"role": "user", "content": "[Session Arc Summary (d1, node 39)]\n" + "old context\n" * 400},
+        {"role": "assistant", "content": "previous answer"},
+    ]
+    session = Session(
+        session_id="sync_chat_replay",
+        workspace=str(tmp_path),
+        messages=list(previous_context),
+        context_messages=list(previous_context),
+        model="test-model",
+        model_provider="test-provider",
+    )
+    session.save(touch_updated_at=False)
+
+    replayed_result = previous_context + previous_context + [
+        {"role": "user", "content": "simple follow-up"},
+        {"role": "assistant", "content": "short answer"},
+    ]
+
+    class FakeAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_conversation(self, **_kwargs):
+            return {
+                "messages": replayed_result,
+                "final_response": "short answer",
+                "completed": True,
+            }
+
+    monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=FakeAgent))
+
+    handler = _FakePostHandler()
+    routes._handle_chat_sync(
+        handler,
+        {"session_id": session.session_id, "message": "simple follow-up", "workspace": str(tmp_path)},
+    )
+
+    assert handler.status == 200
+    reloaded = Session.load(session.session_id)
+    assert reloaded.context_messages == previous_context + [
+        {"role": "user", "content": "simple follow-up"},
+        {"role": "assistant", "content": "short answer"},
+    ]
+    assert reloaded.context_messages.count(previous_context[0]) == 1
 
 
 def test_session_context_falls_back_to_display_messages_for_legacy_sessions(tmp_path):

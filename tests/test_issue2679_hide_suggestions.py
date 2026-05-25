@@ -50,8 +50,8 @@ def test_panels_round_trip_and_hot_apply_hide_suggestions():
 
 def test_hide_suggestions_i18n_all_locales_and_changelog():
     js = I18N.read_text(encoding="utf-8")
-    assert js.count("settings_label_hide_suggestions:") == 11
-    assert js.count("settings_desc_hide_suggestions:") == 11
+    assert js.count("settings_label_hide_suggestions:") == 12
+    assert js.count("settings_desc_hide_suggestions:") == 12
     changelog = CHANGELOG.read_text(encoding="utf-8")
     assert "#2679" in changelog
     assert "hide_empty_state_suggestions" in changelog

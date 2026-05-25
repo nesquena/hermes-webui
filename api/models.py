@@ -764,18 +764,18 @@ def _get_profile_home(profile) -> Path:
 
 _INTERRUPTED_RECOVERED_WORDING = (
     '**Response interrupted.**\n\n'
-    'The WebUI process restarted before this turn finished. '
+    'The live response stream stopped before this turn finished. '
     'The partial output above was recovered from the run journal, '
     'but the interrupted agent process could not continue.'
 )
 _INTERRUPTED_NO_OUTPUT_WORDING = (
     '**Response interrupted.**\n\n'
-    'The WebUI process restarted before this turn finished. '
+    'The live response stream stopped before this turn finished. '
     'The user message above was preserved, but no agent output was recovered.'
 )
 _INTERRUPTED_PENDING_RETRY_WORDING = (
     '**Response interrupted.**\n\n'
-    'The WebUI process restarted before this turn finished. '
+    'The live response stream stopped before this turn finished. '
     'Recovering the partial output from the run journal — '
     'reload this session to retry.'
 )
@@ -783,15 +783,91 @@ _INTERRUPTED_PENDING_RETRY_WORDING = (
 # or the marker has been pending longer than _JOURNAL_RETRY_GIVEUP_SECONDS).
 _INTERRUPTED_NEUTRAL_WORDING = (
     '**Response interrupted.**\n\n'
-    'The WebUI process restarted before this turn finished. '
+    'The live response stream stopped before this turn finished. '
     'Partial output may have been lost.'
 )
+
+_INTERRUPTION_CAUSE_DETAILS = {
+    'process_restart': (
+        'Evidence: the WebUI process started after this turn began, so this '
+        'looks like a real process crash or restart.'
+    ),
+    'stream_run_split_brain': (
+        'Evidence: the browser response stream was gone but the worker registry '
+        'still listed the run. This is a stream/run bookkeeping split-brain.'
+    ),
+    'lost_worker_bookkeeping': (
+        'Evidence: the stream was gone and worker bookkeeping no longer had an '
+        'active run for it. This usually means the worker state was lost or '
+        'cleaned up without a terminal event.'
+    ),
+    'unknown': (
+        'Evidence: the stream stopped, but the WebUI could not classify the '
+        'interruption more precisely.'
+    ),
+}
+
+
+def _classify_interruption_cause(
+    *, stream_id: str | None = None, pending_started_at=None,
+) -> str:
+    """Classify the stale live-response state without overstating certainty."""
+    try:
+        started = float(pending_started_at) if pending_started_at else None
+    except (TypeError, ValueError):
+        started = None
+
+    if started is not None:
+        try:
+            if float(getattr(_cfg, 'SERVER_START_TIME', 0.0) or 0.0) > started:
+                return 'process_restart'
+        except (TypeError, ValueError):
+            pass
+
+    if stream_id:
+        try:
+            with _cfg.ACTIVE_RUNS_LOCK:
+                if str(stream_id) in _cfg.ACTIVE_RUNS:
+                    return 'stream_run_split_brain'
+        except Exception:
+            pass
+        return 'lost_worker_bookkeeping'
+
+    return 'unknown'
+
+
+def _interrupted_content_for(
+    *, recovered_output: bool, pending_retry: bool, interruption_cause: str,
+) -> str:
+    if recovered_output:
+        outcome = (
+            'The partial output above was recovered from the run journal, '
+            'but the interrupted agent process could not continue.'
+        )
+    elif pending_retry:
+        outcome = (
+            'Recovering the partial output from the run journal — '
+            'reload this session to retry.'
+        )
+    else:
+        outcome = 'The user message above was preserved, but no agent output was recovered.'
+    cause_detail = _INTERRUPTION_CAUSE_DETAILS.get(
+        interruption_cause,
+        _INTERRUPTION_CAUSE_DETAILS['unknown'],
+    )
+    return (
+        '**Response interrupted.**\n\n'
+        'The live response stream stopped before this turn finished. '
+        f'{cause_detail} {outcome}'
+    )
 
 
 def _interrupted_recovery_marker(
     *,
     recovered_output: bool = False,
     pending_retry: bool = False,
+    stream_id: str | None = None,
+    pending_started_at=None,
 ) -> dict:
     """Build the standard interrupted-turn marker.
 
@@ -809,18 +885,22 @@ def _interrupted_recovery_marker(
     set so the caller cannot accidentally re-arm retry on a successful
     repair.
     """
-    if recovered_output:
-        content = _INTERRUPTED_RECOVERED_WORDING
-    elif pending_retry:
-        content = _INTERRUPTED_PENDING_RETRY_WORDING
-    else:
-        content = _INTERRUPTED_NO_OUTPUT_WORDING
+    interruption_cause = _classify_interruption_cause(
+        stream_id=stream_id,
+        pending_started_at=pending_started_at,
+    )
+    content = _interrupted_content_for(
+        recovered_output=recovered_output,
+        pending_retry=pending_retry,
+        interruption_cause=interruption_cause,
+    )
     marker = {
         'role': 'assistant',
         'content': content,
         'timestamp': int(time.time()),
         '_error': True,
         'type': 'interrupted',
+        'interruption_cause': interruption_cause,
     }
     if pending_retry and not recovered_output:
         marker['_pending_journal_recovery'] = True
@@ -1218,15 +1298,26 @@ def _journal_retry_lock_for_sid(sid: str) -> threading.Lock:
 
 
 def _build_recovery_marker_with_retry_hook(
-    *, recovered_output: bool, stream_id: str | None,
+    *, recovered_output: bool, stream_id: str | None, pending_started_at=None,
 ) -> dict:
     """Build an interrupted-turn marker, arming the lazy-retry hook when
     visible output was not recovered yet but a stream id is available."""
     if recovered_output:
-        return _interrupted_recovery_marker(recovered_output=True)
+        return _interrupted_recovery_marker(
+            recovered_output=True,
+            stream_id=stream_id,
+            pending_started_at=pending_started_at,
+        )
     if not stream_id:
-        return _interrupted_recovery_marker(recovered_output=False)
-    marker = _interrupted_recovery_marker(pending_retry=True)
+        return _interrupted_recovery_marker(
+            recovered_output=False,
+            pending_started_at=pending_started_at,
+        )
+    marker = _interrupted_recovery_marker(
+        pending_retry=True,
+        stream_id=stream_id,
+        pending_started_at=pending_started_at,
+    )
     marker['_journal_retry_stream_id'] = str(stream_id)
     marker['_journal_retry_attempts'] = 0
     marker['_journal_retry_first_seen_ts'] = int(time.time())
@@ -1511,13 +1602,16 @@ def _apply_core_sync_or_error_marker(
             stream_id_for_recheck or session.active_stream_id,
         )
         _stream_id = stream_id_for_recheck or session.active_stream_id
+        _pending_started_at = session.pending_started_at
         session.active_stream_id = None
         session.pending_user_message = None
         session.pending_attachments = []
         session.pending_started_at = None
         session.messages.append(
             _build_recovery_marker_with_retry_hook(
-                recovered_output=recovered_output, stream_id=_stream_id,
+                recovered_output=recovered_output,
+                stream_id=_stream_id,
+                pending_started_at=_pending_started_at,
             )
         )
         session.save(touch_updated_at=touch_updated_at)
@@ -1562,13 +1656,18 @@ def _apply_core_sync_or_error_marker(
                 _stream_id,
                 dedupe_existing=True,
             )
+            _pending_started_at = session.pending_started_at
             session.active_stream_id = None
             session.pending_user_message = None
             session.pending_attachments = []
             session.pending_started_at = None
             if recovered_output:
                 session.messages.append(
-                    _interrupted_recovery_marker(recovered_output=True)
+                    _interrupted_recovery_marker(
+                        recovered_output=True,
+                        stream_id=_stream_id,
+                        pending_started_at=_pending_started_at,
+                    )
                 )
             # NOTE: when the core transcript was synced in but the run journal
             # is not yet visible, intentionally do NOT append a lazy-retry
@@ -1604,13 +1703,16 @@ def _apply_core_sync_or_error_marker(
         stream_id_for_recheck or session.active_stream_id,
     )
     _stream_id = stream_id_for_recheck or session.active_stream_id
+    _pending_started_at = session.pending_started_at
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
     session.pending_started_at = None
     session.messages.append(
         _build_recovery_marker_with_retry_hook(
-            recovered_output=recovered_output, stream_id=_stream_id,
+            recovered_output=recovered_output,
+            stream_id=_stream_id,
+            pending_started_at=_pending_started_at,
         )
     )
     session.save(touch_updated_at=touch_updated_at)
@@ -1945,18 +2047,6 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         if model_provider:
             effective_model_provider = model_provider
 
-    # Read default personality from config display.personality
-    _default_personality = None
-    try:
-        from api.config import get_config as _get_cfg_for_personality
-        _cfg_personality = (_get_cfg_for_personality().get('display') or {}).get('personality')
-        if _cfg_personality and isinstance(_cfg_personality, str):
-            _cfg_personality = _cfg_personality.strip().lower()
-            if _cfg_personality and _cfg_personality not in ('default', 'none', 'neutral'):
-                _default_personality = _cfg_personality
-    except Exception:
-        pass
-
     wt = worktree_info if isinstance(worktree_info, dict) else None
     workspace_path = (wt.get('path') if wt and wt.get('path') else workspace) if wt else workspace
     s = Session(
@@ -1965,7 +2055,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         model_provider=effective_model_provider,
         profile=profile,
         project_id=project_id,
-        personality=_default_personality,
+        personality=None,
         worktree_path=wt.get('path') if wt else None,
         worktree_branch=wt.get('branch') if wt else None,
         worktree_repo_root=wt.get('repo_root') if wt else None,
@@ -2153,9 +2243,27 @@ def all_sessions(diag=None):
             _diag_stage(diag, "all_sessions.prune_index")
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
+            try:
+                persisted_ids = {
+                    p.stem
+                    for p in SESSION_DIR.glob('*.json')
+                    if not p.name.startswith('_')
+                }
+            except Exception:
+                persisted_ids = None
             index = [
                 s for s in index
-                if _index_entry_exists(s.get('session_id'), in_memory_ids=in_memory_ids)
+                if (
+                    str(s.get('session_id') or '') in in_memory_ids
+                    or (
+                        persisted_ids is not None
+                        and str(s.get('session_id') or '') in persisted_ids
+                    )
+                    or (
+                        persisted_ids is None
+                        and _index_entry_exists(s.get('session_id'), in_memory_ids=in_memory_ids)
+                    )
+                )
             ]
             backfilled = []
             for i, s in enumerate(index):
@@ -3032,55 +3140,6 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False, pr
     return msgs
 
 
-def get_state_db_session_summary(sid) -> dict:
-    """Return cheap message count/max timestamp for one state.db session.
-
-    This is intentionally narrower than ``get_state_db_session_messages`` for
-    metadata-only WebUI polling: callers only need a staleness signal, not a
-    fully materialized transcript with tool/reasoning metadata.
-    """
-    import os
-    try:
-        import sqlite3
-    except ImportError:
-        return {}
-
-    db_path = _active_state_db_path()
-    if not sid or not db_path.exists():
-        return {}
-
-    try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(messages)")
-            available = {str(row['name']) for row in cur.fetchall()}
-            if not {'session_id', 'timestamp'}.issubset(available):
-                return {}
-            cur.execute(
-                """
-                SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at
-                FROM messages
-                WHERE session_id = ?
-                """,
-                (str(sid),),
-            )
-            row = cur.fetchone()
-            if not row:
-                return {}
-            count = int(row['message_count'] or 0)
-            last_message_at = row['last_message_at']
-            result = {'message_count': count}
-            if last_message_at not in (None, ''):
-                try:
-                    result['last_message_at'] = float(last_message_at)
-                except (TypeError, ValueError):
-                    pass
-            return result
-    except Exception:
-        return {}
-
-
 def _normalized_message_timestamp_for_key(value):
     if value is None or value == "":
         return ""
@@ -3174,6 +3233,56 @@ def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]):
 
 def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool:
     return _matching_visible_duplicate(visible_key, visible_keys) is not None
+
+
+def state_db_delta_after_context(sidecar_context: list, state_messages: list) -> list:
+    """Return only state.db rows that are newer than model-facing context.
+
+    `context_messages` is the authoritative model-facing prefix. state.db may
+    contain a mirrored copy of that prefix with fresh timestamps, especially for
+    LCM/continuation sessions. Appending the whole state transcript to a clean
+    sidecar context replays old context into the next runtime prompt.
+    """
+    sidecar_context = list(sidecar_context or [])
+    state_messages = list(state_messages or [])
+    if not sidecar_context or not state_messages:
+        return state_messages
+
+    sidecar_keys = [_session_message_content_key(m) for m in sidecar_context]
+    state_keys = [_session_message_content_key(m) for m in state_messages]
+    max_offset = min(len(sidecar_keys), len(state_keys))
+    best_len = 0
+    for offset in range(max_offset):
+        length = 0
+        while (
+            offset + length < len(sidecar_keys)
+            and length < len(state_keys)
+            and sidecar_keys[offset + length] == state_keys[length]
+        ):
+            length += 1
+        if length > best_len:
+            best_len = length
+
+    # Require at least two mirrored rows. A single repeated short user message
+    # is not enough evidence that state.db starts with a mirrored context
+    # segment, but small recovered contexts often contain only a compact summary
+    # and one follow-up row; those should still use the delta path.
+    if best_len < 2:
+        return state_messages
+
+    # Drop only rows that can be aligned with the remaining sidecar context in
+    # order. This still tolerates stale state-only rows between mirrored context
+    # rows, but once the sidecar context is exhausted every later state row is a
+    # real delta, even if it repeats a short earlier message.
+    sidecar_index = best_len
+    state_index = best_len
+    while sidecar_index < len(sidecar_keys) and state_index < len(state_keys):
+        if state_keys[state_index] == sidecar_keys[sidecar_index]:
+            sidecar_index += 1
+        state_index += 1
+    if sidecar_index == len(sidecar_keys):
+        return state_messages[state_index:]
+    return state_messages[best_len:]
 
 
 def merge_session_messages_append_only(sidecar_messages: list, state_messages: list) -> list:
@@ -3281,6 +3390,8 @@ def reconciled_state_db_messages_for_session(
         local_messages = getattr(session, 'messages', None) or []
     if state_messages is None:
         state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
+    if prefer_context and local_messages:
+        state_messages = state_db_delta_after_context(local_messages, state_messages)
     return merge_session_messages_append_only(local_messages, state_messages)
 
 

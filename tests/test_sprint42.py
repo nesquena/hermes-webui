@@ -389,7 +389,8 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         init_kwargs = captured["init_kwargs"]
         self.assertIsNotNone(init_kwargs["interim_assistant_callback"])
         self.assertTrue(callable(init_kwargs["interim_assistant_callback"]))
-        self.assertIn("WebUI progress contract", captured["agent"].ephemeral_system_prompt)
+        self.assertIn("WebUI progress guidance", captured["agent"].ephemeral_system_prompt)
+        self.assertIn("Match the normal Hermes messaging style", captured["agent"].ephemeral_system_prompt)
         self.assertIn("user-visible progress updates", captured["agent"].ephemeral_system_prompt)
 
         interim_events = []

@@ -138,6 +138,13 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
         assert not pid_file.exists()
 
 
+def test_start_uses_nohup_so_daemon_survives_launcher_exit():
+    ctl_text = CTL.read_text(encoding="utf-8")
+
+    assert "trap '' HUP" in ctl_text
+    assert 'exec nohup "${python_exe}"' in ctl_text
+
+
 def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()

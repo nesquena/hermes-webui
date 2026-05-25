@@ -28,8 +28,8 @@ def _load_repo_dotenv() -> None:
     ``python3 bootstrap.py`` directly behaves identically to ``./start.sh``.
     Variables are set unconditionally (matching shell source semantics), so a
     value in .env overrides one already present in the shell environment.
-    To keep a CLI-supplied value, unset it from .env or launch via start.sh
-    and override there.
+    ``ctl.sh`` sets HERMES_WEBUI_PRESERVE_ENV=1 when it has already resolved
+    launcher-specific values such as HERMES_HOME or HERMES_WEBUI_STATE_DIR.
 
     Only loads the webui repo .env — not ~/.hermes/.env, which the server
     loads independently at startup for provider credentials.
@@ -41,6 +41,12 @@ def _load_repo_dotenv() -> None:
     if not env_path.exists():
         return
     try:
+        preserve_existing = os.getenv("HERMES_WEBUI_PRESERVE_ENV", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
         for raw_line in env_path.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -52,6 +58,8 @@ def _load_repo_dotenv() -> None:
                 k = k[7:].strip()
             v = v.strip().strip('"').strip("'")
             if k:
+                if preserve_existing and k in os.environ:
+                    continue
                 os.environ[k] = v
     except Exception as exc:
         import sys as _sys

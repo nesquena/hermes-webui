@@ -30,6 +30,19 @@ HOME = Path.home()
 # REPO_ROOT is the directory that contains this file's parent (api/ -> repo root)
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 
+
+def _platform_default_hermes_home() -> Path:
+    """Return the platform-aware default Hermes home when HERMES_HOME is unset.
+
+    Native Windows Hermes Agent installs default to %LOCALAPPDATA%\\hermes,
+    while POSIX installs use ~/.hermes.
+    """
+    if os.name == "nt":
+        local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            return Path(local_app_data) / "hermes"
+    return HOME / ".hermes"
+
 # ── Network config (env-overridable) ─────────────────────────────────────────
 HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
@@ -40,8 +53,10 @@ TLS_KEY = os.getenv("HERMES_WEBUI_TLS_KEY", "").strip() or None
 TLS_ENABLED = TLS_CERT is not None and TLS_KEY is not None
 
 # ── State directory (env-overridable, never inside repo) ──────────────────────
+_DEFAULT_HERMES_HOME = _platform_default_hermes_home()
+
 STATE_DIR = (
-    Path(os.getenv("HERMES_WEBUI_STATE_DIR", str(HOME / ".hermes" / "webui")))
+    Path(os.getenv("HERMES_WEBUI_STATE_DIR", str(_DEFAULT_HERMES_HOME / "webui")))
     .expanduser()
     .resolve()
 )
@@ -108,7 +123,7 @@ def _discover_agent_dir() -> Path:
         )
 
     # 2. HERMES_HOME / hermes-agent
-    hermes_home = os.getenv("HERMES_HOME", str(HOME / ".hermes"))
+    hermes_home = os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))
     candidates.append(Path(hermes_home).expanduser() / "hermes-agent")
 
     # 3. Sibling: <repo-root>/../hermes-agent
@@ -119,7 +134,7 @@ def _discover_agent_dir() -> Path:
         candidates.append(REPO_ROOT.parent)
 
     # 5. ~/.hermes/hermes-agent (explicit common path)
-    candidates.append(HOME / ".hermes" / "hermes-agent")
+    candidates.append(_DEFAULT_HERMES_HOME / "hermes-agent")
 
     # 6. ~/hermes-agent
     candidates.append(HOME / "hermes-agent")
@@ -267,7 +282,7 @@ def _get_config_path() -> Path:
 
         return get_active_hermes_home() / "config.yaml"
     except ImportError:
-        return HOME / ".hermes" / "config.yaml"
+        return _DEFAULT_HERMES_HOME / "config.yaml"
 
 
 _WEBUI_SESSION_SAVE_MODES = {"deferred", "eager"}
@@ -2185,6 +2200,116 @@ def set_hermes_default_model(model_id: str) -> dict:
     return {"ok": True, "model": persisted_model}
 
 
+# ── Auxiliary model configuration ──────────────────────────────────────────
+
+# Canonical auxiliary task slots. Keep in sync with hermes_cli/config.py
+# DEFAULT_CONFIG["auxiliary"] and hermes_cli/web_server.py _AUX_TASK_SLOTS.
+AUX_TASK_SLOTS: tuple[str, ...] = (
+ "vision",
+ "web_extract",
+ "compression",
+ "session_search",
+ "skills_hub",
+ "approval",
+ "mcp",
+ "title_generation",
+ "curator",
+)
+
+
+def get_auxiliary_models() -> dict:
+    """Return current auxiliary task assignments from config.yaml.
+
+    Shape:
+    {
+        "tasks": [
+            {"task": "vision", "provider": "auto", "model": "", "base_url": ""},
+            ...
+        ],
+        "main": {"provider": "openrouter", "model": "anthropic/claude-opus-4.7"},
+    }
+    """
+    reload_config()
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    main_provider = str(model_cfg.get("provider") or "").strip()
+    main_model = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
+
+    aux_cfg = cfg.get("auxiliary", {})
+    if not isinstance(aux_cfg, dict):
+        aux_cfg = {}
+
+    tasks = []
+    for slot in AUX_TASK_SLOTS:
+        entry = aux_cfg.get(slot, {})
+        if not isinstance(entry, dict):
+            entry = {}
+        tasks.append({
+            "task": slot,
+            "provider": str(entry.get("provider") or "auto").strip(),
+            "model": str(entry.get("model") or "").strip(),
+            "base_url": str(entry.get("base_url") or "").strip(),
+        })
+
+    return {
+        "tasks": tasks,
+        "main": {"provider": main_provider, "model": main_model},
+    }
+
+
+def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
+    """Persist an auxiliary model assignment in config.yaml.
+
+    Special case: task='__reset__' clears all auxiliary slots.
+    """
+    if task != "__reset__" and task not in AUX_TASK_SLOTS:
+        raise ValueError(
+            f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}"
+        )
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+
+        if task == "__reset__":
+            # Per-slot reset: set each slot to auto, preserving extra fields
+            # (timeout, extra_body, api_key, base_url, download_timeout, etc.)
+            aux_cfg = config_data.get("auxiliary", {})
+            if not isinstance(aux_cfg, dict):
+                aux_cfg = {}
+            for slot in AUX_TASK_SLOTS:
+                slot_cfg = aux_cfg.get(slot, {})
+                if not isinstance(slot_cfg, dict):
+                    slot_cfg = {}
+                slot_cfg["provider"] = "auto"
+                slot_cfg["model"] = ""
+                aux_cfg[slot] = slot_cfg
+            config_data["auxiliary"] = aux_cfg
+        else:
+            aux_cfg = config_data.get("auxiliary", {})
+            if not isinstance(aux_cfg, dict):
+                aux_cfg = {}
+            slot_cfg = aux_cfg.get(task, {})
+            if not isinstance(slot_cfg, dict):
+                slot_cfg = {}
+            slot_cfg["provider"] = provider or "auto"
+            slot_cfg["model"] = model or ""
+            if provider and (provider.startswith("custom:") or provider == "custom"):
+                try:
+                    _, _, resolved_base_url = resolve_model_provider(model)
+                    if resolved_base_url:
+                        slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+                except Exception:
+                    pass
+            aux_cfg[task] = slot_cfg
+            config_data["auxiliary"] = aux_cfg
+
+        _save_yaml_config_file(config_path, config_data)
+
+    reload_config()
+    return {"ok": True, "task": task, "provider": provider, "model": model}
+
+
 # ── TTL cache for get_available_models() ─────────────────────────────────────
 _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
@@ -2258,7 +2383,7 @@ def _get_auth_store_path() -> Path:
 
         return _gah() / "auth.json"
     except ImportError:
-        return HOME / ".hermes" / "auth.json"
+        return _DEFAULT_HERMES_HOME / "auth.json"
 
 
 def _models_cache_file_fingerprint(path: Path) -> dict:
@@ -2990,7 +3115,7 @@ def get_available_models() -> dict:
 
                 hermes_env_path = _gah2() / ".env"
             except ImportError:
-                hermes_env_path = HOME / ".hermes" / ".env"
+                hermes_env_path = _DEFAULT_HERMES_HOME / ".env"
             env_keys = {}
             if hermes_env_path.exists():
                 try:
@@ -4365,6 +4490,7 @@ _SETTINGS_DEFAULTS = {
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
+    "ignore_agent_updates": False,  # keep WebUI update notices but suppress Agent update checks
     "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
@@ -4525,6 +4651,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_previous_messaging_sessions",
     "sync_to_insights",
     "check_for_updates",
+    "ignore_agent_updates",
     "whats_new_summary_enabled",
     "sound_enabled",
     "rtl",

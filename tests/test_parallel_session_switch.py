@@ -88,9 +88,11 @@ class TestLoadSessionIdleOverlap:
                     "The idle path should rely on renderMessages()'s consolidated "
                     "post-render pass instead of running a second highlight pass."
                 )
-                assert "await" in block and "_dirP" in block, (
-                    "loadDir() result should still be stored and awaited."
+                assert "_dirP" in block and "await _dirP" not in block, (
+                    "loadDir() should refresh the workspace without blocking "
+                    "session-load completion."
                 )
+                assert "_dirP.catch" in block
                 break
 
         assert found, (

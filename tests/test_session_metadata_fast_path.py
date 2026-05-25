@@ -62,10 +62,59 @@ def test_boot_does_not_block_session_restore_on_model_catalog():
 
     assert "if(s.default_model){" in src
     assert "window._defaultModel=s.default_model;" in src
-    assert "const _hydrateBootModelDropdown=()=>populateModelDropdown().then" in src
+    assert "const _hydrateBootModelDropdown=()=>populateModelDropdown({preferProfileDefaultOnFreshBoot:true}).then" in src
     assert "window._modelDropdownReady=null;" in src
     assert "window._ensureModelDropdownReady=_startBootModelDropdown;" in src
     assert "await populateModelDropdown()" not in src
+
+
+def test_boot_primes_model_catalog_without_awaiting_it():
+    """The boot-time prime must NOT await the model-catalog hydration before
+    rendering the session list. A later awaited hydration inside the saved-
+    session restore path at ``if(S.session) await _startBootModelDropdown();``
+    is intentional — that one re-applies the saved session's model after the
+    live catalog hydrates so the chip never shows a stale static default
+    (see comment in static/boot.js next to the saved-session restore).
+    """
+    src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+
+    ensure_pos = src.index("window._ensureModelDropdownReady=_startBootModelDropdown;")
+    prime_pos = src.index("Promise.resolve(_startBootModelDropdown()).catch(()=>{});", ensure_pos)
+    session_restore_pos = src.index("await renderSessionList();", prime_pos)
+
+    assert ensure_pos < prime_pos < session_restore_pos
+
+    # No await on the boot-prime path itself: between ensure_pos and the first
+    # session_restore await, the dropdown is fired-and-forgotten.
+    boot_prelude = src[ensure_pos:session_restore_pos]
+    assert "await _startBootModelDropdown()" not in boot_prelude, (
+        "Boot prelude must not await _startBootModelDropdown — the prime is "
+        "fire-and-forget so the sidebar can render before /api/models returns."
+    )
+    assert "await populateModelDropdown()" not in boot_prelude
+
+
+def test_failed_boot_model_catalog_prime_is_retryable():
+    src = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+    # #2726 parameterized the call: populateModelDropdown({preferProfileDefaultOnFreshBoot:true})
+    # Match either signature shape — empty args (legacy) OR opts arg (post-#2726).
+    candidates = [
+        "const _hydrateBootModelDropdown=()=>populateModelDropdown().then",
+        "const _hydrateBootModelDropdown=()=>populateModelDropdown({preferProfileDefaultOnFreshBoot:true}).then",
+    ]
+    start = -1
+    for needle in candidates:
+        try:
+            start = src.index(needle)
+            break
+        except ValueError:
+            continue
+    assert start >= 0, "boot.js missing _hydrateBootModelDropdown wrapper around populateModelDropdown()"
+    end = src.index("const _startBootModelDropdown=()=>", start)
+    block = src[start:end]
+
+    assert "window._modelDropdownReady=null;" in block
+    assert "throw e;" in block
 
 
 def test_boot_primes_visible_default_model_without_catalog_fetch():

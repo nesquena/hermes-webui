@@ -23,7 +23,7 @@ import uuid
 import re
 from pathlib import Path
 from contextlib import closing
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     is_cli_session_row,
@@ -75,6 +75,27 @@ _CSP_REPORT_RATE_LIMIT_LOCK = threading.Lock()
 _CSP_REPORT_RATE_LIMIT_WINDOW_SECONDS = 60
 _CSP_REPORT_RATE_LIMIT_MAX = 100
 _CSP_REPORT_MAX_BODY_BYTES = 64 * 1024
+_CLIENT_EVENT_LOGGER = logging.getLogger("client_event")
+_CLIENT_EVENT_RATE_LIMIT: dict[str, list[float]] = {}
+_CLIENT_EVENT_RATE_LIMIT_LOCK = threading.Lock()
+_CLIENT_EVENT_RATE_LIMIT_WINDOW_SECONDS = 60
+_CLIENT_EVENT_RATE_LIMIT_MAX = 30
+_CLIENT_EVENT_MAX_BODY_BYTES = 4 * 1024
+_CLIENT_EVENT_ALLOWED_FIELDS = {
+    "event": 64,
+    "source": 80,
+    "session_id": 128,
+    "stream_id": 128,
+    "visibility_state": 32,
+    "url_path": 256,
+    "reason": 160,
+}
+
+
+def _session_field(session, field, default=None):
+    if isinstance(session, dict):
+        return session.get(field, default)
+    return getattr(session, field, default)
 
 
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
@@ -1120,7 +1141,7 @@ def _run_journal_status_payload(summary: dict, *, active: bool = False) -> dict:
     terminal = bool(summary.get("terminal"))
     terminal_state = summary.get("terminal_state")
     if not active and not terminal:
-        terminal_state = "stale-from-restart"
+        terminal_state = "lost-worker-bookkeeping"
     return {
         "session_id": summary.get("session_id"),
         "run_id": summary.get("run_id"),
@@ -1257,11 +1278,45 @@ def _is_browser_unsafe_request(handler) -> bool:
 
 def _csrf_exempt_path(path: str) -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
-    return path in {"/api/auth/login", "/api/csp-report"}
+    return path in {
+        "/api/auth/login",
+        "/api/auth/passkey/options",
+        "/api/auth/passkey/login",
+        "/api/csp-report",
+    }
+
+
+_CSRF_FAILURE_ATTR = "_hermes_csrf_failure_reason"
+
+
+def _set_csrf_failure_reason(handler, reason: str) -> bool:
+    try:
+        setattr(handler, _CSRF_FAILURE_ATTR, reason)
+    except Exception:
+        pass
+    return False
+
+
+def _clear_csrf_failure_reason(handler) -> None:
+    try:
+        if hasattr(handler, _CSRF_FAILURE_ATTR):
+            delattr(handler, _CSRF_FAILURE_ATTR)
+    except Exception:
+        pass
+
+
+def _csrf_rejection_error(handler) -> str:
+    reason = getattr(handler, _CSRF_FAILURE_ATTR, "")
+    if reason == "origin_mismatch":
+        return "Cross-origin mismatch - check reverse proxy headers"
+    if reason == "token_mismatch":
+        return "Session expired - reload the page"
+    return "Cross-origin request rejected"
 
 
 def _check_csrf(handler) -> bool:
     """Reject cross-origin or tokenless authenticated browser unsafe requests."""
+    _clear_csrf_failure_reason(handler)
     origin = handler.headers.get("Origin", "")
     referer = handler.headers.get("Referer", "")
     host = handler.headers.get("Host", "")
@@ -1271,7 +1326,7 @@ def _check_csrf(handler) -> bool:
     # Extract host:port from origin/referer
     m = _re.match(r"^https?://([^/]+)", target)
     if not m:
-        return False
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
     origin_host = m.group(1)
     origin_scheme = m.group(0).split('://')[0].lower()  # 'http' or 'https'
     origin_name, origin_port = _normalize_host_port(origin_host)
@@ -1299,7 +1354,7 @@ def _check_csrf(handler) -> bool:
                 origin_allowed = True
                 break
     if not origin_allowed:
-        return False
+        return _set_csrf_failure_reason(handler, "origin_mismatch")
 
     from api.auth import CSRF_HEADER_NAME, is_auth_enabled, parse_cookie, verify_csrf_token
 
@@ -1307,7 +1362,9 @@ def _check_csrf(handler) -> bool:
         return True
     cookie_val = parse_cookie(handler)
     submitted = handler.headers.get(CSRF_HEADER_NAME) or handler.headers.get("X-CSRF-Token")
-    return verify_csrf_token(cookie_val or "", submitted or "")
+    if verify_csrf_token(cookie_val or "", submitted or ""):
+        return True
+    return _set_csrf_failure_reason(handler, "token_mismatch")
 
 
 def _client_ip_for_rate_limit(handler) -> str:
@@ -1331,6 +1388,20 @@ def _csp_report_rate_limited(handler, *, now: float | None = None) -> bool:
             return True
         timestamps.append(now)
         _CSP_REPORT_RATE_LIMIT[key] = timestamps
+    return False
+
+
+def _client_event_rate_limited(handler, *, now: float | None = None) -> bool:
+    now = time.time() if now is None else now
+    key = _client_ip_for_rate_limit(handler)
+    cutoff = now - _CLIENT_EVENT_RATE_LIMIT_WINDOW_SECONDS
+    with _CLIENT_EVENT_RATE_LIMIT_LOCK:
+        timestamps = [ts for ts in _CLIENT_EVENT_RATE_LIMIT.get(key, []) if ts >= cutoff]
+        if len(timestamps) >= _CLIENT_EVENT_RATE_LIMIT_MAX:
+            _CLIENT_EVENT_RATE_LIMIT[key] = timestamps
+            return True
+        timestamps.append(now)
+        _CLIENT_EVENT_RATE_LIMIT[key] = timestamps
     return False
 
 
@@ -1371,6 +1442,105 @@ def _handle_csp_report(handler) -> bool:
     payload = _read_csp_report_payload(handler)
     _CSP_REPORT_LOGGER.info("CSP report from %s: %s", _client_ip_for_rate_limit(handler), payload)
     return _send_no_content(handler)
+
+
+def _bounded_client_event_string(value, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:limit]
+
+
+def _sanitize_client_event_url_path(value) -> str | None:
+    text = _bounded_client_event_string(value, 1024)
+    if not text:
+        return None
+    try:
+        parsed = urlsplit(text)
+        path = parsed.path or "/"
+    except Exception:
+        path = text.split("?", 1)[0] or "/"
+    if not path.startswith("/"):
+        path = "/" + path.lstrip("/")
+    return path[: _CLIENT_EVENT_ALLOWED_FIELDS["url_path"]]
+
+
+def _sanitize_client_event_payload(payload: dict | None) -> dict:
+    """Whitelist tiny browser diagnostic events and discard sensitive content.
+
+    Client-side SSE diagnostics should explain transport failures without
+    persisting prompts, cookies, query strings, headers, or arbitrary browser
+    payloads. This helper intentionally keeps only bounded scalar metadata.
+    """
+    if not isinstance(payload, dict):
+        return {"event": "unknown"}
+    sanitized: dict[str, object] = {}
+    for field, limit in _CLIENT_EVENT_ALLOWED_FIELDS.items():
+        if field == "url_path":
+            value = _sanitize_client_event_url_path(payload.get(field))
+        else:
+            value = _bounded_client_event_string(payload.get(field), limit)
+        if value is not None:
+            sanitized[field] = value
+    ready_state = payload.get("ready_state")
+    if isinstance(ready_state, bool):
+        pass
+    elif isinstance(ready_state, int) and 0 <= ready_state <= 3:
+        sanitized["ready_state"] = ready_state
+    online = payload.get("online")
+    if isinstance(online, bool):
+        sanitized["online"] = online
+    elif isinstance(online, str):
+        lowered = online.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            sanitized["online"] = True
+        elif lowered in {"false", "0", "no", "off"}:
+            sanitized["online"] = False
+    if "event" not in sanitized:
+        sanitized["event"] = "unknown"
+    return sanitized
+
+
+def _read_client_event_payload(handler) -> dict:
+    try:
+        length = int(handler.headers.get("Content-Length", 0))
+    except Exception:
+        length = 0
+    if length > _CLIENT_EVENT_MAX_BODY_BYTES:
+        try:
+            handler.rfile.read(_CLIENT_EVENT_MAX_BODY_BYTES)
+        except Exception:
+            pass
+        # Do not leave unread request-body bytes on an HTTP/1.1 keep-alive
+        # socket. Draining an arbitrary oversized body can tie up a worker;
+        # closing the connection after the bounded read preserves framing for
+        # the next request without turning diagnostics into a slow-drain sink.
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        return {"event": "discarded", "reason": "body_too_large"}
+    raw = handler.rfile.read(length) if length else b"{}"
+    try:
+        decoded = raw.decode("utf-8")
+        payload = json.loads(decoded)
+    except Exception:
+        return {"event": "invalid", "reason": "invalid_json"}
+    return payload if isinstance(payload, dict) else {"event": "invalid", "reason": "not_object"}
+
+
+def _handle_client_event_log(handler, body: dict) -> bool:
+    if _client_event_rate_limited(handler):
+        _CLIENT_EVENT_LOGGER.warning(
+            "Dropped client event from %s: rate limit exceeded",
+            _client_ip_for_rate_limit(handler),
+        )
+        return j(handler, {"ok": False, "error": "rate_limited"}, status=429) or True
+    payload = _sanitize_client_event_payload(body)
+    _CLIENT_EVENT_LOGGER.info("Client event from %s: %s", _client_ip_for_rate_limit(handler), payload)
+    return j(handler, {"ok": True, "event": payload.get("event")}) or True
 
 
 def _normalize_provider_id(value: str | None) -> str:
@@ -2005,6 +2175,37 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     return sidecar_messages
 
 
+def _message_summary(messages) -> dict:
+    messages = list(messages or [])
+    last_message_at = 0.0
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        try:
+            last_message_at = max(last_message_at, float(msg.get("timestamp") or 0))
+        except (TypeError, ValueError):
+            pass
+    return {"message_count": len(messages), "last_message_at": last_message_at}
+
+
+def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict:
+    """Return the reconciled message summary used by metadata-only session loads.
+
+    Threads ``profile=`` through to ``get_state_db_session_messages`` so
+    background-thread reads land on the correct profile's state.db (per the
+    cookie-bound profile selector — fixes the same TLS-vs-thread race the
+    #2762 fix addressed for write paths).
+    """
+    sidecar_session = Session.load(sid)
+    sidecar_messages = []
+    if sidecar_session:
+        sidecar_messages = getattr(sidecar_session, "messages", []) or []
+    state_db_messages = get_state_db_session_messages(sid, profile=profile)
+    return _message_summary(
+        merge_session_messages_append_only(sidecar_messages, state_db_messages)
+    )
+
+
 def _session_requires_cli_metadata_lookup(session) -> bool:
     """Return True when a sidecar/session row still needs CLI metadata.
 
@@ -2530,6 +2731,15 @@ _LOGIN_LOCALE = {
         "invalid_pw": "\ube44\ubc00\ubc88\ud638\uac00 \uc62c\ubc14\ub974\uc9c0 \uc54a\uc2b5\ub2c8\ub2e4",
         "conn_failed": "\uc5f0\uacb0 \uc2e4\ud328",
     },
+    "tr": {
+        "lang": "tr-TR",
+        "title": "Oturum a\u00e7",
+        "subtitle": "Devam etmek i\u00e7in \u015fifrenizi girin",
+        "placeholder": "\u015eifre",
+        "btn": "Oturum a\u00e7",
+        "invalid_pw": "Ge\u00e7ersiz \u015fifre",
+        "conn_failed": "Ba\u011flant\u0131 ba\u015far\u0131s\u0131z",
+    },
 }
 
 
@@ -2587,6 +2797,7 @@ button{width:100%;padding:10px;border-radius:10px;border:none;background:rgba(12
   border:1px solid rgba(124,185,255,.3);color:#7cb9ff;font-size:14px;font-weight:600;cursor:pointer;
   transition:all .15s}
 button:hover{background:rgba(124,185,255,.25)}
+.passkey-login{margin-top:10px;background:rgba(255,255,255,.04);border-color:rgba(232,160,48,.35);color:#e8a030}
 .err{color:#e94560;font-size:12px;margin-top:10px;display:none}
 </style></head><body>
 <div class="card">
@@ -2596,6 +2807,7 @@ button:hover{background:rgba(124,185,255,.25)}
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
     <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
     <button type="submit">{{LOGIN_BTN}}</button>
+    <button type="button" id="passkey-login" class="passkey-login" style="display:none">Sign in with passkey</button>
   </form>
   <div class="err" id="err"></div>
 </div>
@@ -3442,6 +3654,21 @@ def _serve_shell_unavailable(handler, exc: Exception) -> bool:
     return True
 
 
+def _handle_shutdown(handler) -> bool:
+    """Shut down the WebUI server process."""
+    j(handler, {"status": "shutting_down"})
+    import signal
+    import threading
+
+    def _do_shutdown():
+        import time
+        time.sleep(0.3)
+        os.kill(os.getpid(), signal.SIGINT)
+
+    threading.Thread(target=_do_shutdown, daemon=True).start()
+    return True
+
+
 def _serve_manifest(handler) -> bool:
     """Serve static/manifest.json with the correct PWA Content-Type.
 
@@ -3544,13 +3771,26 @@ def handle_get(handler, parsed) -> bool:
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
     if parsed.path == "/api/auth/status":
-        from api.auth import is_auth_enabled, parse_cookie, verify_session
+        from api.auth import _passkey_feature_flag_enabled, get_password_hash, is_auth_enabled, parse_cookie, verify_session
+        from api.passkeys import registered_credentials
 
         logged_in = False
-        if is_auth_enabled():
+        auth_enabled = is_auth_enabled()
+        if auth_enabled:
             cv = parse_cookie(handler)
             logged_in = bool(cv and verify_session(cv))
-        return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
+        passkey_flag = _passkey_feature_flag_enabled()
+        passkeys = registered_credentials() if passkey_flag else []
+        password_auth_enabled = get_password_hash() is not None
+        return j(handler, {
+            "auth_enabled": auth_enabled,
+            "logged_in": logged_in,
+            "password_auth_enabled": password_auth_enabled,
+            "passwordless_enabled": bool(passkeys) and not password_auth_enabled,
+            "passkeys_enabled": bool(passkeys),
+            "passkeys_count": len(passkeys),
+            "passkey_feature_flag": passkey_flag,
+        })
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         return _serve_manifest(handler)
@@ -3628,6 +3868,11 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/models/live":
         return _handle_live_models(handler, parsed)
+
+    # ── Auxiliary models (GET/POST) ──
+    if parsed.path == "/api/model/auxiliary":
+        from api.config import get_auxiliary_models
+        return j(handler, get_auxiliary_models())
 
     if parsed.path == "/api/dashboard/status":
         from api import dashboard_probe
@@ -3771,7 +4016,7 @@ def handle_get(handler, parsed) -> bool:
             is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
             cli_messages = []
             state_db_messages = []
-            sidecar_metadata_messages = None
+            metadata_summary = None
             _session_profile = getattr(s, 'profile', None) or None
             if is_messaging_session:
                 cli_messages = get_cli_session_messages(sid)
@@ -3779,17 +4024,11 @@ def handle_get(handler, parsed) -> bool:
                 state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
             elif not is_messaging_session:
                 # Metadata-only callers still need the same append-only
-                # reconciliation contract as full loads. A raw state.db summary
-                # can count stale rows that the merge intentionally filters out,
-                # which makes sidebar polling think the transcript is always
-                # newer than the loaded conversation.
-                state_db_messages = get_state_db_session_messages(sid, profile=_session_profile)
-                sidecar_metadata_session = Session.load(sid)
-                sidecar_metadata_messages = (
-                    getattr(sidecar_metadata_session, "messages", []) or []
-                    if sidecar_metadata_session
-                    else []
-                )
+                # reconciliation contract as full loads so stale/replayed
+                # state.db rows do not make sidebar polling think the
+                # transcript is always newer. Helper threads profile= to
+                # honor #2827's TLS-vs-thread fix.
+                metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
             _t2 = _time.monotonic()
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
@@ -3819,12 +4058,16 @@ def handle_get(handler, parsed) -> bool:
                     sidecar_messages = getattr(s, "messages", []) or []
                     _all_msgs = merge_session_messages_append_only(cli_messages, sidecar_messages)
                 else:
-                    _metadata_sidecar = sidecar_metadata_messages
-                    if _metadata_sidecar is None:
-                        _metadata_sidecar = getattr(s, "messages", []) or []
-                    _all_msgs = merge_session_messages_append_only(_metadata_sidecar, state_db_messages)
+                    if metadata_summary is None:
+                        metadata_summary = _message_summary(getattr(s, "messages", []) or [])
+                    _summary_message_count = metadata_summary["message_count"]
+                    _summary_last_message_at = metadata_summary["last_message_at"]
+                    _all_msgs = []
             if not load_messages:
-                _summary_message_count = len(_all_msgs)
+                if metadata_summary is None:
+                    metadata_summary = _message_summary(_all_msgs)
+                    _summary_message_count = metadata_summary["message_count"]
+                    _summary_last_message_at = metadata_summary["last_message_at"]
                 if _summary_message_count == 0:
                     # Legacy session with no loaded sidecar and no state.db summary —
                     # fall back to the persisted metadata count from session JSON.
@@ -3837,14 +4080,6 @@ def handle_get(handler, parsed) -> bool:
                             _summary_message_count = max(0, int(metadata_count))
                     except (TypeError, ValueError):
                         pass
-                try:
-                    _summary_last_message_at = max(
-                        float((m or {}).get("timestamp") or 0)
-                        for m in _all_msgs
-                        if isinstance(m, dict)
-                    ) if _all_msgs else 0
-                except (TypeError, ValueError):
-                    _summary_last_message_at = 0
             else:
                 _summary_message_count = None
                 _summary_last_message_at = None
@@ -4279,6 +4514,7 @@ def handle_get(handler, parsed) -> bool:
         settings = load_settings()
         if not settings.get("check_for_updates", True):
             return j(handler, {"disabled": True})
+        include_agent_updates = not bool(settings.get("ignore_agent_updates"))
         qs = parse_qs(parsed.query)
         force = qs.get("force", ["0"])[0] == "1"
         # ?simulate=1 returns fake behind counts for UI testing (localhost only)
@@ -4300,7 +4536,8 @@ def handle_get(handler, parsed) -> bool:
                     },
                     "agent": {
                         "name": "agent",
-                        "behind": 1,
+                        "behind": 1 if include_agent_updates else 0,
+                        "ignored": not include_agent_updates,
                         "current_sha": "aaa0001",
                         "latest_sha": "bbb0002",
                         "branch": "master",
@@ -4312,7 +4549,7 @@ def handle_get(handler, parsed) -> bool:
             )
         from api.updates import check_for_updates
 
-        return j(handler, check_for_updates(force=force))
+        return j(handler, check_for_updates(force=force, include_agent=include_agent_updates))
 
     if parsed.path == "/api/chat/stream/status":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
@@ -4579,6 +4816,13 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/mcp/tools":
         return _handle_mcp_tools_list(handler)
 
+    if parsed.path == "/api/notes/sources":
+        return _handle_notes_sources_list(handler)
+    if parsed.path == "/api/notes/search":
+        return _handle_notes_search(handler, parsed)
+    if parsed.path == "/api/notes/item":
+        return _handle_notes_item(handler, parsed)
+
     # ── Checkpoints / Rollback (GET) ──
     if parsed.path == "/api/rollback/list":
         qs = parse_qs(parsed.query)
@@ -4743,10 +4987,13 @@ def handle_post(handler, parsed) -> bool:
         diag.stage("csrf")
     if not _csrf_exempt_path(parsed.path) and not _check_csrf(handler):
         try:
-            return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+            return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
         finally:
             if diag:
                 diag.finish()
+
+    if parsed.path == "/api/shutdown":
+        return _handle_shutdown(handler)
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
@@ -4755,6 +5002,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
+
+    if parsed.path == "/api/client-events/log":
+        if diag:
+            diag.stage("read_client_event_body")
+        return _handle_client_event_log(handler, _read_client_event_payload(handler))
 
     if diag:
         diag.stage("read_body")
@@ -4916,6 +5168,25 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
+
+    # ── Auxiliary model set (POST) ──
+    if parsed.path == "/api/model/set":
+        scope = str(body.get("scope") or "").strip()
+        task = str(body.get("task") or "").strip()
+        provider = str(body.get("provider") or "auto").strip()
+        model = str(body.get("model") or "").strip()
+        if scope == "auxiliary":
+            from api.config import set_auxiliary_model
+            try:
+                return j(handler, set_auxiliary_model(task, provider, model))
+            except Exception as exc:
+                return bad(handler, str(exc), status=400)
+        if scope == "main":
+            try:
+                return j(handler, set_hermes_default_model(model))
+            except ValueError as exc:
+                return bad(handler, str(exc), status=400)
+        return bad(handler, f"unknown scope: {scope}", status=400)
 
     # ── Providers (POST) ──
     if parsed.path == "/api/providers":
@@ -5738,7 +6009,10 @@ def handle_post(handler, parsed) -> bool:
             isinstance(body.get("_set_password"), str)
             and body.get("_set_password", "").strip()
         )
-        requested_clear_password = bool(body.get("_clear_password"))
+        requested_passwordless = bool(body.pop("_passwordless", False))
+        requested_clear_password = bool(body.get("_clear_password") or requested_passwordless)
+        if requested_passwordless:
+            body["_clear_password"] = True
 
         # #1560: HERMES_WEBUI_PASSWORD env var takes precedence in
         # api.auth.get_password_hash(), so writing password_hash to settings.json
@@ -5753,6 +6027,18 @@ def handle_post(handler, parsed) -> bool:
                     "Unset the env var and restart the server before changing the password here.",
                     409,
                 )
+        if requested_passwordless:
+            from api.auth import _passkey_feature_flag_enabled
+            from api.passkeys import registered_credentials
+
+            if not _passkey_feature_flag_enabled():
+                return bad(handler, "Passkey support is disabled. Enable HERMES_WEBUI_PASSKEY before going passwordless.", 409)
+            if not registered_credentials():
+                return bad(handler, "Register a passkey before going passwordless.", 409)
+        elif requested_clear_password:
+            from api.passkeys import clear_credentials
+
+            clear_credentials()
 
         saved = save_settings(body)
         saved.pop("password_hash", None)  # never expose hash to client
@@ -5903,8 +6189,8 @@ def handle_post(handler, parsed) -> bool:
             # Pre-snapshot from persisted index (acquires LOCK internally,
             # so must run outside our own LOCK acquire below).
             persisted_pinned_ids = {
-                getattr(existing, "session_id", None) for existing in all_sessions()
-                if getattr(existing, "pinned", False) and not getattr(existing, "archived", False)
+                _session_field(existing, "session_id", None) for existing in all_sessions()
+                if _session_field(existing, "pinned", False) and not _session_field(existing, "archived", False)
             }
             with LOCK:
                 # Final authoritative count: merge persisted-pinned with the
@@ -6276,6 +6562,48 @@ def handle_post(handler, parsed) -> bool:
             _record_login_attempt(client_ip)
             return bad(handler, "Invalid password", 401)
         cookie_val = create_session()
+        body = json.dumps({"ok": True}).encode()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.send_header("Cache-Control", "no-store")
+        _security_headers(handler)
+        set_auth_cookie(handler, cookie_val)
+        handler.end_headers()
+        handler.wfile.write(body)
+        return True
+
+    if parsed.path == "/api/auth/passkey/options":
+        from api.auth import _passkey_feature_flag_enabled, is_auth_enabled
+        from api.passkeys import PasskeyError, authentication_options
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled. Set HERMES_WEBUI_PASSKEY=1 or webui_passkey_enabled: true to enable."}, status=404)
+        if not is_auth_enabled():
+            return j(handler, {"error": "Auth not enabled"}, status=400)
+        try:
+            return j(handler, {"ok": True, "publicKey": authentication_options(handler)})
+        except PasskeyError as e:
+            return bad(handler, str(e), status=400)
+
+    if parsed.path == "/api/auth/passkey/login":
+        from api.auth import _passkey_feature_flag_enabled, create_session, is_auth_enabled, set_auth_cookie
+        from api.auth import _check_login_rate, _record_login_attempt
+        from api.passkeys import PasskeyError, finish_login
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        if not is_auth_enabled():
+            return j(handler, {"error": "Auth not enabled"}, status=400)
+        client_ip = handler.client_address[0]
+        if not _check_login_rate(client_ip):
+            return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)
+        try:
+            finish_login(body, handler)
+        except PasskeyError as e:
+            _record_login_attempt(client_ip)
+            return bad(handler, str(e), status=401)
+        cookie_val = create_session()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Cache-Control", "no-store")
@@ -6285,19 +6613,65 @@ def handle_post(handler, parsed) -> bool:
         handler.wfile.write(json.dumps({"ok": True}).encode())
         return True
 
+    if parsed.path == "/api/auth/passkey/register/options":
+        from api.auth import _passkey_feature_flag_enabled
+        from api.passkeys import registration_options
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        return j(handler, {"ok": True, "publicKey": registration_options(handler)})
+
+    if parsed.path == "/api/auth/passkey/register":
+        from api.auth import _passkey_feature_flag_enabled
+        from api.passkeys import PasskeyError, finish_registration, registered_credentials
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        try:
+            result = finish_registration(body, handler)
+            result["credentials"] = registered_credentials()
+            return j(handler, result)
+        except PasskeyError as e:
+            return bad(handler, str(e), status=400)
+
+    if parsed.path == "/api/auth/passkey/delete":
+        from api.auth import _passkey_feature_flag_enabled, get_password_hash
+        from api.passkeys import PasskeyError, delete_credential, registered_credentials
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"error": "Passkey support is disabled."}, status=404)
+        try:
+            credential_id = str(body.get("id") or "")
+            creds = registered_credentials()
+            if get_password_hash() is None and len(creds) <= 1 and any(c.get("id") == credential_id for c in creds):
+                return bad(handler, "Set a password or disable auth before removing the last passkey.", 409)
+            return j(handler, delete_credential(credential_id))
+        except PasskeyError as e:
+            return bad(handler, str(e), status=404)
+
+    if parsed.path == "/api/auth/passkeys":
+        from api.auth import _passkey_feature_flag_enabled
+        from api.passkeys import registered_credentials
+
+        if not _passkey_feature_flag_enabled():
+            return j(handler, {"credentials": [], "disabled": True})
+        return j(handler, {"credentials": registered_credentials()})
+
     if parsed.path == "/api/auth/logout":
         from api.auth import clear_auth_cookie, invalidate_session, parse_cookie
 
         cookie_val = parse_cookie(handler)
         if cookie_val:
             invalidate_session(cookie_val)
+        body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(body)))
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         clear_auth_cookie(handler)
         handler.end_headers()
-        handler.wfile.write(json.dumps({"ok": True}).encode())
+        handler.wfile.write(body)
         return True
 
     # ── Checkpoints / Rollback (POST) ──
@@ -6323,8 +6697,11 @@ def handle_post(handler, parsed) -> bool:
 def handle_patch(handler, parsed) -> bool:
     """Handle all PATCH routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
-        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+        return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
+    if parsed.path.startswith("/api/mcp/servers/"):
+        name = parsed.path[len("/api/mcp/servers/"):]
+        return _handle_mcp_server_toggle(handler, name, body)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
 
@@ -6338,8 +6715,11 @@ def handle_patch(handler, parsed) -> bool:
 def handle_delete(handler, parsed) -> bool:
     """Handle all DELETE routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
-        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+        return j(handler, {"error": _csrf_rejection_error(handler)}, status=403)
     body = read_body(handler)
+    if parsed.path.startswith("/api/mcp/servers/"):
+        name = parsed.path[len("/api/mcp/servers/"):]
+        return _handle_mcp_server_delete(handler, name)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
 
@@ -6347,6 +6727,17 @@ def handle_delete(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "DELETE")
         return True
+    return False
+
+
+def handle_put(handler, parsed) -> bool:
+    """Handle all PUT routes. Returns True if handled, False for 404."""
+    if not _check_csrf(handler):
+        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+    body = read_body(handler)
+    if parsed.path.startswith("/api/mcp/servers/"):
+        name = parsed.path[len("/api/mcp/servers/"):]
+        return _handle_mcp_server_update(handler, name, body)
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────
@@ -6620,7 +7011,7 @@ def _handle_sse_stream(handler, parsed):
         handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
         handler.send_header("Cache-Control", "no-cache")
         handler.send_header("X-Accel-Buffering", "no")
-        handler.send_header("Connection", "keep-alive")
+        handler.send_header("Connection", "close")
         handler.end_headers()
         try:
             _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs))
@@ -6632,7 +7023,7 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "keep-alive")
+    handler.send_header("Connection", "close")
     handler.end_headers()
     try:
         while True:
@@ -6763,7 +7154,7 @@ def _handle_terminal_output(handler, parsed):
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
-    handler.send_header("Connection", "keep-alive")
+    handler.send_header("Connection", "close")
     handler.end_headers()
     try:
         while True:
@@ -6841,7 +7232,7 @@ def _handle_gateway_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     q = watcher.subscribe()
@@ -6874,7 +7265,7 @@ def _handle_session_events_stream(handler):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     q = subscribe_session_events()
@@ -6960,6 +7351,7 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
         handler.send_response(416)
         handler.send_header("Content-Range", f"bytes */{file_size}")
         handler.send_header("Accept-Ranges", "bytes")
+        handler.send_header("Content-Length", "0")
         _security_headers(handler)
         handler.end_headers()
         return True
@@ -7004,6 +7396,51 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
     return True
 
 
+def _html_preview_with_blank_base(raw: bytes) -> bytes:
+    base = '<base target="_blank">'
+    text = raw.decode("utf-8", errors="replace")
+    if re.search(r"<head(?:\s[^>]*)?>", text, flags=re.IGNORECASE):
+        text = re.sub(r"(<head\b[^>]*>)", r"\1" + base, text, count=1, flags=re.IGNORECASE)
+    elif re.search(r"<!doctype[^>]*>", text, flags=re.IGNORECASE):
+        text = re.sub(
+            r"(<!doctype[^>]*>)",
+            r"\1<head>" + base + "</head>",
+            text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    else:
+        text = "<head>" + base + "</head>" + text
+    return text.encode("utf-8")
+
+
+def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp: str):
+    """Serve sandboxed workspace HTML preview with links targeting a new tab."""
+    try:
+        body = _html_preview_with_blank_base(target.read_bytes())
+    except PermissionError:
+        return bad(handler, "Permission denied", 403)
+    except Exception:
+        return bad(handler, "Could not read file", 500)
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Accept-Ranges", "none")
+    handler.send_header("Cache-Control", cache_control)
+    handler.send_header("Content-Disposition", _content_disposition_value("inline", target.name))
+    handler.send_header("Content-Security-Policy", csp)
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Referrer-Policy", "same-origin")
+    handler.send_header(
+        "Permissions-Policy",
+        "camera=(), microphone=(self), geolocation=(), clipboard-write=(self)",
+    )
+    handler.end_headers()
+    handler.wfile.write(body)
+    return True
+
+
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
@@ -7025,10 +7462,12 @@ def _handle_media(handler, parsed):
     if is_auth_enabled():
         cv = parse_cookie(handler)
         if not (cv and verify_session(cv)):
+            body = b'{"error":"Authentication required"}'
             handler.send_response(401)
             handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(body)))
             handler.end_headers()
-            handler.wfile.write(b'{"error":"Authentication required"}')
+            handler.wfile.write(body)
             return
 
     qs = parse_qs(parsed.query)
@@ -7262,6 +7701,15 @@ def _handle_folder_download(handler, parsed):
         _content_disposition_value("attachment", zip_name),
     )
     handler.send_header("Cache-Control", "no-store")
+    # Under HTTP/1.1 (Handler.protocol_version, see server.py post-#2836)
+    # a response with no Content-Length and no Transfer-Encoding requires
+    # Connection: close so the client knows the body ends at FIN. The ZIP
+    # is built on-the-fly so we cannot send Content-Length up front; mirror
+    # the SSE-endpoint pattern #2836 uses. Without this header the client
+    # hangs waiting for the next pipelined response after the central
+    # directory bytes finish. Caught by Opus pre-release advisor on
+    # stage-batch11.
+    handler.send_header("Connection", "close")
     handler.end_headers()
 
     written = 0
@@ -7309,8 +7757,10 @@ def _handle_file_raw(handler, parsed):
     # CSP sandbox directive applies the same isolation server-side: without
     # allow-same-origin, the document is treated as a unique opaque origin and
     # cannot read WebUI cookies, localStorage, or postMessage to the parent.
-    csp = "sandbox allow-scripts" if html_inline_ok else None
+    csp = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox" if html_inline_ok else None
     # _serve_file_bytes sends Content-Security-Policy when csp is set.
+    if html_inline_ok:
+        return _serve_inline_html_preview(handler, target, "no-store", csp=csp)
     return _serve_file_bytes(handler, target, mime, disposition, "no-store", csp=csp)
 
 
@@ -7385,7 +7835,7 @@ def _handle_approval_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     from api.streaming import _sse
@@ -7486,7 +7936,7 @@ def _handle_clarify_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'keep-alive')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     from api.streaming import _sse
@@ -8085,6 +8535,7 @@ def _handle_memory_read(handler):
             "memory_mtime": mem_file.stat().st_mtime if mem_file.exists() else None,
             "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
             "soul_mtime": soul_file.stat().st_mtime if soul_file.exists() else None,
+            "external_notes_enabled": _external_notes_sources_enabled(),
         },
     )
 
@@ -8459,6 +8910,41 @@ def _start_chat_stream_for_session(
     return response
 
 
+def _runtime_runner_client_factory():
+    """Return the runner-local client when a supervised backend exists.
+
+    Slice 4d wires the `/api/chat/start` selection point without silently falling
+    back to the legacy in-process runtime when `runner-local` is explicitly
+    requested. The supervised runner backend itself is intentionally not created
+    in this helper yet; a later slice can replace this factory with the concrete
+    client while keeping the route contract stable.
+    """
+    raise NotImplementedError("runner-local chat backend is not configured")
+
+
+def _chat_start_response_from_run_start(result):
+    """Expose only the legacy browser-facing chat-start response fields."""
+    payload = dict(getattr(result, "payload", {}) or {})
+    response = {}
+    for key in (
+        "stream_id",
+        "session_id",
+        "pending_started_at",
+        "turn_id",
+        "title",
+        "effective_model",
+        "effective_model_provider",
+        "error",
+        "active_stream_id",
+        "_status",
+    ):
+        if key in payload:
+            response[key] = payload[key]
+    response.setdefault("stream_id", result.stream_id)
+    response.setdefault("session_id", result.session_id)
+    return response
+
+
 def _runtime_adapter_goal_action(goal_args: str) -> str:
     """Return the bounded RuntimeAdapter goal action for WebUI /goal args."""
     action = str(goal_args or "").strip().lower()
@@ -8668,10 +9154,12 @@ def _handle_chat_start(handler, body, diag=None):
         from api.runtime_adapter import (
             LegacyJournalRuntimeAdapter,
             StartRunRequest,
+            build_runtime_adapter,
             runtime_adapter_enabled,
+            runtime_adapter_runner_enabled,
         )
 
-        if runtime_adapter_enabled():
+        if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
             def _legacy_start_run(request: StartRunRequest) -> dict:
                 return _start_chat_stream_for_session(
                     s,
@@ -8684,23 +9172,32 @@ def _handle_chat_start(handler, body, diag=None):
                     diag=diag,
                 )
 
-            adapter = LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
-            result = adapter.start_run(
-                StartRunRequest(
-                    session_id=s.session_id,
-                    message=msg,
-                    attachments=attachments,
-                    workspace=workspace,
-                    profile=getattr(s, "profile", None),
-                    provider=model_provider,
-                    model=model,
-                    source="webui",
-                    metadata={"route": "/api/chat/start"},
+            def _legacy_adapter_factory():
+                return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
+
+            try:
+                adapter = build_runtime_adapter(
+                    legacy_adapter_factory=_legacy_adapter_factory,
+                    runner_client_factory=_runtime_runner_client_factory,
                 )
-            )
-            response = dict(result.payload)
-            response.setdefault("stream_id", result.stream_id)
-            response.setdefault("session_id", result.session_id)
+                if adapter is None:
+                    raise NotImplementedError("runtime adapter selection returned no adapter")
+                result = adapter.start_run(
+                    StartRunRequest(
+                        session_id=s.session_id,
+                        message=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        profile=getattr(s, "profile", None),
+                        provider=model_provider,
+                        model=model,
+                        source="webui",
+                        metadata={"route": "/api/chat/start"},
+                    )
+                )
+            except NotImplementedError as exc:
+                return j(handler, {"error": str(exc)}, status=501)
+            response = _chat_start_response_from_run_start(result)
         else:
             response = _start_chat_stream_for_session(
                 s,
@@ -8848,6 +9345,7 @@ def _handle_chat_sync(handler, body):
                 session_id=s.session_id,
             )
             from api.streaming import (
+                _dedupe_replayed_context_messages,
                 _merge_display_messages_after_agent_result,
                 _restore_display_reasoning_metadata,
                 _restore_reasoning_metadata,
@@ -8898,6 +9396,10 @@ def _handle_chat_sync(handler, body):
             _previous_context_messages,
             _result_messages,
         )
+        _next_context_messages = _dedupe_replayed_context_messages(
+            _previous_context_messages,
+            _next_context_messages,
+        )
         s.context_messages = _next_context_messages
         s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
@@ -8922,6 +9424,12 @@ def _handle_chat_sync(handler, body):
                 model=s.model,
                 title=s.title,
                 message_count=len(s.messages),
+                # #2762 / #2827 parity with api/streaming.py:5078: pass the
+                # session's profile explicitly so a future refactor that
+                # backgrounds this handler doesn't silently leak writes to
+                # the wrong profile's state.db. HTTP thread today, but
+                # defense-in-depth. Opus pre-release advisor MUST-FIX.
+                profile=getattr(s, 'profile', None),
             )
     except Exception:
         logger.debug("Failed to update session cost tracking")
@@ -11924,6 +12432,449 @@ def _handle_mcp_tools_list(handler):
     })
 
 
+def _webui_truthy(value) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _external_notes_sources_enabled(config_data: dict | None = None) -> bool:
+    """Return whether the third-party notes drawer is explicitly enabled.
+
+    The Memory panel is a primary surface, so this power-user drawer stays
+    default-off unless a deployment opts in through config or environment.
+    """
+    env_value = os.getenv("HERMES_WEBUI_EXTERNAL_NOTES_SOURCES", "")
+    if env_value:
+        return _webui_truthy(env_value)
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    if not isinstance(cfg, dict):
+        return False
+    return _webui_truthy(
+        cfg.get("webui_external_notes_sources")
+        or cfg.get("external_notes_sources")
+        or cfg.get("notes_sources_drawer")
+    )
+
+
+_NOTES_SOURCE_SERVER_HINTS = {
+    "joplin", "obsidian", "notion", "llm-wiki", "llmwiki", "wiki",
+    "notes", "note", "knowledge", "kb", "readwise", "logseq",
+}
+_NOTES_SOURCE_TOOL_HINTS = {
+    "note", "notes", "notebook", "page", "pages", "wiki", "knowledge",
+    "search_notes", "get_note", "list_notes", "read_note",
+}
+_NOTES_SOURCE_CONFIGURED_TOOL_HINTS = {
+    "joplin": [
+        {"name": "search_notes", "description": "Search Joplin notes by keyword."},
+        {"name": "list_notes", "description": "List notes from a Joplin notebook."},
+        {"name": "get_note", "description": "Read a specific Joplin note by ID."},
+    ],
+    "obsidian": [
+        {"name": "search_notes", "description": "Search Obsidian notes by keyword."},
+        {"name": "read_note", "description": "Read a specific Obsidian note or file."},
+    ],
+    "notion": [
+        {"name": "search_pages", "description": "Search Notion pages or databases."},
+        {"name": "get_page", "description": "Read a specific Notion page."},
+    ],
+    "llm-wiki": [
+        {"name": "query_knowledge_base", "description": "Query the LLM Wiki knowledge base."},
+        {"name": "read_page", "description": "Read a specific wiki page."},
+    ],
+    "llmwiki": [
+        {"name": "query_knowledge_base", "description": "Query the LLM Wiki knowledge base."},
+        {"name": "read_page", "description": "Read a specific wiki page."},
+    ],
+}
+
+
+def _note_source_label(name: str) -> str:
+    labels = {
+        "joplin": "Joplin",
+        "obsidian": "Obsidian",
+        "notion": "Notion",
+        "llm-wiki": "LLM Wiki",
+        "llmwiki": "LLM Wiki",
+        "readwise": "Readwise",
+        "logseq": "Logseq",
+    }
+    lowered = str(name or "").strip().lower()
+    return labels.get(lowered, str(name or "").replace("_", " ").replace("-", " ").title())
+
+
+def _looks_like_notes_source(server_name: str, tool_rows: list[dict]) -> bool:
+    server_l = str(server_name or "").lower()
+    if any(hint in server_l for hint in _NOTES_SOURCE_SERVER_HINTS):
+        return True
+    for tool in tool_rows:
+        haystack = " ".join([
+            str(tool.get("name") or ""),
+            str(tool.get("description") or ""),
+        ]).lower()
+        if any(hint in haystack for hint in _NOTES_SOURCE_TOOL_HINTS):
+            return True
+    return False
+
+
+def _configured_note_tool_hints(server_name: str) -> list[dict]:
+    """Return safe expected note-tool hints for configured known sources."""
+    server_l = str(server_name or "").strip().lower()
+    hints = _NOTES_SOURCE_CONFIGURED_TOOL_HINTS.get(server_l)
+    if hints is None:
+        if any(hint in server_l for hint in ("wiki", "knowledge", "kb")):
+            hints = [
+                {"name": "search", "description": "Search this configured knowledge source."},
+                {"name": "read", "description": "Read an item from this configured knowledge source."},
+            ]
+        elif any(hint in server_l for hint in ("note", "notes")):
+            hints = [
+                {"name": "search_notes", "description": "Search this configured notes source."},
+                {"name": "read_note", "description": "Read a note from this configured notes source."},
+            ]
+        else:
+            hints = []
+    return [
+        {
+            "name": _mcp_safe_display_text(row.get("name") or "", limit=96),
+            "description": _mcp_safe_display_text(row.get("description") or "", limit=180),
+            "inferred": True,
+        }
+        for row in hints
+        if isinstance(row, dict)
+    ]
+
+
+def _notes_sources_from_mcp_inventory(server_summaries: dict, tools: list[dict]) -> list[dict]:
+    """Build a safe notes/knowledge-source inventory from MCP servers/tools.
+
+    Some WebUI deployments can read ``mcp_servers`` from config before their
+    local runtime/tool registry has hydrated MCP tool metadata.  Still show
+    configured note/knowledge servers (for example Joplin) in that case so the
+    drawer reflects connection/configuration state instead of appearing empty.
+    """
+    by_server: dict[str, list[dict]] = {}
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        server = str(tool.get("server") or "").strip()
+        if not server:
+            continue
+        by_server.setdefault(server, []).append(tool)
+
+    if isinstance(server_summaries, dict):
+        for server, summary in server_summaries.items():
+            server_name = str(server or "").strip()
+            if not server_name or server_name in by_server:
+                continue
+            if _looks_like_notes_source(server_name, []):
+                by_server.setdefault(server_name, [])
+
+    sources = []
+    for server, tool_rows in by_server.items():
+        if not _looks_like_notes_source(server, tool_rows):
+            continue
+        summary = server_summaries.get(server, {"name": server}) if isinstance(server_summaries, dict) else {"name": server}
+        safe_tools = []
+        tool_source = "runtime"
+        for tool in tool_rows[:8]:
+            desc = _mcp_safe_display_text(tool.get("description") or "", limit=180)
+            desc = re.sub(r"(?i)\b(api[_-]?key|token|password|secret)\s*[:=]\s*\S+", "[REDACTED]", desc)
+            safe_tools.append({
+                "name": _mcp_safe_display_text(tool.get("name") or "", limit=96),
+                "description": desc,
+            })
+        if not safe_tools:
+            safe_tools = _configured_note_tool_hints(server)
+            if safe_tools:
+                tool_source = "configured_hint"
+        sources.append({
+            "name": server,
+            "label": _note_source_label(server),
+            "enabled": bool(summary.get("enabled", True)),
+            "active": bool(summary.get("active")),
+            "status": summary.get("status") or "unknown",
+            "tool_count": len(safe_tools),
+            "tool_source": tool_source,
+            "tools": safe_tools,
+        })
+    sources.sort(key=lambda row: (not row.get("active"), row.get("label", "")))
+    return sources
+
+
+def _handle_notes_sources_list(handler):
+    """List note/knowledge MCP sources for the WebUI Notes drawer."""
+    cfg = get_config()
+    if not _external_notes_sources_enabled(cfg):
+        return j(handler, {
+            "enabled": False,
+            "sources": [],
+            "source": "disabled",
+            "inventory_scope": "disabled_by_default",
+            "attach_supported": False,
+            "automatic_recall_unchanged": True,
+            "recent_ai_notes": [],
+        })
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    runtime = _mcp_runtime_status_by_name()
+    server_summaries = {
+        str(name): _server_summary(str(name), scfg, runtime.get(str(name)))
+        for name, scfg in servers.items()
+    }
+    tools = _mcp_tools_from_runtime_status(runtime, server_summaries)
+    source = "mcp_runtime_status"
+    if not tools:
+        tools = _mcp_tools_from_registry(server_summaries)
+        source = "tool_registry" if tools else "none"
+    return j(handler, {
+        "enabled": True,
+        "sources": _notes_sources_from_mcp_inventory(server_summaries, tools),
+        "source": source,
+        "inventory_scope": "already_known_runtime_only",
+        "attach_supported": False,
+        "automatic_recall_unchanged": True,
+        "recent_ai_notes": _joplin_recent_ai_notes(limit=6),
+    })
+
+
+def _notes_configured_server(source: str) -> dict:
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(servers, dict):
+        return {}
+    source_l = str(source or "").strip().lower()
+    for name, server_cfg in servers.items():
+        if str(name or "").strip().lower() == source_l and isinstance(server_cfg, dict):
+            return server_cfg
+    return {}
+
+
+def _joplin_connection_from_config() -> tuple[str, str]:
+    cfg = _notes_configured_server("joplin")
+    env = cfg.get("env", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(env, dict):
+        env = {}
+    url = str(env.get("JOPLIN_URL") or os.environ.get("JOPLIN_URL") or "http://127.0.0.1:41184").rstrip("/")
+    token = str(env.get("JOPLIN_TOKEN") or os.environ.get("JOPLIN_TOKEN") or "")
+    return url, token
+
+
+def _joplin_api_get(path: str, params: dict | None = None) -> dict:
+    """Call the local Joplin Web Clipper API without logging credentials."""
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
+    from urllib.error import HTTPError, URLError
+
+    base_url, token = _joplin_connection_from_config()
+    if not token:
+        raise ValueError("Joplin token is not configured")
+    safe_path = "/" + str(path or "").lstrip("/")
+    query = dict(params or {})
+    url = f"{base_url}{safe_path}?{urlencode(query)}"
+    request = Request(url, headers={"Authorization": f"token {token}"})
+    try:
+        with urlopen(request, timeout=8) as response:
+            raw = response.read(2_000_000).decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        raise ValueError(f"Joplin API returned HTTP {exc.code}") from None
+    except URLError as exc:
+        raise ValueError("Joplin API is not reachable") from None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        raise ValueError("Joplin API returned invalid JSON") from None
+    return data if isinstance(data, dict) else {}
+
+
+def _note_snippet(body: str, query: str = "", *, limit: int = 220) -> str:
+    text = re.sub(r"\s+", " ", str(body or "")).strip()
+    if not text:
+        return ""
+    q = str(query or "").strip().lower()
+    if q:
+        idx = text.lower().find(q)
+        if idx > 40:
+            text = "…" + text[max(0, idx - 60):]
+    if len(text) > limit:
+        return text[:limit].rstrip() + "…"
+    return text
+
+
+def _joplin_search_notes(query: str, *, limit: int = 20) -> list[dict]:
+    query = str(query or "").strip()
+    if not query:
+        return []
+    limit = max(1, min(int(limit or 20), 50))
+    data = _joplin_api_get("/search", {
+        "query": query,
+        "type": "note",
+        "fields": "id,title,body,parent_id,updated_time",
+        "limit": limit,
+    })
+    rows = data.get("items") if isinstance(data, dict) else []
+    results = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        note_id = _mcp_safe_display_text(row.get("id") or "", limit=64)
+        if not note_id:
+            continue
+        title = _mcp_safe_display_text(row.get("title") or "Untitled", limit=180)
+        body = str(row.get("body") or "")
+        results.append({
+            "id": note_id,
+            "title": title,
+            "snippet": _mcp_safe_display_text(_note_snippet(body, query), limit=260),
+            "parent_id": _mcp_safe_display_text(row.get("parent_id") or "", limit=64),
+            "updated_time": row.get("updated_time"),
+            "source": "joplin",
+        })
+    return results
+
+
+def _joplin_get_note(note_id: str) -> dict:
+    note_id = str(note_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9]{16,64}", note_id):
+        raise ValueError("Invalid Joplin note id")
+    data = _joplin_api_get(f"/notes/{note_id}", {
+        "fields": "id,title,body,parent_id,updated_time,created_time",
+    })
+    if not data.get("id"):
+        raise ValueError("Joplin note not found")
+    body = str(data.get("body") or "")
+    if len(body) > 50_000:
+        body = body[:50_000].rstrip() + "\n\n[Preview truncated at 50,000 characters]"
+    return {
+        "id": _mcp_safe_display_text(data.get("id") or "", limit=64),
+        "title": _mcp_safe_display_text(data.get("title") or "Untitled", limit=180),
+        "body": _redact_text(body),
+        "parent_id": _mcp_safe_display_text(data.get("parent_id") or "", limit=64),
+        "updated_time": data.get("updated_time"),
+        "created_time": data.get("created_time"),
+        "source": "joplin",
+    }
+
+
+_JOPLIN_AI_RECALL_NOTE_PRIORITY = [
+    ("CURRENT_CONTEXT_ID", "Current Context"),
+    ("OPEN_ISSUES_ID", "Open Issues"),
+    ("AGENT_MEMORY_ID", "Agent Memory"),
+    ("CONVENTIONS_ID", "Conventions / Preferences"),
+    ("INFRA_ID", "Infrastructure"),
+    ("SERVICES_ID", "Services"),
+]
+
+
+def _joplin_prefill_script_path() -> Path | None:
+    cfg = get_config()
+    path_value = cfg.get("prefill_messages_script") if isinstance(cfg, dict) else None
+    if not path_value:
+        return None
+    try:
+        return Path(str(path_value)).expanduser()
+    except Exception:
+        return None
+
+
+def _joplin_recall_note_refs(script_path: Path | None = None) -> list[dict]:
+    """Find stable Joplin note IDs referenced by the configured recall script.
+
+    This keeps the WebUI generic: it does not hard-code a user's note IDs, but
+    can still surface the notes that the configured AI prefill/recall script is
+    known to read for automatic context.
+    """
+    script_path = script_path or _joplin_prefill_script_path()
+    if not script_path or not script_path.exists() or not script_path.is_file():
+        return []
+    try:
+        text = script_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    constants = {
+        match.group(1): match.group(2)
+        for match in re.finditer(r'(?m)^\s*([A-Z0-9_]+_ID)\s*=\s*["\']([A-Fa-f0-9]{16,64})["\']', text)
+    }
+    refs = []
+    seen = set()
+    for const_name, label in _JOPLIN_AI_RECALL_NOTE_PRIORITY:
+        note_id = constants.get(const_name)
+        if not note_id or note_id in seen:
+            continue
+        seen.add(note_id)
+        refs.append({
+            "id": note_id,
+            "label": label,
+            "constant": const_name,
+            "used_by": "ai_prefill",
+            "used_reason": "automatic_recall",
+        })
+    return refs
+
+
+def _joplin_recent_ai_notes(*, limit: int = 6) -> list[dict]:
+    """Return safe Joplin notes that the configured AI recall path recently uses."""
+    try:
+        limit = max(1, min(int(limit or 6), 20))
+    except Exception:
+        limit = 6
+    notes = []
+    for ref in _joplin_recall_note_refs()[:limit]:
+        try:
+            data = _joplin_api_get(f"/notes/{ref['id']}", {
+                "fields": "id,title,parent_id,updated_time,user_updated_time,created_time",
+            })
+        except Exception:
+            continue
+        note_id = _mcp_safe_display_text(data.get("id") or ref.get("id") or "", limit=64)
+        if not note_id:
+            continue
+        notes.append({
+            "id": note_id,
+            "title": _mcp_safe_display_text(data.get("title") or ref.get("label") or "Untitled", limit=180),
+            "label": _mcp_safe_display_text(ref.get("label") or "", limit=120),
+            "parent_id": _mcp_safe_display_text(data.get("parent_id") or "", limit=64),
+            "updated_time": data.get("user_updated_time") or data.get("updated_time"),
+            "created_time": data.get("created_time"),
+            "source": "joplin",
+            "used_by": ref.get("used_by") or "ai_prefill",
+            "used_reason": ref.get("used_reason") or "automatic_recall",
+        })
+    return notes
+
+
+def _handle_notes_search(handler, parsed):
+    if not _external_notes_sources_enabled():
+        return j(handler, {"source": "disabled", "results": [], "error": "External notes sources are disabled."}, status=404)
+    query = parse_qs(parsed.query or "")
+    source = str(query.get("source", ["joplin"])[0] or "joplin").strip().lower()
+    q = str(query.get("q", [""])[0] or "").strip()
+    try:
+        limit = int(query.get("limit", ["20"])[0] or 20)
+    except Exception:
+        limit = 20
+    if source != "joplin":
+        return j(handler, {"source": source, "results": [], "error": "Search is currently implemented for Joplin sources only."}, status=400)
+    try:
+        return j(handler, {"source": "joplin", "query": q, "results": _joplin_search_notes(q, limit=limit)})
+    except ValueError as exc:
+        return j(handler, {"source": "joplin", "query": q, "results": [], "error": str(exc)}, status=502)
+
+
+def _handle_notes_item(handler, parsed):
+    if not _external_notes_sources_enabled():
+        return j(handler, {"source": "disabled", "error": "External notes sources are disabled."}, status=404)
+    query = parse_qs(parsed.query or "")
+    source = str(query.get("source", ["joplin"])[0] or "joplin").strip().lower()
+    note_id = str(query.get("id", [""])[0] or "").strip()
+    if source != "joplin":
+        return j(handler, {"source": source, "error": "Preview is currently implemented for Joplin sources only."}, status=400)
+    try:
+        return j(handler, {"source": "joplin", "note": _joplin_get_note(note_id)})
+    except ValueError as exc:
+        return j(handler, {"source": "joplin", "error": str(exc)}, status=502)
+
+
 def _handle_mcp_servers_list(handler):
     """List configured MCP servers with safe, read-only runtime visibility."""
     cfg = get_config()
@@ -11937,7 +12888,7 @@ def _handle_mcp_servers_list(handler):
     ]
     return j(handler, {
         "servers": result,
-        "toggle_supported": False,
+        "toggle_supported": True,
         "reload_required": True,
     })
 
@@ -11959,6 +12910,30 @@ def _handle_mcp_server_delete(handler, name):
     _save_yaml_config_file(_get_config_path(), cfg)
     reload_config()
     return j(handler, {"ok": True, "deleted": name})
+
+
+def _handle_mcp_server_toggle(handler, name, body):
+    """Toggle enabled state for an MCP server (PATCH /api/mcp/servers/{name})."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    if "enabled" not in body:
+        return bad(handler, "enabled field is required")
+    enabled = bool(body["enabled"])
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    if name not in servers:
+        return bad(handler, f"MCP server '{name}' not found", 404)
+    if not isinstance(servers[name], dict):
+        return bad(handler, f"MCP server '{name}' has invalid config", 400)
+    servers[name]["enabled"] = enabled
+    cfg["mcp_servers"] = servers
+    _save_yaml_config_file(_get_config_path(), cfg)
+    reload_config()
+    return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
 
 _MASKED_PLACEHOLDER = "••••••"

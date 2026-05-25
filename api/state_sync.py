@@ -20,22 +20,78 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def _get_state_db():
-    """Get a SessionDB instance for the active profile's state.db.
-    Returns None if hermes_state is not importable or DB is unavailable.
-    Each caller is responsible for calling db.close() when done.
+def _get_state_db(profile: str=None):
+    """Get a SessionDB instance for a profile's state.db.
+
+    When ``profile`` is provided the function resolves *that* profile's
+    home directory directly (via ``_resolve_profile_home_for_name``).
+    If resolution fails (unknown profile name, IO error, etc.) the
+    function returns ``None`` rather than silently falling back to
+    ``HERMES_HOME`` — silently routing the write to the wrong DB
+    would defeat the point of the explicit-profile path (#2762).
+
+    When ``profile`` is None it falls back to the TLS-based
+    ``get_active_hermes_home()`` lookup for backward compatibility,
+    with a final ``HERMES_HOME`` fallback only on that path. TLS may be
+    unset in background/worker threads, in which case the lookup falls
+    through to the process-global active profile and can write to the
+    wrong DB. Callers that know the session's profile (e.g.
+    ``sync_session_usage`` after a stream completes on a background
+    thread) should pass it explicitly to avoid that race.
+
+    Returns None if hermes_state is not importable, the explicit
+    profile cannot be resolved, or the DB is unavailable. Each caller
+    is responsible for calling db.close() when done.
     """
     try:
         from hermes_state import SessionDB
     except ImportError:
         return None
 
-    try:
-        from api.profiles import get_active_hermes_home
-        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
-    except Exception:
-        logger.debug("Failed to resolve hermes home, using default")
-        hermes_home = Path(os.getenv('HERMES_HOME', str(Path.home() / '.hermes')))
+    if profile is not None:
+        # Explicit-profile path — a resolution failure here MUST NOT
+        # silently fall back to HERMES_HOME or the caller's "write to
+        # the named profile" contract is broken (the original #2762
+        # symptom: writes leaking into the wrong profile's state.db).
+        #
+        # Defense-in-depth (per #2827 maintainer review): validate the
+        # name shape BEFORE handing it to ``_resolve_profile_home_for_name``.
+        # The resolver itself rarely raises — for an invalid-but-non-
+        # malicious name (e.g. one that fails ``_PROFILE_ID_RE``) it
+        # quietly returns ``_DEFAULT_HERMES_HOME``, which is the exact
+        # leak we're trying to prevent on the explicit-profile path.
+        # Validating up-front turns that quiet leak into an explicit
+        # "refuse + log + return None" so the contract is "write to
+        # the EXACT named profile, or write nowhere."
+        try:
+            from api.profiles import (
+                _resolve_profile_home_for_name,
+                _PROFILE_ID_RE,
+                _is_root_profile,
+            )
+            if not (_is_root_profile(profile) or _PROFILE_ID_RE.fullmatch(profile)):
+                logger.warning(
+                    "state_sync: refusing invalid profile name %r — skipping "
+                    "write rather than leaking to the default state.db (#2762).",
+                    profile,
+                )
+                return None
+            hermes_home = Path(_resolve_profile_home_for_name(profile)).expanduser().resolve()
+        except Exception:
+            logger.warning(
+                "state_sync: could not resolve profile %r — skipping write rather "
+                "than leaking to the active profile (#2762).", profile,
+            )
+            return None
+    else:
+        # Implicit / TLS-fallback path — preserves pre-#2762 behavior
+        # for any caller that doesn't pass profile= explicitly.
+        try:
+            from api.profiles import get_active_hermes_home
+            hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+        except Exception:
+            logger.debug("Failed to resolve hermes home, using default")
+            hermes_home = Path(os.getenv('HERMES_HOME', str(Path.home() / '.hermes')))
 
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
@@ -48,11 +104,16 @@ def _get_state_db():
         return None
 
 
-def sync_session_start(session_id: str, model=None) -> None:
+def sync_session_start(session_id: str, model=None, profile: str=None) -> None:
     """Register a WebUI session in state.db (idempotent).
     Called when a session's first message is sent.
+
+    ``profile`` lets the caller name the target state.db explicitly,
+    avoiding the TLS-vs-background-thread mismatch in #2762. When
+    omitted, the active profile is resolved from TLS (then process
+    globals) as before.
     """
-    db = _get_state_db()
+    db = _get_state_db(profile=profile)
     if not db:
         return
     try:
@@ -72,12 +133,20 @@ def sync_session_start(session_id: str, model=None) -> None:
 
 def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=0,
                        estimated_cost=None, model=None, title: str=None,
-                       message_count: int=None) -> None:
+                       message_count: int=None, profile: str=None) -> None:
     """Update token usage and title for a WebUI session in state.db.
     Called after each turn completes. Uses absolute=True to set totals
     (the WebUI Session already accumulates across turns).
+
+    ``profile`` lets the caller name the target state.db explicitly,
+    which is what fixes #2762: this function is invoked from the
+    agent streaming worker thread, where the request-thread's TLS
+    profile context has not been propagated. Without an explicit
+    profile, the TLS lookup falls back to the process-global active
+    profile and writes the session's usage to the wrong state.db
+    (e.g. ``hiyuki``'s instead of the cookie-switched ``maiko``'s).
     """
-    db = _get_state_db()
+    db = _get_state_db(profile=profile)
     if not db:
         return
     try:
