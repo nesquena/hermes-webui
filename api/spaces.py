@@ -6590,7 +6590,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             )
         space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_space_id(data))
         event_id = _space_tool_event_id(data, positional_event_index=1)
-        result = restore_revision(space_id, event_id)
+        receipt_action = name if name.startswith("space.admin.recovery.") else "space.recovery.restore"
+        result = restore_revision(space_id, event_id, action=receipt_action)
         if is_current:
             result["active_space_id"] = space_id
         return {"action": name, **result}
@@ -6636,7 +6637,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         else:
             event_id = _space_tool_event_id(data, positional_event_index=1)
             widget_id = validate_widget_id(_space_tool_widget_id(data, positional_widget_index=2))
-        result = restore_widget_revision(space_id, event_id, widget_id)
+        receipt_action = name if name.startswith("space.admin.recovery.") else "space.recovery.restore_widget"
+        result = restore_widget_revision(space_id, event_id, widget_id, action=receipt_action)
         if is_current:
             result["active_space_id"] = space_id
         return {"action": name, **result}
@@ -7152,7 +7154,7 @@ def list_revision_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]
     return summaries
 
 
-def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
+def restore_revision(space_id: str, event_id: str, *, action: str = "space.recovery.restore") -> dict[str, Any]:
     """Restore a space manifest from a stored revision snapshot.
 
     Revision event files may contain full internal snapshots so rollback can
@@ -7218,19 +7220,25 @@ def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
     restored["revision_events"] = merged_revision_events
     restored = _preserve_admin_space_recovery_control_state(current, restored)
     saved = _write_manifest(restored, "space.restored", {"restored_event_id": safe_event_id}, allow_stale_revision=True)
-    action = "space.recovery.restore"
+    safe_action = _context_value(action, 120) or "space.recovery.restore"
     return {
         "ok": True,
         "space": read_space_detail(sid),
         "restored_event_id": safe_event_id,
         "revision_event_id": saved["revision_event_id"],
-        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
-        "autonomy_policy": _recovery_restore_action_policy_receipt(action),
+        "prompt_preflight": _recovery_required_prompt_preflight_receipt(safe_action),
+        "autonomy_policy": _recovery_restore_action_policy_receipt(safe_action),
         "progress_event": _record_space_recovery_progress_event(sid, action="restore"),
     }
 
 
-def restore_widget_revision(space_id: str, event_id: str, widget_id: str) -> dict[str, Any]:
+def restore_widget_revision(
+    space_id: str,
+    event_id: str,
+    widget_id: str,
+    *,
+    action: str = "space.recovery.restore_widget",
+) -> dict[str, Any]:
     """Restore one widget from a stored revision snapshot, leaving other widgets intact."""
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
@@ -7275,15 +7283,15 @@ def restore_widget_revision(space_id: str, event_id: str, widget_id: str) -> dic
         restored_widgets.append(target_widget)
     current["widgets"] = restored_widgets
     saved = _write_manifest(current, "widget.restored", {"restored_event_id": safe_event_id, "widget_id": wid})
-    action = "space.recovery.restore_widget"
+    safe_action = _context_value(action, 120) or "space.recovery.restore_widget"
     return {
         "ok": True,
         "space_id": sid,
         "widget": read_widget_detail(sid, wid),
         "restored_event_id": safe_event_id,
         "revision_event_id": saved["revision_event_id"],
-        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
-        "autonomy_policy": _recovery_restore_action_policy_receipt(action),
+        "prompt_preflight": _recovery_required_prompt_preflight_receipt(safe_action),
+        "autonomy_policy": _recovery_restore_action_policy_receipt(safe_action),
         "progress_event": _record_space_recovery_progress_event(sid, action="widget.restore"),
     }
 

@@ -10847,6 +10847,48 @@ def test_space_tool_adapter_lists_and_restores_revisions_metadata_only(monkeypat
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_recovery_restore_tool_alias_scopes_receipts_to_invoked_action(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "restore-alias-policy", "name": "Restore Alias Policy"})
+    original_event_id = created["revision_event_id"]
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-card",
+            "kind": "html",
+            "title": "Unsafe Card",
+            "renderer": "<script>steal()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    restored = spaces.run_space_tool(
+        "space.admin.recovery.restore",
+        {
+            "spaceId": created["space_id"],
+            "eventId": original_event_id,
+            "renderer": "<script>ignore()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(restored, sort_keys=True).lower()
+
+    assert restored["ok"] is True
+    assert restored["action"] == "space.admin.recovery.restore"
+    assert restored["prompt_preflight"]["action"] == "space.admin.recovery.restore"
+    assert restored["prompt_preflight"]["boundary"] == "recovery_action"
+    assert restored["prompt_preflight"]["metadata_only"] is True
+    assert restored["autonomy_policy"]["action"] == "space.admin.recovery.restore"
+    assert restored["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
+    assert restored["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert restored["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert restored["progress_event"]["run_id"] == "recovery.restore:restore-alias-policy"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_space_id_validation_rejects_traversal_and_unsafe_names(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
@@ -11424,6 +11466,52 @@ def test_restore_widget_revision_restores_one_widget_without_leaking_sources(mon
     assert "api_key" not in serialized
     assert "secret_value_do_not_leak" not in serialized
 
+
+def test_restore_widget_tool_alias_scopes_receipts_to_invoked_action(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-restore-alias-policy", "name": "Widget Restore Alias Policy"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather",
+            "kind": "html",
+            "title": "Weather original",
+            "renderer": "<script>keptButNeverReturned()</script>",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.patch_widget(created["space_id"], "weather", {"title": "Weather patched"})
+
+    restored = spaces.run_space_tool(
+        "space.admin.recovery.restore_widget",
+        {
+            "spaceId": created["space_id"],
+            "eventId": original["revision_event_id"],
+            "widgetId": "weather",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "renderer": "<script>ignore()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(restored, sort_keys=True).lower()
+
+    assert restored["ok"] is True
+    assert restored["action"] == "space.admin.recovery.restore_widget"
+    assert restored["prompt_preflight"]["action"] == "space.admin.recovery.restore_widget"
+    assert restored["prompt_preflight"]["boundary"] == "recovery_action"
+    assert restored["prompt_preflight"]["metadata_only"] is True
+    assert restored["autonomy_policy"]["action"] == "space.admin.recovery.restore_widget"
+    assert restored["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
+    assert restored["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert restored["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert restored["progress_event"]["run_id"] == "recovery.widget.restore:widget-restore-alias-policy"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert '"source"' not in serialized
 
 
 def test_restore_widget_revision_rejects_mismatched_snapshot_space_id_without_mutation(monkeypatch, tmp_path):
