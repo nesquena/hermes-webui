@@ -2036,6 +2036,7 @@
 .model-group{padding:8px 14px 4px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--muted);text-transform:uppercase;border-top:1px solid var(--border2);margin-top:2px;}
 .model-opt{padding:10px 14px;cursor:pointer;transition:background .12s;display:flex;flex-direction:column;gap:3px;align-items:flex-start;}
 .model-opt:hover{background:rgba(255,255,255,.07);}
+.model-opt.is-highlighted{background:rgba(255,255,255,.10);outline:1px solid var(--border2);outline-offset:-1px;}
 .model-opt.active{background:var(--accent-bg);}
 .model-opt-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;}
 .model-opt-name{display:block;font-size:13px;color:var(--text);font-weight:500;line-height:1.25;}

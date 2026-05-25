@@ -1535,7 +1535,32 @@ function renderModelDropdown(){
   };
   // Event handlers for search input
   _si.addEventListener('input',()=>_filterModels(_si.value));
-  _si.addEventListener('keydown',e=>{if(e.key==='Enter') {e.preventDefault();}if(e.key==='Escape') {closeModelDropdown();}});
+  // ArrowDown / ArrowUp / Enter keyboard navigation through the filtered options (#2791).
+  // Walks the actual rendered `.model-opt` rows so it works for both the Configured
+  // section and the provider-grouped list, and stays correct as the user types.
+  _si.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){closeModelDropdown();return;}
+    if(e.key!=='ArrowDown'&&e.key!=='ArrowUp'&&e.key!=='Enter') return;
+    const rows=Array.from(dd.querySelectorAll('.model-opt'));
+    if(!rows.length) return;
+    let idx=rows.findIndex(r=>r.classList.contains('is-highlighted'));
+    if(e.key==='Enter'){
+      e.preventDefault();
+      if(idx<0) idx=0;
+      const row=rows[idx];
+      if(row&&typeof row.onclick==='function') row.onclick();
+      return;
+    }
+    e.preventDefault();
+    if(e.key==='ArrowDown') idx=idx<0?0:Math.min(rows.length-1,idx+1);
+    else /* ArrowUp */      idx=idx<=0?rows.length-1:idx-1;
+    rows.forEach(r=>r.classList.remove('is-highlighted'));
+    const target=rows[idx];
+    if(target){
+      target.classList.add('is-highlighted');
+      if(typeof target.scrollIntoView==='function') target.scrollIntoView({block:'nearest'});
+    }
+  });
   _si.addEventListener('click',e=>e.stopPropagation());
   // Event handlers for clear button
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };

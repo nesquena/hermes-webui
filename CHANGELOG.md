@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Model picker dropdown now supports ArrowDown / ArrowUp / Enter for keyboard navigation through the filtered results. Escape still closes the dropdown. The currently navigated row receives a subtle highlight and is scrolled into view as it moves. (#2791)
+
 ## [v0.51.137] — 2026-05-25 — Release DI (stage-batch19 — 6-PR medium-risk batch)
 
 ### Added
