@@ -216,7 +216,7 @@
       renderMemoryFreshnessStat(refreshJobCount, 'refresh jobs') +
       '</div>' +
       '<div class="capy-spaces-memory-freshness-state">'+escapeHtml(state)+'</div>' +
-      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="refreshMemorySources">Refresh sources</button></div>' +
+      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="refreshMemorySources">Refresh sources</button><button type="button" class="capy-spaces-btn secondary" data-capy-action="runScheduledMemoryRefresh">Run scheduled refresh</button></div>' +
       '</section>';
   }
 
@@ -280,19 +280,31 @@
 
   function renderMemoryRefreshResult(result){
     const processed = safeNonNegativeCount(result && result.processed);
+    const queued = safeNonNegativeCount(result && result.queued);
+    const isScheduled = result && result.autonomy_policy && result.autonomy_policy.action === 'capy.memory.refresh.scheduled';
     const jobs = Array.isArray(result && result.jobs) ? result.jobs.slice(0, 5) : [];
-    const jobRows = jobs.map(function(job){
-      const source = safeDisplayMetadataText(job && job.source_id, 'source') || 'source';
-      const status = safeDisplayMetadataText(job && job.status, 'updated') || 'updated';
-      const preflight = job && job.prompt_preflight && typeof job.prompt_preflight === 'object' && !Array.isArray(job.prompt_preflight) ? job.prompt_preflight : null;
-      const preflightStatus = safePromptPreflightStatus(preflight && preflight.status);
-      const preflightBoundary = safePromptBoundaryLabel(preflight && preflight.boundary);
-      const preflightText = preflightStatus ? '<div class="capy-spaces-muted">Prompt preflight '+escapeHtml(preflightStatus)+(preflightBoundary ? ' · '+escapeHtml(preflightBoundary) : '')+'</div>' : '';
-      return '<li>'+escapeHtml(source)+' · '+escapeHtml(status)+preflightText+'</li>';
-    }).join('');
+    const queueJobs = Array.isArray(result && result.queue_jobs) ? result.queue_jobs.slice(0, 5) : [];
+    const renderJobRows = function(items){
+      return items.map(function(job){
+        const source = safeDisplayMetadataText(job && job.source_id, 'source') || 'source';
+        const status = safeDisplayMetadataText(job && job.status, 'updated') || 'updated';
+        const preflight = job && job.prompt_preflight && typeof job.prompt_preflight === 'object' && !Array.isArray(job.prompt_preflight) ? job.prompt_preflight : null;
+        const preflightStatus = safePromptPreflightStatus(preflight && preflight.status);
+        const preflightBoundary = safePromptBoundaryLabel(preflight && preflight.boundary);
+        const preflightText = preflightStatus ? '<div class="capy-spaces-muted">Prompt preflight '+escapeHtml(preflightStatus)+(preflightBoundary ? ' · '+escapeHtml(preflightBoundary) : '')+'</div>' : '';
+        return '<li>'+escapeHtml(source)+' · '+escapeHtml(status)+preflightText+'</li>';
+      }).join('');
+    };
+    const queueRows = renderJobRows(queueJobs);
+    const jobRows = renderJobRows(jobs);
+    const title = isScheduled ? 'Scheduled source refresh complete' : 'Source refresh complete';
+    const summary = isScheduled
+      ? String(queued)+' source refresh '+(queued === 1 ? 'job' : 'jobs')+' queued · '+String(processed)+' processed · metadata-only'
+      : String(processed)+' source refresh '+(processed === 1 ? 'job' : 'jobs')+' processed · metadata-only';
     return '<div class="capy-spaces-card capy-spaces-memory-refresh-result" role="status">' +
-      '<h3>Source refresh complete</h3>' +
-      '<div class="capy-spaces-muted">'+escapeHtml(String(processed))+' source refresh '+escapeHtml(processed === 1 ? 'job' : 'jobs')+' processed · metadata-only</div>' +
+      '<h3>'+escapeHtml(title)+'</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(summary)+'</div>' +
+      (queueRows ? '<ul>'+queueRows+'</ul>' : '') +
       (jobRows ? '<ul>'+jobRows+'</ul>' : '') +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
       '</div>';
@@ -2733,6 +2745,13 @@
     const spaceId = button.dataset.spaceId || '';
     if (action === 'refreshMemorySources') {
       const data = await postSpacesJson('api/capy-memory/source/refresh', {limit: 5});
+      await loadCapySpaces();
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) refreshedRoot.innerHTML = renderMemoryRefreshResult(data || {}) + refreshedRoot.innerHTML;
+      return;
+    }
+    if (action === 'runScheduledMemoryRefresh') {
+      const data = await postSpacesJson('api/capy-memory/source/refresh/scheduled', {limit: 5});
       await loadCapySpaces();
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) refreshedRoot.innerHTML = renderMemoryRefreshResult(data || {}) + refreshedRoot.innerHTML;

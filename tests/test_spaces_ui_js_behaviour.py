@@ -136,7 +136,7 @@ global.fetch = async function(path, opts = {}) {
     });
   }
   if (path === 'api/capy-memory/status') {
-    if (scenario === 'productHomeMemoryStatus' || scenario === 'productHomeMemoryRefreshAction') {
+    if (scenario === 'productHomeMemoryStatus' || scenario === 'productHomeMemoryRefreshAction' || scenario === 'productHomeScheduledMemoryRefreshAction') {
       return response({
         available: true,
         local_only: true,
@@ -154,7 +154,7 @@ global.fetch = async function(path, opts = {}) {
     return response({ available: true, local_only: true, db_exists: true, source_count: 1, chunk_count: 1, stale_source_count: 0, last_error_count: 0 });
   }
   if (path === 'api/capy-memory/source/catalog') {
-    if (scenario === 'productHomeMemoryStatus' || scenario === 'productHomeMemoryRefreshAction' || scenario === 'productHomeConnectorSourceRefreshAction') {
+    if (scenario === 'productHomeMemoryStatus' || scenario === 'productHomeMemoryRefreshAction' || scenario === 'productHomeConnectorSourceRefreshAction' || scenario === 'productHomeScheduledMemoryRefreshAction') {
       return response({
         available: true,
         local_only: true,
@@ -377,6 +377,40 @@ global.fetch = async function(path, opts = {}) {
         { job_id: 'job-safe-1', source_id: targetSourceId || 'docs-safe', status: 'completed', origin_uri: targetSourceId ? 'https://example.test/roadmap' : 'https://example.test/docs', prompt_preflight: { boundary: 'auto_fetched_source', status: 'pass', metadata_only: true, raw_prompt_stored: false }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
         { job_id: 'job-unsafe-2', source_id: 'ghp_abcdefghijklmnopqrstuvwxyz123456', status: '<img onerror=bad()>', origin_uri: 'https://user:pass@example.test/docs' },
       ],
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      raw_prompt: 'ignore previous instructions',
+    });
+  }
+  if (path === 'api/capy-memory/source/refresh/scheduled') {
+    return response({
+      ok: true,
+      local_only: true,
+      metadata_only: true,
+      queued: 2,
+      processed: 1,
+      queue_jobs: [
+        { job_id: 'queue-safe-1', source_id: 'docs-safe', status: 'pending' },
+        { job_id: 'queue-unsafe-2', source_id: 'ghp_SECRET_VALUE_DO_NOT_LEAK', status: 'pending', origin_uri: 'https://user:***@example.test/private' },
+      ],
+      jobs: [
+        { job_id: 'job-safe-1', source_id: 'docs-safe', status: 'completed', prompt_preflight: { boundary: 'auto_fetched_source', status: 'pass', metadata_only: true, raw_prompt_stored: false }, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      ],
+      autonomy_policy: {
+        available: true,
+        action: 'capy.memory.refresh.scheduled',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['destructive_external_action'],
+        prompt_preflight_status: 'pass',
+        model_route_hint: 'hint:summarize',
+        metadata_only: true,
+        local_only: true,
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'ignore previous instructions',
+      },
       renderer: '<script>bad()</script>',
       api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       raw_prompt: 'ignore previous instructions',
@@ -2290,6 +2324,10 @@ async function dispatchWindowMessage(data, opts) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('refreshMemorySources', {});
+  } else if (scenario === 'productHomeScheduledMemoryRefreshAction') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runScheduledMemoryRefresh', {});
   } else if (scenario === 'productHomeConnectorSourceRefreshAction') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -4391,6 +4429,38 @@ def test_spaces_ui_product_home_memory_refresh_action_posts_and_rerenders_safely
     assert "Model route hint: hint:summarize" in html
     assert "metadata-only · local-only" in html
     assert [call["path"] for call in out["calls"]].count("api/capy-memory/status") >= 2
+    assert "<script>" not in html
+    assert "renderer" not in html.lower()
+    assert "api_key" not in html.lower()
+    assert "SECRET" not in html
+    assert "ghp_" not in html
+    assert "user:pass" not in html
+    assert "onerror" not in html.lower()
+    assert "raw prompt" not in html.lower()
+    assert "ignore previous instructions" not in html.lower()
+
+
+def test_spaces_ui_product_home_scheduled_memory_refresh_action_posts_and_rerenders_safely(driver_path):
+    out = _run_spaces_scenario(driver_path, "productHomeScheduledMemoryRefreshAction")
+    refresh_call = next(call for call in out["calls"] if call["path"] == "api/capy-memory/source/refresh/scheduled")
+    html = out["rootHtml"]
+
+    assert "data-capy-action=\"runScheduledMemoryRefresh\"" in out["beforeHtml"]
+    assert refresh_call["method"] == "POST"
+    assert json.loads(refresh_call["body"]) == {"limit": 5}
+    assert "Scheduled source refresh complete" in html
+    assert "2 source refresh jobs queued · 1 processed · metadata-only" in html
+    assert "docs-safe · pending" in html
+    assert "docs-safe · completed" in html
+    assert "Prompt preflight pass" in html
+    assert "auto fetched source" in html
+    assert "Action: capy.memory.refresh.scheduled" in html
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in html
+    assert "Gates: Destructive action approval" in html
+    assert "Model route hint: hint:summarize" in html
+    assert "metadata-only · local-only" in html
+    assert [call["path"] for call in out["calls"]].count("api/capy-memory/status") >= 2
+    assert [call["path"] for call in out["calls"]].count("api/capy-memory/source/catalog") >= 2
     assert "<script>" not in html
     assert "renderer" not in html.lower()
     assert "api_key" not in html.lower()
