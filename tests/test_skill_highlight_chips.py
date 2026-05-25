@@ -107,16 +107,15 @@ def test_composer_skill_overlay_uses_whitespace_completed_mentions():
     assert "function updateComposerSkillPreview" in skills
     assert "function renderComposerSkillOverlay" in skills
     assert "composer-overlay-token" in skills
-    assert "composer-overlay-token-raw" in skills
-    assert "rawMatch" in skills
-    assert "width:100%" in css
-    assert "justify-content:center" in css
+    assert "composer-overlay-token-raw" not in skills
+    assert "rawMatch" not in skills
+    assert ".composer-overlay-token{display:inline;vertical-align:baseline;}" in css
+    assert "composer-overlay-token-chip" not in css
     assert "function findCompletedComposerSkillMentions" in skills
     assert "COMPOSER_SKILL_TOKEN_RE" in skills
     assert "(?=\\s)" in skills
-    assert "opts && opts.force" in skills
     assert "updateComposerSkillPreview();" in boot
-    assert "updateComposerSkillPreview({force:true});" in commands
+    assert "updateComposerSkillPreview({force:true});" not in commands
     assert "replaceChild(textNode,chip)" not in skills
 
 

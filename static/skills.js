@@ -182,18 +182,10 @@ function appendOverlayText(fragment, text) {
   fragment.appendChild(span);
 }
 
-function createComposerOverlayToken(rawText, skill) {
+function createComposerOverlayToken(skill) {
   const token = document.createElement('span');
   token.className = 'composer-overlay-token';
-
-  const raw = document.createElement('span');
-  raw.className = 'composer-overlay-token-raw';
-  raw.textContent = rawText;
-  token.appendChild(raw);
-
-  const chip = createSkillChip(skill);
-  chip.classList.add('composer-overlay-token-chip');
-  token.appendChild(chip);
+  token.appendChild(createSkillChip(skill));
   return token;
 }
 
@@ -202,7 +194,7 @@ function renderComposerSkillOverlay(text, mentions) {
   let last = 0;
   for(const mention of mentions){
     appendOverlayText(fragment, text.slice(last, mention.start));
-    fragment.appendChild(createComposerOverlayToken(text.slice(mention.start, mention.end), mention.skill));
+    fragment.appendChild(createComposerOverlayToken(mention.skill));
     last = mention.end;
   }
   appendOverlayText(fragment, text.slice(last));
@@ -218,13 +210,6 @@ async function updateComposerSkillPreview(opts={}) {
   await loadSkillRegistry();
   const text = String(textarea.value || '');
   let mentions = findCompletedComposerSkillMentions(text);
-  if(opts && opts.force && !mentions.length){
-    const rawMatch = text.trim();
-    const forcedToken = rawMatch.replace(/^\//, '');
-    const forcedSkill = getSkillByMentionToken(forcedToken);
-    const start = rawMatch ? text.indexOf(rawMatch) : -1;
-    if(forcedSkill && start >= 0) mentions = [{token: forcedToken, skill: forcedSkill, start, end: start + rawMatch.length}];
-  }
   overlay.innerHTML = '';
   overlay.appendChild(renderComposerSkillOverlay(text, mentions));
   overlay.scrollTop = textarea.scrollTop;

@@ -1332,7 +1332,7 @@ function showCmdDropdown(matches){
       e.preventDefault();
       const nextValue=isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':''));
       $('msg').value=nextValue;
-      if(typeof updateComposerSkillPreview==='function')updateComposerSkillPreview({force:true});
+      if(typeof updateComposerSkillPreview==='function')updateComposerSkillPreview();
       $('msg').focus();
       if(!isSubArg&&c.source!=='skill'&&nextValue.endsWith(' ')&&typeof getSlashAutocompleteMatches==='function'){
         getSlashAutocompleteMatches(nextValue).then(matches=>{
