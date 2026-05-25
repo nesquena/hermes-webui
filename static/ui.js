@@ -1,4 +1,4 @@
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false,git:{status:null,selectedTab:'files',selectedDiff:null,loading:false}};
 
 function assistantDisplayName(){
   if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
@@ -3789,6 +3789,12 @@ function copyToastText(btn){
   const done=()=>{const old=btn.textContent;btn.textContent='Copied';setTimeout(()=>{btn.textContent=old;},1200);};
   _copyText(text).then(done).catch(()=>{});
 }
+function toastMessageHtml(s){
+  const lines=String(s==null?'':s).split(/\r?\n/).map(line=>line.trim()).filter(Boolean);
+  if(lines.length<=1)return `<span class="toast-message">${esc(s)}</span>`;
+  const title=lines.shift();
+  return `<span class="toast-message"><span class="toast-title">${esc(title)}</span><span class="toast-detail">${esc(lines.join('\n'))}</span></span>`;
+}
 function showToast(msg,ms,type){
   const el=$('toast');if(!el)return;
   const s=String(msg==null?'':msg);let t=type;
@@ -3796,8 +3802,9 @@ function showToast(msg,ms,type){
   const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
   el.className='toast show '+t;
   el.dataset.toastMessage=s;
-  if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button>`;
-  else el.textContent=s;
+  const body=toastMessageHtml(s);
+  if(t==='error') el.innerHTML=`${body}<button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button>`;
+  else el.innerHTML=body;
   el.onmouseenter=()=>clearToastDismissTimer(el);
   el.onmouseleave=()=>setToastDismissTimer(el,duration);
   el.onfocusin=()=>clearToastDismissTimer(el);
@@ -8082,19 +8089,24 @@ function renderFileTree(){
   // Show empty-state when no workspace is set or the directory is empty (#703)
   const emptyEl=$('wsEmptyState');
   const hasWorkspace=!!(S.session&&S.session.workspace);
+  const showingChanges=typeof _ensureGitState==='function'&&_ensureGitState().selectedTab==='changes';
   if(!hasWorkspace){
-    if(emptyEl){emptyEl.textContent=t('workspace_empty_no_path');emptyEl.style.display='flex';}
+    if(emptyEl){emptyEl.textContent=t('workspace_empty_no_path');emptyEl.style.display=showingChanges?'none':'flex';}
     box.style.display='none';
     return;
   }
   if(emptyEl) emptyEl.style.display='none';
-  box.style.display='';
+  box.style.display=showingChanges?'none':'';
   const visibleEntries=_visibleWorkspaceEntries(S.entries);
   if(!visibleEntries.length){
-    if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
+    if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display=showingChanges?'none':'flex';}
     return;
   }
   _renderTreeItems(box, visibleEntries, 0);
+}
+
+function _isWorkspaceMarkdownPath(path){
+  return /\.(md|markdown|mdown)$/i.test(String(path||''));
 }
 
 function _renderTreeItems(container, entries, depth){
@@ -8196,6 +8208,29 @@ function _renderTreeItems(container, entries, depth){
     };
     el.appendChild(nameEl);
 
+    const gitState=(typeof _gitStatusForPath==='function')?_gitStatusForPath(item.path):null;
+    if(gitState&&gitState.ignored){
+      el.classList.add('git-ignored');
+    }
+    if(gitState){
+      const gitMark=document.createElement('span');
+      gitMark.className='file-git-status'+(gitState.ignored?' ignored':gitState.conflict?' conflict':gitState.untracked?' untracked':'');
+      gitMark.textContent=(typeof _gitStatusLabel==='function')?_gitStatusLabel(gitState):(gitState.status||'M');
+      gitMark.title=(typeof _gitStatusTitle==='function')?_gitStatusTitle(gitState):`Git status: ${gitState.status||'M'}`;
+      el.appendChild(gitMark);
+    }
+
+    if(item.type==='file'&&_isWorkspaceMarkdownPath(item.path)){
+      const previewBtn=document.createElement('button');
+      previewBtn.className='file-preview-btn';
+      previewBtn.type='button';
+      previewBtn.title=`Preview rendered Markdown: ${item.name}`;
+      previewBtn.setAttribute('aria-label',`Preview rendered Markdown: ${item.name}`);
+      previewBtn.innerHTML=(typeof li==='function')?li('eye',13):'Preview';
+      previewBtn.onclick=(e)=>{e.stopPropagation();openFile(item.path);};
+      el.appendChild(previewBtn);
+    }
+
     // Size -- only for files
     if(item.type==='file'&&item.size){
       const sizeEl=document.createElement('span');
@@ -8271,6 +8306,7 @@ async function deleteWorkspaceDir(relPath, name){
     if(S._expandedDirs){S._expandedDirs.delete(relPath);if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();}
     delete S._dirCache[relPath];
     await loadDir(S.currentDir);
+    if(typeof refreshGitStatus==='function')refreshGitStatus();
   }catch(e){setStatus(t('delete_failed')+e.message);}
 }
 
@@ -8427,6 +8463,7 @@ async function deleteWorkspaceFile(relPath, name){
     // Close preview if we just deleted the viewed file
     if($('previewPathText').textContent===relPath)$('btnClearPreview').onclick();
     await loadDir(S.currentDir);
+    if(typeof refreshGitStatus==='function')refreshGitStatus();
   }catch(e){setStatus(t('delete_failed')+e.message);}
 }
 
@@ -8449,6 +8486,7 @@ async function promptNewFile(){
     await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,content:''})});
     showToast(t('created')+name.trim());
     await loadDir(S.currentDir);
+    if(typeof refreshGitStatus==='function')refreshGitStatus();
     openFile(relPath);
   }catch(e){setStatus(t('create_failed')+e.message);}
 }
@@ -8471,6 +8509,7 @@ async function promptNewFolder(){
     await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
     showToast(t('folder_created')+name.trim());
     await loadDir(S.currentDir);
+    if(typeof refreshGitStatus==='function')refreshGitStatus();
     // Offer to add the new folder as a space (#782)
     const absPath=S.session.workspace?((S.currentDir==='.'?S.session.workspace:S.session.workspace+'/'+S.currentDir)+'/'+name.trim()):null;
     if(absPath){
