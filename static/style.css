@@ -512,9 +512,9 @@
   /* ── Geist Contrast: composer fixes ── */
   /* Light mode: override white user-bubble-text so textarea text is black */
   :root[data-skin="geist-contrast"]:not(.dark){--user-bubble-text:#111111;}
-  /* Remove scrollbar from textarea */
-  :root[data-skin="geist-contrast"] textarea#msg{scrollbar-width:none;overflow-y:auto;}
-  :root[data-skin="geist-contrast"] textarea#msg::-webkit-scrollbar{display:none;}
+  /* Remove scrollbar from composer */
+  :root[data-skin="geist-contrast"] #msg.composer-editor{scrollbar-width:none;overflow-y:auto;}
+  :root[data-skin="geist-contrast"] #msg.composer-editor::-webkit-scrollbar{display:none;}
 
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
@@ -1397,9 +1397,10 @@
   @media (hover: hover) {
     .attach-thumb:hover{filter:brightness(1.05);transform:scale(1.04);}
   }
-  textarea#msg{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:16px;line-height:1.65;padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;}
-  textarea#msg::placeholder{color:var(--muted);}
-  .composer-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px 10px;position:relative;container-type:inline-size;container-name:composer-footer;}
+#msg.composer-editor{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:16px;line-height:1.65;padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;overflow-y:auto;white-space:pre-wrap;word-break:break-word;}
+#msg.composer-editor:empty::before{content:attr(data-placeholder);color:var(--muted);pointer-events:none;}
+#msg.composer-editor .skill-chip{font-size:12px;vertical-align:baseline;margin:0 1px;}
+.composer-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px 10px;position:relative;container-type:inline-size;container-name:composer-footer;}
   .composer-left{display:flex;align-items:center;gap:4px;min-width:0;flex:1;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;}
   .composer-left::-webkit-scrollbar{display:none;}
   .composer-divider{width:1px;height:16px;background:var(--border);margin:0 3px;flex-shrink:0;}
@@ -3352,8 +3353,29 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .project-create-btn{font-size:10px;padding:3px 6px;border-radius:12px;cursor:pointer;border:1px dashed var(--border2);background:none;color:var(--muted);opacity:.6;transition:all .15s;}
 .project-create-btn:hover{opacity:1;border-color:var(--blue);color:var(--blue);}
 .project-create-input{font-size:10px;padding:3px 8px;border-radius:12px;border:1px solid var(--accent-bg);background:var(--surface);color:var(--text);outline:none;min-width:40px;max-width:180px;width:auto;font-family:inherit;box-shadow:0 0 0 2px var(--accent-bg);}
+
+.skill-chip{
+  font-size:10px;
+  font-weight:600;
+  padding:3px 8px;
+  border-radius:12px;
+  border:1px solid var(--border2);
+  background:var(--input-bg);
+  color:var(--muted);
+  transition:all .15s;
+  white-space:nowrap;
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  cursor:default;
+}
+
+.skill-chip:hover{
+  background:rgba(255,255,255,.08);
+  color:var(--text);
+}
+
 .project-picker{position:absolute;right:0;top:100%;background:var(--sidebar);border:1px solid var(--border2);border-radius:8px;padding:4px;z-index:30;min-width:160px;max-width:220px;width:max-content;box-shadow:0 4px 16px rgba(0,0,0,.3);}
-.batch-action-bar .batch-project-picker{position:static;right:auto;top:auto;min-width:100%;max-width:none;width:100%;box-shadow:none;margin-top:2px;background:var(--input-bg);}
 .project-picker-item{padding:5px 10px;font-size:11px;border-radius:6px;cursor:pointer;color:var(--muted);transition:all .1s;display:flex;align-items:center;gap:6px;}
 .project-picker-item:hover{background:rgba(255,255,255,.08);color:var(--text);}
 .project-picker-item.active{color:var(--blue);}

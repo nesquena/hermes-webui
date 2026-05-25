@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Chat messages and the composer now render registered Hermes skills as quiet inline chips using the current profile's `/api/skills` list. Skill chips avoid arbitrary slash-command false positives, strip presentation markers from labels, replace full inline-code wrappers, and only chip composer text after whitespace or explicit autocomplete selection so prefix-overlapping skills remain editable.
+
 ## [v0.51.134] — 2026-05-25 — Release DF (stage-batch16 — single-PR Windows path defaults)
 
 ### Fixed

@@ -16,6 +16,124 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+
+let _composerSkillRenderLock=false;
+function _composerTextFromDom(el){
+  if(!el) return '';
+  let out='';
+  for(const node of Array.from(el.childNodes||[])){
+    if(node.nodeType===Node.TEXT_NODE) out+=node.nodeValue||'';
+    else if(node.nodeType===Node.ELEMENT_NODE){
+      if(node.classList&&node.classList.contains('skill-chip')) out+=node.dataset.raw||node.textContent||'';
+      else if(node.tagName==='BR') out+='\n';
+      else out+=node.textContent||'';
+    }
+  }
+  return out.replace(/\u00a0/g,' ');
+}
+function _setComposerCaretAtEnd(el){
+  if(!el||!document.createRange||!window.getSelection)return;
+  const range=document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
+  const sel=window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+function _composerSkillCache(){
+  if(!Array.isArray(window._skillCommandCache)&&typeof _skillCommandCache==='undefined') return [];
+  return (typeof _skillCommandCache!=='undefined'&&_skillCommandCache)||[];
+}
+function _composerSkillTokenHasWhitespaceBoundary(text,end){
+  return end<String(text||'').length&&/\s/.test(String(text||'').charAt(end));
+}
+function _composerSkillEntryForToken(token){
+  const slug=String(token||'').trim().replace(/^\//,'').toLowerCase();
+  if(!slug) return null;
+  const cache=_composerSkillCache();
+  return cache.find(skill=>skill&&skill.name===slug)||null;
+}
+function _renderComposerSkillChips(opts={}){
+  const el=$('msg');
+  if(!el||!el.classList||!el.classList.contains('composer-editor')||_composerSkillRenderLock) return;
+  const text=el.value||'';
+  const re=/(^|[^A-Za-z0-9_-])\/?([A-Za-z0-9][A-Za-z0-9_-]*)(?=$|[^A-Za-z0-9_-])/g;
+  let last=0;
+  let matched=false;
+  const frag=document.createDocumentFragment();
+  for(let m=re.exec(text);m;m=re.exec(text)){
+    const prefix=m[1]||'';
+    const start=m.index+prefix.length;
+    const end=start+(m[0].length-prefix.length);
+    const token=m[2]||'';
+    if(!opts.allowPrefixExact&&!_composerSkillTokenHasWhitespaceBoundary(text,end)) continue;
+    const entry=_composerSkillEntryForToken(token);
+    if(!entry) continue;
+    frag.appendChild(document.createTextNode(text.slice(last,start)));
+    const chip=document.createElement('span');
+    const label=String(entry.skillName||entry.name||token).trim()||token;
+    const raw=text.slice(start,end);
+    chip.className='skill-chip';
+    chip.contentEditable='false';
+    chip.dataset.raw=raw;
+    chip.dataset.skill=label;
+    chip.textContent=label;
+    chip.title=`Skill: ${label}`;
+    chip.setAttribute('aria-label',`Skill ${label}`);
+    frag.appendChild(chip);
+    last=end;
+    matched=true;
+  }
+  if(!matched) return;
+  frag.appendChild(document.createTextNode(text.slice(last)));
+  _composerSkillRenderLock=true;
+  el.innerHTML='';
+  el.appendChild(frag);
+  _setComposerCaretAtEnd(el);
+  _composerSkillRenderLock=false;
+}
+window._renderComposerSkillChips=_renderComposerSkillChips;
+function _initComposerEditorBridge(){
+  const el=$('msg');
+  if(!el||!el.classList||!el.classList.contains('composer-editor')||el._composerEditorBridge)return;
+  el._composerEditorBridge=true;
+  Object.defineProperty(el,'value',{
+    configurable:true,
+    get(){return _composerTextFromDom(el);},
+    set(value){el.textContent=String(value||'');_renderComposerSkillChips();_setComposerCaretAtEnd(el);}
+  });
+  el.setSelectionRange=function(){_setComposerCaretAtEnd(el);};
+  const revertChipForBackspace=e=>{
+    const sel=window.getSelection&&window.getSelection();
+    if(!sel||!sel.anchorNode)return false;
+    let chip=null;
+    if(!sel.isCollapsed){
+      const node=sel.anchorNode.nodeType===Node.ELEMENT_NODE?sel.anchorNode.childNodes[sel.anchorOffset]||sel.anchorNode.childNodes[sel.anchorOffset-1]:sel.anchorNode;
+      if(node&&node.nodeType===Node.ELEMENT_NODE&&node.classList.contains('skill-chip')) chip=node;
+    }
+    if(!chip&&sel.isCollapsed){
+      if(sel.anchorNode===el) chip=el.childNodes[Math.max(0,sel.anchorOffset-1)]||null;
+      else if(sel.anchorNode.nodeType===Node.TEXT_NODE&&sel.anchorOffset===0) chip=sel.anchorNode.previousSibling;
+      else if(sel.anchorNode.nodeType===Node.ELEMENT_NODE) chip=sel.anchorNode.childNodes[Math.max(0,sel.anchorOffset-1)]||null;
+    }
+    if(!chip||chip.nodeType!==Node.ELEMENT_NODE||!chip.classList.contains('skill-chip')) return false;
+    if(e&&e.preventDefault)e.preventDefault();
+    const raw=chip.dataset.raw||chip.dataset.skill||chip.textContent||'';
+    const next=raw.slice(0,-1);
+    const textNode=document.createTextNode(next);
+    chip.parentNode.replaceChild(textNode,chip);
+    const range=document.createRange();
+    range.setStart(textNode,textNode.nodeValue.length);
+    range.collapse(true);
+    sel.removeAllRanges();sel.addRange(range);
+    el.dispatchEvent(new Event('input',{bubbles:true}));
+    return true;
+  };
+  el.addEventListener('keydown',e=>{if(e.key==='Backspace')revertChipForBackspace(e);},true);
+  el.addEventListener('beforeinput',e=>{if(e.inputType==='deleteContentBackward')revertChipForBackspace(e);},true);
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_initComposerEditorBridge);
+else _initComposerEditorBridge();
 const OFFLINE_RECHECK_MS=2500;
 let _offlineVisible=false;
 let _offlineReason='browser';
@@ -7011,9 +7129,146 @@ function postProcessRenderedMessages(container) {
   loadExcalidrawInline(container);
   loadPdfInline(container);
   loadHtmlInline(container);
+  highlightSkillsInMessages(container);
   renderMermaidBlocks(container);
   renderKatexBlocks(container);
   initTreeViews(container);
+}
+
+const _SKILL_MENTION_SKIP_TAGS = new Set(['PRE', 'A', 'SCRIPT', 'STYLE', 'TEXTAREA', 'INPUT', 'BUTTON']);
+const _SKILL_MENTION_TOKEN_RE = /(^|[^A-Za-z0-9_-])(`\/?([A-Za-z0-9][A-Za-z0-9_-]*)`|\/?([A-Za-z0-9][A-Za-z0-9_-]*))(?=$|[^A-Za-z0-9_-])/g;
+let _skillMentionCacheReady = false;
+let _skillMentionCacheLoadPromise = null;
+/**
+ * Map of normalized skill slug -> canonical skill name.
+ */
+let _skillMentionCache = new Map();
+
+function _normalizeSkillMentionSlug(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if(!raw) return '';
+  return raw
+    .replace(/[\s_]+/g, '-')
+    .replace(/[^a-z0-9-]/g, '')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function _shouldSkipSkillMentionNode(node) {
+  for(let parent=node.parentNode; parent&&parent.nodeType===1; parent=parent.parentNode){
+    const tag = parent.tagName;
+    if(!tag) continue;
+    if(_SKILL_MENTION_SKIP_TAGS.has(tag)) return true;
+    if(parent.classList&&parent.classList.contains('skill-chip')) return true;
+  }
+  return false;
+}
+
+function _nearestInlineSkillMentionCodeParent(node) {
+  for(let parent=node&&node.parentNode; parent&&parent.nodeType===1; parent=parent.parentNode){
+    if(parent.tagName==='PRE') return null;
+    if(parent.tagName==='CODE') return parent;
+  }
+  return null;
+}
+
+function _createSkillMentionChip(skillName, slug) {
+  const chip = document.createElement('span');
+  chip.className = 'skill-chip';
+  chip.textContent = skillName;
+  chip.title = `Skill: ${_skillMentionCache.get(slug)}`;
+  chip.setAttribute('aria-label', `Skill ${_skillMentionCache.get(slug)}`);
+  return chip;
+}
+
+async function _loadSkillMentions() {
+  if(_skillMentionCacheReady) return _skillMentionCache;
+  if(_skillMentionCacheLoadPromise) return _skillMentionCacheLoadPromise;
+
+  _skillMentionCacheLoadPromise = (async () => {
+    try {
+      const data = await api('/api/skills');
+      const next = new Map();
+      for(const skill of (data&&data.skills)||[]){
+        if(skill && skill.disabled) continue;
+        const name = String(skill&&skill.name||'').trim();
+        const slug = _normalizeSkillMentionSlug(name);
+        if(!slug) continue;
+        if(!next.has(slug)) next.set(slug, name);
+      }
+      _skillMentionCache = next;
+    } catch(_) {
+      _skillMentionCache = new Map();
+    } finally {
+      _skillMentionCacheReady = true;
+      _skillMentionCacheLoadPromise = null;
+    }
+    return _skillMentionCache;
+  })();
+
+  return _skillMentionCacheLoadPromise;
+}
+
+function _highlightSkillMentionsInTextNode(node) {
+  if(!node||!node.nodeValue) return false;
+  const text = node.nodeValue;
+
+  _SKILL_MENTION_TOKEN_RE.lastIndex = 0;
+  const parts = [];
+  let last = 0;
+  let matched = false;
+
+  for(let m=_SKILL_MENTION_TOKEN_RE.exec(text); m; m=_SKILL_MENTION_TOKEN_RE.exec(text)){
+    const prefix = m[1] || '';
+    const tokenStart = m.index + prefix.length;
+    const matchedText = m[2] || '';
+    const skillName = m[3] || m[4] || '';
+    const slug = _normalizeSkillMentionSlug(skillName);
+    if(!_skillMentionCache.has(slug)) continue;
+
+    const tokenEnd = tokenStart + matchedText.length;
+    parts.push(document.createTextNode(text.slice(last, tokenStart)));
+    const chip = _createSkillMentionChip(skillName, slug);
+    const codeParent = _nearestInlineSkillMentionCodeParent(node);
+    if(codeParent && codeParent.textContent.trim()===matchedText && text.trim()===matchedText){
+      codeParent.parentNode.replaceChild(chip, codeParent);
+      return true;
+    }
+    parts.push(chip);
+    last = tokenEnd;
+    matched = true;
+  }
+
+  if(!matched) return false;
+
+  parts.push(document.createTextNode(text.slice(last)));
+  const frag = document.createDocumentFragment();
+  for(const part of parts){ frag.appendChild(part); }
+  node.parentNode.replaceChild(frag, node);
+  return true;
+}
+
+function highlightSkillsInMessages(container) {
+  const root = container || $('msgInner');
+  if(!root) return;
+  if(!_skillMentionCacheReady) {
+    _loadSkillMentions().then(() => _highlightSkillsInRenderedMessages(root));
+    return;
+  }
+  _highlightSkillsInRenderedMessages(root);
+}
+
+function _highlightSkillsInRenderedMessages(container) {
+  if(!container||!_skillMentionCache.size) return;
+  container.querySelectorAll('.msg-body').forEach(body => {
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    const textNodes = [];
+    let current = null;
+    while((current = walker.nextNode())){
+      if(!_shouldSkipSkillMentionNode(current)) textNodes.push(current);
+    }
+    for(const node of textNodes) _highlightSkillMentionsInTextNode(node);
+  });
 }
 
 function highlightCode(container) {
