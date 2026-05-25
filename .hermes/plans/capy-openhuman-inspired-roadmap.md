@@ -94,7 +94,7 @@ Remaining:
 
 ### Phase 5 — Autonomy policy, prompt-injection preflight, model-routing hints
 
-Status: **metadata-only status surface plus creator preview/commit, active-space instruction/context, repair prompt, source-refresh preflight, camera-stream tool receipts, package policy receipts, logical path-helper policy receipts, widget reload/refresh required-preflight receipts, and safe model-route resolution receipts implemented; broader per-action enforcement and actual model invocation routing remain**.
+Status: **metadata-only status surface plus creator preview/commit, active-space instruction/context, repair prompt, source-refresh preflight, camera-stream tool receipts, package policy receipts, logical path-helper policy receipts, widget reload/refresh required-preflight receipts, safe model-route resolution receipts, and initial actual model-route invocation for safe summary workloads implemented; broader per-action enforcement and model invocation routing remain**.
 
 Delivered:
 - `api/capy_policy.py` exposes allow-listed autonomy modes, approval gates, prompt-preflight status, model-routing hints, and bounded/deduplicated action-policy receipts without echoing raw env/provider/model secrets.
@@ -115,6 +115,7 @@ Delivered:
 - Space Agent package import tool aliases now return per-invocation metadata-only autonomy-policy receipts, so `space.import`, `space.package.import`, and `space.agent.import` can be distinguished in product/tool evidence while preserving prompt-preflight status, approval gates, model-route hints, and import quarantine redaction.
 - Action-policy receipts now include a metadata-only `model_route_resolution` decision derived from safe configured route fields or deterministic default fallbacks, and Spaces UI receipts render the selected route plus fallback reason without exposing raw provider config, API-auth fields, renderer/source/script markers, prompts, or credentials.
 - Active-space context receipts, repair prompts and empty-prompt whole-Space/widget/module repair queues, widget-runtime prompts (including direct sandbox queue-status UI receipts), fixed widget reload/refresh events without free-form prompts, source-style widget definition/blueprint preview/source helpers, and source-refresh ingestion paths now use protected prompt-preflight boundaries before advisory context or user-provided instructions can influence an agent/tool action.
+- Source-refresh ingest can now use the configured safe `hint:summarize` route for actual model-backed metadata-only source summaries after auto-fetched-source prompt preflight passes; missing/unsafe/unconfigured/unavailable routes still fall back to deterministic sanitized source records, custom providers can resolve through their configured connection when generic runtime lookup is unavailable, and public receipts/prompts omit raw renderer/source/API-auth fields, prompts, scripts, and credentials.
 
 Remaining:
 - Extend pass/warn/block preflight and action-policy receipts to additional high-risk browser/development/recovery/tool boundaries beyond the current creator/context/repair/widget-refresh/source-refresh/camera/package-export coverage.
@@ -180,7 +181,7 @@ Only after the remaining Phase 1-6 integration items are working:
    - Record structured events from browser/development/repair flows so the product-home and Space-detail streams reflect real autonomous work. Research Harness progress updates, creator visual-QA commit gates, Memory Tree source-refresh ingest workers, the demo smoke suite, individual browser demo smokes, source-style layout-repair actions, shared-data/widget-upsert actions, and recovery widget toggles now cover the first workflow/gate/ingest/run/browser/repair/cooperation/construction/recovery producers.
 
 5. **Model-route invocation plumbing**
-   - Reuse the new metadata-only `model_route_resolution` receipts as the visible decision envelope, then wire safe configured hints into actual Capy/Hermes invocation selection without exposing provider config or weakening Brendan's provider-agnostic OpenAI/xAI/LM Studio setup.
+   - Reuse the metadata-only `model_route_resolution` receipts as the visible decision envelope, then continue wiring safe configured hints into actual Capy/Hermes invocation selection without exposing provider config or weakening Brendan's provider-agnostic OpenAI/xAI/LM Studio setup. Initial safe summary workloads (handoff/source-refresh summaries) now prove the pattern; next targets should stay internal and metadata-only before any creator/widget execution path.
 
 ---
 

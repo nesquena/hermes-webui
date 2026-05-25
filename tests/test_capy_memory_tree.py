@@ -1,6 +1,8 @@
 import io
 import json
 import sqlite3
+import sys
+import types
 from urllib.parse import urlparse
 
 import pytest
@@ -764,6 +766,305 @@ def test_run_source_refresh_jobs_uses_configured_summarize_route_for_safe_refres
     assert "safe fetched metadata about memory tree routing" not in persisted
     for unsafe in ("secret_value_do_not_leak", '"raw_prompt":', "api_key", "<script", "renderer", '"source":', "bad()"):
         assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+def test_run_source_refresh_jobs_invokes_default_summarize_route_model_when_configured(tmp_path, monkeypatch):
+    """Configured summarize routes should drive the actual source-refresh summarizer call."""
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:summarize": {
+            "provider": "openrouter",
+            "model": "summary/provider-model",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+        },
+    }))
+    register_source_reference({
+        "source_id": "default-model-route-docs",
+        "origin_uri": "https://example.test/default-model-route?api_key=***#raw-prompt",
+        "display_name": "Default Model Route Docs",
+    })
+
+    def fake_fetcher(*, source_id, origin_uri):
+        return {
+            "metadata_only": True,
+            "title": "Default Model Route Docs",
+            "summary": "Safe fetched metadata before actual model routing.",
+            "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+
+    import api.config as cfg
+
+    resolve_calls = []
+
+    def fake_resolve_model_provider(model=None):
+        resolve_calls.append(model)
+        if model == "@openrouter:summary/provider-model":
+            return "summary/provider-model", "openrouter", "https://summary.example/v1"
+        return "session-default-model", "default-provider", None
+
+    monkeypatch.setattr(cfg, "resolve_model_provider", fake_resolve_model_provider)
+
+    runtime_requests = []
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(fake_runtime_module, "resolve_runtime_provider", lambda requested=None: runtime_requests.append(requested) or {
+        "api_key": "runtime-key",
+        "provider": requested,
+        "base_url": None,
+    })
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__path__ = []
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+
+    created_agents = []
+    completion_calls = []
+
+    class _Client:
+        class completions:
+            @staticmethod
+            def create(*args, **kwargs):
+                completion_calls.append(kwargs)
+                return types.SimpleNamespace(choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="Model routed source-refresh digest."),
+                        finish_reason="stop",
+                    )
+                ])
+
+    class _Chat:
+        completions = _Client.completions
+
+    class _OpenAIClient:
+        chat = _Chat
+
+    class _RouteAwareAgent:
+        api_mode = ""
+
+        def __init__(self, *args, **kwargs):
+            created_agents.append(kwargs)
+            self.model = kwargs.get("model")
+            self.reasoning_config = None
+
+        def _build_api_kwargs(self, messages, *args, **kwargs):
+            return {"messages": messages}
+
+        def _ensure_primary_openai_client(self, reason=None):
+            return _OpenAIClient()
+
+        def release_clients(self):
+            return None
+
+    fake_run_agent = types.ModuleType("run_agent")
+    setattr(fake_run_agent, "AIAgent", _RouteAwareAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    result = run_source_refresh_jobs(limit=1, fetcher=fake_fetcher)
+    persisted = (root / "vault" / "default-model-route-docs.md").read_text(encoding="utf-8").lower()
+    serialized_result = json.dumps(result, sort_keys=True).lower()
+    serialized_prompt = json.dumps(completion_calls, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    job = result["jobs"][0]
+    assert job["status"] == "completed"
+    assert resolve_calls[0] == "@openrouter:summary/provider-model"
+    assert runtime_requests == ["openrouter"]
+    assert created_agents == [{
+        "model": "summary/provider-model",
+        "provider": "openrouter",
+        "base_url": "https://summary.example/v1",
+        "api_key": "runtime-key",
+        "platform": "webui",
+        "quiet_mode": True,
+        "enabled_toolsets": [],
+        "session_id": "source-refresh:default-model-route-docs",
+    }]
+    assert completion_calls[0]["timeout"] == 30.0
+    assert completion_calls[0]["temperature"] == 0.2
+    assert "model routed source-refresh digest" in persisted
+    assert "safe fetched metadata before actual model routing" not in persisted
+    assert job["model_route_resolution"]["resolution"] == "configured"
+    assert job["model_route_resolution"]["resolved_provider"] == "openrouter"
+    assert job["model_route_resolution"]["resolved_model"] == "summary/provider-model"
+    for unsafe in ("secret_value_do_not_leak", "api_key", "renderer", "<script", "raw-prompt"):
+        assert unsafe not in serialized_result
+        assert unsafe not in persisted
+    for unsafe in ("secret_value_do_not_leak", "<script", "raw-prompt"):
+        assert unsafe not in serialized_prompt
+
+def test_run_source_refresh_jobs_falls_back_when_configured_summarize_route_unavailable(tmp_path, monkeypatch):
+    """Unavailable configured summarize routes must not break deterministic source refresh."""
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:summarize": {
+            "provider": "openrouter",
+            "model": "summary/provider-model",
+        },
+    }))
+    register_source_reference({
+        "source_id": "fallback-route-docs",
+        "origin_uri": "https://example.test/fallback-route?api_key=***#raw-prompt",
+        "display_name": "Fallback Route Docs",
+    })
+
+    def fake_fetcher(*, source_id, origin_uri):
+        return {
+            "metadata_only": True,
+            "title": "Fallback Route Docs",
+            "summary": "Deterministic safe source summary survives route outage.",
+            "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        }
+
+    import api.config as cfg
+
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_provider",
+        lambda model=None: ("summary/provider-model", "openrouter", "https://summary.example/v1"),
+    )
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(fake_runtime_module, "resolve_runtime_provider", lambda requested=None: {
+        "api_key": "",
+        "provider": requested,
+        "base_url": None,
+    })
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__path__ = []
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+
+    fake_run_agent = types.ModuleType("run_agent")
+
+    class _UnexpectedAgent:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("model client should not be constructed without an API key")
+
+    setattr(fake_run_agent, "AIAgent", _UnexpectedAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    result = run_source_refresh_jobs(limit=1, fetcher=fake_fetcher)
+    persisted = (root / "vault" / "fallback-route-docs.md").read_text(encoding="utf-8").lower()
+    serialized_result = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "completed"
+    assert "deterministic safe source summary survives route outage" in persisted
+    assert result["jobs"][0]["model_route_resolution"]["resolution"] == "configured"
+    for unsafe in ("secret_value_do_not_leak", "api_key", "renderer", "<script", "raw-prompt"):
+        assert unsafe not in serialized_result
+        assert unsafe not in persisted
+
+def test_run_source_refresh_jobs_uses_custom_summarize_route_when_runtime_lookup_fails(tmp_path, monkeypatch):
+    """Custom summarize providers should still run when generic runtime lookup is unavailable."""
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "example.test")
+    monkeypatch.setenv("CAPY_MODEL_ROUTING_HINTS", json.dumps({
+        "hint:summarize": {
+            "provider": "custom:summary-local",
+            "model": "summary/provider-model",
+        },
+    }))
+    register_source_reference({
+        "source_id": "custom-route-docs",
+        "origin_uri": "https://example.test/custom-route",
+        "display_name": "Custom Route Docs",
+    })
+
+    def fake_fetcher(*, source_id, origin_uri):
+        return {
+            "metadata_only": True,
+            "title": "Custom Route Docs",
+            "summary": "Safe fetched custom provider metadata.",
+        }
+
+    import api.config as cfg
+
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_provider",
+        lambda model=None: ("summary/provider-model", "custom:summary-local", ""),
+    )
+    monkeypatch.setattr(
+        cfg,
+        "resolve_custom_provider_connection",
+        lambda provider: ("custom-runtime-key", "http://custom-summary.local/v1"),
+    )
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(fake_runtime_module, "resolve_runtime_provider", lambda requested=None: (_ for _ in ()).throw(RuntimeError("runtime unavailable")))
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__path__ = []
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+
+    created_agents = []
+
+    class _Client:
+        class completions:
+            @staticmethod
+            def create(*args, **kwargs):
+                return types.SimpleNamespace(choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="Custom route source-refresh digest."),
+                        finish_reason="stop",
+                    )
+                ])
+
+    class _Chat:
+        completions = _Client.completions
+
+    class _OpenAIClient:
+        chat = _Chat
+
+    class _RouteAwareAgent:
+        api_mode = ""
+
+        def __init__(self, *args, **kwargs):
+            created_agents.append(kwargs)
+            self.reasoning_config = None
+
+        def _build_api_kwargs(self, messages, *args, **kwargs):
+            return {"messages": messages}
+
+        def _ensure_primary_openai_client(self, reason=None):
+            return _OpenAIClient()
+
+        def release_clients(self):
+            return None
+
+    fake_run_agent = types.ModuleType("run_agent")
+    setattr(fake_run_agent, "AIAgent", _RouteAwareAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    result = run_source_refresh_jobs(limit=1, fetcher=fake_fetcher)
+    persisted = (root / "vault" / "custom-route-docs.md").read_text(encoding="utf-8").lower()
+    serialized_result = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "completed"
+    assert created_agents == [{
+        "model": "summary/provider-model",
+        "provider": "custom:summary-local",
+        "base_url": "http://custom-summary.local/v1",
+        "api_key": "custom-runtime-key",
+        "platform": "webui",
+        "quiet_mode": True,
+        "enabled_toolsets": [],
+        "session_id": "source-refresh:custom-route-docs",
+    }]
+    assert "custom route source-refresh digest" in persisted
+    for unsafe in ("api_key", "custom-runtime-key", '"raw_prompt":', "<script"):
+        assert unsafe not in serialized_result
         assert unsafe not in persisted
 
 
