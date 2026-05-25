@@ -40,6 +40,17 @@ def test_skill_highlighter_supports_requested_token_forms():
     assert "const skillName = m[3] || m[4] || '';" in skills
 
 
+def test_skill_highlighter_requires_space_separated_case_sensitive_mentions():
+    """Conversation matcher should not chip case variants or slash/path substrings."""
+    skills = read("static/skills.js")
+
+    assert "const SKILL_MENTION_TOKEN_RE = /(^|\\s)(`\\/?([A-Za-z0-9][A-Za-z0-9_-]*)`|\\/?([A-Za-z0-9][A-Za-z0-9_-]*))(?=$|\\s)/g;" in skills
+    assert "function getSkillByMentionToken(token)" in skills
+    assert "const raw = String(token || '').trim().replace(/^\\//, '');" in skills
+    assert "return _skillRegistry.get(raw) || null;" in skills
+    assert "return getSkillBySlug(token);" not in skills
+
+
 def test_skill_chip_truncates_slash_and_code_markers():
     """Conversation chip label should strip presentation markers from slash/code forms."""
     skills = read("static/skills.js")

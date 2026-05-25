@@ -52,7 +52,8 @@ function getSkillBySlug(slug) {
 }
 
 function getSkillByMentionToken(token) {
-  return getSkillBySlug(token);
+  const raw = String(token || '').trim().replace(/^\//, '');
+  return _skillRegistry.get(raw) || null;
 }
 
 function getRegisteredSkills() {
@@ -80,7 +81,7 @@ function createSkillChip(skill) {
 }
 
 const SKILL_MENTION_SKIP_TAGS = new Set(['PRE', 'A', 'SCRIPT', 'STYLE', 'TEXTAREA', 'INPUT', 'BUTTON']);
-const SKILL_MENTION_TOKEN_RE = /(^|[^A-Za-z0-9_-])(`\/?([A-Za-z0-9][A-Za-z0-9_-]*)`|\/?([A-Za-z0-9][A-Za-z0-9_-]*))(?=$|[^A-Za-z0-9_-])/g;
+const SKILL_MENTION_TOKEN_RE = /(^|\s)(`\/?([A-Za-z0-9][A-Za-z0-9_-]*)`|\/?([A-Za-z0-9][A-Za-z0-9_-]*))(?=$|\s)/g;
 
 function shouldSkipSkillMentionNode(node) {
   for(let parent=node.parentNode; parent&&parent.nodeType===1; parent=parent.parentNode){
