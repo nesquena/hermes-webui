@@ -616,6 +616,16 @@ function closeLiveStream(sessionId, streamId, source){
   if(source&&live.source!==source) return;
   try{live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
+  // closeLiveStream() is called during session-switch teardown for any session
+  // the user is no longer viewing. The stream is still active on the server,
+  // so mark the in-memory INFLIGHT entry for reattach — otherwise
+  // loadSession() returning to this session skips the reattach branch
+  // (`INFLIGHT.reattach` was only set by the storage-load path) and the SSE
+  // is never reopened. The user then sees no streamed tokens until the LLM
+  // finishes and a metadata refresh swaps in the final reply.
+  // If the stream is terminating cleanly, _clearOwnerInflightState() has
+  // already deleted INFLIGHT[sessionId], so this is a safe no-op.
+  if(INFLIGHT[sessionId]) INFLIGHT[sessionId].reattach=true;
 }
 
 function closeOtherLiveStreams(activeSid){
