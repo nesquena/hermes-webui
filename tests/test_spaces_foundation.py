@@ -7638,12 +7638,19 @@ def test_browser_surface_tool_open_returns_receipt_only_policy_progress(monkeypa
     assert result["progress_event"]["event_type"] == "tool.completed"
     assert result["progress_event"]["run_id"] == f"browser.open:{created['space_id']}"
     assert result["progress_event"]["redaction_status"] == "metadata_only"
+    assert result["output_compaction"]["tool"] == "capy-spaces-browser-surface"
+    assert result["output_compaction"]["command"] == "space.browser.open"
+    assert result["output_compaction"]["original_chars"] >= result["output_compaction"]["compacted_chars"]
+    assert result["output_compaction"]["redaction_status"] in {"redacted", "metadata_only"}
+    assert result["output_compaction"]["rules_applied"]
     assert malformed["ok"] is True
     assert malformed["action"] == "browser.open"
     assert malformed["browser_surface"]["requested_action"] == "open"
     assert malformed["browser_surface"]["url_scheme"] == "other"
     assert malformed["browser_surface"]["url_host_class"] == "none"
     assert malformed["progress_event"]["run_id"] == f"browser.open:{created['space_id']}"
+    assert malformed["output_compaction"]["tool"] == "capy-spaces-browser-surface"
+    assert malformed["output_compaction"]["command"] == "browser.open"
     assert "example.com" not in serialized
     assert "dashboard" not in serialized
     assert "ignore previous" not in serialized
@@ -7699,6 +7706,11 @@ def test_browser_surface_snapshot_click_type_are_receipt_only_and_redact_payload
         assert receipt["autonomy_policy"]["prompt_preflight_status"] == "required"
         assert receipt["progress_event"]["event_type"] == "tool.completed"
         assert receipt["progress_event"]["redaction_status"] == "metadata_only"
+        assert receipt["output_compaction"]["tool"] == "capy-spaces-browser-surface"
+        assert receipt["output_compaction"]["command"] == receipt["action"]
+        assert receipt["output_compaction"]["original_chars"] >= receipt["output_compaction"]["compacted_chars"]
+        assert receipt["output_compaction"]["redaction_status"] in {"redacted", "metadata_only"}
+        assert receipt["output_compaction"]["rules_applied"]
 
     assert snapshot["progress_event"]["run_id"] == f"browser.snapshot:{created['space_id']}"
     assert clicked["progress_event"]["run_id"] == f"browser.click_ref:{created['space_id']}"
@@ -7767,6 +7779,11 @@ def test_browser_surface_navigation_key_scroll_are_receipt_only_and_redact_paylo
         assert receipt["autonomy_policy"]["prompt_preflight_status"] == "required"
         assert receipt["progress_event"]["event_type"] == "tool.completed"
         assert receipt["progress_event"]["redaction_status"] == "metadata_only"
+        assert receipt["output_compaction"]["tool"] == "capy-spaces-browser-surface"
+        assert receipt["output_compaction"]["command"] == receipt["action"]
+        assert receipt["output_compaction"]["original_chars"] >= receipt["output_compaction"]["compacted_chars"]
+        assert receipt["output_compaction"]["redaction_status"] in {"redacted", "metadata_only"}
+        assert receipt["output_compaction"]["rules_applied"]
 
     assert backed["progress_event"]["run_id"] == f"browser.back:{created['space_id']}"
     assert forwarded["progress_event"]["run_id"] == f"browser.forward:{created['space_id']}"

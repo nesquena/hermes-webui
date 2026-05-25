@@ -5860,6 +5860,48 @@ def _browser_surface_url_metadata(raw_url: Any) -> dict[str, str]:
     return {"url_scheme": scheme, "url_host_class": host_class}
 
 
+def _browser_surface_output_compaction_receipt(
+    *,
+    action: str,
+    kind: str,
+    surface: dict[str, Any],
+    preflight: dict[str, Any],
+    policy: dict[str, Any],
+    progress_event: dict[str, Any],
+) -> dict[str, Any]:
+    """Return metadata-only compaction evidence for receipt-only browser tools."""
+    from api.capy_compaction import compact_output
+
+    safe_action = _context_value(action, 120) or "browser.surface.action"
+    safe_kind = _context_value(kind, 40) or "browser"
+    surface_bits = [
+        f"{key}: {value}"
+        for key, value in sorted(surface.items())
+        if isinstance(value, (bool, int, float, str)) and key not in {"url_host", "url", "href", "target"}
+    ]
+    lines = [
+        f"action: {safe_action}",
+        f"requested_action: {safe_kind}",
+        "executed: false",
+        "approval required: true",
+        f"prompt_preflight_status: {_context_value(preflight.get('status'), 40) or 'required'}",
+        f"policy_action: {_context_value(policy.get('action'), 120) or safe_action}",
+        f"model_route_hint: {_context_value(policy.get('model_route_hint'), 80) or 'hint:fast'}",
+        f"progress_run_id: {_context_value(progress_event.get('run_id'), 160) or f'browser.{safe_kind}'}",
+        *surface_bits,
+    ]
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-browser-surface",
+        command=safe_action,
+        exit_status=0,
+        max_chars=700,
+    )
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
 def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     space_id = validate_space_id(_space_tool_current_id(payload))
     kind = _browser_surface_tool_kind(action)
@@ -5885,14 +5927,24 @@ def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[
     if kind == "type_ref":
         surface["typed_text_stored"] = False
     preflight = _browser_surface_required_prompt_preflight_receipt(action)
+    policy = _browser_surface_action_policy_receipt(action, preflight)
+    progress_event = _record_space_tool_progress_event(space_id, run_prefix=f"browser.{kind}")
     return {
         "ok": True,
         "action": action,
         "active_space_id": space_id,
         "browser_surface": surface,
         "prompt_preflight": preflight,
-        "autonomy_policy": _browser_surface_action_policy_receipt(action, preflight),
-        "progress_event": _record_space_tool_progress_event(space_id, run_prefix=f"browser.{kind}"),
+        "autonomy_policy": policy,
+        "progress_event": progress_event,
+        "output_compaction": _browser_surface_output_compaction_receipt(
+            action=action,
+            kind=kind,
+            surface=surface,
+            preflight=preflight,
+            policy=policy,
+            progress_event=progress_event,
+        ),
     }
 
 
