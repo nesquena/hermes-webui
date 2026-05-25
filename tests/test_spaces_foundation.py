@@ -10194,6 +10194,7 @@ def test_space_tool_template_install_accepts_camelcase_space_id_metadata_only(mo
 
 
 def test_space_tool_template_reset_accepts_camelcase_space_id_metadata_only(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_AUTONOMY_MODE", "autonomous")
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     installed = spaces.install_template("big-bang", space_id="tool-reset-camel")
     spaces.upsert_widget(
@@ -10226,6 +10227,16 @@ def test_space_tool_template_reset_accepts_camelcase_space_id_metadata_only(monk
     assert result["progress_event"]["run_id"] == "template.reset:tool-reset-camel"
     assert result["progress_event"]["space_id"] == "tool-reset-camel"
     assert result["progress_event"]["redaction_status"] == "metadata_only"
+    assert result["autonomy_policy"]["available"] is True
+    assert result["autonomy_policy"]["action"] == "space.template.reset"
+    assert result["autonomy_policy"]["mode"] == "supervised"
+    assert result["autonomy_policy"]["label"] == "Supervised"
+    assert result["autonomy_policy"]["approval_required"] is True
+    assert "creator_commit" in result["autonomy_policy"]["approval_gates"]
+    assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert result["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert result["autonomy_policy"]["metadata_only"] is True
+    assert result["autonomy_policy"]["local_only"] is True
     assert "unsafe-extra" not in serialized
     assert "renderer" not in serialized
     assert "<script" not in serialized

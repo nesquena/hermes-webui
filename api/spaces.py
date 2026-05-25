@@ -671,6 +671,20 @@ def _local_service_template_action_policy_receipt(preflight_receipt: dict[str, A
     )
 
 
+def _template_reset_action_policy_receipt() -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    receipt = action_policy_receipt(
+        "space.template.reset",
+        approval_gates=["creator_commit"],
+        prompt_preflight_status="required",
+        model_route_hint="hint:reasoning",
+    )
+    receipt["mode"] = "supervised"
+    receipt["label"] = "Supervised"
+    return receipt
+
+
 def _space_dir(space_id: str) -> Path:
     sid = validate_space_id(space_id)
     root = manifests_dir().resolve()
@@ -9168,6 +9182,7 @@ def reset_template(template: str, *, space_id: str | None = None, record_progres
     }
     if record_progress:
         result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="template.reset")
+    result["autonomy_policy"] = _template_reset_action_policy_receipt()
     return result
 
 
