@@ -30,6 +30,19 @@ HOME = Path.home()
 # REPO_ROOT is the directory that contains this file's parent (api/ -> repo root)
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 
+
+def _platform_default_hermes_home() -> Path:
+    """Return the platform-aware default Hermes home when HERMES_HOME is unset.
+
+    Native Windows Hermes Agent installs default to %LOCALAPPDATA%\\hermes,
+    while POSIX installs use ~/.hermes.
+    """
+    if os.name == "nt":
+        local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            return Path(local_app_data) / "hermes"
+    return HOME / ".hermes"
+
 # ── Network config (env-overridable) ─────────────────────────────────────────
 HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
@@ -40,8 +53,11 @@ TLS_KEY = os.getenv("HERMES_WEBUI_TLS_KEY", "").strip() or None
 TLS_ENABLED = TLS_CERT is not None and TLS_KEY is not None
 
 # ── State directory (env-overridable, never inside repo) ──────────────────────
+_DEFAULT_HERMES_HOME = _platform_default_hermes_home()
+_EFFECTIVE_HERMES_HOME = Path(os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))).expanduser()
+
 STATE_DIR = (
-    Path(os.getenv("HERMES_WEBUI_STATE_DIR", str(HOME / ".hermes" / "webui")))
+    Path(os.getenv("HERMES_WEBUI_STATE_DIR", str(_EFFECTIVE_HERMES_HOME / "webui")))
     .expanduser()
     .resolve()
 )
@@ -108,7 +124,7 @@ def _discover_agent_dir() -> Path:
         )
 
     # 2. HERMES_HOME / hermes-agent
-    hermes_home = os.getenv("HERMES_HOME", str(HOME / ".hermes"))
+    hermes_home = os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))
     candidates.append(Path(hermes_home).expanduser() / "hermes-agent")
 
     # 3. Sibling: <repo-root>/../hermes-agent
@@ -119,7 +135,7 @@ def _discover_agent_dir() -> Path:
         candidates.append(REPO_ROOT.parent)
 
     # 5. ~/.hermes/hermes-agent (explicit common path)
-    candidates.append(HOME / ".hermes" / "hermes-agent")
+    candidates.append(_DEFAULT_HERMES_HOME / "hermes-agent")
 
     # 6. ~/hermes-agent
     candidates.append(HOME / "hermes-agent")
@@ -267,7 +283,7 @@ def _get_config_path() -> Path:
 
         return get_active_hermes_home() / "config.yaml"
     except ImportError:
-        return HOME / ".hermes" / "config.yaml"
+        return _DEFAULT_HERMES_HOME / "config.yaml"
 
 
 _WEBUI_SESSION_SAVE_MODES = {"deferred", "eager"}
@@ -2364,7 +2380,7 @@ def _get_auth_store_path() -> Path:
 
         return _gah() / "auth.json"
     except ImportError:
-        return HOME / ".hermes" / "auth.json"
+        return _DEFAULT_HERMES_HOME / "auth.json"
 
 
 def _models_cache_file_fingerprint(path: Path) -> dict:
@@ -3096,7 +3112,7 @@ def get_available_models() -> dict:
 
                 hermes_env_path = _gah2() / ".env"
             except ImportError:
-                hermes_env_path = HOME / ".hermes" / ".env"
+                hermes_env_path = _DEFAULT_HERMES_HOME / ".env"
             env_keys = {}
             if hermes_env_path.exists():
                 try:
