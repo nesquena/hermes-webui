@@ -8109,6 +8109,23 @@ def _camera_stream_url_metadata(raw_url: Any) -> dict[str, Any]:
     }
 
 
+def _camera_stream_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only evidence that camera stream ingestion is browser-gated."""
+    safe_action = _context_value(action, 120) or "space.camera.add_stream"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "browser_surface",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["camera_stream_approval_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
 def _camera_stream_action_policy_receipt(action: str) -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
@@ -8166,12 +8183,16 @@ def add_camera_stream(space_id: str, stream: dict[str, Any], *, action: str = "s
     widgets[idx] = _normalize_widget(grid)
     space["widgets"] = widgets
     saved = _write_manifest(space, "camera.stream.added", {"widget_id": "camera-grid", "stream_id": stream_id})
+    prompt_preflight = _camera_stream_required_prompt_preflight_receipt(action)
+    progress_event = _record_space_tool_progress_event(sid, run_prefix="camera.stream.add")
     return {
         "space_id": saved["space_id"],
         "stream": safe_stream,
         "widget": _widget_summary(widgets[idx]),
         "revision_event_id": saved["revision_event_id"],
+        "prompt_preflight": prompt_preflight,
         "autonomy_policy": _camera_stream_action_policy_receipt(action),
+        "progress_event": progress_event,
     }
 
 
@@ -10047,6 +10068,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
     sid = validate_space_id(space_id)
     safe_prefix = str(run_prefix or "tool").strip().lower()
     if safe_prefix not in {
+        "camera.stream.add",
         "checkpoint",
         "context",
         "package.export",

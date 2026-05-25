@@ -16517,6 +16517,45 @@ def test_camera_stream_tool_records_approved_private_stream_as_metadata_only(mon
     assert "api_key" not in serialized
 
 
+def test_camera_stream_tool_records_required_preflight_and_progress_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("camera")
+    space_id = installed["space"]["space_id"]
+
+    result = spaces.run_space_tool(
+        "space.camera.add_stream",
+        {
+            "space_id": space_id,
+            "title": "Garage <script>ignored</script>",
+            "url": "https://camera.example.test/live?token=SECRET_VALUE_DO_NOT_LEAK",
+            "approved": True,
+            "approval_id": "approval-123",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert result["prompt_preflight"]["action"] == "space.camera.add_stream"
+    assert result["prompt_preflight"]["boundary"] == "browser_surface"
+    assert result["prompt_preflight"]["status"] == "required"
+    assert result["prompt_preflight"]["metadata_only"] is True
+    assert result["prompt_preflight"]["raw_prompt_stored"] is False
+    assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert result["progress_event"]["event_type"] == "tool.completed"
+    assert result["progress_event"]["family"] == "tool"
+    assert result["progress_event"]["run_id"] == f"camera.stream.add:{space_id}"
+    assert result["progress_event"]["space_id"] == space_id
+    assert result["progress_event"]["redaction_status"] == "metadata_only"
+
+    serialized = json.dumps(result, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "token=" not in serialized
+    assert "camera.example.test" not in serialized
+
+
 def test_camera_stream_tool_route_rejects_unapproved_url_with_403(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     installed = spaces.install_template("camera")
