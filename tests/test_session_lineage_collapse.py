@@ -253,6 +253,89 @@ console.log(JSON.stringify(collapsed));
 
 
 
+def test_sidebar_lineage_collapse_prefers_current_tip_over_same_segment_snapshot():
+    """A preserved parent snapshot can share the child's backend segment count.
+
+    Loading/polling the parent refreshes its timestamp, but the collapsed row
+    must still open the non-snapshot continuation tip. Otherwise a reload after
+    compression jumps back to the older parent transcript and looks like the
+    active conversation disappeared.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+const sessions = [
+  {{session_id:'parent', title:'Duplicate Assistant Text Blocks', message_count:64, updated_at:300, last_message_at:300, pre_compression_snapshot:true, _lineage_root_id:'parent', _compression_segment_count:2}},
+  {{session_id:'child', title:'Duplicate Assistant Text Blocks', parent_session_id:'parent', message_count:86, updated_at:200, last_message_at:200, _lineage_root_id:'parent', _compression_segment_count:2}},
+];
+const collapsed = _collapseSessionLineageForSidebar(sessions);
+console.log(JSON.stringify(collapsed));
+"""
+    collapsed = json.loads(_run_node(source))
+    assert [row["session_id"] for row in collapsed] == ["child"]
+    assert collapsed[0]["_lineage_collapsed_count"] == 2
+    assert [seg["session_id"] for seg in collapsed[0]["_lineage_segments"]] == ["child", "parent"]
+
+
+
+def test_direct_parent_restore_resolves_to_visible_compression_tip():
+    """A stale /session/<parent> URL should reopen the visible continuation tip.
+
+    The sidebar payload may omit the archived pre-compression parent but still
+    include the latest continuation with lineage metadata pointing back to the
+    parent. Boot restore should use that visible tip instead of loading the old
+    parent transcript and making the continuation look lost.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+var _allSessions = [
+  {{session_id:'child', title:'Duplicate Assistant Text Blocks', parent_session_id:'parent', message_count:86, updated_at:200, last_message_at:200, _lineage_root_id:'parent', _compression_segment_count:2}},
+  {{session_id:'other', title:'Other', message_count:4, updated_at:100, last_message_at:100}},
+];
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sessionLineageContainsSession'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_resolveSessionIdFromSidebarLineage'));
+console.log(JSON.stringify({{parent:_resolveSessionIdFromSidebarLineage('parent'), child:_resolveSessionIdFromSidebarLineage('child'), other:_resolveSessionIdFromSidebarLineage('other')}}));
+"""
+    result = json.loads(_run_node(source))
+    assert result == {"parent": "child", "child": "child", "other": "other"}
+
+
 def test_sidebar_attaches_child_sessions_to_collapsed_hidden_parent_lineage():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     source = f"""

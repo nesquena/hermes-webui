@@ -389,7 +389,8 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         init_kwargs = captured["init_kwargs"]
         self.assertIsNotNone(init_kwargs["interim_assistant_callback"])
         self.assertTrue(callable(init_kwargs["interim_assistant_callback"]))
-        self.assertIn("WebUI progress contract", captured["agent"].ephemeral_system_prompt)
+        self.assertIn("WebUI progress guidance", captured["agent"].ephemeral_system_prompt)
+        self.assertIn("Match the normal Hermes messaging style", captured["agent"].ephemeral_system_prompt)
         self.assertIn("user-visible progress updates", captured["agent"].ephemeral_system_prompt)
 
         interim_events = []
@@ -679,9 +680,11 @@ def test_streaming_persists_reasoning_in_session():
     assert "_reasoning_text = ''" in src, \
         "_reasoning_text variable not initialised in streaming.py"
 
-    # on_reasoning must accumulate into _reasoning_text
-    assert '_reasoning_text += str(text)' in src, \
-        "on_reasoning callback does not accumulate into _reasoning_text"
+    # on_reasoning must accumulate non-echo reasoning into _reasoning_text
+    assert '_reasoning_text += reasoning_delta' in src, \
+        "on_reasoning callback does not accumulate accepted reasoning deltas into _reasoning_text"
+    assert '_is_visible_output_echo(reasoning_delta)' in src, \
+        "on_reasoning callback should suppress reasoning deltas that only echo visible streamed output"
 
     # Persistence block must exist before raw_session is built
     assert "Persist reasoning trace in the session so it survives reload" in src, \
@@ -751,7 +754,7 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
     src = (REPO / 'api' / 'streaming.py').read_text()
     assert "def _restore_reasoning_metadata(" in src, \
         "streaming.py must define a helper to restore prior reasoning metadata"
-    assert "s.context_messages = _next_context_messages" in src, \
+    assert "_next_context_messages" in src and "s.context_messages" in src, \
         "streaming.py must restore prior reasoning metadata into model context"
     assert "s.messages = _merge_display_messages_after_agent_result(" in src, \
         "streaming.py must merge restored result messages into the visible transcript"
@@ -764,7 +767,7 @@ def test_routes_restores_prior_reasoning_metadata_after_followup():
     src = (REPO / 'api' / 'routes.py').read_text()
     assert "_restore_reasoning_metadata" in src, \
         "routes.py must import reasoning metadata restoration helper"
-    assert "s.context_messages = _next_context_messages" in src, \
+    assert "_next_context_messages" in src and "s.context_messages" in src, \
         "routes.py must restore prior reasoning metadata into model context"
     assert 's.messages = _merge_display_messages_after_agent_result(' in src, \
         "routes.py must merge restored result messages into the visible transcript"

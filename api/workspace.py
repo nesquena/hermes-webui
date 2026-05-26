@@ -7,6 +7,7 @@ profile has its own workspace configuration.  State files live at
 ``{profile_home}/webui_state/last_workspace.txt``.  The global STATE_DIR
 paths are used as fallback when no profile module is available.
 """
+import hashlib
 import json
 import logging
 import os
@@ -714,12 +715,18 @@ def list_dir(workspace: Path, rel: str='.'):
             display_path = str(Path(item.name))
             if rel and rel != '.':
                 display_path = rel + '/' + display_path
+            try:
+                item_stat = item.lstat()
+                mtime_ns = item_stat.st_mtime_ns
+            except OSError:
+                mtime_ns = None
             entry = {
                 'name': item.name,
                 'path': display_path,
                 'type': 'symlink',
                 'target': str(link_target),
                 'is_dir': is_dir,
+                'mtime_ns': mtime_ns,
             }
             if not is_dir:
                 try:
@@ -733,15 +740,47 @@ def list_dir(workspace: Path, rel: str='.'):
             entry_path = item.name
             if rel and rel != '.':
                 entry_path = rel + '/' + item.name
+            try:
+                item_stat = item.stat()
+                size = item_stat.st_size if item.is_file() else None
+                mtime_ns = item_stat.st_mtime_ns
+            except OSError:
+                size = None
+                mtime_ns = None
             entries.append({
                 'name': item.name,
                 'path': entry_path,
                 'type': 'dir' if item.is_dir() else 'file',
-                'size': item.stat().st_size if item.is_file() else None,
+                'size': size,
+                'mtime_ns': mtime_ns,
             })
         if len(entries) >= 200:
             break
     return entries
+
+
+def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = None) -> str:
+    """Return a cheap, stable signature for a listed workspace directory.
+
+    The signature is based only on bounded directory-entry metadata already used
+    by the workspace tree: names, displayed paths, entry type, file sizes,
+    mtimes, and symlink targets. It intentionally does not read file contents.
+    """
+    if entries is None:
+        entries = list_dir(workspace, rel)
+    payload = []
+    for entry in entries:
+        payload.append({
+            'name': entry.get('name'),
+            'path': entry.get('path'),
+            'type': entry.get('type'),
+            'is_dir': entry.get('is_dir'),
+            'size': entry.get('size'),
+            'mtime_ns': entry.get('mtime_ns'),
+            'target': entry.get('target'),
+        })
+    raw = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
 def read_file_content(workspace: Path, rel: str) -> dict:

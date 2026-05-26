@@ -162,8 +162,8 @@ The wizard uses the same files and APIs as the normal app:
 
 State normally lives outside the repository. By default:
 
-- Hermes Agent state: `~/.hermes`
-- WebUI state: `~/.hermes/webui`
+- Hermes Agent state: Windows `%LOCALAPPDATA%\hermes`; POSIX `~/.hermes`
+- WebUI state: `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`)
 
 Override these with `HERMES_HOME` and `HERMES_WEBUI_STATE_DIR` when you need an
 isolated test install.

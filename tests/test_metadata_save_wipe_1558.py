@@ -270,6 +270,24 @@ def test_recover_all_sessions_on_startup_restores_orphan_bak(temp_session_dir):
     assert len(restored["messages"]) == 293
 
 
+def test_recover_all_sessions_on_startup_rebuilds_missing_index_without_restores(temp_session_dir, monkeypatch):
+    """Startup recovery must rebuild a missing index even when no .bak restore runs."""
+    import api.models as _m
+
+    sid = _make_session_on_disk(temp_session_dir, n_msgs=42)
+    missing_index = temp_session_dir / "_index.json"
+    monkeypatch.setattr(_m, "SESSION_INDEX_FILE", missing_index)
+    assert not missing_index.exists()
+
+    from api.session_recovery import recover_all_sessions_on_startup
+    result = recover_all_sessions_on_startup(temp_session_dir, rebuild_index=True)
+
+    assert result["restored"] == 0
+    index = json.loads(missing_index.read_text(encoding="utf-8"))
+    assert [entry["session_id"] for entry in index] == [sid]
+    assert index[0]["message_count"] == 42
+
+
 def test_recover_all_sessions_on_startup_rebuilds_index_after_orphan_restore(temp_session_dir, monkeypatch):
     """A restored orphan must be visible through the WebUI session index immediately."""
     import api.models as _m

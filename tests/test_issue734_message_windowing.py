@@ -33,7 +33,8 @@ def test_windowed_render_keeps_streaming_and_tool_activity_anchored_to_rendered_
 
 def test_window_state_participates_in_cache_and_cached_button_is_rewired():
     assert "cached.renderWindowSize===renderWindowSize" in UI_JS
-    assert "_sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize})" in UI_JS
+    assert "cached.signature===renderSignature" in UI_JS
+    assert "_sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize,signature:renderSignature})" in UI_JS
     assert "function _wireMessageWindowLoadEarlierButton()" in UI_JS
     assert "_wireMessageWindowLoadEarlierButton();" in UI_JS
     assert UI_JS.count("_wireMessageWindowLoadEarlierButton();") >= 2

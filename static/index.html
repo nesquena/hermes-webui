@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Hermes</title>
 <!-- base href enables subpath mount support; all static paths must stay relative (no leading slash).
      MUST appear before manifest/favicon links so browsers resolve relative URLs against the
@@ -17,7 +17,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Hermes">
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
-<script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,nous:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
+<script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
 <meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
@@ -26,6 +26,8 @@
 <script>(function(){try{var t=localStorage.getItem('hermes-theme')||'dark';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#FAF7F0';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <script>(function(){try{if(localStorage.getItem('hermes-webui-sidebar-collapsed')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
+<link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
+<script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
 <script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
 <script>(function(){
   var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
@@ -138,6 +140,12 @@
     <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
   </div>
   <div class="app-titlebar-spacer" aria-hidden="true"></div>
+  <button class="app-titlebar-reload" id="btnReload" onclick="window.location.reload()" type="button" aria-label="Reload" title="Reload page">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16">
+      <polyline points="23 4 23 10 17 10"/>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </svg>
+  </button>
 </header>
 <div class="layout">
   <nav class="rail" aria-label="Primary navigation">
@@ -172,6 +180,11 @@
       <!-- Settings button mirrored here for mobile (rail is desktop-only via @media >=768px). Keep in sync with rail entry. -->
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="settings" onclick="switchPanel('settings',{fromRailClick:true})" data-tooltip="Settings" data-i18n-title="tab_settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
     </div>
+    <!-- Flash-prevention: apply hidden tab visibility from localStorage synchronously
+         before any paint. Mirrors the theme/skin/font-size inline scripts in <head>.
+         The boot.js _restoreTabVisibility IIFE is a secondary fallback that also
+         handles the active-tab switch. -->
+    <script>(function(){try{var h=localStorage.getItem('hermes-webui-hidden-tabs');if(!h)return;var p=JSON.parse(h);if(!Array.isArray(p))return;var a=new Set(['chat','settings']);p.forEach(function(id){if(a.has(id))return;document.querySelectorAll('[data-panel="'+id+'"]').forEach(function(el){el.classList.add('nav-tab-hidden');});});try{var ac=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]')||document.querySelector('.sidebar-nav .nav-tab.active[data-panel]');if(ac&&ac.classList.contains('nav-tab-hidden')){ac.classList.remove('active');var c=document.querySelector('.rail .rail-btn.nav-tab[data-panel="chat"]')||document.querySelector('.sidebar-nav .nav-tab[data-panel="chat"]');if(c)c.classList.add('active');}}catch(_){}}catch(e){}})();</script>
     <!-- Chat panel -->
     <div class="panel-view active" id="panelChat">
       <div class="panel-head">
@@ -194,6 +207,7 @@
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openCronCreate()" data-tooltip="New job" data-i18n-title="new_job" aria-label="New job"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
+      <div id="cronGatewayNotice" class="detail-alert cron-gateway-notice" style="display:none"></div>
       <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Kanban panel -->
@@ -477,6 +491,7 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17h.01"/><path d="M9.09 9a3 3 0 1 1 5.82 1c0 2-3 2-3 4"/><circle cx="12" cy="12" r="10"/></svg>
             <span id="clarifyHeading" data-i18n="clarify_heading">Clarification needed</span>
             <span class="clarify-countdown" id="clarifyCountdown"></span>
+            <button type="button" class="clarify-collapse" id="clarifyCollapse" aria-expanded="true" aria-label="Collapse clarification" aria-controls="clarifyQuestion clarifyChoices clarifyInput clarifyHint" onclick="toggleClarifyCardCollapsed()" title="Collapse clarification"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           </div>
           <div class="clarify-question" id="clarifyQuestion"></div>
           <div class="clarify-choices" id="clarifyChoices"></div>
@@ -965,6 +980,11 @@
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_session_endless_scroll">When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.</div>
             </div>
+            <div class="settings-field">
+              <label id="tabVisibilityLabel" data-i18n="settings_label_tab_visibility">Sidebar tabs</label>
+              <div id="tabVisibilityChips" class="tab-visibility-chips" role="group" aria-labelledby="tabVisibilityLabel"></div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tab_visibility">Choose which tabs appear in the sidebar and rail. Chat and Settings are always visible.</div>
+            </div>
             <div id="settingsAppearanceAutosaveStatus" class="settings-autosave-status" aria-live="polite"></div>
           </div>
           <div class="settings-pane" id="settingsPanePreferences">
@@ -978,6 +998,22 @@
               <label for="settingsModel" data-i18n="settings_label_model">Default Model</label>
               <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_model">Used for new conversations. Existing conversations keep their selected model.</div>
+            </div>
+            <div class="settings-field">
+              <label data-i18n="settings_label_auxiliary_models">Auxiliary Models</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:10px" data-i18n="settings_desc_auxiliary_models">Side-task routing for vision, compression, title generation, etc. "Auto" uses your main chat model.</div>
+              <div id="auxModelsContainer"></div>
+              <div style="margin-top:8px;display:flex;gap:8px">
+                <button type="button" id="btnResetAuxModels" class="settings-btn" style="font-size:12px;padding:4px 12px;border-radius:6px" data-i18n="settings_btn_reset_aux_models">Reset all to auto</button>
+                <button type="button" id="btnApplyAuxModels" class="settings-btn" style="font-size:12px;padding:4px 12px;border-radius:6px;display:none" data-i18n="settings_btn_apply_aux_models">Apply changes</button>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsHideSuggestions" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_hide_suggestions">Hide new-chat suggestions</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_hide_suggestions">Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.</div>
             </div>
             <div class="settings-field">
               <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
@@ -1104,6 +1140,11 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sidebar_density">Controls how much metadata the session list shows in the left sidebar.</div>
             </div>
             <div class="settings-field">
+              <label for="settingsPinnedSessionsLimit">Pinned conversations limit</label>
+              <input type="number" id="settingsPinnedSessionsLimit" min="1" max="99" step="1" inputmode="numeric" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              <div style="font-size:11px;color:var(--muted);margin-top:4px">Maximum number of active conversations that can be pinned in the sidebar. Default is 3.</div>
+            </div>
+            <div class="settings-field">
               <label for="settingsAutoTitleRefresh" data-i18n="settings_label_auto_title_refresh">Adaptive title refresh</label>
               <select id="settingsAutoTitleRefresh" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="0" data-i18n="settings_auto_title_refresh_off">Off</option>
@@ -1152,14 +1193,21 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsIgnoreAgentUpdates" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_ignore_agent_updates">Ignore Agent updates</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_ignore_agent_updates">Keep WebUI update checks on, but hide Agent update notices and skip Agent update fetches.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsWhatsNewSummary" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_whats_new_summary">Summarize What's New with AI</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_whats_new_summary">Changes the What's New action from opening the raw diff first to generating a short, human-readable summary. The regular diff comparison stays available after the summary.</div>
             </div>
             <div class="settings-field">
-              <label for="settingsBotName" data-i18n="settings_label_bot_name">Assistant Name</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
+              <label for="settingsBotName" data-i18n="settings_label_bot_name">Default assistant name</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Used for the default profile only. Other profiles use their own profile names.</div>
               <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
@@ -1214,9 +1262,21 @@
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
+            <div class="settings-field" id="shutdownServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label data-i18n="settings_label_shutdown">Stop the Hermes WebUI server</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_shutdown">Gracefully stops the local WebUI server. Useful if you launched via <code>./ctl.sh start</code> and want to stop without switching to a terminal. You'll need to relaunch the server (<code>./ctl.sh start</code> or the native app) before the WebUI is reachable again.</div>
+              <button class="sm-btn" id="btnShutdownServer" onclick="shutdownServer()" style="width:100%;padding:8px;font-weight:600;color:#e74c3c;border-color:rgba(231,76,60,.3)" data-i18n="settings_btn_shutdown">Stop server</button>
+            </div>
+            <div class="settings-field" id="passkeysSettingsBlock" style="display:none;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label>Passkeys</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Register this browser or device for passwordless sign-in. Once at least one passkey exists, you can remove the password and sign in with passkeys only.</div>
+              <button class="sm-btn" id="btnRegisterPasskey" onclick="registerPasskey()" style="width:100%;padding:8px;font-weight:600">Add passkey</button>
+              <button class="sm-btn" id="btnGoPasswordless" onclick="goPasswordless()" style="display:none;margin-top:8px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3)">Go passwordless</button>
+              <div id="passkeyList" style="margin-top:8px;font-size:12px;color:var(--muted)">No passkeys registered.</div>
+            </div>
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label for="settingsDashboardMode">Official Hermes Dashboard</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Show a nav-rail link when the official <code>hermes dashboard</code> is reachable. Overrides are restricted to loopback URLs.</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Show a nav-rail link when the official <code>hermes dashboard</code> is reachable. Public reverse-proxy URLs are stored as browser-only links and are never server-probed.</div>
               <select id="settingsDashboardMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="auto">Auto-detect</option>
                 <option value="always">Always show</option>
@@ -1271,8 +1331,13 @@
         <button class="panel-icon-btn close-preview has-tooltip has-tooltip--bottom" id="btnClearPreview" data-tooltip="Close preview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
     </div>
+    <div class="workspace-panel-tabs" role="tablist" aria-label="Workspace panel views">
+      <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button" onclick="switchWorkspacePanelTab('files')" role="tab" aria-selected="true">Files</button>
+      <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false">Artifacts <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
+    </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree"></div>
+    <div class="workspace-artifacts" id="workspaceArtifacts" hidden></div>
     <div id="wsEmptyState" style="display:none;flex:1;align-items:center;justify-content:center;padding:24px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6"></div>
     <div class="preview-area" id="previewArea">
       <div class="preview-path" id="previewPath">
@@ -1290,7 +1355,7 @@
       </div>
       <div class="preview-md" id="previewMd" style="display:none"></div>
       <div class="preview-html-wrap" id="previewHtmlWrap" style="display:none;flex:1;border-radius:8px;overflow:hidden;border:1px solid var(--border2)">
-        <iframe id="previewHtmlIframe" style="width:100%;height:100%;border:none;background:#fff" sandbox="allow-scripts" title="HTML preview"></iframe>
+        <iframe id="previewHtmlIframe" style="width:100%;height:100%;border:none;background:#fff" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" title="HTML preview"></iframe>
       </div>
       <textarea id="previewEditArea" style="display:none;flex:1;width:100%;background:var(--code-bg);color:var(--pre-text);border:1px solid var(--border2);border-radius:8px;padding:12px;font-family:'SF Mono',ui-monospace,monospace;font-size:12px;line-height:1.6;resize:none;outline:none" oninput="_previewDirty=true;updateEditBtn()"></textarea>
     </div>

@@ -41,9 +41,9 @@ def test_service_worker_uses_network_first_for_page_navigation():
     """Page navigations must hit the server before cache so expired auth redirects work."""
     navigate_idx = SW_SRC.find("event.request.mode === 'navigate'")
     assert navigate_idx != -1, "service worker must special-case page navigations"
-    fetch_idx = SW_SRC.find("fetch(event.request)", navigate_idx)
+    fetch_idx = SW_SRC.find("fetch(new Request(event.request, { cache: 'no-store' }))", navigate_idx)
     cache_idx = SW_SRC.find("caches.match", navigate_idx)
-    assert fetch_idx != -1, "navigation branch must try the live server first"
+    assert fetch_idx != -1, "navigation branch must try the live server first while bypassing HTTP cache"
     assert cache_idx != -1, "navigation branch may use cached shell only as offline fallback"
     assert fetch_idx < cache_idx, (
         "navigation requests must be network-first, not cache-first, so auth redirects "

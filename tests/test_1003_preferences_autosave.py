@@ -44,6 +44,7 @@ PREFERENCE_FIELDS_AUTOSAVE = [
     ("settingsShowPreviousMessagingSessions", "show_previous_messaging_sessions"),
     ("settingsSyncInsights", "sync_to_insights"),
     ("settingsCheckUpdates", "check_for_updates"),
+    ("settingsIgnoreAgentUpdates", "ignore_agent_updates"),
     ("settingsSoundEnabled", "sound_enabled"),
     ("settingsNotificationsEnabled", "notifications_enabled"),
     ("settingsSidebarDensity", "sidebar_density"),

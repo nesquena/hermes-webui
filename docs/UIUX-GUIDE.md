@@ -150,7 +150,7 @@ Current implementation has two appearance axes, sourced from `static/boot.js`:
 `theme` is only `light`, `dark`, or `system` and resolves to the `.dark` class
 for dark mode; `skin` is a separate axis applied with `data-skin` and currently
 includes `default`, `ares`, `mono`, `slate`, `poseidon`, `sisyphus`,
-`charizard`, `sienna`, `catppuccin`, and `nous`. `slate` is both an active skin
+`charizard`, `sienna`, `catppuccin`, `nous`, and `geist-contrast` / Geist Contrast. `slate` is both an active skin
 and a legacy theme-name migration target; `solarized`, `monokai`, `nord`, and
 `oled` are legacy theme names mapped to current theme/skin pairs. Do not follow
 stale `data-theme`-only guidance without first proving the current

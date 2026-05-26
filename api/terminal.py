@@ -9,6 +9,7 @@ in the agent execution layer.
 from __future__ import annotations
 
 import errno
+import atexit
 import codecs
 import fcntl
 import os
@@ -67,6 +68,19 @@ class TerminalSession:
 
 _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
+
+
+# NOTE on parent-death-signal: a previous version of this module set
+# PR_SET_PDEATHSIG via a preexec_fn to terminate orphaned PTY shells when the
+# WebUI process crashed.  That broke every Linux user (#2853): WebUI runs a
+# ThreadingHTTPServer, so the Popen call happens on a short-lived per-request
+# thread, and PR_SET_PDEATHSIG is per-thread.  The PTY shell registered the
+# spawning thread as its "parent" and was killed with SIGTERM the instant that
+# thread joined — within ~10 ms of opening the terminal — surfacing as the
+# `[terminal closed]` banner.  The graceful path is covered by
+# `atexit.register(close_all_terminals)` and the explicit `close_terminal`
+# call sites; hard kills of the WebUI process leak the shell, which is the
+# tradeoff for working on Linux at all.
 
 
 def _decode_terminal_output(decoder, data: bytes) -> str:
@@ -240,9 +254,24 @@ def close_terminal(session_id: str) -> bool:
                     os.killpg(term.proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                try:
+                    term.proc.wait(timeout=1.0)
+                except (subprocess.TimeoutExpired, ProcessLookupError):
+                    pass
     finally:
         try:
             os.close(term.master_fd)
         except OSError:
             pass
     return True
+
+
+def close_all_terminals() -> None:
+    """Best-effort reap of embedded shells during graceful WebUI shutdown."""
+    with _LOCK:
+        session_ids = list(_TERMINALS)
+    for session_id in session_ids:
+        close_terminal(session_id)
+
+
+atexit.register(close_all_terminals)

@@ -266,6 +266,48 @@ def test_sessions_js_sends_profile_in_new_session_post():
     )
 
 
+def test_new_session_uses_explicit_profile_default_model_and_provider(tmp_path, monkeypatch):
+    """New chats must inherit the selected profile's config default."""
+    import api.profiles as p
+    import api.models as m
+
+    monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", tmp_path)
+    profile_home = tmp_path / "profiles" / "pepper"
+    profile_home.mkdir(parents=True)
+    (profile_home / "config.yaml").write_text(
+        "model:\n  default: pepper-profile-model\n  provider: pepper-provider\n",
+        encoding="utf-8",
+    )
+
+    with patch.object(m.Session, 'save', return_value=None):
+        s = m.new_session(workspace=str(tmp_path), profile="pepper")
+    try:
+        assert s.model == "pepper-profile-model"
+        assert s.model_provider == "pepper-provider"
+        assert s.profile == "pepper"
+    finally:
+        with m.LOCK:
+            m.SESSIONS.pop(s.session_id, None)
+
+
+def test_new_session_does_not_persist_display_personality(monkeypatch, tmp_path):
+    """display.personality is a UI/default hint, not durable per-session state."""
+    import api.config as c
+    import api.models as m
+
+    monkeypatch.setattr(c, "get_config", lambda: {"display": {"personality": "kawaii"}})
+    with patch.object(m.Session, 'save', return_value=None):
+        s = m.new_session(workspace=str(tmp_path), profile="default")
+    try:
+        assert s.personality is None, (
+            "new_session() must not stamp display.personality into the persistent "
+            "Session.personality field; only explicit /api/personality/set should."
+        )
+    finally:
+        with m.LOCK:
+            m.SESSIONS.pop(s.session_id, None)
+
+
 def test_get_hermes_home_for_profile_rejects_path_traversal():
     """R19j: get_hermes_home_for_profile() must reject names that don't match
     _PROFILE_ID_RE (e.g. path traversal like '../../etc') and return the base

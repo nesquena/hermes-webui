@@ -81,6 +81,16 @@ def _upload_destination(session_id: str, safe_name: str) -> Path:
     dest = (dest_dir / safe_name).resolve()
     if not dest.is_relative_to(dest_dir):
         raise ValueError('Invalid upload destination')
+    if dest.exists():
+        stem = dest.stem
+        suffix = dest.suffix
+        for idx in range(1, 1000):
+            candidate = (dest_dir / f'{stem}-{idx}{suffix}').resolve()
+            if not candidate.is_relative_to(dest_dir):
+                raise ValueError('Invalid upload destination')
+            if not candidate.exists():
+                return candidate
+        raise ValueError('Too many uploads with the same filename')
     return dest
 
 
@@ -258,8 +268,9 @@ def handle_upload_extract(handler):
             s = get_session(session_id)
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
-        workspace = Path(s.workspace)
-        result = extract_archive(file_bytes, filename, workspace)
+        session_dir = _session_attachment_dir(session_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        result = extract_archive(file_bytes, filename, session_dir)
         return j(handler, {'ok': True, **result})
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)

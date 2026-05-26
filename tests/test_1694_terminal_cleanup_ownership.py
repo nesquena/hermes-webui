@@ -91,3 +91,53 @@ def test_reconnect_settled_and_error_paths_keep_cleanup_session_scoped():
     assert "stopApprovalPolling();stopClarifyPolling();" not in combined
     assert "renderSessionList();setBusy(false)" not in combined
     assert "_setActivePaneIdleIfOwner" in combined
+
+def test_stream_end_without_done_restores_settled_session_before_closing():
+    """If a journal/replay emits stream_end without done, the UI must settle from /api/session.
+
+    A close-only stream_end handler leaves live Thinking/inflight DOM around and
+    never replaces the pane with the persisted transcript when done is missing.
+    """
+    body = _event_body("stream_end")
+    restore_idx = body.find("_restoreSettledSession()")
+    close_idx = body.rfind("source.close()")
+    finalized_idx = body.find("_streamFinalized=true")
+    assert restore_idx != -1, "stream_end handler must restore settled session when done is absent"
+    assert close_idx != -1, "stream_end handler must still close the EventSource"
+    assert restore_idx < close_idx, "restore must be attempted before closing the stream"
+    assert finalized_idx != -1, "stream_end terminal path must suppress trailing rAF/render work"
+
+
+def test_done_handler_is_idempotent_for_replay_or_duplicate_done_events():
+    """Duplicate/replayed done events must not replay completion sound or duplicate render."""
+    body = _event_body("done")
+    first_stmt = body.strip().splitlines()[0].strip()
+    assert "_streamFinalized" in first_stmt and "return" in first_stmt, (
+        "done handler must return early when the stream was already finalized"
+    )
+    guard_idx = body.find("if(_streamFinalized) return;")
+    sound_idx = body.find("playNotificationSound();")
+    assert sound_idx != -1, "done handler should still play completion sound once"
+    assert guard_idx != -1 and guard_idx < sound_idx, (
+        "completion sound must be behind the duplicate-done finalization guard"
+    )
+
+
+def test_attach_live_stream_registers_one_source_per_session_stream():
+    """Reconnect/compaction paths must not stack same-stream EventSources.
+
+    The stream channel broadcasts each token to every subscriber. If the browser
+    opens four live EventSources for the same run, one assistant paragraph is
+    appended four times even though the run journal contains it once.
+    """
+    close_body = _function_body("closeLiveStream")
+    attach_body = _function_body("attachLiveStream")
+    wire_body = _function_body("_wireSSE")
+    error_body = _event_body("error")
+
+    assert "const LIVE_STREAMS={};" in MESSAGES_JS
+    assert "LIVE_STREAMS[activeSid]={streamId,source};" in wire_body
+    assert "existingLive.source.close();" in wire_body
+    assert "if(source&&live.source!==source) return;" in close_body
+    assert "existingLive&&existingLive.streamId===streamId" in attach_body
+    assert "_closeSource(source);" in error_body

@@ -30,6 +30,19 @@ HOME = Path.home()
 # REPO_ROOT is the directory that contains this file's parent (api/ -> repo root)
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 
+
+def _platform_default_hermes_home() -> Path:
+    """Return the platform-aware default Hermes home when HERMES_HOME is unset.
+
+    Native Windows Hermes Agent installs default to %LOCALAPPDATA%\\hermes,
+    while POSIX installs use ~/.hermes.
+    """
+    if os.name == "nt":
+        local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            return Path(local_app_data) / "hermes"
+    return HOME / ".hermes"
+
 # ── Network config (env-overridable) ─────────────────────────────────────────
 HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
@@ -40,8 +53,10 @@ TLS_KEY = os.getenv("HERMES_WEBUI_TLS_KEY", "").strip() or None
 TLS_ENABLED = TLS_CERT is not None and TLS_KEY is not None
 
 # ── State directory (env-overridable, never inside repo) ──────────────────────
+_DEFAULT_HERMES_HOME = _platform_default_hermes_home()
+
 STATE_DIR = (
-    Path(os.getenv("HERMES_WEBUI_STATE_DIR", str(HOME / ".hermes" / "webui")))
+    Path(os.getenv("HERMES_WEBUI_STATE_DIR", str(_DEFAULT_HERMES_HOME / "webui")))
     .expanduser()
     .resolve()
 )
@@ -108,7 +123,7 @@ def _discover_agent_dir() -> Path:
         )
 
     # 2. HERMES_HOME / hermes-agent
-    hermes_home = os.getenv("HERMES_HOME", str(HOME / ".hermes"))
+    hermes_home = os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))
     candidates.append(Path(hermes_home).expanduser() / "hermes-agent")
 
     # 3. Sibling: <repo-root>/../hermes-agent
@@ -119,7 +134,7 @@ def _discover_agent_dir() -> Path:
         candidates.append(REPO_ROOT.parent)
 
     # 5. ~/.hermes/hermes-agent (explicit common path)
-    candidates.append(HOME / ".hermes" / "hermes-agent")
+    candidates.append(_DEFAULT_HERMES_HOME / "hermes-agent")
 
     # 6. ~/hermes-agent
     candidates.append(HOME / "hermes-agent")
@@ -267,7 +282,7 @@ def _get_config_path() -> Path:
 
         return get_active_hermes_home() / "config.yaml"
     except ImportError:
-        return HOME / ".hermes" / "config.yaml"
+        return _DEFAULT_HERMES_HOME / "config.yaml"
 
 
 _WEBUI_SESSION_SAVE_MODES = {"deferred", "eager"}
@@ -692,6 +707,7 @@ _PROVIDER_DISPLAY = {
     "anthropic": "Anthropic",
     "openai": "OpenAI",
     "openai-codex": "OpenAI Codex",
+    "xai-oauth": "xAI Grok OAuth",
     "copilot": "GitHub Copilot",
     "zai": "Z.AI / GLM",
     "kimi-coding": "Kimi / Moonshot",
@@ -712,6 +728,7 @@ _PROVIDER_DISPLAY = {
     "x-ai": "xAI",
     "nvidia": "NVIDIA NIM",
     "xiaomi": "Xiaomi",
+    "bedrock": "AWS Bedrock",
 }
 
 # Provider alias → canonical slug.  Users configure providers using the
@@ -972,6 +989,49 @@ def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
     return {f"custom:{host}:{port}", f"custom:{host}-{port}"}
 
 
+_LEGACY_CUSTOM_API_KEY_ENV_WARNED: set[str] = set()
+
+
+def _api_key_env_name(provider_id: object) -> str:
+    """Return the POSIX-safe default API-key env var for a custom provider id."""
+    sanitized = re.sub(r"[^A-Za-z0-9]", "_", str(provider_id or "")).upper().strip("_")
+    if not sanitized:
+        sanitized = "CUSTOM"
+    if not sanitized.startswith("CUSTOM_"):
+        sanitized = f"CUSTOM_{sanitized}"
+    return f"{sanitized}_API_KEY"
+
+
+def _legacy_custom_api_key_env_name(provider_id: object) -> str:
+    """Return the pre-#2541 custom-provider env hint shape, if any."""
+    raw = str(provider_id or "").strip().upper()
+    if not raw:
+        return ""
+    return f"{raw}_API_KEY"
+
+
+def _lookup_custom_api_key_env(provider_id: object) -> str | None:
+    """Look up sanitized custom-provider env first, then legacy broken shape."""
+    env_name = _api_key_env_name(provider_id)
+    api_key = os.getenv(env_name, "").strip()
+    if api_key:
+        return api_key
+
+    legacy_env_name = _legacy_custom_api_key_env_name(provider_id)
+    if legacy_env_name and legacy_env_name != env_name:
+        legacy_key = os.getenv(legacy_env_name, "").strip()
+        if legacy_key:
+            if legacy_env_name not in _LEGACY_CUSTOM_API_KEY_ENV_WARNED:
+                _LEGACY_CUSTOM_API_KEY_ENV_WARNED.add(legacy_env_name)
+                logger.warning(
+                    "Custom provider API key env var %s is deprecated; use %s instead",
+                    legacy_env_name,
+                    env_name,
+                )
+            return legacy_key
+    return None
+
+
 def _named_custom_provider_slug_for_base_url(
     base_url: object,
     config_obj: dict | None = None,
@@ -1165,6 +1225,19 @@ _PROVIDER_MODELS = {
     # xAI — prefix used in OpenRouter model IDs (x-ai/grok-4-20)
     "x-ai": [
         {"id": "grok-4.20", "label": "Grok 4.20"},
+    ],
+    "xai-oauth": [
+        {"id": "grok-4.20", "label": "Grok 4.20"},
+    ],
+    # AWS Bedrock — static fallback list; live model list is fetched via
+    # hermes_cli.models.provider_model_ids("bedrock") when available (#2720).
+    "bedrock": [
+        {"id": "global.anthropic.claude-opus-4-7",                 "label": "Global Anthropic Claude Opus 4.7"},
+        {"id": "global.anthropic.claude-opus-4-6-v1",              "label": "Global Anthropic Claude Opus 4.6"},
+        {"id": "global.anthropic.claude-sonnet-4-6",               "label": "Global Anthropic Claude Sonnet 4.6"},
+        {"id": "global.anthropic.claude-opus-4-5-20251101-v1:0",   "label": "GLOBAL Anthropic Claude Opus 4.5"},
+        {"id": "global.anthropic.claude-sonnet-4-5-20250929-v1:0", "label": "Global Claude Sonnet 4.5"},
+        {"id": "global.anthropic.claude-haiku-4-5-20251001-v1:0",  "label": "Global Anthropic Claude Haiku 4.5"},
     ],
 }
 
@@ -1841,7 +1914,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     # cases after profile switches or runtime config edits.
     cfg_data = get_config()
 
-    def _resolve_key(raw_api_key, raw_key_env) -> str | None:
+    def _resolve_key(raw_api_key, raw_key_env, provider_hint=None) -> str | None:
         api_key = None
         if raw_api_key is not None:
             key_text = str(raw_api_key).strip()
@@ -1853,6 +1926,8 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
             key_env = str(raw_key_env or "").strip()
             if key_env:
                 api_key = os.getenv(key_env, "").strip() or None
+        if not api_key and provider_hint:
+            api_key = _lookup_custom_api_key_env(provider_hint)
         return api_key
 
     custom_providers = cfg_data.get("custom_providers", [])
@@ -1870,7 +1945,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
             continue
 
         base_url = str(entry.get("base_url") or "").strip() or None
-        api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"))
+        api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"), pid)
         return api_key, base_url
 
     # If exactly one custom provider is configured, use it as a pragmatic
@@ -1878,7 +1953,7 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     if len(custom_providers) == 1 and isinstance(custom_providers[0], dict):
         entry = custom_providers[0]
         return (
-            _resolve_key(entry.get("api_key"), entry.get("key_env")),
+            _resolve_key(entry.get("api_key"), entry.get("key_env"), pid),
             str(entry.get("base_url") or "").strip() or None,
         )
 
@@ -1900,11 +1975,11 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
 
     fallback_key = None
     if isinstance(provider_specific, dict):
-        fallback_key = _resolve_key(provider_specific.get("api_key"), provider_specific.get("key_env"))
+        fallback_key = _resolve_key(provider_specific.get("api_key"), provider_specific.get("key_env"), pid)
     if not fallback_key and isinstance(provider_custom, dict):
-        fallback_key = _resolve_key(provider_custom.get("api_key"), provider_custom.get("key_env"))
+        fallback_key = _resolve_key(provider_custom.get("api_key"), provider_custom.get("key_env"), pid)
     if not fallback_key and isinstance(model_cfg, dict) and model_provider in {"custom", pid, slug}:
-        fallback_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"))
+        fallback_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"), pid)
 
     if fallback_key or fallback_base:
         return fallback_key, fallback_base or None
@@ -2125,6 +2200,116 @@ def set_hermes_default_model(model_id: str) -> dict:
     return {"ok": True, "model": persisted_model}
 
 
+# ── Auxiliary model configuration ──────────────────────────────────────────
+
+# Canonical auxiliary task slots. Keep in sync with hermes_cli/config.py
+# DEFAULT_CONFIG["auxiliary"] and hermes_cli/web_server.py _AUX_TASK_SLOTS.
+AUX_TASK_SLOTS: tuple[str, ...] = (
+ "vision",
+ "web_extract",
+ "compression",
+ "session_search",
+ "skills_hub",
+ "approval",
+ "mcp",
+ "title_generation",
+ "curator",
+)
+
+
+def get_auxiliary_models() -> dict:
+    """Return current auxiliary task assignments from config.yaml.
+
+    Shape:
+    {
+        "tasks": [
+            {"task": "vision", "provider": "auto", "model": "", "base_url": ""},
+            ...
+        ],
+        "main": {"provider": "openrouter", "model": "anthropic/claude-opus-4.7"},
+    }
+    """
+    reload_config()
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    main_provider = str(model_cfg.get("provider") or "").strip()
+    main_model = str(model_cfg.get("default") or model_cfg.get("name") or "").strip()
+
+    aux_cfg = cfg.get("auxiliary", {})
+    if not isinstance(aux_cfg, dict):
+        aux_cfg = {}
+
+    tasks = []
+    for slot in AUX_TASK_SLOTS:
+        entry = aux_cfg.get(slot, {})
+        if not isinstance(entry, dict):
+            entry = {}
+        tasks.append({
+            "task": slot,
+            "provider": str(entry.get("provider") or "auto").strip(),
+            "model": str(entry.get("model") or "").strip(),
+            "base_url": str(entry.get("base_url") or "").strip(),
+        })
+
+    return {
+        "tasks": tasks,
+        "main": {"provider": main_provider, "model": main_model},
+    }
+
+
+def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
+    """Persist an auxiliary model assignment in config.yaml.
+
+    Special case: task='__reset__' clears all auxiliary slots.
+    """
+    if task != "__reset__" and task not in AUX_TASK_SLOTS:
+        raise ValueError(
+            f"Unknown auxiliary task slot: {task!r}. Valid: {list(AUX_TASK_SLOTS)}"
+        )
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+
+        if task == "__reset__":
+            # Per-slot reset: set each slot to auto, preserving extra fields
+            # (timeout, extra_body, api_key, base_url, download_timeout, etc.)
+            aux_cfg = config_data.get("auxiliary", {})
+            if not isinstance(aux_cfg, dict):
+                aux_cfg = {}
+            for slot in AUX_TASK_SLOTS:
+                slot_cfg = aux_cfg.get(slot, {})
+                if not isinstance(slot_cfg, dict):
+                    slot_cfg = {}
+                slot_cfg["provider"] = "auto"
+                slot_cfg["model"] = ""
+                aux_cfg[slot] = slot_cfg
+            config_data["auxiliary"] = aux_cfg
+        else:
+            aux_cfg = config_data.get("auxiliary", {})
+            if not isinstance(aux_cfg, dict):
+                aux_cfg = {}
+            slot_cfg = aux_cfg.get(task, {})
+            if not isinstance(slot_cfg, dict):
+                slot_cfg = {}
+            slot_cfg["provider"] = provider or "auto"
+            slot_cfg["model"] = model or ""
+            if provider and (provider.startswith("custom:") or provider == "custom"):
+                try:
+                    _, _, resolved_base_url = resolve_model_provider(model)
+                    if resolved_base_url:
+                        slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+                except Exception:
+                    pass
+            aux_cfg[task] = slot_cfg
+            config_data["auxiliary"] = aux_cfg
+
+        _save_yaml_config_file(config_path, config_data)
+
+    reload_config()
+    return {"ok": True, "task": task, "provider": provider, "model": model}
+
+
 # ── TTL cache for get_available_models() ─────────────────────────────────────
 _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
@@ -2198,7 +2383,7 @@ def _get_auth_store_path() -> Path:
 
         return _gah() / "auth.json"
     except ImportError:
-        return HOME / ".hermes" / "auth.json"
+        return _DEFAULT_HERMES_HOME / "auth.json"
 
 
 def _models_cache_file_fingerprint(path: Path) -> dict:
@@ -2930,7 +3115,7 @@ def get_available_models() -> dict:
 
                 hermes_env_path = _gah2() / ".env"
             except ImportError:
-                hermes_env_path = HOME / ".hermes" / ".env"
+                hermes_env_path = _DEFAULT_HERMES_HOME / ".env"
             env_keys = {}
             if hermes_env_path.exists():
                 try:
@@ -2958,6 +3143,8 @@ def get_available_models() -> dict:
                 "MINIMAX_CN_API_KEY",
                 "XAI_API_KEY",
                 "MISTRAL_API_KEY",
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
             ):
                 val = os.getenv(k)
                 if val:
@@ -2997,6 +3184,10 @@ def get_available_models() -> dict:
                 detected_providers.add("opencode-zen")
             if all_env.get("OPENCODE_GO_API_KEY"):
                 detected_providers.add("opencode-go")
+            # AWS Bedrock uses IAM credentials rather than a single API key.
+            # Detect when both access key and secret are available (#2720).
+            if all_env.get("AWS_ACCESS_KEY_ID") and all_env.get("AWS_SECRET_ACCESS_KEY"):
+                detected_providers.add("bedrock")
             # LM Studio: detect via LM_API_KEY + LM_BASE_URL in ~/.hermes/.env
             if all_env.get("LM_API_KEY") and all_env.get("LM_BASE_URL"):
                 detected_providers.add("lmstudio")
@@ -3120,18 +3311,45 @@ def get_available_models() -> dict:
                 models.append({"id": model_id, "label": label})
             return models
 
+        def _custom_endpoint_error(
+            provider: str,
+            exc: Exception,
+            *,
+            code: int | None = None,
+        ) -> dict:
+            provider_label = str(provider or "custom").replace("custom:", "")
+            status_code = code if code is not None else getattr(exc, "code", None)
+            if status_code in (401, 403):
+                return {
+                    "kind": "auth",
+                    "code": int(status_code),
+                    "message": f"Models endpoint returned {status_code} — check the API key for {provider_label}.",
+                }
+            if isinstance(status_code, int):
+                return {
+                    "kind": "http",
+                    "code": int(status_code),
+                    "message": f"Models endpoint returned {status_code} for {provider_label}; see logs.",
+                }
+            return {
+                "kind": "network",
+                "code": None,
+                "message": f"Models endpoint unreachable for {provider_label}; verify base_url.",
+            }
+
         def _read_custom_endpoint_models(
             base_url: object,
             provider: str,
             *,
             api_key: object = "",
             trusted_base_urls: tuple[object, ...] = (),
-        ) -> list[dict]:
+        ) -> tuple[list[dict], dict | None]:
             base = str(base_url or "").strip()
             if not base:
-                return []
+                return [], None
             try:
                 import ipaddress
+                import urllib.error
                 import urllib.request
                 import socket
 
@@ -3177,10 +3395,15 @@ def get_available_models() -> dict:
                     req.add_header(k, v)
                 with urllib.request.urlopen(req, timeout=10) as response:  # nosec B310
                     data = json.loads(response.read().decode("utf-8"))
-                return _extract_model_entries_from_payload(data, provider)
-            except Exception:
-                logger.debug("Custom endpoint unreachable or misconfigured for provider: %s", provider)
-                return []
+                return _extract_model_entries_from_payload(data, provider), None
+            except urllib.error.HTTPError as exc:
+                error = _custom_endpoint_error(provider, exc, code=getattr(exc, "code", None))
+                logger.debug("Custom endpoint models fetch failed for provider %s: %s", provider, error)
+                return [], error
+            except Exception as exc:
+                error = _custom_endpoint_error(provider, exc)
+                logger.debug("Custom endpoint unreachable or misconfigured for provider %s: %s", provider, error)
+                return [], error
 
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
@@ -3251,12 +3474,13 @@ def get_available_models() -> dict:
                     for _cp in _custom_providers_for_trust
                     if isinstance(_cp, dict) and _cp.get("base_url")
                 )
-            for auto_model in _read_custom_endpoint_models(
+            _active_endpoint_models, _active_endpoint_error = _read_custom_endpoint_models(
                 base_url,
                 provider,
                 api_key=api_key,
                 trusted_base_urls=tuple(_trusted_custom_bases),
-            ):
+            )
+            for auto_model in _active_endpoint_models:
                 auto_detected_models.append(auto_model)
                 provider_key = provider.lower()
                 auto_detected_models_by_provider.setdefault(provider_key, []).append(auto_model)
@@ -3264,6 +3488,7 @@ def get_available_models() -> dict:
 
         _custom_providers_cfg = cfg.get("custom_providers", [])
         _named_custom_groups: dict = {}
+        _named_custom_errors: dict[str, dict] = {}
         if isinstance(_custom_providers_cfg, list):
             _seen_custom_ids = set()
             for _cp in _custom_providers_cfg:
@@ -3281,12 +3506,39 @@ def get_available_models() -> dict:
                         _cp_key_env = str(_cp.get("key_env") or "").strip()
                         if _cp_key_env:
                             _cp_api_key = str(os.getenv(_cp_key_env) or "").strip()
-                    _live_models = auto_detected_models_by_provider.get(_slug) or _read_custom_endpoint_models(
-                        _cp_base_url,
-                        _slug,
-                        api_key=_cp_api_key,
-                        trusted_base_urls=(_cp_base_url,),
+
+                    # Check if user has configured models in config.yaml —
+                    # configured models take priority over live /v1/models
+                    # discovery (same as hermes-agent model_switch.py Section 4
+                    # patch). Without this check, ZenMux and similar aggregator
+                    # gateways would show hundreds of online models instead of
+                    # the user's curated list.
+                    _cp_configured_models = _cp.get("models")
+                    _cp_has_configured_models = (
+                        isinstance(_cp_configured_models, (dict, list))
+                        and len(_cp_configured_models) > 0
                     )
+                    _live_models = auto_detected_models_by_provider.get(_slug)
+                    _live_error = None
+                    if _cp_has_configured_models:
+                        # Skip the live /v1/models probe when an allowlist
+                        # exists — the curated list wins and probe failures
+                        # should not surface as a user-facing diagnostic in
+                        # that case. Still respect any pre-warm result that
+                        # ``auto_detected_models_by_provider`` already
+                        # populated (cheap to keep).
+                        if _live_models is None:
+                            _live_models = []
+                    elif _live_models is None:
+                        _live_models, _live_error = _read_custom_endpoint_models(
+                            _cp_base_url,
+                            _slug,
+                            api_key=_cp_api_key,
+                            trusted_base_urls=(_cp_base_url,),
+                        )
+                    if _live_error:
+                        _named_custom_errors[_slug] = _live_error
+                        detected_providers.add(_slug)
                     for _live_model in _live_models:
                         _live_id = str(_live_model.get("id") or "").strip()
                         if not _live_id:
@@ -3422,8 +3674,11 @@ def get_available_models() -> dict:
                         # changes (e.g. supporting model-less custom_providers entries).
                         if not _nc_models:
                             _nc_models = auto_detected_models_by_provider.get(pid, [])
-                        if _nc_models:
-                            groups.append({"provider": _nc_display, "provider_id": pid, "models": _nc_models})
+                        if _nc_models or pid in _named_custom_errors:
+                            group = {"provider": _nc_display, "provider_id": pid, "models": _nc_models}
+                            if pid in _named_custom_errors:
+                                group["models_endpoint_error"] = _named_custom_errors[pid]
+                            groups.append(group)
                     continue
                 provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
                 if pid == "openrouter":
@@ -3807,6 +4062,18 @@ def get_available_models() -> dict:
                                 "models": models_for_group,
                             }
                         )
+                    elif pid == "custom" and cfg_base_url:
+                        # Anonymous custom endpoint: /v1/models probe may have
+                        # failed (e.g. llama-server, lightweight relay), but the
+                        # chat endpoint itself may still work.  Add the group
+                        # with an empty model list so the user can type a model
+                        # ID manually rather than being blocked by a silent
+                        # probe failure (#2542).
+                        groups.append({
+                            "provider": provider_name,
+                            "provider_id": pid,
+                            "models": [],
+                        })
         else:
             if default_model:
                 label = _get_label_for_model(default_model, groups)
@@ -3877,6 +4144,36 @@ def get_available_models() -> dict:
             if g.get("models")
             or (g.get("provider_id") or "").startswith("custom:")
         ]
+
+        # Sort groups: active provider first, then custom:* providers,
+        # then providers with configured keys, then the rest alphabetically.
+        _providers_with_keys: set[str] = set()
+        try:
+            _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
+            if isinstance(_pool, dict):
+                for _pid in _pool:
+                    _providers_with_keys.add(_resolve_provider_alias(str(_pid)))
+        except Exception:
+            pass
+        try:
+            _cfg_providers = cfg.get("providers", {})
+            if isinstance(_cfg_providers, dict):
+                for _pk, _pv in _cfg_providers.items():
+                    if isinstance(_pv, dict) and (_pv.get("api_key") or _pv.get("key_env")):
+                        _providers_with_keys.add(_resolve_provider_alias(str(_pk)))
+        except Exception:
+            pass
+
+        def _group_sort_key(g):
+            pid = g.get("provider_id") or ""
+            if pid == active_provider:
+                return (0, pid)
+            if pid.startswith("custom:"):
+                return (1, pid)
+            if pid in _providers_with_keys:
+                return (2, pid)
+            return (3, pid)
+        groups.sort(key=_group_sort_key)
 
         # 12. Include model aliases so the WebUI frontend can resolve them.
         model_aliases: dict[str, str] = {}
@@ -4023,6 +4320,14 @@ class StreamChannel:
             self._offline_buffer.clear()
         for q in subscribers:
             q.put_nowait(item)
+
+    def diagnostic_snapshot(self) -> dict[str, int]:
+        """Return non-sensitive stream observation counters for health checks."""
+        with self._lock:
+            return {
+                "subscriber_count": len(self._subscribers),
+                "offline_buffered_events": len(self._offline_buffer),
+            }
 
 
 def create_stream_channel() -> StreamChannel:
@@ -4178,18 +4483,27 @@ _SETTINGS_DEFAULTS = {
     "send_key": "enter",  # 'enter' or 'ctrl+enter'
     "show_token_usage": False,  # show input/output token badge below assistant messages
     "show_quota_chip": False,  # show ambient provider quota chip in composer footer (default off; wide desktop only when enabled, see style.css @media)
+    "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
     "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
+    "ignore_agent_updates": False,  # keep WebUI update notices but suppress Agent update checks
     "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
     "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
+    "pinned_sessions_limit": 3,  # maximum active pinned sessions shown in the sidebar
+    "inflight_state_max_sessions": 8,  # max active-stream recovery snapshots kept in browser localStorage
+    "inflight_state_max_messages": 24,  # max recent messages kept per recovery snapshot
+    "inflight_state_max_tool_calls": 48,  # max recent tool-call records kept per recovery snapshot
+    "inflight_state_max_string_chars": 60000,  # max string length kept inside a recovery snapshot field
+    "inflight_state_max_json_chars": 1500000,  # max serialized recovery snapshot payload before pruning
+    "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
@@ -4218,6 +4532,7 @@ _SETTINGS_SKIN_VALUES = {
     "sienna",
     "catppuccin",
     "nous",
+    "geist-contrast",
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.
@@ -4296,6 +4611,12 @@ def load_settings() -> dict:
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
     )
     settings["default_model"] = get_effective_default_model()
+    try:
+        model_cfg = get_config().get("model", {})
+        if isinstance(model_cfg, dict) and model_cfg.get("provider"):
+            settings["default_model_provider"] = str(model_cfg.get("provider"))
+    except Exception:
+        logger.debug("Failed to resolve default model provider for settings")
     return settings
 
 
@@ -4310,16 +4631,26 @@ _SETTINGS_ENUM_VALUES = {
     "auto_title_refresh_every": {"0", "5", "10", "20"},
     "busy_input_mode": {"queue", "interrupt", "steer"},
 }
+_SETTINGS_INT_RANGES = {
+    "pinned_sessions_limit": (1, 99),
+    "inflight_state_max_sessions": (1, 25),
+    "inflight_state_max_messages": (1, 100),
+    "inflight_state_max_tool_calls": (1, 200),
+    "inflight_state_max_string_chars": (1000, 500000),
+    "inflight_state_max_json_chars": (100000, 4000000),
+}
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
     "show_token_usage",
     "show_quota_chip",
+    "hide_empty_state_suggestions",
     "show_tps",
     "fade_text_effect",
     "show_cli_sessions",
     "show_previous_messaging_sessions",
     "sync_to_insights",
     "check_for_updates",
+    "ignore_agent_updates",
     "whats_new_summary_enabled",
     "sound_enabled",
     "rtl",
@@ -4369,11 +4700,32 @@ def save_settings(settings: dict) -> dict:
             # Validate enum-constrained keys
             if k in _SETTINGS_ENUM_VALUES and v not in _SETTINGS_ENUM_VALUES[k]:
                 continue
+            # Validate bounded integer settings.
+            if k in _SETTINGS_INT_RANGES:
+                try:
+                    v = int(v)
+                except (TypeError, ValueError):
+                    continue
+                min_value, max_value = _SETTINGS_INT_RANGES[k]
+                if v < min_value or v > max_value:
+                    continue
             # Validate language codes (BCP-47-like: 'en', 'zh', 'fr', 'zh-CN')
             if k == "language" and (
                 not isinstance(v, str) or not _SETTINGS_LANG_RE.match(v)
             ):
                 continue
+            # Validate hidden_tabs: must be a list of non-empty strings.
+            # Belt-and-suspenders strip of "chat" and "settings" so a
+            # malicious POST cannot lock the user out of the always-visible
+            # nav tabs even though the client also filters them at apply time.
+            # Stage-394 follow-up to #2636 deep review.
+            if k == "hidden_tabs":
+                if not isinstance(v, list):
+                    continue
+                v = [
+                    s for s in v
+                    if isinstance(s, str) and s.strip() and s not in {"chat", "settings"}
+                ]
             # Coerce bool keys
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)

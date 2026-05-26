@@ -1171,10 +1171,13 @@ class TestFrontendModelProviderState:
         assert "_modelStateForSelect" in src
         assert "model_provider:modelState.model_provider||null" in src
 
-    def test_new_session_sends_model_provider(self):
+    def test_new_session_lets_profile_config_choose_default_model_provider(self):
         src = _read("static/sessions.js")
-        assert "_modelStateForSelect(modelSel,selectedDefaultModel)" in src
-        assert "model_provider:newModelState.model_provider||null" in src
+        start = src.index("async function newSession(")
+        body = src[start:src.index("const data=await api('/api/session/new'", start)]
+        assert "profile:S.activeProfile||'default'" in body
+        assert "model:newModelState.model" not in body
+        assert "model_provider:newModelState.model_provider||null" not in body
 
     def test_ui_has_json_model_state_storage(self):
         src = _read("static/ui.js")

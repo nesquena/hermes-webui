@@ -12,7 +12,7 @@ import json
 import logging
 import os
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,44 @@ def normalize_dashboard_url(raw_url: str | None) -> tuple[str, int, str, str] | 
         raise ValueError("invalid dashboard URL path")
     base = _base_url(normalized_host, port, parsed.scheme)
     return normalized_host, port, parsed.scheme, base
+
+
+def normalize_dashboard_browser_url(raw_url: str | None) -> str:
+    """Return a safe browser-only dashboard link URL.
+
+    Unlike the server-side probe target, this value is only returned to the
+    browser for navigation.  It may point at a public reverse-proxy hostname, but
+    it still rejects credentials, paths, query strings, fragments, and non-HTTP
+    schemes so it cannot hide secrets or script URLs in config.
+    """
+    raw = str(raw_url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("invalid dashboard URL scheme")
+    if parsed.username or parsed.password:
+        raise ValueError("invalid dashboard URL credentials")
+    if not parsed.hostname:
+        raise ValueError("invalid dashboard URL host")
+    if parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("invalid dashboard URL path")
+    path = parsed.path or ""
+    if path not in ("", "/"):
+        raise ValueError("invalid dashboard URL path")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("invalid dashboard URL port") from exc
+    host = parsed.hostname.lower()
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    netloc = host
+    if port is not None:
+        if not (1 <= port <= 65535):
+            raise ValueError("invalid dashboard URL port")
+        netloc = f"{netloc}:{port}"
+    return urlunparse((parsed.scheme, netloc, "", "", "", ""))
 
 
 def _looks_like_official_dashboard(payload: object) -> bool:
@@ -132,8 +170,7 @@ def get_dashboard_config(config_data: dict | None = None) -> dict:
         enabled = "auto"
     raw_url = str(dashboard_cfg.get("url") or "").strip()
     if raw_url:
-        # Normalize before echoing so the UI never displays unsafe/stale values.
-        _host, _port, _scheme, raw_url = normalize_dashboard_url(raw_url)
+        raw_url = normalize_dashboard_browser_url(raw_url)
     return {"enabled": enabled, "url": raw_url}
 
 
@@ -143,9 +180,7 @@ def save_dashboard_config(payload: dict) -> dict:
     if enabled not in _DASHBOARD_ENABLED_VALUES:
         raise ValueError("invalid dashboard enabled mode")
     raw_url = str((payload or {}).get("url", "") or "").strip()
-    normalized_url = ""
-    if raw_url:
-        _host, _port, _scheme, normalized_url = normalize_dashboard_url(raw_url)
+    normalized_url = normalize_dashboard_browser_url(raw_url) if raw_url else ""
 
     from api import config as webui_config
 
@@ -186,9 +221,13 @@ def get_dashboard_status(config_data: dict | None = None) -> dict:
 
     raw_url = dashboard_cfg.get("url") or dashboard_cfg.get("target") or ""
     try:
-        override = normalize_dashboard_url(raw_url)
+        browser_url = normalize_dashboard_browser_url(raw_url) if raw_url else ""
     except ValueError:
         return {"running": False, "enabled": enabled, "error": "invalid dashboard url"}
+    try:
+        override = normalize_dashboard_url(raw_url)
+    except ValueError:
+        override = None
 
     targets: list[tuple[str, int, str, str]]
     if override:
@@ -197,8 +236,10 @@ def get_dashboard_status(config_data: dict | None = None) -> dict:
         targets = [(host, port, "http", _base_url(host, port)) for host, port in DEFAULT_DASHBOARD_TARGETS]
 
     if enabled == "always":
+        if browser_url and not override:
+            return {"running": True, "enabled": enabled, "url": browser_url, "browser_url": browser_url}
         host, port, scheme, base = targets[0]
-        return {"running": True, "enabled": enabled, "host": host, "port": port, "url": base}
+        return {"running": True, "enabled": enabled, "host": host, "port": port, "url": browser_url or base, "browser_url": browser_url or base}
 
     if not _webui_bind_host_allows_auto_probe():
         return {"running": False, "enabled": enabled}
@@ -207,5 +248,8 @@ def get_dashboard_status(config_data: dict | None = None) -> dict:
         result = probe_official_dashboard(host, port, timeout=DEFAULT_DASHBOARD_TIMEOUT, scheme=scheme)
         if result.get("running"):
             result["enabled"] = enabled
+            if browser_url:
+                result["browser_url"] = browser_url
+                result["url"] = browser_url
             return result
     return {"running": False, "enabled": enabled}

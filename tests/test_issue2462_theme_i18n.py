@@ -29,9 +29,9 @@ def test_theme_command_help_mentions_current_theme_and_skin_values():
     """Every /theme help string should describe the current Theme × Skin contract."""
     required_fragments = (
         "system/dark/light",
-        "default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous",
+        "default/ares/mono/slate/poseidon/sisyphus/charizard/sienna/catppuccin/nous/geist-contrast",
     )
-    for locale in ("en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "fr"):
+    for locale in ("en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "fr", "tr"):
         value = _literal_value(_locale_block(locale), "cmd_theme")
         for fragment in required_fragments:
             assert fragment in value, f"{locale} cmd_theme missing {fragment!r}: {value!r}"
