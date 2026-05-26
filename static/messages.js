@@ -2826,8 +2826,10 @@ function stopSessionStream() {
 // Events without `event_id` are ignored — the server contract guarantees one
 // on every completion emit, so a missing key signals a malformed or replayed
 // payload we should not surface or ack.
-// The UX surface (toast spawn) lands in PR (c); this handler is intentionally
-// minimal — dedupe + diagnostic ack only.
+// PR (c) UX surface: post-dedupe the handler marks the session viewed (when
+// the session pane is current and the doc is visible+focused), then runs the
+// T4 drop-when-focused gate; only out-of-focus or off-pane completions spawn
+// a toast. The diagnostic ack POST always fires.
 function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
   try {
     const d = JSON.parse(e.data || '{}');
@@ -2837,6 +2839,17 @@ function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
     if (!evt_id) return;  // server contract requires event_id; ignore otherwise
     if (_bgTaskCompleteRingBufferAdd(sid, evt_id)) return;  // duplicate
     const pid = String(d.task_id || '');
+    const _viewed = typeof _isSessionActivelyViewed === 'function' && _isSessionActivelyViewed(sid);
+    if (_viewed) {
+      try { _markSessionViewed(sid, (S&&S.session&&S.session.session_id===sid)?(S.session.message_count??(S.messages&&S.messages.length)??0):0); } catch(_){}
+      try { if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(sid); } catch(_){}
+      return;  // T4 drop-when-focused: suppress toast + ack; bookkeeping already fired
+    }
+    try {
+      const tid = (d.task_id || '').slice(0, 8) || '?';
+      const tail = d.summary ? `: ${String(d.summary).slice(0, 80)}` : ' completed';
+      showToast(`Task ${tid} done${tail}`, 2600);
+    } catch (_) {}
 
     // Fire-and-forget ack (diagnostic only — Option Z made this a no-op for
     // state. The agent wakeup is now started SERVER-SIDE by the drain thread
