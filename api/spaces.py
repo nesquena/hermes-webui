@@ -3507,6 +3507,66 @@ def _research_artifact_output_compaction_receipt(
     )
 
 
+def _research_progress_output_compaction_receipt(
+    space_id: str,
+    *,
+    source_count: int,
+    note_count: int,
+    updated_revision_event_ids: list[str],
+    prompt_preflight: dict[str, Any] | None,
+    autonomy_policy: dict[str, Any] | None,
+    progress_event: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return metadata-only compaction evidence for Research progress updates.
+
+    The progress message, notes, source URLs, and source titles are deliberately
+    excluded. The receipt is reconstructed from allow-listed counts, safe
+    revision handles, policy receipts, and widget handles so public UI/model
+    context can show bounded progress evidence without copying untrusted
+    research text.
+    """
+    from api.capy_compaction import compact_output
+
+    public_revision_ids = [_public_revision_event_id(event_id) for event_id in updated_revision_event_ids]
+    public_revision_ids = [event_id for event_id in public_revision_ids if event_id]
+    lines = [
+        "research_progress: updated",
+        "metadata_only: true",
+        "raw_prompt_stored: false",
+        f"space_id: {space_id}",
+        f"source_count: {max(0, int(source_count))}",
+        f"note_count: {max(0, int(note_count))}",
+        "updated_widget_count: 3",
+    ]
+    for event_id in public_revision_ids[:3]:
+        lines.append(f"revision_event_id: {event_id}")
+    if isinstance(prompt_preflight, dict):
+        lines.append(f"prompt_preflight_status: {_payload_text_summary(prompt_preflight.get('status') or 'required', 40) or 'required'}")
+    if isinstance(autonomy_policy, dict):
+        lines.append(f"autonomy_action: {_payload_text_summary(autonomy_policy.get('action') or 'space.research.progress', 80) or 'space.research.progress'}")
+        lines.append(f"model_route_hint: {_payload_text_summary(autonomy_policy.get('model_route_hint') or 'hint:summarize', 80) or 'hint:summarize'}")
+    if isinstance(progress_event, dict):
+        lines.append(f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or f'research:{space_id}', 120) or f'research:{space_id}'}")
+        lines.append(f"progress_status: {_payload_text_summary(progress_event.get('status') or 'completed', 40) or 'completed'}")
+
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-research",
+        command="space.research.progress",
+        exit_status=0,
+        max_chars=700,
+        artifact_handles=[
+            {"kind": "widget", "handle": f"widget:{space_id}:research-plan", "label": "Research plan metadata"},
+            {"kind": "widget", "handle": f"widget:{space_id}:research-sources", "label": "Research sources metadata"},
+            {"kind": "widget", "handle": f"widget:{space_id}:research-notes", "label": "Research notes metadata"},
+        ],
+    )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
 def _record_research_progress_event(space_id: str, *, source_count: int, note_count: int) -> dict[str, Any]:
     """Best-effort metadata-only producer event for Research Harness progress."""
     run_id = f"research:{space_id}"
@@ -3613,6 +3673,20 @@ def set_research_progress(
         source_count=len(source_rows),
         note_count=len(note_items),
     )
+    updated_revision_event_ids = [
+        plan_result["revision_event_id"],
+        sources_result["revision_event_id"],
+        notes_result["revision_event_id"],
+    ]
+    output_compaction = _research_progress_output_compaction_receipt(
+        sid,
+        source_count=len(source_rows),
+        note_count=len(note_items),
+        updated_revision_event_ids=updated_revision_event_ids,
+        prompt_preflight=prompt_preflight,
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_event,
+    )
     return {
         "space_id": sid,
         "widgets": {
@@ -3621,14 +3695,11 @@ def set_research_progress(
             "notes": read_widget_detail(sid, "research-notes"),
         },
         "revision_event_id": notes_result["revision_event_id"],
-        "updated_revision_event_ids": [
-            plan_result["revision_event_id"],
-            sources_result["revision_event_id"],
-            notes_result["revision_event_id"],
-        ],
+        "updated_revision_event_ids": updated_revision_event_ids,
         "progress_event": progress_event,
         "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
+        "output_compaction": output_compaction,
     }
 
 
