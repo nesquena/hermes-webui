@@ -535,6 +535,15 @@ def test_space_tool_adapter_create_list_and_get_are_metadata_only(monkeypatch, t
     assert created["progress_event"]["run_id"] == "space.create:tool-lab"
     assert created["progress_event"]["space_id"] == "tool-lab"
     assert created["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = created["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == "space.create"
+    assert compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert "space_action: space.create" in compaction["text"]
+    assert "widget_payload_count: 1" in compaction["text"]
+    assert "widget_payload_omitted: 1" in compaction["text"]
+    assert "renderer" not in json.dumps(compaction, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in json.dumps(compaction, sort_keys=True).lower()
     assert spaces.read_space("tool-lab")["widgets"] == []
 
     spaces.upsert_widget(

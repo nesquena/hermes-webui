@@ -1712,6 +1712,76 @@ def _space_create_action_policy_receipt(action: str) -> dict[str, Any]:
 
 
 
+def _space_create_output_compaction_receipt(
+    *,
+    action: str,
+    raw_payload: dict[str, Any],
+    space: dict[str, Any],
+    autonomy_policy: dict[str, Any] | None = None,
+    progress_event: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return metadata-only compaction evidence for source-style Space create.
+
+    Source-style create payloads may carry proposed widgets, generated bodies,
+    renderer/source fields, or credential-like values. The actual create adapter
+    deliberately ignores those widget payloads, and this receipt preserves only
+    bounded counts plus safe Space/action metadata for model context/UI evidence.
+    """
+    from api.capy_compaction import compact_output
+
+    safe_action = _context_value(action, 120) or "space.create"
+    safe_space_id = _context_value(space.get("space_id"), 120) or "redacted-space"
+    safe_name = _payload_text_summary(space.get("name"), 120) or "Untitled Space"
+    widgets = raw_payload.get("widgets") if isinstance(raw_payload, dict) else None
+    widget_payload_count = len(widgets) if isinstance(widgets, list) else 0
+    widget_payload_omitted = widget_payload_count
+    policy_status = (
+        _payload_text_summary((autonomy_policy or {}).get("prompt_preflight_status") or "required", 40)
+        or "required"
+    )
+    route_hint = (
+        _payload_text_summary((autonomy_policy or {}).get("model_route_hint") or "hint:reasoning", 80)
+        or "hint:reasoning"
+    )
+    progress_run_id = (
+        _payload_text_summary((progress_event or {}).get("run_id") or f"space.create:{safe_space_id}", 160)
+        or f"space.create:{safe_space_id}"
+    )
+    lines = [
+        "Capy Spaces tool action metadata-only receipt",
+        f"space_action: {safe_action}",
+        f"space_id: {safe_space_id}",
+        f"space_name: {safe_name}",
+        f"widget_count: {int(space.get('widget_count') or 0)}",
+        f"widget_payload_count: {widget_payload_count}",
+        f"widget_payload_omitted: {widget_payload_omitted}",
+        f"prompt_preflight_status: {policy_status}",
+        f"model_route_hint: {route_hint}",
+        f"progress_run_id: {progress_run_id}",
+        "metadata_only: true",
+        "raw_prompt_stored: false",
+    ]
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-tool-action",
+        command=safe_action,
+        exit_status=0,
+        max_chars=900,
+        artifact_handles=[
+            {
+                "kind": "space",
+                "handle": f"space:{safe_space_id}",
+                "label": "Space create metadata",
+            }
+        ],
+    )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
+
 def _space_layout_action_policy_receipt(action: str) -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
@@ -6464,12 +6534,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space = read_space_detail(created["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
         progress_event = _record_space_tool_progress_event(created["space_id"], run_prefix="space.create")
+        autonomy_policy = _space_create_action_policy_receipt(name)
+        output_compaction = _space_create_output_compaction_receipt(
+            action=name,
+            raw_payload=data,
+            space=space,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+        )
         return {
             "ok": True,
             "action": name,
             "space": space,
-            "autonomy_policy": _space_create_action_policy_receipt(name),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": output_compaction,
         }
     if name in {"space.creator.preview", "space.creator.spec.preview", "space.spaces.previewcreatorspec"}:
         return _space_creator_preview_payload(name, data)
