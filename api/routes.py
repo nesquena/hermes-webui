@@ -5389,7 +5389,15 @@ def handle_post(handler, parsed) -> bool:
             space_id = _route_alias_value("space_id", "spaceId")
             if not space_id:
                 return bad(handler, "Missing space_id")
-            return j(handler, {"space": capy_spaces.update_space(space_id, body.get("updates") or body)})
+            include_safety_receipts = _route_bool_value("include_safety_receipts", "includeSafetyReceipts")
+            result = capy_spaces.update_space(
+                space_id,
+                body.get("updates") or body,
+                include_safety_receipts=include_safety_receipts,
+            )
+            if include_safety_receipts and isinstance(result, dict) and "space" in result:
+                return j(handler, result)
+            return j(handler, {"space": result})
         except RuntimeError as e:
             return bad(handler, str(e), 403)
         except ValueError as e:

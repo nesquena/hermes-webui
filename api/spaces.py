@@ -7933,12 +7933,14 @@ def restore_widget_revision(
     }
 
 
-def update_space(space_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+def update_space(space_id: str, updates: dict[str, Any], *, include_safety_receipts: bool = False) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     with _SPACE_MANIFEST_LOCK:
         space = read_space(space_id)
+        sid = validate_space_id(space.get("space_id") or space_id)
         allowed = {"name", "description", "agent_instructions", "layout", "widgets", "capabilities", "template"}
+        prompt_preflight: dict[str, Any] | None = None
         for key, value in (updates or {}).items():
             if key in allowed:
                 if key == "widgets":
@@ -7965,10 +7967,27 @@ def update_space(space_id: str, updates: dict[str, Any]) -> dict[str, Any]:
                         raise ValueError(f"{key} must be an object")
                     value = _public_root_metadata_summary(value)
                 if key == "agent_instructions":
+                    prompt_preflight = _space_current_instruction_prompt_preflight_receipt(str(value or ""))
+                    if prompt_preflight.get("status") != "pass":
+                        categories: list[str] = []
+                        for category in prompt_preflight.get("categories") or []:
+                            text = str(category or "").strip().lower()
+                            if text and re.fullmatch(r"[a-z0-9_:-]{1,80}", text) and text not in categories:
+                                categories.append(text)
+                        suffix = f" ({', '.join(categories)})" if categories else ""
+                        raise ValueError(f"Space update prompt preflight blocked{suffix}")
                     value = str(value or "")
                 space[key] = value
         saved = _write_manifest(space, "space.updated", {"fields": sorted(set(updates or {}) & allowed)})
-        return read_space_detail(saved["space_id"])
+        detail = read_space_detail(saved["space_id"])
+        if not include_safety_receipts:
+            return detail
+        result: dict[str, Any] = {"space": detail}
+        if prompt_preflight is not None:
+            result["prompt_preflight"] = prompt_preflight
+            result["autonomy_policy"] = _space_current_instruction_action_policy_receipt("space.update", prompt_preflight)
+            result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="space.update")
+        return result
 
 
 def delete_space(space_id: str) -> dict[str, Any]:
@@ -11242,6 +11261,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "space.duplicate",
         "space.open",
         "space.reload",
+        "space.update",
         "template.install",
         "template.reset",
         "widget.delete",
