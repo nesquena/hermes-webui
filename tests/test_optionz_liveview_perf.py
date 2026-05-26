@@ -8,7 +8,7 @@ Defect B — server-initiated wakeup turn is not shown live (needs refresh).
   stream_end frames to STREAMS[stream_id]. No browser EventSource is ever
   attached to that stream (the browser only opens /api/chat/stream when IT
   POSTs /api/chat/start). The per-session SSE channel only carried
-  process_complete, never a signal to attach. Fix: when a process_wakeup
+  bg_task_complete, never a signal to attach. Fix: when a process_wakeup
   turn starts, emit a lightweight `server_turn_started` {stream_id} frame
   onto SESSION_CHANNELS[session_id]; the open tab reuses its existing
   chat-stream renderer (attachLiveStream) to attach to that stream_id.
@@ -417,14 +417,14 @@ def test_emit_to_session_streams_skips_owner_unknown_stream():
     ch = bp.get_or_create_session_channel(sid)
     q = ch.subscribe()
     try:
-        emitted = bp._emit_to_session_streams(sid, "process_complete", {"session_id": sid})
+        emitted = bp._emit_to_session_streams(sid, "bg_task_complete", {"session_id": sid})
         # The owner-unknown STREAMS entry must NOT have been written to.
         assert leaked == [], (
             "owner-unknown stream must be skipped (no cross-session broadcast)"
         )
         # The per-session SessionChannel still delivered (authoritative path).
         ev, data = q.get(timeout=2.0)
-        assert ev == "process_complete"
+        assert ev == "bg_task_complete"
         assert data["session_id"] == sid
         assert emitted >= 1
     finally:
@@ -457,11 +457,11 @@ def test_emit_to_session_streams_still_delivers_to_matching_owner():
     ch = bp.get_or_create_session_channel(sid)
     q = ch.subscribe()
     try:
-        bp._emit_to_session_streams(sid, "process_complete", {"session_id": sid})
+        bp._emit_to_session_streams(sid, "bg_task_complete", {"session_id": sid})
         assert received, "owner-matching stream must still receive in-turn delivery"
-        assert received[0][0] == "process_complete"
+        assert received[0][0] == "bg_task_complete"
         ev, _data = q.get(timeout=2.0)
-        assert ev == "process_complete"
+        assert ev == "bg_task_complete"
     finally:
         ch.unsubscribe(q)
         with bp.SESSION_CHANNELS_LOCK:
@@ -493,7 +493,7 @@ def test_emit_to_session_streams_does_not_leak_to_other_session_owner():
     ch = bp.get_or_create_session_channel(sid)
     q = ch.subscribe()
     try:
-        bp._emit_to_session_streams(sid, "process_complete", {"session_id": sid})
+        bp._emit_to_session_streams(sid, "bg_task_complete", {"session_id": sid})
         assert leaked == [], "must not leak to a different session's stream"
     finally:
         ch.unsubscribe(q)
@@ -514,3 +514,28 @@ def test_emit_to_session_streams_skip_unknown_owner_documented_in_source():
     assert "if owner_sid != session_id:" in fn_src
     assert "if owner_sid and owner_sid != session_id:" not in fn_src
     assert "Copilot review #3" in fn_src
+
+
+# ---------------------------------------------------------------------------
+# event_id contract surface (post-rename to bg_task_complete)
+# ---------------------------------------------------------------------------
+#
+# The #2242 thread Q4 reply pins the consumer dedupe key on
+# `(session_id, event_id)`. The handler in static/messages.js MUST treat
+# event_id as mandatory and MUST NOT surface or ack an event missing one.
+# ---------------------------------------------------------------------------
+
+
+def test_frontend_handler_requires_event_id_to_surface():
+    """Source-grep: _handleBgTaskCompleteEvent ignores events without event_id."""
+    js = (REPO_ROOT / "static" / "messages.js").read_text()
+    fn_ix = js.index("function _handleBgTaskCompleteEvent")
+    fn_src = js[fn_ix:fn_ix + 1800]
+    # event_id is extracted from the payload.
+    assert "d.event_id" in fn_src
+    # Missing event_id short-circuits before any dedupe / ack.
+    assert "if (!evt_id) return;" in fn_src or "if(!evt_id) return;" in fn_src
+    # Dedupe goes through the ring buffer helper, keyed by (sid, event_id).
+    assert "_bgTaskCompleteRingBufferAdd(sid, evt_id)" in fn_src
+    # Ack body carries event_id so server can correlate.
+    assert "event_id: evt_id" in fn_src

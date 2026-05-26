@@ -1,7 +1,7 @@
 """Tests for the persistent per-session SSE channel (Option X).
 
 Verifies the SessionChannel registry + reaper + dual-emit + endpoint wiring
-that bridges the cross-turn process_complete delivery gap (between agent
+that bridges the cross-turn bg_task_complete delivery gap (between agent
 turns STREAMS is torn down, so the session-scoped channel is the only live
 surface).
 
@@ -62,16 +62,16 @@ def test_session_channel_subscriber_lifecycle():
     q2 = ch.subscribe()
     assert ch.subscriber_count() == 2
 
-    delivered = ch.emit("process_complete", {"hello": 1})
+    delivered = ch.emit("bg_task_complete", {"hello": 1})
     assert delivered == 2
-    assert q1.get_nowait() == ("process_complete", {"hello": 1})
-    assert q2.get_nowait() == ("process_complete", {"hello": 1})
+    assert q1.get_nowait() == ("bg_task_complete", {"hello": 1})
+    assert q2.get_nowait() == ("bg_task_complete", {"hello": 1})
 
     ch.unsubscribe(q1)
     assert ch.subscriber_count() == 1
     # Re-emit goes to remaining sub only
-    ch.emit("process_complete", {"hello": 2})
-    assert q2.get_nowait() == ("process_complete", {"hello": 2})
+    ch.emit("bg_task_complete", {"hello": 2})
+    assert q2.get_nowait() == ("bg_task_complete", {"hello": 2})
 
     ch.unsubscribe(q2)
     assert ch.subscriber_count() == 0
@@ -87,10 +87,10 @@ def test_session_channel_emit_with_full_buffer_drops_silently():
     # Fill the slow queue
     q_slow.put_nowait(("filler", {}))
 
-    delivered = ch.emit("process_complete", {"x": 1})
+    delivered = ch.emit("bg_task_complete", {"x": 1})
     # fast receives, slow dropped
     assert delivered == 1
-    assert q_fast.get_nowait() == ("process_complete", {"x": 1})
+    assert q_fast.get_nowait() == ("bg_task_complete", {"x": 1})
 
 
 # ---------------------------------------------------------------------------
@@ -197,13 +197,14 @@ def test_emit_when_idle_between_turns_session_channel_delivers():
         try:
             bp._process_one(evt)
             event_name, data = q.get(timeout=2.0)
-            assert event_name == "process_complete"
+            assert event_name == "bg_task_complete"
             assert data["session_id"] == sid
-            assert data["process_id"] == "proc-99"
+            assert data["task_id"] == "proc-99"
+            assert data.get("event_id"), "emitter must stamp event_id (Q4 contract)"
         finally:
             bp.unregister_process_session(sid)
-            cfg.PENDING_PROCESS_COMPLETIONS.discard(sid)
-            cfg.PROCESS_COMPLETE_EVENTS_SEEN.pop(sid, None)
+            cfg.PENDING_BG_TASK_COMPLETIONS.discard(sid)
+            cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
     finally:
         ch.unsubscribe(q)
         with bp.SESSION_CHANNELS_LOCK:
@@ -245,12 +246,14 @@ def test_emit_during_busy_turn_dual_emits_to_both():
         # Both surfaces received the event (frontend will dedupe by process_id)
         assert streams_received, "STREAMS subscriber must receive in-turn delivery"
         event_name, data = streams_received[0]
-        assert event_name == "process_complete"
-        assert data["process_id"] == "proc-busy-1"
+        assert event_name == "bg_task_complete"
+        assert data["task_id"] == "proc-busy-1"
+        assert data.get("event_id"), "emitter must stamp event_id (Q4 contract)"
 
         ev2, data2 = q.get(timeout=2.0)
-        assert ev2 == "process_complete"
-        assert data2["process_id"] == "proc-busy-1"
+        assert ev2 == "bg_task_complete"
+        assert data2["task_id"] == "proc-busy-1"
+        assert data2.get("event_id"), "emitter must stamp event_id (Q4 contract)"
     finally:
         ch.unsubscribe(q)
         with bp.SESSION_CHANNELS_LOCK:
@@ -259,8 +262,8 @@ def test_emit_during_busy_turn_dual_emits_to_both():
             cfg.STREAMS.pop(stream_id, None)
         cfg.ACTIVE_RUNS.pop(stream_id, None)
         bp.unregister_process_session(sid)
-        cfg.PENDING_PROCESS_COMPLETIONS.discard(sid)
-        cfg.PROCESS_COMPLETE_EVENTS_SEEN.pop(sid, None)
+        cfg.PENDING_BG_TASK_COMPLETIONS.discard(sid)
+        cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
 
 
 # ---------------------------------------------------------------------------
@@ -293,19 +296,36 @@ def test_frontend_opens_session_stream():
     assert "stopSessionStream" in js
 
 
-def test_frontend_busy_race_gate_present():
-    """When S.busy is true the handler must short-circuit."""
+def test_frontend_busy_race_gate_obsoleted_by_option_z_pivot():
+    """Per the Option Z PIVOT note baked into the handler body, the browser
+    is no longer in the wakeup path at all — the server-side drain owns
+    starting the next turn. The original ``if (S.busy)`` busy-race gate
+    inside the handler was paired with the now-removed re-POST of
+    ``/api/chat/stream``; once the re-POST went away (Option Z), the gate
+    became moot. We assert the pivot documentation is in place so a future
+    refactor doesn't silently re-introduce the gate without re-introducing
+    the re-POST as well."""
     js = (REPO_ROOT / "static" / "messages.js").read_text()
-    assert "if (S.busy) {" in js or "if (S.busy)" in js
-    assert "turn busy" in js  # console.debug hint per spec
+    fn_ix = js.index("function _handleBgTaskCompleteEvent")
+    fn_src = js[fn_ix:fn_ix + 2400]
+    assert "Option Z PIVOT" in fn_src
+    assert "drain thread" in fn_src
+    # The legacy re-POST and busy-race gate must NOT be inside the handler.
+    assert "if (S.busy)" not in fn_src
+    assert "/api/chat/stream" not in fn_src
 
 
 def test_frontend_shared_handler_dedupes_across_paths():
-    """Module-scope dedupe set (not per-EventSource) is what makes dual-emit safe."""
+    """Module-scope dedupe ring buffer (Map+TTL keyed (sid, event_id)) is what makes dual-emit safe."""
     js = (REPO_ROOT / "static" / "messages.js").read_text()
-    # Module-scope declaration outside any `function () { ... }` body
-    assert "var _seenProcessCompleteIds = new Set();" in js
-    assert "_handleProcessCompleteEvent" in js
+    # Module-scope Map+TTL declaration outside any `function () { ... }` body
+    assert "const _bgTaskCompleteSeenIds = new Map();" in js
+    assert "const _BG_TASK_COMPLETE_TTL_MS = 60000;" in js
+    assert "const _BG_TASK_COMPLETE_CAP = 256;" in js
+    assert "_bgTaskCompleteRingBufferAdd" in js
+    assert "_handleBgTaskCompleteEvent" in js
+    # The handler must require event_id (server contract surface per Q4).
+    assert "if (!evt_id) return;" in js or "if(!evt_id) return;" in js
 
 
 def test_sessions_js_starts_and_stops_session_stream_on_mount_unmount():
@@ -395,10 +415,22 @@ def test_real_completion_event_shape_routes_to_session_channel():
     try:
         bp._process_one(drained)
         event_name, data = q.get(timeout=2.0)
-        assert event_name == "process_complete"
+        assert event_name == "bg_task_complete"
         assert data["session_id"] == webui_sid
-        assert data["process_id"] == proc_id
-        assert data["wakeup_prompt"].startswith("[IMPORTANT: Background process")
+        assert data["task_id"] == proc_id
+        assert data.get("event_id"), "emitter must stamp event_id (Q4 contract)"
+        # Per the Q1 minimal-payload trim settled in #2242, the SSE payload
+        # no longer carries ``wakeup_prompt`` (or ``command`` / ``exit_code``).
+        # The optional ``summary`` field is now the only human-readable
+        # surface; when the synthetic wakeup body is available the emitter
+        # derives a short first-line summary from it.
+        assert "wakeup_prompt" not in data
+        assert "command" not in data
+        assert "exit_code" not in data
+        summary = data.get("summary")
+        if summary is not None:
+            assert isinstance(summary, str)
+            assert "IMPORTANT" in summary or "Background process" in summary
     finally:
         ch.unsubscribe(q)
         with bp.SESSION_CHANNELS_LOCK:
@@ -406,8 +438,8 @@ def test_real_completion_event_shape_routes_to_session_channel():
         bp.unregister_process_session(webui_sid)
         with process_registry._lock:
             process_registry._finished.pop(proc_id, None)
-        cfg.PENDING_PROCESS_COMPLETIONS.discard(webui_sid)
-        cfg.PROCESS_COMPLETE_EVENTS_SEEN.pop(webui_sid, None)
+        cfg.PENDING_BG_TASK_COMPLETIONS.discard(webui_sid)
+        cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(webui_sid, None)
 
 
 # ===========================================================================
@@ -489,13 +521,13 @@ def test_server_side_wakeup_when_idle_no_tab(monkeypatch):
         assert call["message"].startswith("[IMPORTANT: Background process")
     finally:
         bp.unregister_process_session(sid)
-        cfg.PENDING_PROCESS_COMPLETIONS.discard(sid)
-        cfg.PROCESS_COMPLETE_EVENTS_SEEN.pop(sid, None)
+        cfg.PENDING_BG_TASK_COMPLETIONS.discard(sid)
+        cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
 
 
 def test_server_side_wakeup_deferred_when_turn_active(monkeypatch):
     """A foreground turn is active (ACTIVE_RUNS has a row for the session) →
-    the drain must NOT start a second turn. The PENDING_PROCESS_COMPLETIONS
+    the drain must NOT start a second turn. The PENDING_BG_TASK_COMPLETIONS
     marker is left for PR #2279's next-turn drain.
     """
     from api import background_process as bp, config as cfg
@@ -528,12 +560,12 @@ def test_server_side_wakeup_deferred_when_turn_active(monkeypatch):
         )
         assert holder["calls"] == []
         # Marker must remain so the next-turn drain delivers it.
-        assert sid in cfg.PENDING_PROCESS_COMPLETIONS
+        assert sid in cfg.PENDING_BG_TASK_COMPLETIONS
     finally:
         cfg.ACTIVE_RUNS.pop(stream_id, None)
         bp.unregister_process_session(sid)
-        cfg.PENDING_PROCESS_COMPLETIONS.discard(sid)
-        cfg.PROCESS_COMPLETE_EVENTS_SEEN.pop(sid, None)
+        cfg.PENDING_BG_TASK_COMPLETIONS.discard(sid)
+        cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
 
 
 def test_wakeup_dedupe_once_per_process(monkeypatch):
@@ -567,13 +599,13 @@ def test_wakeup_dedupe_once_per_process(monkeypatch):
         )
     finally:
         bp.unregister_process_session(sid)
-        cfg.PENDING_PROCESS_COMPLETIONS.discard(sid)
-        cfg.PROCESS_COMPLETE_EVENTS_SEEN.pop(sid, None)
+        cfg.PENDING_BG_TASK_COMPLETIONS.discard(sid)
+        cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
 
 
 def test_open_tab_sees_live_stream(monkeypatch):
     """Live-view still works: with a subscribed per-session SSE channel, the
-    process_complete frame is still delivered to the tab (so the open tab can
+    bg_task_complete frame is still delivered to the tab (so the open tab can
     render the server-initiated turn live). Server-side wakeup is additive —
     it does not remove the SSE emit.
     """
@@ -599,9 +631,10 @@ def test_open_tab_sees_live_stream(monkeypatch):
 
         # Live-view: the open tab still receives the SSE frame.
         event_name, data = q.get(timeout=2.0)
-        assert event_name == "process_complete"
+        assert event_name == "bg_task_complete"
         assert data["session_id"] == sid
-        assert data["process_id"] == proc_id
+        assert data["task_id"] == proc_id
+        assert data.get("event_id"), "emitter must stamp event_id (Q4 contract)"
 
         # AND the server-side wakeup still started (no active turn here).
         assert _wait_for_wakeup(holder)
@@ -611,5 +644,26 @@ def test_open_tab_sees_live_stream(monkeypatch):
         with bp.SESSION_CHANNELS_LOCK:
             bp.SESSION_CHANNELS.pop(sid, None)
         bp.unregister_process_session(sid)
-        cfg.PENDING_PROCESS_COMPLETIONS.discard(sid)
-        cfg.PROCESS_COMPLETE_EVENTS_SEEN.pop(sid, None)
+        cfg.PENDING_BG_TASK_COMPLETIONS.discard(sid)
+        cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
+
+
+# ---------------------------------------------------------------------------
+# event_id contract surface — backend emitter must stamp every event
+# ---------------------------------------------------------------------------
+
+
+def test_backend_emitter_stamps_event_id_on_every_bg_task_complete():
+    """Per the #2242 Q4 reply: every bg_task_complete emit carries an
+    event_id; the consumer's ring-buffer dedupe is keyed on it. Source-grep
+    the payload builder to confirm event_id is stamped."""
+    src = (REPO_ROOT / "api" / "background_process.py").read_text()
+    # Locate the canonical payload builder and confirm event_id is in the dict.
+    fn_ix = src.index("def _build_payload")
+    fn_src = src[fn_ix:fn_ix + 4000]
+    assert '"event_id"' in fn_src or "'event_id'" in fn_src, (
+        "payload builder must stamp event_id on every bg_task_complete payload"
+    )
+    assert "uuid.uuid4().hex" in fn_src, (
+        "event_id should be a per-emit uuid hex (R2 §Q1)"
+    )
