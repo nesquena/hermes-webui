@@ -5,7 +5,7 @@
 
 ### Added
 
-- Arrow-key navigation in the model picker. Up/Down moves the highlight through the visible (and filter-narrowed) model rows, Enter selects the highlighted row, and Escape still closes the dropdown.
+- Arrow-key navigation in the model picker. Up/Down moves the highlight through the visible (and filter-narrowed) model rows, Enter selects the highlighted row, and Escape still closes the dropdown. Typing into the filter box rebuilds the row list and clears the highlight by design, so Enter after a fresh keystroke picks the first match. When the keyboard cursor lands on the currently-selected model, the `.active` accent background stays visible under the highlight outline.
 
 ## [v0.51.137] — 2026-05-25 — Release DI (stage-batch19 — 6-PR medium-risk batch)
 

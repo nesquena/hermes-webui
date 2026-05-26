@@ -2038,6 +2038,7 @@
 .model-opt:hover{background:rgba(255,255,255,.07);}
 .model-opt.is-highlighted{background:rgba(255,255,255,.1);outline:1px solid var(--border2);outline-offset:-1px;}
 .model-opt.active{background:var(--accent-bg);}
+.model-opt.active.is-highlighted{background:var(--accent-bg);outline:1px solid var(--accent);outline-offset:-1px;}
 .model-opt-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%;}
 .model-opt-name{display:block;font-size:13px;color:var(--text);font-weight:500;line-height:1.25;}
 .model-opt-badge{display:inline-flex;align-items:center;justify-content:center;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;border:1px solid transparent;}
