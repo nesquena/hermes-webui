@@ -3129,11 +3129,25 @@ function renderSessionListFromCache(){
     _activeProject===NO_PROJECT_FILTER
       ?profileFiltered.filter(s=>!s.project_id)
       :(_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered);
+  // Optional: hide sessions whose workspace !== the currently active workspace (#2549).
+  // Setting defaults to true (show-all) for backward compat. Compares the resolved
+  // workspace path stored on each row against _currentWorkspaceDetail.path from panels.js
+  // (already normalized via Path.resolve() at workspace-switch time, api/models.py).
+  // Pinned rows are exempt — pinning is a stronger "keep visible" affordance than the
+  // per-workspace filter, matching how rows missing s.workspace are also exempt.
+  // Comparison is case-sensitive: Slice C (#2549) ships normalized casing separately,
+  // so two rows with paths differing only in case will show as distinct workspaces.
+  const _showAllWs=(typeof window!=='undefined')?window._showAllWorkspaces!==false:true;
+  const _activeWsPath=(typeof S!=='undefined'&&S.session&&S.session.workspace)
+    ||(typeof _currentWorkspaceDetail!=='undefined'&&_currentWorkspaceDetail?_currentWorkspaceDetail.path:null);
+  const workspaceFiltered=(_showAllWs||!_activeWsPath)
+    ?projectFiltered
+    :projectFiltered.filter(s=>s.pinned||!s.workspace||s.workspace===_activeWsPath);
   // Filter archived unless toggle is on
-  const sessionsRaw=_showArchived?projectFiltered:projectFiltered.filter(s=>!s.archived);
+  const sessionsRaw=_showArchived?workspaceFiltered:workspaceFiltered.filter(s=>!s.archived);
   const sessions=_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
-  const archivedCount=projectFiltered.filter(s=>s.archived).length;
+  const archivedCount=workspaceFiltered.filter(s=>s.archived).length;
   const list=$('sessionList');
   const animateRefresh=_sessionListRefreshAnimationPending;
   _sessionListRefreshAnimationPending=false;
@@ -3247,6 +3261,15 @@ function renderSessionListFromCache(){
     const empty=document.createElement('div');
     empty.style.cssText='padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;';
     empty.textContent=_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.';
+    list.appendChild(empty);
+  }
+  // Empty state for active per-workspace filter (#2549). Only fires when the workspace
+  // filter is doing the rejecting (i.e. no active project filter is in play), so the
+  // two empty-state messages don't fight over the same DOM slot.
+  if(!_activeProject&&!_showAllWs&&_activeWsPath&&sessions.length===0){
+    const empty=document.createElement('div');
+    empty.style.cssText='padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;';
+    empty.textContent='No sessions in this workspace yet.';
     list.appendChild(empty);
   }
   const orderedSessions=[...sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
