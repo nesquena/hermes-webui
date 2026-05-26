@@ -8492,6 +8492,50 @@ def _camera_stream_action_policy_receipt(action: str) -> dict[str, Any]:
     )
 
 
+def _camera_stream_output_compaction_receipt(
+    *,
+    action: str,
+    space_id: str,
+    stream: dict[str, Any],
+    preflight: dict[str, Any],
+    policy: dict[str, Any],
+    progress_event: dict[str, Any],
+) -> dict[str, Any]:
+    """Return bounded metadata-only compaction evidence for camera stream ingestion."""
+    from api.capy_compaction import compact_output
+
+    safe_action = _context_value(action, 120) or "space.camera.add_stream"
+    safe_space_id = _context_value(space_id, 120) or "unknown-space"
+    safe_stream_id = _context_value(stream.get("id"), 120) or "stream"
+    lines = [
+        f"action: {safe_action}",
+        f"space_id: {safe_space_id}",
+        "widget_id: camera-grid",
+        f"stream_id: {safe_stream_id}",
+        f"scheme: {_context_value(stream.get('scheme'), 20) or 'unknown'}",
+        f"host_class: {_context_value(stream.get('host_class'), 40) or 'unknown'}",
+        f"mixed_content: {bool(stream.get('mixed_content'))}",
+        "approved: true",
+        "raw_url_stored: false",
+        "exit_status: 0",
+        "approval required: true",
+        f"prompt_preflight_status: {_context_value(preflight.get('status'), 40) or 'required'}",
+        f"policy_action: {_context_value(policy.get('action'), 120) or safe_action}",
+        f"model_route_hint: {_context_value(policy.get('model_route_hint'), 80) or 'hint:vision'}",
+        f"progress_run_id: {_context_value(progress_event.get('run_id'), 160) or f'camera.stream.add:{safe_space_id}'}",
+    ]
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-camera-stream",
+        command=safe_action,
+        exit_status=0,
+        max_chars=700,
+    )
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
 def add_camera_stream(space_id: str, stream: dict[str, Any], *, action: str = "space.camera.add_stream") -> dict[str, Any]:
     """Append an approved camera-stream reference as metadata only.
 
@@ -8539,6 +8583,7 @@ def add_camera_stream(space_id: str, stream: dict[str, Any], *, action: str = "s
     space["widgets"] = widgets
     saved = _write_manifest(space, "camera.stream.added", {"widget_id": "camera-grid", "stream_id": stream_id})
     prompt_preflight = _camera_stream_required_prompt_preflight_receipt(action)
+    autonomy_policy = _camera_stream_action_policy_receipt(action)
     progress_event = _record_space_tool_progress_event(sid, run_prefix="camera.stream.add")
     return {
         "space_id": saved["space_id"],
@@ -8546,8 +8591,16 @@ def add_camera_stream(space_id: str, stream: dict[str, Any], *, action: str = "s
         "widget": _widget_summary(widgets[idx]),
         "revision_event_id": saved["revision_event_id"],
         "prompt_preflight": prompt_preflight,
-        "autonomy_policy": _camera_stream_action_policy_receipt(action),
+        "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "output_compaction": _camera_stream_output_compaction_receipt(
+            action=action,
+            space_id=sid,
+            stream=safe_stream,
+            preflight=prompt_preflight,
+            policy=autonomy_policy,
+            progress_event=progress_event,
+        ),
     }
 
 

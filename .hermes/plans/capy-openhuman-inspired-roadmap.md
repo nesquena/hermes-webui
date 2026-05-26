@@ -58,7 +58,7 @@ Delivered:
 - `api/capy_compaction.py` implements `compact_output(...)` with bounded receipts, unsafe-marker redaction, path collapsing, repeated-line dedupe, approval-prompt preservation, error-block preservation, invalid-cap rejection, and `rules_applied` metadata.
 - `tests/test_capy_output_compaction.py` verifies size accounting, error/approval preservation, redaction status, cap enforcement, and unsafe-marker omission.
 - `space_demo_run_all()` now emits a metadata-only `output_compaction` receipt built from allow-listed demo-suite summary lines, so the existing Spaces UI can show original/compacted character counts, redaction status, and allow-listed rules without rendering raw output, prompts, widget bodies, or credentials.
-- Individual demo smokes, creator preview/commit receipts, active-space context receipts, Research Harness artifact completion receipts, scoped progress status receipts, receipt-only Browser Surface tool actions, widget recovery toggles, and recovery-module disable/enable toggles now reuse the same product-visible compaction evidence pattern without rendering raw URLs, prompts, markdown bodies, generated bodies, renderer/source/API-auth fields, scripts, credentials, module bodies, or exception text.
+- Individual demo smokes, creator preview/commit receipts, active-space context receipts, Research Harness artifact completion receipts, scoped progress status receipts, receipt-only Browser Surface tool actions, approved camera-stream ingestion, widget recovery toggles, and recovery-module disable/enable toggles now reuse the same product-visible compaction evidence pattern without rendering raw URLs, prompts, markdown bodies, generated bodies, renderer/source/API-auth fields, scripts, credentials, module bodies, camera hosts, ports, query tokens, or exception text.
 
 Remaining:
 - Extend compaction receipts to remaining long external tool/subagent/browser/development/recovery-output boundaries where they add product value.
@@ -172,7 +172,7 @@ Only after the remaining Phase 1-6 integration items are working:
    - Keep Memory Tree content untrusted advisory context that cannot bypass creator gates, approval gates, sandbox preview, visual QA, or rollback/recovery controls.
 
 2. **Broader compaction producers**
-   - Extend the implemented run-all, individual-demo, creator preview/commit, active-context, scoped-progress, receipt-only Browser Surface, widget recovery toggle, and recovery-module toggle `output_compaction` receipt pattern to remaining long tool/subagent/development/recovery-output boundaries where it adds product value.
+   - Extend the implemented run-all, individual-demo, creator preview/commit, active-context, scoped-progress, receipt-only Browser Surface, approved camera-stream, widget recovery toggle, and recovery-module toggle `output_compaction` receipt pattern to remaining long tool/subagent/development/recovery-output boundaries where it adds product value.
    - Preserve failures, approval prompts, and artifact handles/citations; never compact away safety-relevant evidence.
 
 3. **Broader source-refresh scheduling/fetcher coverage**
