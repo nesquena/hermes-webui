@@ -4780,6 +4780,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/clarify/stream":
         return _handle_clarify_sse_stream(handler, parsed)
 
+    if parsed.path == "/api/session/stream":
+        return _handle_session_sse_stream(handler, parsed)
+
     if parsed.path == "/api/clarify/inject_test":
         # Loopback-only: used by automated tests; blocked from any remote client
         if handler.client_address[0] != "127.0.0.1":
@@ -8141,6 +8144,98 @@ def _handle_clarify_sse_stream(handler, parsed):
         pass
     finally:
         clarify_sse_unsubscribe(sid, q)
+
+
+def _handle_session_sse_stream(handler, parsed):
+    """SSE endpoint for the persistent per-session channel (Option X).
+
+    Subscribes to ``api.background_process.SESSION_CHANNELS[sid]`` — a channel
+    that lives across agent turns (unlike STREAMS, which is torn down at
+    end-of-turn). Used to deliver ``bg_task_complete`` events that fire while
+    no agent turn is active.
+
+    Lifecycle: opened by the frontend at session mount, closed at unmount or
+    on tab close. Multiple tabs share one SessionChannel (refcounted via
+    subscribe/unsubscribe). 30s SSE keepalive comments keep the proxy alive.
+    Reaper-driven idle TTL (default 4h) prevents zombie channels.
+    """
+    sid = parse_qs(parsed.query).get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id is required")
+
+    from api.background_process import (
+        get_or_create_session_channel,
+        active_stream_id_for_session,
+    )
+
+    ch = get_or_create_session_channel(sid)
+    q = ch.subscribe(maxsize=64)
+
+    handler.send_response(200)
+    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+    handler.send_header('Cache-Control', 'no-cache')
+    handler.send_header('X-Accel-Buffering', 'no')
+    handler.send_header('Connection', 'keep-alive')
+    handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
+
+    from api.streaming import _sse
+
+    # Push an initial frame so the client has confirmation the channel is
+    # live (mirrors approval/clarify which send an 'initial' frame). No
+    # snapshot data is needed — this channel only carries forward-looking
+    # events, not pending state.
+    _sse(handler, 'initial', {"session_id": sid})
+
+    # ── Open-tab live-view self-heal (root cause: lost server_turn_started) ──
+    # The `server_turn_started` fan-out (routes.start_session_turn) is a
+    # fire-and-forget SessionChannel.emit with NO replay buffer: it reaches
+    # only the subscribers connected at the exact emit instant. A tab whose
+    # per-session EventSource was momentarily absent at that instant — a
+    # transient SSE drop, a reverse-proxy idle-timeout, or browser
+    # connection-pool starvation (all common behind a corporate proxy) —
+    # misses the frame permanently, so a SERVER-initiated wakeup turn never
+    # renders live and the user must hard-refresh (the reported defect). The
+    # server-side wakeup itself ran and persisted fine; only the live-view
+    # was lost. On (re)subscribe, if the session has a live run RIGHT NOW,
+    # replay a synthetic `server_turn_started` to THIS new subscriber so the
+    # open tab attaches its existing chat-stream renderer (attachLiveStream)
+    # and self-heals with no refresh. `recovered: True` lets the frontend
+    # use the replay (reconnecting) attach so the renderer picks up the
+    # in-progress stream from the run journal rather than expecting token 0.
+    # Idempotent: the frontend dedupes by (session_id, stream_id) — if the
+    # original frame WAS delivered this is a harmless no-op there.
+    try:
+        recover_stream_id = active_stream_id_for_session(sid)
+        if recover_stream_id:
+            _sse(handler, 'server_turn_started', {
+                "session_id": sid,
+                "stream_id": recover_stream_id,
+                "source": "subscribe_recovery",
+                "recovered": True,
+            })
+    except Exception:
+        logger.debug(
+            "session-stream on-subscribe recovery failed for %s", sid,
+            exc_info=True,
+        )
+
+    try:
+        while True:
+            try:
+                payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+            except queue.Empty:
+                handler.wfile.write(b': keepalive\n\n')
+                handler.wfile.flush()
+                continue
+            if payload is None:
+                break
+            event_name, data = payload
+            _sse(handler, event_name, data)
+    except _CLIENT_DISCONNECT_ERRORS:
+        pass  # client went away — normal for long-lived connections
+    finally:
+        ch.unsubscribe(q)
 
 
 def _handle_clarify_inject(handler, parsed):
