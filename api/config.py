@@ -4596,17 +4596,17 @@ PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuati
 # PROCESS_SESSION_INDEX maps the per-process "session_key" (set in the spawned
 # subprocess via HERMES_SESSION_KEY) back to the WebUI session_id that owns it,
 # so the drain task can route the event to the right SSE channel.
-# PENDING_PROCESS_COMPLETIONS mirrors PENDING_GOAL_CONTINUATION: server-side
+# PENDING_BG_TASK_COMPLETIONS mirrors PENDING_GOAL_CONTINUATION: server-side
 # marker discarded atomically by routes.py when the frontend re-POSTs the
 # wakeup_prompt as the next user turn. (process_complete event, agent wakeup fix)
 PROCESS_SESSION_INDEX: dict = {}  # process_registry session_key -> WebUI session_id
 PROCESS_SESSION_INDEX_LOCK = threading.Lock()
-PENDING_PROCESS_COMPLETIONS: set = set()  # session_ids awaiting a process_complete wakeup turn
-PROCESS_COMPLETE_EVENTS_SEEN: dict = {}  # session_id -> set[process_id] for idempotency
+PENDING_BG_TASK_COMPLETIONS: set = set()  # session_ids awaiting a process_complete wakeup turn
+BG_TASK_COMPLETE_EVENTS_SEEN: dict = {}  # session_id -> set[process_id] for idempotency
 
 # Defer-path fix (fast-bg-task wakeup race): when a completion arrives while a
 # turn is active, Option Z's drain branch CANNOT start a turn (would 409). The
-# pre-existing PENDING_PROCESS_COMPLETIONS marker was a bare session_id flag —
+# pre-existing PENDING_BG_TASK_COMPLETIONS marker was a bare session_id flag —
 # the wakeup_prompt was DISCARDED, and the only consumer (PR #2279 next-turn
 # drain) reads completion_queue, which the Option Z drain thread already
 # emptied. So for an autonomous agent (no next user turn) the deferred wakeup

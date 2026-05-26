@@ -17,13 +17,13 @@ The drain thread:
        the same payload regardless of host,
     4. emits a ``process_complete`` SSE event on the active stream(s) for that
        session (DEMOTED to pure live-view — an open tab streams the turn
-       live), records a server-side marker in ``PENDING_PROCESS_COMPLETIONS``,
+       live), records a server-side marker in ``PENDING_BG_TASK_COMPLETIONS``,
        and — Option Z PIVOT — starts the agent wakeup turn **directly
        server-side** when the session is idle (``_start_server_side_wakeup_turn``
        → ``routes.start_session_turn``). This needs NO browser round-trip, so
        the closed-tab case works exactly like CLI / Telegram / gateway
        self-wake. When a turn is already active the wakeup is NOT started here;
-       the ``PENDING_PROCESS_COMPLETIONS`` marker is left for PR #2279's
+       the ``PENDING_BG_TASK_COMPLETIONS`` marker is left for PR #2279's
        next-turn drain (``api/streaming._drain_webui_process_notifications``).
 
 The marker is *not* required for delivery — it's a telemetry-style flag the
@@ -404,7 +404,7 @@ def _emit_to_session_streams(session_id: str, event: str, data: dict) -> int:
 # errors.log + monitoring) rather than swallowed by a broad ``except`` at
 # DEBUG. ImportError stays best-effort (the registry is legitimately absent in
 # non-agent unit-test contexts; this module's own
-# ``PROCESS_COMPLETE_EVENTS_SEEN`` still dedupes B's own duplicates there).
+# ``BG_TASK_COMPLETE_EVENTS_SEEN`` still dedupes B's own duplicates there).
 _REGISTRY_CONSUMED_CONTRACT = ("_lock", "_completion_consumed", "is_completion_consumed")
 
 
@@ -425,7 +425,7 @@ def _mark_registry_completion_consumed(process_id: str) -> None:
         from tools.process_registry import process_registry as _pr
     except ImportError:
         # Agent registry not importable (e.g. isolated unit test) — B's own
-        # PROCESS_COMPLETE_EVENTS_SEEN gate still prevents this module's
+        # BG_TASK_COMPLETE_EVENTS_SEEN gate still prevents this module's
         # duplicates; cross-A/B dedupe is moot when A isn't running either.
         logger.debug(
             "tools.process_registry not importable; skipping shared "
@@ -594,9 +594,9 @@ def _process_one(evt: dict) -> None:
     # The real merged #2279 next-turn drain
     # (api/streaming._drain_webui_process_notifications) dedupes ONLY via
     # process_registry.is_completion_consumed() / _completion_consumed — it
-    # does NOT populate PROCESS_COMPLETE_EVENTS_SEEN (that set is ours-original
+    # does NOT populate BG_TASK_COMPLETE_EVENTS_SEEN (that set is ours-original
     # and private to this module). So the cross-A/B shared dedupe contract is
-    # process_registry._completion_consumed, NOT PROCESS_COMPLETE_EVENTS_SEEN.
+    # process_registry._completion_consumed, NOT BG_TASK_COMPLETE_EVENTS_SEEN.
     # If the upstream A-drain already delivered this process_id (A-first
     # order), it marked _completion_consumed; B must early-return here or it
     # would double-fire a wakeup. This guard aligns our B-drain to the real
@@ -609,21 +609,21 @@ def _process_one(evt: dict) -> None:
         except Exception:
             logger.debug(
                 "is_completion_consumed check failed on B drain; "
-                "falling back to PROCESS_COMPLETE_EVENTS_SEEN gate",
+                "falling back to BG_TASK_COMPLETE_EVENTS_SEEN gate",
                 exc_info=True,
             )
     # Secondary (ours-original) idempotency: if we've already emitted for this
     # (session_id, process_id) pair via THIS module, skip the duplicate. Two
     # _move_to_finished() callers (kill_process racing the reader thread) can
     # occasionally enqueue twice despite the process_registry guard.
-    seen = _cfg.PROCESS_COMPLETE_EVENTS_SEEN.setdefault(session_id, set())
+    seen = _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(session_id, set())
     if process_id and process_id in seen:
         return
     if process_id:
         seen.add(process_id)
     payload = _build_payload(evt, session_id)
     _emit_to_session_streams(session_id, "process_complete", payload)
-    _cfg.PENDING_PROCESS_COMPLETIONS.add(session_id)
+    _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
     # Mark the event consumed in the agent's process registry so the REAL
     # merged PR #2279's next-turn drain
     # (api/streaming._drain_webui_process_notifications) treats this process_id
@@ -651,7 +651,7 @@ def _process_one(evt: dict) -> None:
     #   - turn IDLE → start a new server-side turn directly with wakeup_prompt
     #     as the user message (the real gap Option Z closes).
     #
-    # Idempotency is already guaranteed above: PROCESS_COMPLETE_EVENTS_SEEN +
+    # Idempotency is already guaranteed above: BG_TASK_COMPLETE_EVENTS_SEEN +
     # the registry _completion_consumed marker mean this process_id reached
     # here at most once, so the wakeup turn starts at most once.
     try:
@@ -661,12 +661,12 @@ def _process_one(evt: dict) -> None:
                 # Defer-path fix: persist the prompt so a turn-teardown
                 # idle-hook can redeliver it once the session goes idle.
                 # The OLD behavior only logged + left a bare
-                # PENDING_PROCESS_COMPLETIONS session flag; the prompt was
+                # PENDING_BG_TASK_COMPLETIONS session flag; the prompt was
                 # discarded and the next-turn drain reads completion_queue
                 # (already emptied by THIS drain thread), so for an
                 # autonomous agent with no next user turn the wakeup was
                 # lost forever. process_id is already in
-                # PROCESS_COMPLETE_EVENTS_SEEN + the registry
+                # BG_TASK_COMPLETE_EVENTS_SEEN + the registry
                 # _completion_consumed marker (set above), so persisting it
                 # here cannot cause a double-fire — the atomic claim in
                 # ``claim_deferred_wakeups`` guarantees exactly one delivery.
@@ -784,7 +784,7 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
         # real delivery is the prompt(s) we just claimed. Discard it now that
         # the deferred wakeups are owned by this teardown.
         try:
-            _cfg.PENDING_PROCESS_COMPLETIONS.discard(session_id)
+            _cfg.PENDING_BG_TASK_COMPLETIONS.discard(session_id)
         except Exception:
             logger.debug(
                 "PENDING discard failed for session %s", session_id, exc_info=True
@@ -796,7 +796,7 @@ def drain_deferred_wakeups_for_session(session_id: str) -> int:
                 continue
             # Same server-side wakeup path the idle branch uses. It spawns its
             # own daemon thread, so the teardown thread never blocks. The
-            # process_id is already in PROCESS_COMPLETE_EVENTS_SEEN +
+            # process_id is already in BG_TASK_COMPLETE_EVENTS_SEEN +
             # registry _completion_consumed (set in _process_one before the
             # defer), so no other path re-delivers it.
             _start_server_side_wakeup_turn(session_id, prompt)
@@ -857,10 +857,10 @@ def _start_server_side_wakeup_turn(session_id: str, wakeup_prompt: str) -> None:
       - ``start_session_turn`` → ``_start_chat_stream_for_session`` serializes
         on the per-session agent lock and returns ``_status=409`` if a turn is
         already active. A human ``/api/chat/start`` racing this wakeup wins
-        (one starts, the other 409s). On 409 the PENDING_PROCESS_COMPLETIONS
+        (one starts, the other 409s). On 409 the PENDING_BG_TASK_COMPLETIONS
         marker is left intact (the 409 returns before the marker discard), so
         PR #2279's next-turn drain still delivers the wakeup.
-      - ``PROCESS_COMPLETE_EVENTS_SEEN`` already deduped this process_id in
+      - ``BG_TASK_COMPLETE_EVENTS_SEEN`` already deduped this process_id in
         ``_process_one`` before we were called, so a process wakes at most once.
     """
 
@@ -875,7 +875,7 @@ def _start_server_side_wakeup_turn(session_id: str, wakeup_prompt: str) -> None:
             if status == 409:
                 logger.debug(
                     "server-side wakeup raced an active turn for session %s; "
-                    "PENDING_PROCESS_COMPLETIONS marker will drain on next turn",
+                    "PENDING_BG_TASK_COMPLETIONS marker will drain on next turn",
                     session_id,
                 )
             elif status >= 400:

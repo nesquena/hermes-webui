@@ -5,13 +5,13 @@ Root cause (proven by source, not speculation):
   - api/background_process.py:_process_one defer branch — when a completion
     arrives and _session_has_active_turn(session_id) is True (ACTIVE_RUNS has
     a row), Option Z CANNOT start a turn (start_session_turn would 409). Before
-    this fix it only logged + left a bare PENDING_PROCESS_COMPLETIONS session
+    this fix it only logged + left a bare PENDING_BG_TASK_COMPLETIONS session
     flag; the wakeup_prompt was DISCARDED.
   - The only consumer of that bare flag was the PR #2279 next-turn drain
     (api/streaming._drain_webui_process_notifications, called at
     streaming.py:3445 inside the turn pipeline). It reads completion_queue —
     which the Option Z drain thread already emptied — and is gated by
-    PROCESS_COMPLETE_EVENTS_SEEN / registry _completion_consumed (both set in
+    BG_TASK_COMPLETE_EVENTS_SEEN / registry _completion_consumed (both set in
     _process_one BEFORE the defer). So even a user turn could not recover it.
   - For an AUTONOMOUS agent there is NO next user turn, so the deferred wakeup
     was lost forever. A SLOW task (5s) completes AFTER teardown finished →
@@ -109,8 +109,8 @@ def _reset_cfg_state():
 
     with _cfg.PROCESS_SESSION_INDEX_LOCK:
         _cfg.PROCESS_SESSION_INDEX.clear()
-    _cfg.PENDING_PROCESS_COMPLETIONS.clear()
-    _cfg.PROCESS_COMPLETE_EVENTS_SEEN.clear()
+    _cfg.PENDING_BG_TASK_COMPLETIONS.clear()
+    _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.clear()
     with _cfg.DEFERRED_PROCESS_WAKEUPS_LOCK:
         _cfg.DEFERRED_PROCESS_WAKEUPS.clear()
     with _cfg.STREAMS_LOCK:
@@ -247,7 +247,7 @@ def test_idle_completion_still_fires_once(monkeypatch):
 def test_next_user_turn_drain_and_teardown_hook_dont_double_fire(monkeypatch):
     """If a user turn DOES come, the next-turn drain
     (_drain_webui_process_notifications) must NOT also deliver the deferred
-    completion: _process_one set PROCESS_COMPLETE_EVENTS_SEEN AND the registry
+    completion: _process_one set BG_TASK_COMPLETE_EVENTS_SEEN AND the registry
     _completion_consumed marker BEFORE the defer, and it consumed the
     completion_queue event, so the next-turn drain has nothing to fire. The
     teardown idle-hook then delivers it exactly once. Total deliveries == 1.
@@ -271,7 +271,7 @@ def test_next_user_turn_drain_and_teardown_hook_dont_double_fire(monkeypatch):
         bp._process_one(_completion_evt("proc-shared-1", sid))
         # Shared dedupe contract: _process_one marked it seen + registry-
         # consumed before deferring.
-        assert "proc-shared-1" in cfg.PROCESS_COMPLETE_EVENTS_SEEN[sid]
+        assert "proc-shared-1" in cfg.BG_TASK_COMPLETE_EVENTS_SEEN[sid]
         assert fake.is_completion_consumed("proc-shared-1")
         assert sid in cfg.DEFERRED_PROCESS_WAKEUPS
 

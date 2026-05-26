@@ -967,7 +967,7 @@ from api.config import (
     _save_yaml_config_file,
     reload_config,
     _cfg_lock,
-    PENDING_PROCESS_COMPLETIONS,
+    PENDING_BG_TASK_COMPLETIONS,
 )
 from api.helpers import (
     require,
@@ -8805,8 +8805,8 @@ def _start_chat_stream_for_session(
     # The marker is server-internal telemetry; the actual wakeup is delivered
     # either server-side (Option Z) or via the PR #2279 next-turn drain.
     process_completion_related = False
-    if s.session_id in PENDING_PROCESS_COMPLETIONS:
-        PENDING_PROCESS_COMPLETIONS.discard(s.session_id)
+    if s.session_id in PENDING_BG_TASK_COMPLETIONS:
+        PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
         process_completion_related = True
 
     stream_id = uuid.uuid4().hex
@@ -8957,7 +8957,7 @@ def start_session_turn(
 
     Returns the same dict ``_start_chat_stream_for_session`` returns, including
     ``_status`` (200 on start, 409 when a turn is already active). On 409 the
-    caller must leave the ``PENDING_PROCESS_COMPLETIONS`` marker in place so the
+    caller must leave the ``PENDING_BG_TASK_COMPLETIONS`` marker in place so the
     PR #2279 next-turn drain delivers the wakeup when the active turn ends.
     """
     msg = str(message or "").strip()

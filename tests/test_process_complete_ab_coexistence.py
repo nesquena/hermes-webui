@@ -10,7 +10,7 @@ process_registry.is_completion_consumed()):
 - If A's (real merged #2279) drain fires first (SSE-disconnected case), it
   marks the same registry consumed-marker so B's drain early-returns.
 
-api.config.PROCESS_COMPLETE_EVENTS_SEEN remains as B's own private
+api.config.BG_TASK_COMPLETE_EVENTS_SEEN remains as B's own private
 secondary dedupe (duplicate enqueue within this module) but is NOT the
 cross-A/B contract — the real merged #2279 never writes it.
 
@@ -75,8 +75,8 @@ def _reset_cfg_state():
     from api import config as _cfg
     with _cfg.PROCESS_SESSION_INDEX_LOCK:
         _cfg.PROCESS_SESSION_INDEX.clear()
-    _cfg.PENDING_PROCESS_COMPLETIONS.clear()
-    _cfg.PROCESS_COMPLETE_EVENTS_SEEN.clear()
+    _cfg.PENDING_BG_TASK_COMPLETIONS.clear()
+    _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.clear()
     with _cfg.STREAMS_LOCK:
         _cfg.STREAMS.clear()
     if hasattr(_cfg, "ACTIVE_RUNS"):
@@ -109,7 +109,7 @@ def test_b_sse_first_then_a_drain_skips_same_process_id(monkeypatch):
     bp._process_one(evt)
 
     # B must have marked the (session, process) seen and registry-consumed
-    assert "p1" in _cfg.PROCESS_COMPLETE_EVENTS_SEEN["sess-1"]
+    assert "p1" in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN["sess-1"]
     assert fake.is_completion_consumed("p1")
 
     # Now simulate A's next-turn drain. Put a *new* event onto the queue for the
@@ -128,9 +128,9 @@ def test_a_drain_first_marks_seen_so_b_would_skip(monkeypatch):
 
     Re-pointed for the rebase: the real merged #2279 drain dedupes ONLY via
     process_registry.is_completion_consumed() — it does NOT populate
-    api.config.PROCESS_COMPLETE_EVENTS_SEEN (that set is ours-original and
+    api.config.BG_TASK_COMPLETE_EVENTS_SEEN (that set is ours-original and
     private to api.background_process). So the cross-A/B contract is the
-    registry consumed-marker, not PROCESS_COMPLETE_EVENTS_SEEN.
+    registry consumed-marker, not BG_TASK_COMPLETE_EVENTS_SEEN.
     """
     fake = _FakeProcessRegistry()
     fake.register("p2", "sess-2")
@@ -158,11 +158,11 @@ def test_a_drain_first_marks_seen_so_b_would_skip(monkeypatch):
     assert "Background process p2 completed" in notifications[0]
 
     # The REAL merged #2279 A-drain marks the SHARED upstream dedupe key
-    # (registry consumed-marker) — NOT our private PROCESS_COMPLETE_EVENTS_SEEN.
+    # (registry consumed-marker) — NOT our private BG_TASK_COMPLETE_EVENTS_SEEN.
     assert fake.is_completion_consumed("p2")
-    assert "sess-2" not in _cfg.PROCESS_COMPLETE_EVENTS_SEEN, (
+    assert "sess-2" not in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN, (
         "real upstream #2279 A-drain must NOT populate our private "
-        "PROCESS_COMPLETE_EVENTS_SEEN set"
+        "BG_TASK_COMPLETE_EVENTS_SEEN set"
     )
 
     # Now if B's drain thread sees another spurious event for the same id
@@ -171,11 +171,11 @@ def test_a_drain_first_marks_seen_so_b_would_skip(monkeypatch):
     bp._process_one(evt)  # second time
     assert fake.is_completion_consumed("p2")
     # B early-returned on the shared key BEFORE reaching its own seen-set, so
-    # PROCESS_COMPLETE_EVENTS_SEEN stays unpopulated for this session (proves
+    # BG_TASK_COMPLETE_EVENTS_SEEN stays unpopulated for this session (proves
     # the cross-A/B dedupe used the real upstream key, not ours).
-    assert "sess-2" not in _cfg.PROCESS_COMPLETE_EVENTS_SEEN
+    assert "sess-2" not in _cfg.BG_TASK_COMPLETE_EVENTS_SEEN
     # And no duplicate wakeup marker was queued by the second B pass.
-    assert "sess-2" not in _cfg.PENDING_PROCESS_COMPLETIONS
+    assert "sess-2" not in _cfg.PENDING_BG_TASK_COMPLETIONS
 
 
 def test_registry_completion_consumed_contract():
