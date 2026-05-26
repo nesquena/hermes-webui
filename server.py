@@ -164,7 +164,7 @@ def _build_csp_report_only_policy() -> str:
 
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
-from api.helpers import j, get_profile_cookie
+from api.helpers import j, get_profile_cookie, _CLIENT_DISCONNECT_ERRORS
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
 from api.startup import auto_install_agent_deps, fix_credential_permissions
@@ -317,8 +317,13 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception as e:
+            if isinstance(e, _CLIENT_DISCONNECT_ERRORS):
+                return
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
-            return j(self, {'error': 'Internal server error'}, status=500)
+            try:
+                j(self, {'error': 'Internal server error'}, status=500)
+            except Exception:
+                pass
         finally:
             clear_request_profile()
 
@@ -348,8 +353,13 @@ class Handler(BaseHTTPRequestHandler):
             # reconnect races; do not convert it into a misleading server 500.
             return
         except Exception as e:
+            if isinstance(e, _CLIENT_DISCONNECT_ERRORS):
+                return
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
-            return j(self, {'error': 'Internal server error'}, status=500)
+            try:
+                j(self, {'error': 'Internal server error'}, status=500)
+            except Exception:
+                pass
         finally:
             clear_request_profile()
 
