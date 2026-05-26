@@ -352,6 +352,24 @@ def test_upload_respects_attachment_dir_env(monkeypatch, tmp_path):
     assert _session_attachment_dir("session-123") == inbox.resolve() / "session-123"
 
 
+def test_upload_destination_does_not_overwrite_same_filename(monkeypatch, tmp_path):
+    """Repeated uploads with the same filename in one session keep distinct paths."""
+    from api.upload import _upload_destination
+
+    inbox = tmp_path / "attachment-inbox"
+    monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(inbox))
+
+    first = _upload_destination("session-123", "photo.png")
+    first.write_bytes(b"first")
+    second = _upload_destination("session-123", "photo.png")
+    second.write_bytes(b"second")
+
+    assert first.name == "photo.png"
+    assert second.name == "photo-1.png"
+    assert first.read_bytes() == b"first"
+    assert second.read_bytes() == b"second"
+
+
 def test_upload_too_large(cleanup_test_sessions):
     """Uploading a file over MAX_UPLOAD_BYTES is rejected (413 or connection closed)."""
     sid, _ = make_session_tracked(cleanup_test_sessions)

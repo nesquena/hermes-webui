@@ -204,7 +204,7 @@ function _artifactCandidatesFromToolCall(tc){
     path = _normalizeArtifactPath(path);
     if(path) out.push({path, kind:source});
   };
-  if(args && typeof args === 'object'){
+  if(ARTIFACT_MUTATION_TOOLS.has(name) && args && typeof args === 'object'){
     for(const key of ['path','file_path','source','destination']) add(args[key]);
     if(Array.isArray(args.paths)) args.paths.forEach(p=>add(p));
     if(Array.isArray(args.edits)) args.edits.forEach(e=>add(e&&e.path));

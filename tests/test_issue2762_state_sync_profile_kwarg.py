@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import sys
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -94,6 +95,72 @@ def _read_session(db_path: Path, session_id: str):
         return row
     finally:
         conn.close()
+
+
+def _make_message_state_db(path: Path, session_id: str, message_count: int, label: str):
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, title TEXT, model TEXT, started_at REAL, message_count INTEGER)"
+        )
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL)"
+        )
+        conn.execute(
+            "INSERT INTO sessions (id, source, title, model, started_at, message_count) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, "webui", label, "test-model", 1000.0, message_count),
+        )
+        for idx in range(message_count):
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                (
+                    session_id,
+                    "user" if idx % 2 == 0 else "assistant",
+                    f"{label} message {idx + 1}",
+                    1000.0 + idx,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.fixture()
+def two_profile_message_homes(tmp_path, monkeypatch):
+    """Minimal multi-profile state.db homes for metadata-only read-path tests."""
+    import api.config as config
+    import api.models as models_mod
+    import api.profiles as profiles_mod
+    import api.routes as routes_mod
+
+    hiyuki_home = tmp_path / "hiyuki"
+    maiko_home = tmp_path / "maiko"
+    session_dir = tmp_path / "webui-state" / "sessions"
+    for home in (hiyuki_home, maiko_home, session_dir):
+        home.mkdir(parents=True)
+
+    sid = "metadata_profile_routing"
+    _make_message_state_db(hiyuki_home / "state.db", sid, 1, "hiyuki")
+    _make_message_state_db(maiko_home / "state.db", sid, 3, "maiko")
+
+    def fake_profile_home(name):
+        if name == "maiko":
+            return maiko_home
+        if name == "hiyuki" or name in (None, "", "default"):
+            return hiyuki_home
+        raise LookupError(name)
+
+    monkeypatch.setattr(profiles_mod, "get_hermes_home_for_profile", fake_profile_home)
+    monkeypatch.setattr(profiles_mod, "get_active_hermes_home", lambda: hiyuki_home)
+    monkeypatch.setattr(models_mod, "_active_state_db_path", lambda: hiyuki_home / "state.db")
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "webui-state", raising=False)
+    monkeypatch.setattr(config, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(config, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False)
+    monkeypatch.setattr(models_mod, "SESSION_DIR", session_dir, raising=False)
+    monkeypatch.setattr(models_mod, "SESSION_INDEX_FILE", session_dir / "_index.json", raising=False)
+    monkeypatch.setattr(routes_mod, "_active_state_db_path", lambda: hiyuki_home / "state.db", raising=False)
+
+    return {"sid": sid, "hiyuki": hiyuki_home, "maiko": maiko_home, "session_dir": session_dir}
 
 
 def test_get_state_db_honors_explicit_profile_kwarg(two_profile_homes):
@@ -180,6 +247,101 @@ def test_sync_session_usage_without_profile_kwarg_uses_active(two_profile_homes)
     hiyuki_row = _read_session(two_profile_homes['hiyuki'] / 'state.db', 'legacy-call-shape')
     assert hiyuki_row is not None, \
         "sync_session_usage() without profile= regressed: did not write to active profile's state.db"
+
+
+def test_metadata_only_summary_reads_explicit_profile_state_db(two_profile_message_homes):
+    """Metadata-only state.db reads must honor explicit profile=.
+
+    This pins the read-path equivalent of #2762/#2827: if the helper drops the
+    profile kwarg or stops forwarding it to get_state_db_session_messages(), it
+    falls back to the active profile (hiyuki) and reports the wrong count.
+    """
+    from api.routes import _metadata_only_message_summary
+
+    sid = two_profile_message_homes["sid"]
+
+    maiko_summary = _metadata_only_message_summary(sid, profile="maiko")
+    hiyuki_summary = _metadata_only_message_summary(sid)
+
+    assert maiko_summary["message_count"] == 3
+    assert hiyuki_summary["message_count"] == 1
+
+
+def test_metadata_only_summary_honors_profile_from_background_thread(two_profile_message_homes):
+    """Explicit profile= must work even when TLS active-profile context is absent."""
+    from api.routes import _metadata_only_message_summary
+
+    sid = two_profile_message_homes["sid"]
+    result = {}
+
+    def run():
+        result["summary"] = _metadata_only_message_summary(sid, profile="maiko")
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert result["summary"]["message_count"] == 3
+
+
+def test_api_session_metadata_only_passes_session_profile_to_summary(
+    two_profile_message_homes, monkeypatch
+):
+    """GET /api/session?messages=0 must pass the loaded session profile onward.
+
+    If the call site accidentally invokes _metadata_only_message_summary(sid)
+    without profile=s.profile, this test reports the active hiyuki count (1)
+    instead of maiko's count (3).
+    """
+    from urllib.parse import urlparse
+    from io import BytesIO
+
+    import api.models as models_mod
+    import api.routes as routes_mod
+
+    sid = two_profile_message_homes["sid"]
+    session = models_mod.Session(
+        session_id=sid,
+        title="Metadata profile routing",
+        workspace=str(two_profile_message_homes["session_dir"]),
+        model="test-model",
+        profile="maiko",
+        messages=[
+            {"role": "user", "content": "maiko message 1", "timestamp": 1000.0}
+        ],
+        created_at=1000.0,
+        updated_at=1001.0,
+    )
+    session.save(touch_updated_at=False)
+    monkeypatch.setattr(routes_mod, "_lookup_cli_session_metadata", lambda _sid: {})
+
+    class Handler:
+        path = f"/api/session?session_id={sid}&messages=0&resolve_model=0"
+        headers = {}
+        client_address = ("127.0.0.1", 12345)
+
+        def __init__(self):
+            self.status = None
+            self.wfile = BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, *_args):
+            pass
+
+        def end_headers(self):
+            pass
+
+        def log_message(self, *_args, **_kwargs):
+            pass
+
+    handler = Handler()
+    routes_mod.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert b'"message_count": 3' in handler.wfile.getvalue()
 
 
 def test_unknown_explicit_profile_returns_none_not_falls_back(two_profile_homes):

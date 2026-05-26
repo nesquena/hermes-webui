@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 
 def test_prefill_json_file_keeps_valid_roles_and_drops_invalid_items(tmp_path):
@@ -78,3 +79,14 @@ def test_prefill_status_redactor_handles_secret_shaped_text():
 
     assert "redaction-test-placeholder" not in redacted
     assert "[REDACTED]" in redacted
+
+
+def test_cached_agent_prefill_refresh_requires_explicit_kwargs():
+    """Cached agents should not get an empty prefill list when kwargs omitted it."""
+    src = Path("api/streaming.py").read_text(encoding="utf-8")
+    callback_refresh = src.index("# Refresh per-turn callbacks")
+    session_db_refresh = src.index("if _session_db is not None:", callback_refresh)
+    body = src[callback_refresh:session_db_refresh]
+
+    assert "'prefill_messages' in _agent_kwargs" in body
+    assert "hasattr(agent, 'prefill_messages')" in body

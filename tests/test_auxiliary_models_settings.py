@@ -215,3 +215,44 @@ class TestAuxiliaryModelsBackend:
         assert "/api/model/options" not in body, (
             "_loadAuxiliaryModels must NOT call /api/model/options (agent-only endpoint)"
         )
+
+    def test_set_auxiliary_model_rejects_unknown_task(self, monkeypatch, tmp_path):
+        """Unknown auxiliary task names must not pollute config.yaml."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("auxiliary: {}\n", encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+
+        try:
+            config.set_auxiliary_model("arbitrary_key", "openai", "gpt-5.5")
+        except ValueError as exc:
+            assert "Unknown auxiliary task slot" in str(exc)
+            assert "vision" in str(exc)
+        else:
+            raise AssertionError("set_auxiliary_model accepted an unknown task")
+
+        assert "arbitrary_key" not in config_path.read_text(encoding="utf-8")
+
+    def test_model_set_route_returns_400_for_unknown_auxiliary_task(self, monkeypatch):
+        """The route should surface invalid auxiliary task names as a client error."""
+        from types import SimpleNamespace
+        from api import routes
+
+        monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+        monkeypatch.setattr(routes, "read_body", lambda _handler: {
+            "scope": "auxiliary",
+            "task": "arbitrary_key",
+            "provider": "openai",
+            "model": "gpt-5.5",
+        })
+        monkeypatch.setattr(
+            routes,
+            "bad",
+            lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status},
+        )
+
+        result = routes.handle_post(object(), SimpleNamespace(path="/api/model/set"))
+
+        assert result["status"] == 400
+        assert "Unknown auxiliary task slot" in result["error"]

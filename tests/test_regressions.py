@@ -650,6 +650,25 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     )
 
 
+
+def test_browser_session_url_accepts_api_session_id_param(cleanup_test_sessions):
+    """External links using ?session_id=... should open that session in the browser.
+
+    The API endpoint uses `session_id`, while the browser URL historically used
+    `session`/`/session/<id>`. Auth/cookie bridges and external callers can
+    legitimately produce `/?session_id=<sid>`; ignoring it falls back to stale
+    localStorage and renders the wrong or empty conversation.
+    """
+    src = (REPO_ROOT / "static/sessions.js").read_text()
+    start = src.find("function _sessionIdFromLocation")
+    assert start >= 0, "session URL parser not found"
+    end = src.find("function _sessionUrlForSid", start)
+    assert end > start, "session URL parser block end not found"
+    block = src[start:end]
+    assert "qs.get('session')" in block or 'qs.get("session")' in block
+    assert "qs.get('session_id')" in block or 'qs.get("session_id")' in block
+
+
 def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     """Uploaded-file turns render optimistically before the server stores the
     final pending text with an `[Attached files: ...]` suffix.  The INFLIGHT
@@ -664,6 +683,12 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     )
     assert "role==='user'" in src, (
         "attached-files normalization should be limited to user turns"
+    )
+    pending_idx = src.find("function _mergePendingSessionMessage")
+    assert pending_idx >= 0, "pending session merge helper not found"
+    pending_block = src[pending_idx:pending_idx+500]
+    assert "_sameTranscriptMessage(existing,pendingMsg)" in pending_block, (
+        "pending-user merge should reuse transcript identity dedupe before inserting the server pending message"
     )
 
 

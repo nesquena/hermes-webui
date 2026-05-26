@@ -27,6 +27,11 @@ does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
   model-context reconstruction, compression, UI scene/cache, and sidebar metadata
   repairs. Start here for narrow fixes that keep the existing WebUI execution
   path.
+- [`docs/rfcs/canonical-session-resolution.md`](rfcs/canonical-session-resolution.md):
+  proposed contract for resolving URL routes, query parameters, localStorage,
+  sidebar rows, and compression-lineage IDs to one canonical visible session
+  target. Start here for session routing, boot restore, stale parent, or
+  compression-tip selection changes.
 - [`docs/rfcs/hermes-run-adapter-contract.md`](rfcs/hermes-run-adapter-contract.md):
   proposed event/control contract, runtime-state ownership matrix,
   acceptance-test catalog, and reversible migration gates for moving WebUI

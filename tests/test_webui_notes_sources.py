@@ -132,6 +132,39 @@ def test_joplin_get_note_validates_id_and_truncates_body(monkeypatch):
     assert "Preview truncated" in note["body"]
 
 
+def test_joplin_api_get_uses_authorization_header(monkeypatch):
+    from api import routes
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit):
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["authorization"] = request.get_header("Authorization")
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(routes, "_joplin_connection_from_config", lambda: ("http://127.0.0.1:41184", "secret-token"))
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    data = routes._joplin_api_get("/notes", {"query": "hello world"})
+
+    assert data == {"ok": True}
+    assert captured["timeout"] == 8
+    assert "token=" not in captured["url"]
+    assert "query=hello+world" in captured["url"]
+    assert captured["authorization"] == "token secret-token"
+
+
 def test_joplin_recent_ai_notes_uses_configured_prefill_script(monkeypatch, tmp_path):
     from api import routes
 
@@ -188,6 +221,40 @@ def test_external_notes_menu_item_is_default_off_from_memory_payload():
     panels = Path("static/panels.js").read_text(encoding="utf-8")
     assert "external_notes_enabled" in panels
     assert "if (s.key === 'external_notes' && !_memoryData.external_notes_enabled) continue;" in panels
+
+
+def test_external_notes_drawer_copy_is_localized_outside_english():
+    from pathlib import Path
+
+    i18n = Path("static/i18n.js").read_text(encoding="utf-8")
+
+    assert i18n.count("external_notes_sources: 'Third-party notes'") == 1
+    assert i18n.count("external_notes_recent_ai: 'Recently used by AI'") == 1
+    assert i18n.count("external_notes_recent_ai_reason: 'Automatic recall'") == 1
+    assert i18n.count("external_notes_search_placeholder: 'Search notes…'") == 1
+
+    locale_sources = [
+        ("  en: {", "  it: {", "external_notes_sources: 'Third-party notes'"),
+        ("  it: {", "  ja: {", "external_notes_sources: 'Note di terze parti'"),
+        ("  ja: {", "  ru: {", "external_notes_sources: 'サードパーティのノート'"),
+        ("  ru: {", "  es: {", "external_notes_sources: 'Сторонние заметки'"),
+        ("  es: {", "  de: {", "external_notes_sources: 'Notas de terceros'"),
+        ("  de: {", "  zh: {", "external_notes_sources: 'Notizen von Drittanbietern'"),
+        ("  zh: {", "  'zh-Hant': {", "external_notes_sources: '第三方笔记'"),
+        ("  'zh-Hant': {", "  pt: {", "external_notes_sources: '第三方筆記'"),
+        ("  pt: {", "  ko: {", "external_notes_sources: 'Notas de terceiros'"),
+        ("  ko: {", "  fr: {", "external_notes_sources: '타사 노트'"),
+        ("  fr: {", "  tr: {", "external_notes_sources: 'Notes tierces'"),
+    ]
+    for start_marker, end_marker, expected in locale_sources:
+        start = i18n.index(start_marker)
+        end = i18n.index(end_marker, start)
+        assert expected in i18n[start:end]
+
+    tr_start = i18n.index("  tr: {")
+    tr_block = i18n[tr_start:]
+    assert "external_notes_sources: 'Üçüncü taraf notlar'" in tr_block
+    assert "external_notes_sources: 'Third-party notes'" not in tr_block
 
 
 def test_external_notes_search_button_matches_minimal_dark_controls():
