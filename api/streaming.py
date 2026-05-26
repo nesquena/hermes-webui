@@ -107,6 +107,45 @@ def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
 
 
 COST_PROTECTION_INTERRUPT_PREFIX = "Hermes WebUI cost protection pause:"
+_DEFAULT_COST_PROTECTION_THRESHOLDS = {
+    "api_call_threshold": 36,
+    "compression_event_threshold": 8,
+    "compression_failure_threshold": 2,
+    "fallback_threshold": 3,
+    "tool_error_threshold": 3,
+}
+
+
+def _positive_int(value, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def _cost_protection_config() -> dict:
+    try:
+        cfg_data = get_config()
+    except Exception:
+        cfg_data = {}
+    if not isinstance(cfg_data, dict):
+        return {}
+    direct = cfg_data.get("cost_protection")
+    if isinstance(direct, dict):
+        return direct
+    webui = cfg_data.get("webui")
+    nested = webui.get("cost_protection") if isinstance(webui, dict) else None
+    return nested if isinstance(nested, dict) else {}
+
+
+def _cost_protection_guard_from_config(*, session_id: str, stream_id: str):
+    cfg_data = _cost_protection_config()
+    thresholds = {
+        key: _positive_int(cfg_data.get(key), fallback)
+        for key, fallback in _DEFAULT_COST_PROTECTION_THRESHOLDS.items()
+    }
+    return CostProtectionGuard(session_id=session_id, stream_id=stream_id, **thresholds)
 
 
 class CostProtectionGuard:
@@ -117,19 +156,34 @@ class CostProtectionGuard:
         *,
         session_id: str,
         stream_id: str,
-        api_call_threshold: int = 12,
-        compression_event_threshold: int = 5,
-        compression_failure_threshold: int = 2,
-        fallback_threshold: int = 3,
-        tool_error_threshold: int = 3,
+        api_call_threshold: int = _DEFAULT_COST_PROTECTION_THRESHOLDS["api_call_threshold"],
+        compression_event_threshold: int = _DEFAULT_COST_PROTECTION_THRESHOLDS["compression_event_threshold"],
+        compression_failure_threshold: int = _DEFAULT_COST_PROTECTION_THRESHOLDS["compression_failure_threshold"],
+        fallback_threshold: int = _DEFAULT_COST_PROTECTION_THRESHOLDS["fallback_threshold"],
+        tool_error_threshold: int = _DEFAULT_COST_PROTECTION_THRESHOLDS["tool_error_threshold"],
     ):
         self.session_id = session_id
         self.stream_id = stream_id
-        self.api_call_threshold = max(1, int(api_call_threshold or 12))
-        self.compression_event_threshold = max(1, int(compression_event_threshold or 5))
-        self.compression_failure_threshold = max(1, int(compression_failure_threshold or 2))
-        self.fallback_threshold = max(1, int(fallback_threshold or 3))
-        self.tool_error_threshold = max(1, int(tool_error_threshold or 3))
+        self.api_call_threshold = _positive_int(
+            api_call_threshold,
+            _DEFAULT_COST_PROTECTION_THRESHOLDS["api_call_threshold"],
+        )
+        self.compression_event_threshold = _positive_int(
+            compression_event_threshold,
+            _DEFAULT_COST_PROTECTION_THRESHOLDS["compression_event_threshold"],
+        )
+        self.compression_failure_threshold = _positive_int(
+            compression_failure_threshold,
+            _DEFAULT_COST_PROTECTION_THRESHOLDS["compression_failure_threshold"],
+        )
+        self.fallback_threshold = _positive_int(
+            fallback_threshold,
+            _DEFAULT_COST_PROTECTION_THRESHOLDS["fallback_threshold"],
+        )
+        self.tool_error_threshold = _positive_int(
+            tool_error_threshold,
+            _DEFAULT_COST_PROTECTION_THRESHOLDS["tool_error_threshold"],
+        )
         self.api_call_count = 0
         self.compression_events = 0
         self.compression_failures = 0
@@ -137,7 +191,8 @@ class CostProtectionGuard:
         self.tool_errors = 0
         self.tool_calls = 0
         self.paused_payload = None
-        self._seen_prev_tool_keys = set()
+        self._counted_tool_key_counts = {}
+        self._seen_prev_tool_key_counts = {}
 
     def record_status(self, kind: str, message: str) -> None:
         message_text = str(message or "").strip()
@@ -165,24 +220,55 @@ class CostProtectionGuard:
         if _is_fallback_lifecycle_message(kind, message_text):
             self.fallback_events += 1
 
-    def record_tool_complete(self, *, is_error: bool = False, result=None) -> None:
+    def record_tool_complete(
+        self,
+        *,
+        tool_call_id=None,
+        name=None,
+        arguments=None,
+        is_error: bool = False,
+        result=None,
+    ) -> None:
+        key = self._tool_key(
+            tool_call_id=tool_call_id,
+            name=name,
+            arguments=arguments,
+            result=result,
+        )
+        self._counted_tool_key_counts[key] = self._counted_tool_key_counts.get(key, 0) + 1
+        self._record_tool_count(is_error=is_error, result=result)
+
+    def _record_tool_count(self, *, is_error: bool = False, result=None) -> None:
         self.tool_calls += 1
         if is_error or self._result_looks_error(result):
             self.tool_errors += 1
 
     def record_step(self, api_call_count: int, prev_tools=None):
         self.api_call_count = max(self.api_call_count, int(api_call_count or 0))
+        prev_seen_this_step = {}
         for tool in prev_tools or []:
             if isinstance(tool, dict):
-                key = (
-                    str(tool.get("name") or "")[:120],
-                    str(tool.get("arguments") or "")[:512],
-                    str(tool.get("result") or "")[:512],
+                key = self._tool_key(
+                    name=tool.get("name"),
+                    arguments=tool.get("arguments"),
+                    result=tool.get("result"),
                 )
-                if key in self._seen_prev_tool_keys:
+                prev_seen_this_step[key] = prev_seen_this_step.get(key, 0) + 1
+                occurrence = prev_seen_this_step[key]
+                if occurrence <= self._seen_prev_tool_key_counts.get(key, 0):
                     continue
-                self._seen_prev_tool_keys.add(key)
-                self.record_tool_complete(result=tool.get("result"))
+                self._seen_prev_tool_key_counts[key] = occurrence
+                counted = self._counted_tool_key_counts.get(key, 0)
+                if counted > 0:
+                    if counted == 1:
+                        self._counted_tool_key_counts.pop(key, None)
+                    else:
+                        self._counted_tool_key_counts[key] = counted - 1
+                    continue
+                self._record_tool_count(
+                    is_error=bool(tool.get("is_error", False)),
+                    result=tool.get("result"),
+                )
         return self._maybe_pause()
 
     def interrupt_message(self) -> str:
@@ -241,6 +327,25 @@ class CostProtectionGuard:
             or "traceback (most recent call last)" in text
             or "command not found" in text
             or "path not found" in text
+        )
+
+    @staticmethod
+    def _stable_key_part(value, limit: int) -> str:
+        try:
+            text = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+        except Exception:
+            text = str(value)
+        return text[:limit]
+
+    @classmethod
+    def _tool_key(cls, *, tool_call_id=None, name=None, arguments=None, result=None):
+        if tool_call_id:
+            return ("id", str(tool_call_id))
+        return (
+            "value",
+            cls._stable_key_part(name or "", 120),
+            cls._stable_key_part(arguments or {}, 512),
+            cls._stable_key_part(result or "", 512),
         )
 
 
@@ -3804,7 +3909,7 @@ def _run_agent_streaming(
         except Exception:
             logger.debug("Failed to put event to queue")
 
-    _cost_guard = CostProtectionGuard(session_id=session_id, stream_id=stream_id)
+    _cost_guard = _cost_protection_guard_from_config(session_id=session_id, stream_id=stream_id)
     _agent_ref = [None]
 
     def _agent_status_callback(kind, message):
@@ -4275,6 +4380,8 @@ def _run_agent_streaming(
 
                 if event_type == 'tool.completed':
                     _cost_guard.record_tool_complete(
+                        name=name,
+                        arguments=args if isinstance(args, dict) else {},
                         is_error=bool(cb_kwargs.get('is_error', False)),
                         result=preview,
                     )
@@ -4348,6 +4455,9 @@ def _run_agent_streaming(
             def on_tool_complete(tool_call_id, name, args, function_result, **cb_kwargs):
                 try:
                     _cost_guard.record_tool_complete(
+                        tool_call_id=tool_call_id,
+                        name=name,
+                        arguments=args,
                         is_error=bool(cb_kwargs.get('is_error', False)),
                         result=function_result,
                     )
