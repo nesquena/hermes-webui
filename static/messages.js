@@ -4,13 +4,42 @@ function _markSessionViewed(sid, messageCount) {
   _setSessionViewedCount(sid, next);
 }
 
-// Module-scope dedupe set for bg_task_complete events. Shared between the
-// in-turn STREAMS path (per-turn EventSource inside the chat-stream wirer)
+// Module-scope dedupe ring buffer for bg_task_complete events. Shared between
+// the in-turn STREAMS path (per-turn EventSource inside the chat-stream wirer)
 // and the persistent session-scoped path (/api/session/stream), so the
 // frontend never double-fires a toast or ack for the same (session_id,
-// task_id) regardless of which channel delivered it first. (Option X)
-// D-b-2 swaps this Set for a Map+TTL ring buffer keyed (sid, event_id).
-var _bgTaskCompleteSeenIds = new Set();
+// event_id) regardless of which channel delivered it first. (Option X)
+//
+// Keyed by `${session_id}|${event_id}` → expiry timestamp (ms since epoch).
+// Bounded by a 60-second TTL plus a 256-entry soft cap with insertion-order
+// eviction on overflow. Events without `event_id` are ignored by the caller
+// (the server contract guarantees `event_id` on every completion emit).
+const _BG_TASK_COMPLETE_TTL_MS = 60000;
+const _BG_TASK_COMPLETE_CAP = 256;
+const _bgTaskCompleteSeenIds = new Map();
+
+function _bgTaskCompleteRingBufferAdd(sid, evt_id) {
+  if (!sid || !evt_id) return false;
+  const key = sid + '|' + evt_id;
+  const now = Date.now();
+  // Lazy purge: walk insertion-order; drop any entry whose expiry has passed.
+  // Map iteration is insertion-order so this also surfaces the oldest entries
+  // first when we need to evict for the soft cap below.
+  for (const [k, exp] of _bgTaskCompleteSeenIds) {
+    if (exp <= now) {
+      _bgTaskCompleteSeenIds.delete(k);
+    }
+  }
+  if (_bgTaskCompleteSeenIds.has(key)) return true;  // duplicate
+  _bgTaskCompleteSeenIds.set(key, now + _BG_TASK_COMPLETE_TTL_MS);
+  // Soft cap: insertion-order eviction.
+  while (_bgTaskCompleteSeenIds.size > _BG_TASK_COMPLETE_CAP) {
+    const firstKey = _bgTaskCompleteSeenIds.keys().next().value;
+    if (firstKey === undefined) break;
+    _bgTaskCompleteSeenIds.delete(firstKey);
+  }
+  return false;
+}
 
 function _isDocumentVisibleAndFocused() {
   if(typeof document!=='undefined' && document.visibilityState && document.visibilityState!=='visible') return false;
@@ -2792,8 +2821,11 @@ function stopSessionStream() {
 
 // Shared bg_task_complete handler — invoked from BOTH the in-turn STREAMS
 // channel (legacy path, still kept as defense-in-depth) AND the session-
-// scoped channel (Option X primary path). Dedupes by (session_id, task_id).
-// D-b-2 swaps the Set dedupe for a Map+TTL ring buffer keyed by event_id.
+// scoped channel (Option X primary path). Dedupes by (session_id, event_id)
+// via the Map+TTL ring buffer declared at the top of this module.
+// Events without `event_id` are ignored — the server contract guarantees one
+// on every completion emit, so a missing key signals a malformed or replayed
+// payload we should not surface or ack.
 // The UX surface (toast spawn) lands in PR (c); this handler is intentionally
 // minimal — dedupe + diagnostic ack only.
 function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
@@ -2801,10 +2833,10 @@ function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
     const d = JSON.parse(e.data || '{}');
     const sid = d.session_id || expectedSid;
     if (sid !== expectedSid) return;
+    const evt_id = d.event_id ? String(d.event_id) : '';
+    if (!evt_id) return;  // server contract requires event_id; ignore otherwise
+    if (_bgTaskCompleteRingBufferAdd(sid, evt_id)) return;  // duplicate
     const pid = String(d.task_id || '');
-    const dedupeKey = sid + '|' + pid;
-    if (pid && _bgTaskCompleteSeenIds.has(dedupeKey)) return;
-    if (pid) _bgTaskCompleteSeenIds.add(dedupeKey);
 
     // Fire-and-forget ack (diagnostic only — Option Z made this a no-op for
     // state. The agent wakeup is now started SERVER-SIDE by the drain thread
@@ -2815,7 +2847,7 @@ function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         credentials: 'include',
-        body: JSON.stringify({session_id: sid, task_id: pid}),
+        body: JSON.stringify({session_id: sid, task_id: pid, event_id: evt_id}),
       }).catch(() => {});
     } catch(_) {}
 
