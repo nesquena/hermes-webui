@@ -2125,6 +2125,23 @@ def _hide_from_default_sidebar(session: dict) -> bool:
     return False
 
 
+def _is_empty_untitled_sidebar_session(session: dict) -> bool:
+    """Return True only for ephemeral empty sessions that should be hidden."""
+    title = str(session.get('title', 'Untitled') or 'Untitled').strip()
+    try:
+        message_count = int(session.get('message_count') or 0)
+    except (TypeError, ValueError):
+        message_count = 0
+    return (
+        title == 'Untitled'
+        and message_count == 0
+        and not session.get('active_stream_id')
+        and not session.get('has_pending_user_message')
+        and not session.get('pending_user_message')
+        and not session.get('worktree_path')
+    )
+
+
 def _sidebar_message_count(session: dict) -> int:
     for key in ('message_count', 'actual_message_count'):
         try:
@@ -2354,13 +2371,7 @@ def all_sessions(diag=None):
             # initial streaming turn the session still looks like Untitled+0-messages.
             # Without this exemption, navigating away during a long first turn causes
             # the session to vanish from the sidebar.
-            result = [s for s in result if not (
-                s.get('title', 'Untitled') == 'Untitled'
-                and s.get('message_count', 0) == 0
-                and not s.get('active_stream_id')
-                and not s.get('has_pending_user_message')
-                and not s.get('worktree_path')
-            )]
+            result = [s for s in result if not _is_empty_untitled_sidebar_session(s)]
             result = _prefer_fuller_snapshots_for_sidebar(result)
             result = [s for s in result if not _hide_from_default_sidebar(s)]
             _strip_sidebar_internal_flags(result)
@@ -2392,13 +2403,14 @@ def all_sessions(diag=None):
     # Hide empty Untitled sessions from the UI entirely — kept consistent with the
     # index-path filter above. No grace window: a 0-message Untitled session is
     # never shown regardless of age (#1171).  Same streaming exemption as above (#1327).
-    result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids) for s in out if not (
-        s.title == 'Untitled'
-        and len(s.messages) == 0
-        and not s.active_stream_id
-        and not s.pending_user_message
-        and not getattr(s, 'worktree_path', None)
-    )]
+    result = [
+        compact
+        for compact in (
+            s.compact(include_runtime=True, active_stream_ids=active_stream_ids)
+            for s in out
+        )
+        if not _is_empty_untitled_sidebar_session(compact)
+    ]
     result = _prefer_fuller_snapshots_for_sidebar(result)
     result = [s for s in result if not _hide_from_default_sidebar(s)]
     _strip_sidebar_internal_flags(result)
