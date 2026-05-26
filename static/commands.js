@@ -29,7 +29,7 @@ const COMMANDS=[
   {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
-  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
+  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh [session]', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
   {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
 ];
@@ -1128,16 +1128,24 @@ function cmdStatus(){
   renderMessages();
 }
 function cmdReasoning(args){
-  const arg=(args||'').trim().toLowerCase();
+  const raw=(args||'').trim();
   const BRAIN='\uD83E\uDDE0';
   // Matches hermes_constants.VALID_REASONING_EFFORTS + 'none' (CLI parity).
   const EFFORTS=['none','minimal','low','medium','high','xhigh'];
+  // #2697 \u2014 accept an optional 'session' qualifier as a second token:
+  //   /reasoning <effort>          --> profile default (writes config.yaml)
+  //   /reasoning <effort> session  --> session override (writes session sidecar)
+  // The arg parse keeps the no-token and show/hide branches unchanged.
+  const tokens=raw.toLowerCase().split(/\s+/).filter(Boolean);
+  const arg=tokens[0]||'';
+  const scopeToken=tokens[1]||'';
+  const wantSession=(scopeToken==='session');
   // Shared status renderer used by the no-args branch and as a fallback.
   function _fmtStatus(st){
     const vis=(st && st.show_reasoning===false)?'off':'on';
     const eff=(st && st.reasoning_effort)||'default';
     return BRAIN+' Reasoning effort: '+eff+' \u00B7 display: '+vis
-      +'  |  /reasoning show|hide|none|minimal|low|medium|high|xhigh';
+      +'  |  /reasoning show|hide|none|minimal|low|medium|high|xhigh [session]';
   }
   if(!arg){
     // Status — read from the same config.yaml keys the CLI uses.
@@ -1175,7 +1183,28 @@ function cmdReasoning(args){
       });
     return true;
   }
-  showToast('Unknown argument: '+arg+' \u2014 use show|hide|'+EFFORTS.join('|'));
+  if(scopeToken&&!wantSession){
+    showToast('Unknown scope: '+scopeToken+' \u2014 use "session" or omit for profile default');
+    return true;
+  }
+  if(wantSession&&EFFORTS.includes(arg)){
+    // #2697 \u2014 per-session override: writes the session sidecar, NOT
+    // config.yaml, so the profile default and CLI are unaffected.
+    const sid=S.session&&S.session.session_id;
+    if(!sid){showToast(t('no_active_session'));return true;}
+    api('/api/session/reasoning',{method:'POST',body:JSON.stringify({session_id:sid,effort:arg})})
+      .then(function(st){
+        const eff=(st && st.reasoning_effort)||arg;
+        if(S.session) S.session.reasoning_effort=eff;
+        showToast(BRAIN+' Reasoning effort: '+eff+' (session only)');
+        if(typeof _applyReasoningChip==='function') _applyReasoningChip(eff,eff);
+      })
+      .catch(function(e){
+        showToast(BRAIN+' Failed to set session effort: '+(e && e.message ? e.message : arg));
+      });
+    return true;
+  }
+  showToast('Unknown argument: '+arg+' \u2014 use show|hide|'+EFFORTS.join('|')+' [session]');
   return true;
 }
 function cmdVoice(){

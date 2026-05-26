@@ -453,6 +453,7 @@ class Session:
                 worktree_created_at=None,
                 enabled_toolsets=None,
                 composer_draft=None,
+                reasoning_effort=None,
                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -507,6 +508,14 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        # Per-session reasoning effort override (#2697). None = inherit profile
+        # default (agent.reasoning_effort in config.yaml). Otherwise one of the
+        # values in api.config.VALID_REASONING_EFFORTS plus 'none' (disabled).
+        # Persisted in the session sidecar; resolved at stream start by
+        # api/streaming.py with session-overrides-profile precedence.
+        self.reasoning_effort = (
+            str(reasoning_effort).strip().lower() if reasoning_effort else None
+        )
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
         if raw_message_count is not None:
@@ -574,6 +583,8 @@ class Session:
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
+            # #2697 — per-session reasoning effort override (None = inherit profile default)
+            'reasoning_effort',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['messages'] = self.messages
@@ -788,6 +799,8 @@ class Session:
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            # #2697 — per-session reasoning effort override (None = profile default)
+            'reasoning_effort': self.reasoning_effort,
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
