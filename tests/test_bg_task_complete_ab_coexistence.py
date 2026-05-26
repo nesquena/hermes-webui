@@ -254,3 +254,95 @@ def test_mark_registry_completion_consumed_fails_loud_on_rename(monkeypatch, cap
     # The marker was NOT set (the bug it guards against), but it failed LOUD so
     # CI / monitoring catches it instead of double-firing wakeups silently.
     assert not fake.is_completion_consumed("p-renamed")
+
+
+def test_emit_uses_new_event_name_with_trimmed_payload_and_event_id(monkeypatch):
+    """T1 + T2 contract: emit is named ``bg_task_complete`` (canonical) AND
+    ``process_complete`` (dual-emit shim until PR (b)); payload matches the
+    minimal shape ``{session_id, task_id, completed_at, summary?, event_id}``;
+    both emits carry the same payload + the same ``event_id``.
+    """
+    fake = _FakeProcessRegistry()
+    fake.register("task-evt-1", "sess-evt-1")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+
+    from api import background_process as bp
+
+    bp.register_process_session("sess-evt-1", "sess-evt-1")
+
+    # Capture every (event, data) tuple the emitter pushes to streams.
+    emits: list[tuple[str, dict]] = []
+
+    def _capture(session_id: str, event: str, data: dict) -> int:
+        emits.append((event, data))
+        return 1
+
+    monkeypatch.setattr(bp, "_emit_to_session_streams", _capture)
+
+    evt = {
+        "type": "completion",
+        "session_id": "task-evt-1",
+        "session_key": "sess-evt-1",
+        "command": "sleep 1",
+        "exit_code": 0,
+        "output": "done",
+    }
+    bp._process_one(evt)
+
+    # Dual-emit shim: both names fire, same payload, same event_id.
+    names = [e[0] for e in emits]
+    assert "bg_task_complete" in names, f"canonical event missing: {names}"
+    assert "process_complete" in names, f"dual-emit shim missing: {names}"
+
+    payloads = [e[1] for e in emits if e[0] in ("bg_task_complete", "process_complete")]
+    assert len({p["event_id"] for p in payloads}) == 1, (
+        "dual-emit must share a single event_id so consumers can dedupe"
+    )
+
+    payload = payloads[0]
+    # Minimal shape per maintainer (R2 §Q1).
+    expected_required = {"session_id", "task_id", "completed_at", "event_id"}
+    allowed = expected_required | {"summary"}
+    assert expected_required <= set(payload), f"missing required keys: {payload}"
+    assert set(payload) <= allowed, f"unexpected keys in trimmed payload: {payload}"
+
+    # Dropped keys must NOT be present.
+    for dropped in ("command", "exit_code", "type", "stdout_preview", "wakeup_prompt", "emitted_at", "process_id"):
+        assert dropped not in payload, f"{dropped!r} should be dropped by T1 trim"
+
+    # Field-rename invariants:
+    assert payload["session_id"] == "sess-evt-1"
+    assert payload["task_id"] == "task-evt-1"          # was process_id
+    assert isinstance(payload["completed_at"], float)  # was emitted_at
+    assert isinstance(payload["event_id"], str) and len(payload["event_id"]) >= 8
+
+
+def test_event_id_is_unique_per_emit(monkeypatch):
+    """T2: every emit gets a fresh event_id; two completions for two distinct
+    processes produce two distinct ids.
+    """
+    fake = _FakeProcessRegistry()
+    fake.register("task-a", "sess-evt-2")
+    fake.register("task-b", "sess-evt-2")
+    _install_fake_registry(monkeypatch, fake)
+    _reset_cfg_state()
+
+    from api import background_process as bp
+
+    bp.register_process_session("sess-evt-2", "sess-evt-2")
+
+    emits: list[tuple[str, dict]] = []
+
+    def _capture(session_id: str, event: str, data: dict) -> int:
+        emits.append((event, data))
+        return 1
+
+    monkeypatch.setattr(bp, "_emit_to_session_streams", _capture)
+
+    bp._process_one({"type": "completion", "session_id": "task-a", "session_key": "sess-evt-2", "exit_code": 0})
+    bp._process_one({"type": "completion", "session_id": "task-b", "session_key": "sess-evt-2", "exit_code": 0})
+
+    canonical_payloads = [d for ev, d in emits if ev == "bg_task_complete"]
+    assert len(canonical_payloads) == 2
+    assert canonical_payloads[0]["event_id"] != canonical_payloads[1]["event_id"]
