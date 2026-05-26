@@ -177,61 +177,6 @@ def test_bg_task_complete_wakeup_emits_canonical_event_with_event_id(monkeypatch
     assert len(payload["event_id"]) >= 8
 
 
-def test_bg_task_complete_wakeup_dual_emits_legacy_alias_with_shared_event_id(monkeypatch):
-    """The dual-emit shim fires the legacy ``process_complete`` event with
-    the *same* payload and the *same* ``event_id``. This is what lets a
-    consumer that still listens on the old name dedupe against the new
-    canonical event during the PR (a) -> PR (b) cutover.
-    """
-    fake = _FakeProcessRegistry()
-    fake.register("task-wakeup-2", "sess-wakeup-2")
-    _install_fake_registry(monkeypatch, fake)
-    _reset_cfg_state()
-
-    from api import background_process as bp
-
-    bp.register_process_session("sess-wakeup-2", "sess-wakeup-2")
-    emits = _capture_emits(monkeypatch)
-
-    evt = {
-        "type": "completion",
-        "session_id": "task-wakeup-2",
-        "session_key": "sess-wakeup-2",
-        "command": "echo hi",
-        "exit_code": 0,
-        "output": "hi",
-    }
-    bp._process_one(evt)
-
-    names = [e[0] for e in emits]
-    assert "bg_task_complete" in names
-    assert "process_complete" in names, (
-        "dual-emit shim must still fire ``process_complete`` until PR (b) "
-        f"removes it; got {names}"
-    )
-
-    relevant = [d for ev, d in emits if ev in ("bg_task_complete", "process_complete")]
-    assert len({d["event_id"] for d in relevant}) == 1, (
-        "dual-emit must share a single event_id so consumers dedupe across "
-        "the old/new event names"
-    )
-
-    # Old payload keys MUST NOT regress on either name.
-    for d in relevant:
-        for dropped in (
-            "command",
-            "exit_code",
-            "type",
-            "stdout_preview",
-            "wakeup_prompt",
-            "emitted_at",
-            "process_id",
-        ):
-            assert dropped not in d, (
-                f"{dropped!r} present in dual-emit payload: {d}"
-            )
-
-
 class _FakeHandler:
     """Minimal handler stub for exercising ``handle_post`` directly.
 
