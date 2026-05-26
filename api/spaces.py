@@ -6878,11 +6878,20 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = save_space_meta_from_tool(data)
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="save-meta")
         response = {"ok": True, "action": name, **result, "progress_event": progress_event}
-        if isinstance(result.get("prompt_preflight"), dict):
-            response["autonomy_policy"] = _space_current_instruction_action_policy_receipt(
-                name,
-                result["prompt_preflight"],
-            )
+        preflight_receipt = result.get("prompt_preflight") if isinstance(result.get("prompt_preflight"), dict) else None
+        autonomy_policy = _space_current_instruction_action_policy_receipt(
+            name,
+            preflight_receipt,
+        )
+        response["autonomy_policy"] = autonomy_policy
+        response["output_compaction"] = _space_tool_action_output_compaction_receipt(
+            action=name,
+            space_id=result.get("space_id"),
+            widget_count=len((result.get("space") or {}).get("widgets") or []),
+            revision_event_id=result.get("revision_event_id"),
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+        )
         if name.startswith("space.current."):
             response["active_space_id"] = result["space_id"]
         return response
@@ -6891,12 +6900,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             _space_tool_reject_ambient_current_selectors(data)
         result = save_space_layout_from_tool(data)
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="save-layout")
+        autonomy_policy = _space_layout_action_policy_receipt(name)
         response = {
             "ok": True,
             "action": name,
             **result,
-            "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=result.get("space_id"),
+                widget_count=len((result.get("space") or {}).get("widgets") or []),
+                revision_event_id=result.get("revision_event_id"),
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
         if name.startswith("space.current."):
             response["active_space_id"] = result["space_id"]
@@ -6904,11 +6922,20 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name == "space.spaces.repairlayout":
         _space_tool_reject_ambient_current_selectors(data)
         result = repair_space_layout_from_tool(data)
+        autonomy_policy = _space_layout_action_policy_receipt(name)
         return {
             "ok": True,
             "action": name,
             **result,
-            "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "autonomy_policy": autonomy_policy,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=result.get("space_id"),
+                widget_count=result.get("widget_count"),
+                revision_event_id=result.get("revision_event_id"),
+                autonomy_policy=autonomy_policy,
+                progress_event=result.get("progress_event"),
+            ),
         }
     if name == "space.spaces.rearrangewidgets":
         _space_tool_reject_ambient_current_selectors(data)
@@ -6935,6 +6962,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             revision_event_ids.append(result["revision_event_id"])
             saved_widgets.append(read_widget_detail(space_id, widget_id))
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.rearrange")
+        autonomy_policy = _space_layout_action_policy_receipt(name)
         return {
             "ok": True,
             "action": name,
@@ -6943,8 +6971,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widgets": saved_widgets,
             "widget_count": len(saved_widgets),
             "revision_event_ids": revision_event_ids,
-            "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=len(saved_widgets),
+                revision_event_ids=revision_event_ids,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
     if name in {"space.spaces.removespace", "space.spaces.deletespace"}:
         _space_tool_reject_ambient_current_selectors(data)

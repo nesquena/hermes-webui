@@ -7863,6 +7863,172 @@ def test_space_tool_adapter_duplicate_delete_source_output_compaction_receipts_m
     assert "raw prompt/body-like text" not in serialized
 
 
+def test_space_tool_adapter_meta_layout_repair_rearrange_output_compaction_receipts_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "layout-action-compaction-lab",
+            "name": "Layout Action Compaction Lab SECRET_VALUE_DO_NOT_LEAK",
+            "description": "raw prompt/body-like text renderer source api_key <script>",
+            "agent_instructions": "Do not leak raw prompt/body-like text SECRET_SOURCE",
+            "layout": {"columns": 24, "renderer": "<script>stored()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather-card",
+            "kind": "weather",
+            "title": "Weather SECRET_VALUE_DO_NOT_LEAK",
+            "layout": {"x": 1, "y": 1, "w": 5, "h": 3},
+            "renderer": "<script>stored()</script>",
+            "source": "SECRET_SOURCE",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "prompt": "raw prompt/body-like text"},
+        },
+    )
+    spaces.run_space_tool(
+        "space.current.saveLayout",
+        {
+            "activeSpaceId": created["space_id"],
+            "widgetIds": ["weather-card"],
+            "widgetPositions": {"weather-card": {"x": 2, "y": 2}},
+            "widgetSizes": {"weather-card": {"w": 6, "h": 4}},
+            "renderer": "<script>layout()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    cases = [
+        (
+            "space.current.saveMeta",
+            {
+                "activeSpaceId": created["space_id"],
+                "name": "Safe Layout Actions",
+                "specialInstructions": "Keep widget layout changes metadata-only.",
+                "renderer": "<script>meta()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "prompt": "raw prompt/body-like text must not leak",
+            },
+            "save-meta:layout-action-compaction-lab",
+            "pass",
+            "hint:reasoning",
+            "widget_count: 1",
+        ),
+        (
+            "space.current.saveLayout",
+            {
+                "activeSpaceId": created["space_id"],
+                "widgetIds": ["weather-card"],
+                "widgetPositions": {"weather-card": {"x": 3, "y": 4, "renderer": "<script>layout()</script>"}},
+                "widgetSizes": {"weather-card": {"w": 7, "h": 5, "token": "SECRET_TOKEN_DO_NOT_LEAK"}},
+                "source": "SECRET_SOURCE",
+            },
+            "save-layout:layout-action-compaction-lab",
+            "required",
+            "hint:fast",
+            "widget_count: 1",
+        ),
+        (
+            "space.spaces.repairLayout",
+            {
+                "spaceId": created["space_id"],
+                "renderer": "<script>repair()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "prompt": "raw prompt/body-like text must not leak",
+            },
+            "repair:layout-action-compaction-lab",
+            "required",
+            "hint:fast",
+            "widget_count: 1",
+        ),
+        (
+            "space.spaces.rearrangeWidgets",
+            {
+                "spaceId": created["space_id"],
+                "widgets": [
+                    {
+                        "id": "weather-card",
+                        "x": 4,
+                        "y": 5,
+                        "cols": 8,
+                        "rows": 6,
+                        "source": "SECRET_SOURCE",
+                        "renderer": "<script>rearrange()</script>",
+                    }
+                ],
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "layout.rearrange:layout-action-compaction-lab",
+            "required",
+            "hint:fast",
+            "widget_count: 1",
+        ),
+    ]
+
+    for action, payload, expected_run_id, expected_preflight, expected_route_hint, expected_widget_count in cases:
+        result = spaces.run_space_tool(action, payload)
+        serialized = json.dumps(result, sort_keys=True).lower()
+        compaction = result["output_compaction"]
+        text = compaction["text"].lower()
+
+        assert result["ok"] is True
+        assert result["action"] == action.lower()
+        assert compaction["tool"] == "capy-spaces-tool-action"
+        assert compaction["command"] == action.lower()
+        assert compaction["exit_status"] == 0
+        assert compaction["metadata_only"] is True
+        assert compaction["redaction_status"] in {"metadata_only", "redacted"}
+        assert f"space_action: {action.lower()}" in text
+        assert "space_id: layout-action-compaction-lab" in text
+        assert expected_widget_count in text
+        assert f"prompt_preflight_status: {expected_preflight}" in text
+        assert f"model_route_hint: {expected_route_hint}" in text
+        assert f"progress_run_id: {expected_run_id}" in text
+        assert "progress_status: completed" in text
+        assert result.get("revision_event_id") or result.get("revision_event_ids")
+        if result.get("revision_event_id"):
+            assert f"revision_event_id: {result['revision_event_id']}" in text
+        else:
+            assert result.get("revision_event_ids")
+        assert {"kind": "space", "handle": "space:layout-action-compaction-lab", "label": "Space action metadata"} in compaction[
+            "retained_artifact_handles"
+        ]
+        assert "secret_value_do_not_leak" not in serialized
+        assert "secret_source" not in serialized
+        assert "secret_token_do_not_leak" not in serialized
+        assert "raw prompt/body-like text" not in serialized
+        assert "<script" not in serialized
+        assert "renderer" not in serialized
+        assert '\"source\":' not in serialized
+        assert "api_key" not in serialized
+
+    meta_without_instructions = spaces.run_space_tool(
+        "space.spaces.saveSpaceMeta",
+        {
+            "spaceId": created["space_id"],
+            "name": "Metadata Only Rename",
+            "description": "Safe metadata-only summary",
+            "renderer": "<script>meta()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "prompt": "raw prompt/body-like text must not leak",
+        },
+    )
+    meta_without_instructions_serialized = json.dumps(meta_without_instructions, sort_keys=True).lower()
+    meta_without_instructions_text = meta_without_instructions["output_compaction"]["text"].lower()
+
+    assert meta_without_instructions["ok"] is True
+    assert meta_without_instructions["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert "prompt_preflight_status: required" in meta_without_instructions_text
+    assert "model_route_hint: hint:reasoning" in meta_without_instructions_text
+    assert "progress_run_id: save-meta:layout-action-compaction-lab" in meta_without_instructions_text
+    assert meta_without_instructions.get("revision_event_id")
+    assert "secret_value_do_not_leak" not in meta_without_instructions_serialized
+    assert "raw prompt/body-like text" not in meta_without_instructions_serialized
+    assert "<script" not in meta_without_instructions_serialized
+    assert "renderer" not in meta_without_instructions_serialized
+    assert "api_key" not in meta_without_instructions_serialized
+
+
 @pytest.mark.parametrize("action", ["space.spaces.duplicateSpace", "space.spaces.cloneSpace"])
 def test_space_tool_adapter_duplicate_clone_rejects_conflicting_target_aliases_before_create_metadata_only(
     monkeypatch, tmp_path, action
