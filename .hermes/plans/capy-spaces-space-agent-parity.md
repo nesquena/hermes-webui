@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): render creator visual QA progress receipts`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving creator commit success cards render backend `visual_qa_event` metadata-only progress evidence beside prompt-preflight, compaction, and action-policy receipts.
+  - Reused the structured progress renderer so `space.visual_qa.completed` / `space.visual_qa` / safe `creator:<space_id>` run ids become visible without exposing raw prompts, generated code, renderer/source/API-auth fields, scripts, or secret-looking fixture values.
+
 - `feat(spaces): compact camera stream receipts`
   - Added RED/GREEN backend coverage proving approved `space.camera.add_stream` / `camera.add_stream` tool responses include metadata-only `output_compaction` receipts beside the existing required prompt-preflight, action-policy, and structured progress evidence.
   - The camera compaction receipt preserves only safe action, Space/widget/stream ids, scheme/host-class/mixed-content, approval/preflight/policy/model-route, and progress run metadata while omitting raw camera hosts, ports, query tokens, renderer/source/API-auth fields, bearer strings, scripts, and secret-looking fixture values.

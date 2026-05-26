@@ -1075,6 +1075,20 @@ global.fetch = async function(path, opts = {}) {
           renderer: '<script>bad()</script>',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         },
+        visual_qa_event: {
+          event_id: 'creator-visual-qa-event-1',
+          event_type: 'space.visual_qa.completed',
+          family: 'space.visual_qa',
+          run_id: 'creator:creator-lab',
+          redaction_status: 'metadata_only',
+          metadata_only: true,
+          raw_prompt: 'Build SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>',
+          prompt: 'Build SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>',
+          generated_code: '<script>bad()</script>',
+          renderer: '<script>bad()</script>',
+          source: 'generated renderer source SECRET_VALUE_DO_NOT_LEAK',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
       });
     }
   }
@@ -7781,6 +7795,12 @@ def test_creator_commit_requires_shared_confirm_and_revision_gates(driver_path):
     assert "Redaction: redacted" in out["rootHtml"]
     assert "Rules: redact_unsafe_markers, cap_section_chars" in out["rootHtml"]
     assert "Raw output, prompt bodies, widget bodies, and credentials remain omitted" in out["rootHtml"]
+    assert "Creator visual QA progress" in out["rootHtml"]
+    assert "space.visual_qa.completed" in out["rootHtml"]
+    assert "space.visual_qa" in out["rootHtml"]
+    assert "run creator:creator-lab" in out["rootHtml"]
+    assert "metadata-only progress receipt" in out["rootHtml"]
+    assert "Structured event metadata only; raw prompts, tool bodies, and generated contents are omitted." in out["rootHtml"]
     assert "abcdef0123456789abcdef0123456789" in out["rootHtml"]
     assert "Open committed Space" in out["rootHtml"]
     assert "Manage committed widgets" in out["rootHtml"]

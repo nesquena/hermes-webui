@@ -1363,7 +1363,7 @@
       '</div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Creator commit saved</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(rev ? ' · Revision: '+escapeHtml(rev) : '')+'</div>' +
-      revisionReceipt + renderCreatorMemoryAssist(data || {}) + renderPromptPreflightEvidence(data && data.prompt_preflight) + renderCompactionEvidence(data && (data.output_compaction || data.compaction)) + renderActionPolicyEvidence(data && data.autonomy_policy) +
+      revisionReceipt + renderCreatorMemoryAssist(data || {}) + renderPromptPreflightEvidence(data && data.prompt_preflight) + renderCompactionEvidence(data && (data.output_compaction || data.compaction)) + renderActionPolicyEvidence(data && data.autonomy_policy) + renderPackageProgressEvidence(data && data.visual_qa_event, 'Creator visual QA progress') +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       (spaceId ? '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+'</div>' : '') +
       '</div>'+actions+'</div></div></div>';
