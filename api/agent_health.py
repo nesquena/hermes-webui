@@ -174,10 +174,24 @@ def _gateway_root_pid_path() -> Path | None:
     Gateway runtime files are root-level singletons.  A profile-scoped WebUI
     process may have HERMES_HOME=<root>/profiles/<name>, but gateway.pid,
     gateway.lock, and gateway_state.json still live under <root>.
+
+    When the root-level gateway.pid is absent (profile-scoped gateway
+    deployments write it under <root>/profiles/<name>/), fall back to the
+    active profile's directory so the gateway is detected correctly.
     """
     try:
         from hermes_constants import get_default_hermes_root
-        return get_default_hermes_root() / _GATEWAY_PID_FILE
+        root_pid = get_default_hermes_root() / _GATEWAY_PID_FILE
+        if root_pid.exists():
+            return root_pid
+        try:
+            from api.profiles import get_active_hermes_home
+            profile_pid = Path(get_active_hermes_home()) / _GATEWAY_PID_FILE
+            if profile_pid.exists():
+                return profile_pid
+        except Exception:
+            pass
+        return root_pid
     except Exception:
         return None
 

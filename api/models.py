@@ -51,6 +51,8 @@ _STALE_TMP_AGE_SECONDS = 3600  # 1 hour
 # Serializes index writers so concurrent Session.save() calls cannot race on
 # stale baselines while still allowing LOCK to be released before disk I/O.
 _INDEX_WRITE_LOCK = threading.RLock()
+_SESSION_INDEX_REBUILD_LOCK = threading.Lock()
+_SESSION_INDEX_REBUILD_THREAD = None
 
 
 def _cleanup_stale_tmp_files() -> None:
@@ -72,6 +74,32 @@ def _cleanup_stale_tmp_files() -> None:
                 pass  # best-effort
     except Exception:
         pass  # SESSION_DIR may not exist yet; that's fine
+
+
+def _rebuild_session_index_background() -> None:
+    try:
+        _write_session_index(updates=None)
+    except Exception:
+        logger.debug("Background session-index rebuild failed", exc_info=True)
+
+
+def _start_session_index_rebuild_thread() -> None:
+    """Start one background full-index rebuild if the index is missing."""
+    global _SESSION_INDEX_REBUILD_THREAD
+    with _SESSION_INDEX_REBUILD_LOCK:
+        if SESSION_INDEX_FILE.exists():
+            return
+        if (
+            _SESSION_INDEX_REBUILD_THREAD is not None
+            and _SESSION_INDEX_REBUILD_THREAD.is_alive()
+        ):
+            return
+        _SESSION_INDEX_REBUILD_THREAD = threading.Thread(
+            target=_rebuild_session_index_background,
+            name="session-index-rebuild",
+            daemon=True,
+        )
+        _SESSION_INDEX_REBUILD_THREAD.start()
 
 
 def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
@@ -415,6 +443,7 @@ class Session:
                  context_engine_state=None,
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
+                 truncation_watermark=None,
                  gateway_routing=None, gateway_routing_history=None,
                  llm_title_generated: bool=False,
                 parent_session_id: str=None,
@@ -461,6 +490,7 @@ class Session:
         self.context_length = context_length
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
+        self.truncation_watermark = truncation_watermark
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
         self.llm_title_generated = bool(llm_title_generated)
@@ -490,6 +520,18 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
+    def _maybe_clear_truncation_watermark(self) -> None:
+        watermark = _message_timestamp_as_float({"timestamp": self.truncation_watermark})
+        if watermark is None:
+            return
+        max_message_timestamp = None
+        for msg in self.messages or []:
+            timestamp = _message_timestamp_as_float(msg)
+            if timestamp is not None:
+                max_message_timestamp = timestamp if max_message_timestamp is None else max(max_message_timestamp, timestamp)
+        if max_message_timestamp is not None and max_message_timestamp > watermark:
+            self.truncation_watermark = None
+
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         # ── #1558 P0 guard ──────────────────────────────────────────────
         # Refuse to save a session that was loaded with metadata_only=True.
@@ -510,6 +552,7 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
+        self._maybe_clear_truncation_watermark()
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -525,6 +568,7 @@ class Session:
             'context_engine', 'compression_anchor_engine', 'compression_anchor_mode',
             'compression_anchor_details', 'context_engine_state',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
+            'truncation_watermark',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
@@ -2081,6 +2125,23 @@ def _hide_from_default_sidebar(session: dict) -> bool:
     return False
 
 
+def _is_empty_untitled_sidebar_session(session: dict) -> bool:
+    """Return True only for ephemeral empty sessions that should be hidden."""
+    title = str(session.get('title', 'Untitled') or 'Untitled').strip()
+    try:
+        message_count = int(session.get('message_count') or 0)
+    except (TypeError, ValueError):
+        message_count = 0
+    return (
+        title == 'Untitled'
+        and message_count == 0
+        and not session.get('active_stream_id')
+        and not session.get('has_pending_user_message')
+        and not session.get('pending_user_message')
+        and not session.get('worktree_path')
+    )
+
+
 def _sidebar_message_count(session: dict) -> int:
     for key in ('message_count', 'actual_message_count'):
         try:
@@ -2236,6 +2297,9 @@ def all_sessions(diag=None):
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
     _diag_stage(diag, "all_sessions.index_exists")
+    if not SESSION_INDEX_FILE.exists():
+        _diag_stage(diag, "all_sessions.start_index_rebuild")
+        _start_session_index_rebuild_thread()
     if SESSION_INDEX_FILE.exists():
         try:
             _diag_stage(diag, "all_sessions.read_index")
@@ -2307,13 +2371,7 @@ def all_sessions(diag=None):
             # initial streaming turn the session still looks like Untitled+0-messages.
             # Without this exemption, navigating away during a long first turn causes
             # the session to vanish from the sidebar.
-            result = [s for s in result if not (
-                s.get('title', 'Untitled') == 'Untitled'
-                and s.get('message_count', 0) == 0
-                and not s.get('active_stream_id')
-                and not s.get('has_pending_user_message')
-                and not s.get('worktree_path')
-            )]
+            result = [s for s in result if not _is_empty_untitled_sidebar_session(s)]
             result = _prefer_fuller_snapshots_for_sidebar(result)
             result = [s for s in result if not _hide_from_default_sidebar(s)]
             _strip_sidebar_internal_flags(result)
@@ -2345,13 +2403,14 @@ def all_sessions(diag=None):
     # Hide empty Untitled sessions from the UI entirely — kept consistent with the
     # index-path filter above. No grace window: a 0-message Untitled session is
     # never shown regardless of age (#1171).  Same streaming exemption as above (#1327).
-    result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids) for s in out if not (
-        s.title == 'Untitled'
-        and len(s.messages) == 0
-        and not s.active_stream_id
-        and not s.pending_user_message
-        and not getattr(s, 'worktree_path', None)
-    )]
+    result = [
+        compact
+        for compact in (
+            s.compact(include_runtime=True, active_stream_ids=active_stream_ids)
+            for s in out
+        )
+        if not _is_empty_untitled_sidebar_session(compact)
+    ]
     result = _prefer_fuller_snapshots_for_sidebar(result)
     result = [s for s in result if not _hide_from_default_sidebar(s)]
     _strip_sidebar_internal_flags(result)
@@ -3285,13 +3344,27 @@ def state_db_delta_after_context(sidecar_context: list, state_messages: list) ->
     return state_messages[best_len:]
 
 
-def merge_session_messages_append_only(sidecar_messages: list, state_messages: list) -> list:
+def merge_session_messages_append_only(
+    sidecar_messages: list,
+    state_messages: list,
+    *,
+    truncation_watermark=None,
+) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows."""
     sidecar_messages = list(sidecar_messages or [])
     state_messages = list(state_messages or [])
+    watermark_timestamp = _message_timestamp_as_float({"timestamp": truncation_watermark})
     if not state_messages:
         return sidecar_messages
     if not sidecar_messages:
+        if watermark_timestamp is not None:
+            return [
+                msg for msg in state_messages
+                if (
+                    (timestamp := _message_timestamp_as_float(msg)) is not None
+                    and timestamp <= watermark_timestamp
+                )
+            ]
         return state_messages
 
     merged_messages = []
@@ -3335,6 +3408,13 @@ def merge_session_messages_append_only(sidecar_messages: list, state_messages: l
                 skipped_state_visible_counts[matched_visible_key] = (
                     skipped_state_visible_counts.get(matched_visible_key, 0) + 1
                 )
+            continue
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp > watermark_timestamp
+            and key not in seen_message_keys
+        ):
             continue
         if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
             if key in seen_message_keys:
@@ -3392,7 +3472,11 @@ def reconciled_state_db_messages_for_session(
         state_messages = get_state_db_session_messages(getattr(session, 'session_id', None))
     if prefer_context and local_messages:
         state_messages = state_db_delta_after_context(local_messages, state_messages)
-    return merge_session_messages_append_only(local_messages, state_messages)
+    return merge_session_messages_append_only(
+        local_messages,
+        state_messages,
+        truncation_watermark=getattr(session, "truncation_watermark", None),
+    )
 
 
 def get_cli_session_messages(sid) -> list:

@@ -121,3 +121,23 @@ def test_done_handler_is_idempotent_for_replay_or_duplicate_done_events():
     assert guard_idx != -1 and guard_idx < sound_idx, (
         "completion sound must be behind the duplicate-done finalization guard"
     )
+
+
+def test_attach_live_stream_registers_one_source_per_session_stream():
+    """Reconnect/compaction paths must not stack same-stream EventSources.
+
+    The stream channel broadcasts each token to every subscriber. If the browser
+    opens four live EventSources for the same run, one assistant paragraph is
+    appended four times even though the run journal contains it once.
+    """
+    close_body = _function_body("closeLiveStream")
+    attach_body = _function_body("attachLiveStream")
+    wire_body = _function_body("_wireSSE")
+    error_body = _event_body("error")
+
+    assert "const LIVE_STREAMS={};" in MESSAGES_JS
+    assert "LIVE_STREAMS[activeSid]={streamId,source};" in wire_body
+    assert "existingLive.source.close();" in wire_body
+    assert "if(source&&live.source!==source) return;" in close_body
+    assert "existingLive&&existingLive.streamId===streamId" in attach_body
+    assert "_closeSource(source);" in error_body

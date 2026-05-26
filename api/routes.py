@@ -2146,6 +2146,23 @@ def _messages_include_tool_metadata(messages) -> bool:
     return False
 
 
+def _tool_calls_for_message_window(tool_calls, start_idx: int, message_count: int) -> list:
+    """Keep session-level tool calls that point into a returned message window."""
+    if not isinstance(tool_calls, list) or message_count <= 0:
+        return []
+    end_idx = start_idx + message_count
+    filtered = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        assistant_idx = tool_call.get("assistant_msg_idx")
+        if isinstance(assistant_idx, bool) or not isinstance(assistant_idx, int):
+            continue
+        if start_idx <= assistant_idx < end_idx:
+            filtered.append(tool_call)
+    return filtered
+
+
 def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     """Return the message coordinate space exposed by ``GET /api/session``.
 
@@ -2202,7 +2219,11 @@ def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict
         sidecar_messages = getattr(sidecar_session, "messages", []) or []
     state_db_messages = get_state_db_session_messages(sid, profile=profile)
     return _message_summary(
-        merge_session_messages_append_only(sidecar_messages, state_db_messages)
+        merge_session_messages_append_only(
+            sidecar_messages,
+            state_db_messages,
+            truncation_watermark=getattr(sidecar_session, "truncation_watermark", None),
+        )
     )
 
 
@@ -4033,7 +4054,11 @@ def handle_get(handler, parsed) -> bool:
                     # them chronologically and dedupe exact repeats.
                     _all_msgs = _merged_session_messages_for_display(s, cli_messages)
                 else:
-                    _all_msgs = merge_session_messages_append_only(s.messages, state_db_messages)
+                    _all_msgs = merge_session_messages_append_only(
+                        s.messages,
+                        state_db_messages,
+                        truncation_watermark=getattr(s, "truncation_watermark", None),
+                    )
             else:
                 if is_messaging_session and cli_messages:
                     sidecar_messages = getattr(s, "messages", []) or []
@@ -4080,6 +4105,19 @@ def handle_get(handler, parsed) -> bool:
                     _truncated_msgs = _all_msgs
             else:
                 _truncated_msgs = []
+            # Index of the first returned message in the full message array.
+            # Frontend uses this as cursor for scroll-to-top paging.
+            if load_messages and msg_before is not None:
+                _messages_offset = max(0, _before_idx - len(_truncated_msgs))
+            elif load_messages:
+                _messages_offset = max(0, len(_all_msgs) - len(_truncated_msgs))
+            else:
+                _messages_offset = 0
+            _windowed_messages = (
+                load_messages
+                and msg_limit is not None
+                and (msg_before is not None or len(_truncated_msgs) < len(_all_msgs))
+            )
             # Resolve effective context_length with model-metadata fallback so
             # older sessions (pre-#1318) that have context_length=0 persisted
             # still render a meaningful indicator on load.  Mirrors the
@@ -4119,6 +4157,12 @@ def handle_get(handler, parsed) -> bool:
                 # messages already carry per-message tool metadata. Avoid sending
                 # the full historical list with a small tail window.
                 _session_tool_calls = []
+            elif _windowed_messages:
+                _session_tool_calls = _tool_calls_for_message_window(
+                    _session_tool_calls,
+                    _messages_offset,
+                    len(_truncated_msgs),
+                )
             _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
             _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
             if _summary_last_message_at is None and _all_msgs:
@@ -4179,12 +4223,7 @@ def handle_get(handler, parsed) -> bool:
             else:
                 _truncated = load_messages and msg_limit is not None and len(_all_msgs) > msg_limit
             raw["_messages_truncated"] = _truncated
-            # Index of the first returned message in the full message array.
-            # Frontend uses this as cursor for scroll-to-top paging.
-            if msg_before is not None:
-                raw["_messages_offset"] = max(0, _before_idx - len(_truncated_msgs))
-            else:
-                raw["_messages_offset"] = max(0, len(_all_msgs) - len(_truncated_msgs))
+            raw["_messages_offset"] = _messages_offset
             _t4 = _time.monotonic()
             if effective_model:
                 raw["model"] = effective_model
@@ -4754,7 +4793,7 @@ def handle_get(handler, parsed) -> bool:
             configured = True
         else:  # alive is None → gateway not configured / unavailable
             running = bool(identity_map)
-            configured = False
+            configured = bool(identity_map)
 
         platforms_set: set[str] = set()
         for meta in identity_map.values():
@@ -5433,6 +5472,11 @@ def handle_post(handler, parsed) -> bool:
         keep = int(body["keep_count"])
         with _get_session_agent_lock(body["session_id"]):
             s.messages = s.messages[:keep]
+            try:
+                from api.session_ops import _truncation_watermark_for
+                s.truncation_watermark = _truncation_watermark_for(s.messages)
+            except Exception:
+                s.truncation_watermark = 0.0
             s.save()
         return j(
             handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}

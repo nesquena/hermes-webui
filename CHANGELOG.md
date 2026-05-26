@@ -3,6 +3,46 @@
 
 ## [Unreleased]
 
+## [v0.51.137] — 2026-05-25 — Release DI (stage-batch19 — 6-PR medium-risk batch)
+
+### Added
+
+- Operators can now set `HERMES_WEBUI_CSP_CONNECT_EXTRA` to append validated extra origins to the report-only CSP `connect-src` directive for reverse-proxy or tunnel deployments.
+
+### Fixed
+
+- Trim session-level tool call payloads to the returned message window for paginated `/api/session` loads, so long tool-heavy sessions do not send historical tool call summaries during ordinary session switching.
+- Sidebar compression lineage collapse now prefers the current continuation tip over a preserved parent snapshot when both rows share the same backend segment count. This keeps reloads after context compression from reopening the older parent transcript and making the active conversation appear to disappear.
+- Reloading a stale `/session/<parent>` compression URL now resolves to the visible continuation tip from the sidebar payload instead of reopening the archived parent snapshot.
+- Undo, retry, and explicit session truncation now persist a sidecar truncation watermark, preventing older `state.db` rows from reappearing after the WebUI transcript was intentionally shortened.
+- Chat uploads with the same filename in one session now keep distinct attachment files instead of overwriting the earlier upload.
+- Compression reference card no longer disappears behind the "Load earlier messages" cutoff after subsequent turns. The post-compression anchor is now calculated from the position of the last `[CONTEXT COMPACTION]` marker in the transcript instead of pointing at the visible tail, so the anchor stays at the compression boundary regardless of how many turns have been added since.
+
+## [v0.51.136] — 2026-05-25 — Release DH (stage-batch18 — 5-PR streaming + session index batch)
+
+### Fixed
+
+- When the session index is missing, WebUI now starts a background rebuild while preserving the first sidebar full-scan result, so the index is primed for later requests without temporarily hiding existing sessions.
+- Live token-usage hints now cap the cumulative in-flight tool-result prompt estimate per assistant turn, preventing many large tool callbacks from temporarily inflating the context ring before exact provider accounting arrives.
+- Streaming checkpoint saves now run under the session's profile environment, so periodic background checkpoints no longer risk falling back to the process-global profile when a WebUI tab is using a non-default profile.
+- Chat streaming now keeps a single live EventSource registered per session/stream, preventing reconnect or context-compaction paths from stacking subscribers and rendering one assistant token stream multiple times.
+- Streaming visible-progress text emitted simultaneously through token, reasoning, and interim-assistant callbacks now renders once in the chat transcript instead of duplicating inside Thinking cards.
+
+## [v0.51.135] — 2026-05-25 — Release DG (stage-batch17 — 9-PR small-fix batch)
+
+### Added
+
+- Added a proposed canonical session resolution RFC covering URL routes, query parameters, localStorage, sidebar rows, and compression-lineage IDs so future session-routing fixes have one review contract.
+
+### Fixed
+
+- Browser session links that use the API-style `?session_id=<id>` query parameter now open the requested conversation instead of falling back to the last locally stored session.
+- Gateway status now treats existing messaging-session metadata as configured when `gateway.status` is unavailable, avoiding a misleading "Gateway not configured" warning for multi-container deployments with active gateway sessions.
+- Session sidebar Archive/Delete menu actions now repaint from local sidebar state immediately after the server confirms the mutation, instead of waiting for the full `/api/sessions` refresh before the row disappears.
+- Clarification dialogs now reserve transcript space while open or collapsed, so the question prompt no longer covers the assistant text needed to answer it.
+- Chat uploads now send the absolute server-side path for image attachments in the agent text context, restoring immediate tool access (e.g. `vision_analyze`) to files uploaded in the current turn.
+- Pending uploaded-file user turns no longer double-render when both the optimistic bubble and the server's pending-message hydration produce the same `[Attached files: ...]` suffix.
+
 ## [v0.51.134] — 2026-05-25 — Release DF (stage-batch16 — single-PR Windows path defaults)
 
 ### Fixed
