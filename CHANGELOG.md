@@ -5,7 +5,7 @@
 
 ### Added
 
-- New Settings > Preferences toggle "Show sessions from all workspaces" (default on). When off, the sidebar only lists sessions whose stored workspace path matches the active workspace, matching how `show_cli_sessions` and `_showAllProfiles` already scope the list along other axes. (#2549)
+- New Settings > Preferences toggle "Show sessions from all workspaces" (default on). When off, the sidebar only lists sessions whose stored workspace path matches the active workspace, matching how `show_cli_sessions` and `_showAllProfiles` already scope the list along other axes. Pinned sessions are exempt from the filter so the `★ Pinned` group stays visible across workspace switches. An empty-state hint renders when the filter rejects every row. Workspace path comparison is case-sensitive in this slice; Slice C of #2549 will normalize casing in a follow-up. (#2549)
 
 ## [v0.51.137] — 2026-05-25 — Release DI (stage-batch19 — 6-PR medium-risk batch)
 
