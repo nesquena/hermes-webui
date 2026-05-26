@@ -7766,6 +7766,103 @@ def test_space_tool_adapter_duplicate_clone_returns_policy_and_progress_receipts
     assert "secret_value_do_not_leak" not in serialized
 
 
+@pytest.mark.parametrize(
+    "action, operation",
+    [
+        ("space.spaces.duplicateSpace", "duplicate"),
+        ("space.spaces.cloneSpace", "duplicate"),
+        ("space.spaces.removeSpace", "delete"),
+        ("space.spaces.deleteSpace", "delete"),
+    ],
+)
+def test_space_tool_adapter_duplicate_delete_source_output_compaction_receipts_metadata_only(
+    monkeypatch, tmp_path, action, operation
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    source_name = "Hostile <script> source name SECRET_VALUE_DO_NOT_LEAK"
+    source_description = "raw prompt/body-like text SECRET_SOURCE renderer source api_key <script>"
+    source_instructions = "Never echo raw prompt/body-like text SECRET_VALUE_DO_NOT_LEAK renderer source api_key"
+    space_id = f"compaction-{operation}-{action.split('.')[-1].lower()}-lab"
+    created = spaces.create_space(
+        {
+            "space_id": space_id,
+            "name": source_name,
+            "description": source_description,
+            "agent_instructions": source_instructions,
+            "layout": {"columns": 24, "renderer": "<script>stored()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "hostile-widget",
+            "kind": "html",
+            "title": "raw prompt/body-like text SECRET_VALUE_DO_NOT_LEAK",
+            "renderer": "<script>stored()</script>",
+            "html": "<img src=x onerror=stored()>",
+            "source": "SECRET_SOURCE",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "body": "raw prompt/body-like text"},
+        },
+    )
+
+    payload = {
+        "spaceId": created["space_id"],
+        "renderer": "<script>steal()</script>",
+        "source": "SECRET_SOURCE",
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        "prompt": "raw prompt/body-like text must not leak",
+    }
+    if operation == "duplicate":
+        payload["targetSpaceId"] = f"compaction-{action.split('.')[-1].lower()}-target"
+    result = spaces.run_space_tool(action, payload)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["ok"] is True
+    assert result["action"] == action.lower()
+    assert result["autonomy_policy"]["metadata_only"] is True
+    assert result["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = result["output_compaction"]
+    text = compaction["text"].lower()
+
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == action.lower()
+    assert compaction["exit_status"] == 0
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert f"space_action: {action.lower()}" in text
+    assert "widget_count: 1" in text
+    assert "prompt_preflight_status: required" in text
+    assert "model_route_hint: hint:fast" in text
+    assert "progress_status: completed" in text
+    if operation == "duplicate":
+        assert result["source_space_id"] == created["space_id"]
+        assert result["space_id"] == payload["targetSpaceId"]
+        assert f"source_space_id: {created['space_id']}" in text
+        assert f"target_space_id: {result['space_id']}" in text
+        assert f"progress_run_id: space.duplicate:{result['space_id']}" in text
+        assert {"kind": "space", "handle": f"space:{result['space_id']}", "label": "Space action metadata"} in compaction[
+            "retained_artifact_handles"
+        ]
+    else:
+        assert result["deleted"] is True
+        assert result["space_id"] == created["space_id"]
+        assert f"space_id: {created['space_id']}" in text
+        assert f"progress_run_id: space.delete:{created['space_id']}" in text
+
+    assert result["revision_event_id"]
+    assert f"revision_event_id: {result['revision_event_id']}" in text
+    assert source_name.lower() not in text
+    assert source_description.lower() not in text
+    assert source_instructions.lower() not in text
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '\"source\":' not in serialized
+    assert "api_key" not in serialized
+    assert "raw prompt/body-like text" not in serialized
+
+
 @pytest.mark.parametrize("action", ["space.spaces.duplicateSpace", "space.spaces.cloneSpace"])
 def test_space_tool_adapter_duplicate_clone_rejects_conflicting_target_aliases_before_create_metadata_only(
     monkeypatch, tmp_path, action

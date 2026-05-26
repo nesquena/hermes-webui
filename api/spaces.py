@@ -1782,6 +1782,108 @@ def _space_create_output_compaction_receipt(
 
 
 
+def _space_tool_action_output_compaction_receipt(
+    *,
+    action: str,
+    space_id: str | None = None,
+    source_space_id: str | None = None,
+    target_space_id: str | None = None,
+    widget_count: int | None = None,
+    revision_event_id: str | None = None,
+    revision_event_ids: list[str] | None = None,
+    autonomy_policy: dict[str, Any] | None = None,
+    progress_event: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return metadata-only compaction evidence for source-style Space actions.
+
+    Source duplicate/delete tool payloads may carry ignored renderer/source/auth
+    fields and operate on manifests containing widget bodies. This receipt is
+    reconstructed only from allow-listed IDs/counts/policy/progress metadata.
+    """
+    from api.capy_compaction import compact_output
+
+    safe_action = _context_value(action, 120) or "space.action"
+    safe_space_id = _context_value(space_id, 120) if space_id else None
+    safe_source_space_id = _context_value(source_space_id, 120) if source_space_id else None
+    safe_target_space_id = _context_value(target_space_id, 120) if target_space_id else None
+    try:
+        safe_widget_count = max(0, int(widget_count or 0))
+    except (TypeError, ValueError):
+        safe_widget_count = 0
+
+    public_revision_event_ids: list[str] = []
+    for candidate in [revision_event_id, *(revision_event_ids or [])]:
+        public_event_id = _public_revision_event_id(candidate)
+        if public_event_id and public_event_id not in public_revision_event_ids:
+            public_revision_event_ids.append(public_event_id)
+
+    lines = [
+        "Capy Spaces tool action metadata-only receipt",
+        f"space_action: {safe_action}",
+        "metadata_only: true",
+        "raw_prompt_stored: false",
+    ]
+    if safe_source_space_id:
+        lines.append(f"source_space_id: {safe_source_space_id}")
+    if safe_space_id:
+        lines.append(f"space_id: {safe_space_id}")
+    if safe_target_space_id:
+        lines.append(f"target_space_id: {safe_target_space_id}")
+    lines.append(f"widget_count: {safe_widget_count}")
+    if public_revision_event_ids:
+        if len(public_revision_event_ids) == 1:
+            lines.append(f"revision_event_id: {public_revision_event_ids[0]}")
+        else:
+            lines.append(f"revision_event_ids: {', '.join(public_revision_event_ids[:8])}")
+    if isinstance(autonomy_policy, dict):
+        lines.append(
+            f"prompt_preflight_status: {_payload_text_summary(autonomy_policy.get('prompt_preflight_status') or 'required', 40) or 'required'}"
+        )
+        lines.append(f"autonomy_action: {_payload_text_summary(autonomy_policy.get('action') or safe_action, 120) or safe_action}")
+        lines.append(
+            f"model_route_hint: {_payload_text_summary(autonomy_policy.get('model_route_hint') or 'hint:fast', 80) or 'hint:fast'}"
+        )
+    if isinstance(progress_event, dict):
+        fallback_progress_id = f"space.action:{safe_target_space_id or safe_space_id or safe_source_space_id or 'unknown-space'}"
+        lines.append(
+            f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or fallback_progress_id, 160) or fallback_progress_id}"
+        )
+        lines.append(f"progress_status: {_payload_text_summary(progress_event.get('status') or 'completed', 40) or 'completed'}")
+
+    retained_space_id = safe_target_space_id or safe_space_id or safe_source_space_id
+    artifact_handles: list[dict[str, str]] = []
+    if retained_space_id:
+        artifact_handles.append(
+            {
+                "kind": "space",
+                "handle": f"space:{retained_space_id}",
+                "label": "Space action metadata",
+            }
+        )
+    for event_id in public_revision_event_ids[:3]:
+        artifact_handles.append(
+            {
+                "kind": "revision",
+                "handle": f"revision:{event_id}",
+                "label": "Space action revision",
+            }
+        )
+
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-tool-action",
+        command=safe_action,
+        exit_status=0,
+        max_chars=900,
+        artifact_handles=artifact_handles,
+    )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
+
 def _space_layout_action_policy_receipt(action: str) -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
@@ -6752,13 +6854,23 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space = read_space_detail(result["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="space.duplicate")
+        autonomy_policy = _space_layout_action_policy_receipt(name)
         return {
             "ok": True,
             "action": name,
             **result,
             "space": space,
-            "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                source_space_id=result.get("source_space_id"),
+                target_space_id=result.get("space_id"),
+                widget_count=space.get("widget_count"),
+                revision_event_id=result.get("revision_event_id"),
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
     if name in {"space.spaces.savespacemeta", "space.current.savemeta"}:
         if not name.startswith("space.current."):
@@ -6837,14 +6949,25 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.spaces.removespace", "space.spaces.deletespace"}:
         _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
+        space_detail = read_space_detail(space_id)
+        widget_count = len(space_detail.get("widgets") or [])
         result = delete_space(space_id)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="space.delete")
+        autonomy_policy = _space_layout_action_policy_receipt(name)
         return {
             "ok": True,
             "action": name,
             **result,
-            "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=widget_count,
+                revision_event_id=result.get("revision_event_id"),
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
     if name in {"space.spaces.upsertwidget", "space.spaces.upsertwidgets"}:
         _space_tool_reject_ambient_current_selectors(data)
