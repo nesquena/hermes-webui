@@ -776,6 +776,26 @@ def _local_service_template_action_policy_receipt(preflight_receipt: dict[str, A
     )
 
 
+def _model_provider_template_prompt_preflight_receipt() -> dict[str, Any]:
+    from api.capy_policy import prompt_preflight
+
+    return prompt_preflight(
+        "Install model provider setup template with provider selection, local runtime review, and explicit approval for runtime changes.",
+        boundary="model_provider_template",
+    )
+
+
+def _model_provider_template_action_policy_receipt(preflight_receipt: dict[str, Any]) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        "space.template.install.model_provider",
+        approval_gates=["destructive_external_action", "credential_change"],
+        prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
+        model_route_hint="hint:local",
+    )
+
+
 def _template_reset_action_policy_receipt() -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
@@ -9742,6 +9762,10 @@ def install_template(template: str, *, space_id: str | None = None, record_progr
         preflight_receipt = _local_service_template_prompt_preflight_receipt()
         result["prompt_preflight"] = preflight_receipt
         result["autonomy_policy"] = _local_service_template_action_policy_receipt(preflight_receipt)
+    elif response_template == "model-setup":
+        preflight_receipt = _model_provider_template_prompt_preflight_receipt()
+        result["prompt_preflight"] = preflight_receipt
+        result["autonomy_policy"] = _model_provider_template_action_policy_receipt(preflight_receipt)
     return result
 
 

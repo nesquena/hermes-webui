@@ -2070,6 +2070,9 @@ global.fetch = async function(path, opts = {}) {
       return response({
         template: 'model-setup',
         space: { space_id: 'model-provider-setup', name: 'Model Provider Setup', description: 'Safe provider/local-model setup starter', widget_count: 4, revision_event_id: 'rev-model' },
+        prompt_preflight: { available: true, action: 'capy.prompt_preflight', boundary: 'model_provider_template', status: 'pass', severity: 'none', categories: [], metadata_only: true, raw_prompt_stored: false, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        autonomy_policy: { available: true, action: 'space.template.install.model_provider', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['destructive_external_action', 'credential_change'], prompt_preflight_status: 'pass', model_route_hint: 'hint:local', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        progress_event: { event_id: 'evt-template-install-model', event_type: 'tool.completed', family: 'tool', run_id: 'template.install:model-provider-setup', redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
         installed_widgets: [
           { id: 'model-provider-status', kind: 'status', title: 'Provider status', layout: { x: 0, y: 0, w: 10, h: 5, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
           { id: 'model-local-runtime', kind: 'local-runtime', title: 'Local runtime', layout: { x: 10, y: 0, w: 8, h: 5, minimized: false }, source: 'SECRET_SOURCE' },
@@ -5637,6 +5640,15 @@ def test_spaces_ui_install_model_setup_posts_template_and_shows_safe_open_manage
     assert "Open model setup" in out["rootHtml"]
     assert "Manage provider widgets" in out["rootHtml"]
     assert "Run provider setup smoke" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Status: pass" in out["rootHtml"]
+    assert "Boundary: model_provider_template" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Action: space.template.install.model_provider" in out["rootHtml"]
+    assert "Gates: Destructive action approval, Credential-change approval" in out["rootHtml"]
+    assert "Model route hint: hint:local" in out["rootHtml"]
+    assert "Template install progress" in out["rootHtml"]
+    assert "template.install:model-provider-setup" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="model-provider-setup"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="model-provider-setup"' in out["rootHtml"]
     assert 'data-capy-action="runDemoSmoke" data-demo="demo_provider_setup"' in out["rootHtml"]
