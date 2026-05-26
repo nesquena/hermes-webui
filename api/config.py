@@ -533,13 +533,46 @@ def _workspace_candidates(raw: str | Path | None = None) -> list[Path]:
     return candidates
 
 
+def _mode_allows(path: Path, required_bits: int) -> bool:
+    """Return permission-bit access, independent of root's os.access bypass."""
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return False
+    user_bits = (mode >> 6) & 0b111
+    group_bits = (mode >> 3) & 0b111
+    other_bits = mode & 0b111
+    return any((bits & required_bits) == required_bits for bits in (user_bits, group_bits, other_bits))
+
+
+def _is_autocreatable_workspace_path(path: Path) -> bool:
+    """Only create fallback workspace dirs under WebUI-controlled roots."""
+    try:
+        path.resolve().relative_to(HOME.resolve())
+        return True
+    except ValueError:
+        pass
+    try:
+        path.resolve().relative_to(STATE_DIR.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 
 def _ensure_workspace_dir(path: Path) -> bool:
     """Best-effort check that a workspace directory exists and is writable."""
     try:
         path = path.expanduser().resolve()
+        if path.exists():
+            return path.is_dir() and _mode_allows(path, 0b111)
+        if not _is_autocreatable_workspace_path(path):
+            return False
+        parent = path.parent
+        if not parent.exists() or not _mode_allows(parent, 0b111):
+            return False
         path.mkdir(parents=True, exist_ok=True)
-        return path.is_dir() and os.access(path, os.R_OK | os.W_OK | os.X_OK)
+        return path.is_dir() and _mode_allows(path, 0b111)
     except Exception:
         return False
 
@@ -5585,7 +5618,13 @@ def load_settings() -> dict:
     settings = dict(_SETTINGS_DEFAULTS)
     stored = None
     try:
-        settings_exists = SETTINGS_FILE.exists()
+        parent = SETTINGS_FILE.parent
+        settings_exists = (
+            parent.exists()
+            and _mode_allows(parent, 0b101)
+            and SETTINGS_FILE.exists()
+            and _mode_allows(SETTINGS_FILE, 0b100)
+        )
     except OSError:
         # PermissionError or other OS-level error (e.g. UID mismatch in Docker)
         # Treat as missing — start with defaults rather than crashing.
