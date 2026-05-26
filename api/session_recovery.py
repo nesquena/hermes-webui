@@ -589,6 +589,57 @@ def _session_recovery_progress_event(clean: bool) -> dict:
         }
 
 
+def _session_recovery_output_compaction_receipt(
+    *,
+    clean: bool,
+    repaired: int,
+    before: dict,
+    after: dict,
+    backup_repair: dict,
+    sidecar_repair: dict,
+    autonomy_policy: dict,
+    progress_event: dict,
+) -> dict:
+    """Return metadata-only compaction evidence for the repair-safe boundary.
+
+    Session recovery audits can contain local filenames and sidecar metadata. The
+    product-visible receipt is reconstructed from allow-listed aggregate counts
+    only, then passed through the shared compactor so recovery output follows the
+    same bounded evidence contract as Spaces tool receipts.
+    """
+    from api.capy_compaction import compact_output
+
+    raw_before_summary = before.get("summary")
+    raw_after_summary = after.get("summary")
+    before_summary = raw_before_summary if isinstance(raw_before_summary, dict) else {}
+    after_summary = raw_after_summary if isinstance(raw_after_summary, dict) else {}
+    status = "clean" if clean else "manual_review_required"
+    approval_required = "yes" if autonomy_policy.get("approval_required") else "no"
+    lines = [
+        "session_recovery: repair_safe",
+        f"repair_status: {status}",
+        f"before_status: {before.get('status') or 'unknown'}",
+        f"after_status: {after.get('status') or 'unknown'}",
+        f"repaired_sessions: {int(repaired)}",
+        f"backup_restored: {int(backup_repair.get('restored') or 0)}",
+        f"sidecars_materialized: {int(sidecar_repair.get('materialized') or 0)}",
+        f"repairable_before: {int(before_summary.get('repairable') or 0)}",
+        f"repairable_remaining: {int(after_summary.get('repairable') or 0)}",
+        f"unsafe_remaining: {int(after_summary.get('unsafe_to_repair') or 0)}",
+        f"approval_required: {approval_required}",
+        "prompt_preflight_status: required",
+        f"progress_run_id: {progress_event.get('run_id') or 'session.recovery.repair_safe'}",
+        f"progress_status: {progress_event.get('event_type') or ('tool.completed' if clean else 'tool.failed')}",
+    ]
+    return compact_output(
+        "\n".join(lines),
+        tool="capy-session-recovery",
+        command="session.recovery.repair_safe",
+        exit_status=0 if clean else 1,
+        max_chars=1200,
+    )
+
+
 def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None = None) -> dict:
     """Run safe, deterministic session recovery repairs.
 
@@ -613,17 +664,31 @@ def repair_safe_session_recovery(session_dir: Path, state_db_path: Path | None =
     unsafe_remaining = int((after.get("summary") or {}).get("unsafe_to_repair") or 0)
     repairable_remaining = int((after.get("summary") or {}).get("repairable") or 0)
     clean = unsafe_remaining == 0 and repairable_remaining == 0
+    repaired = int(backup_repair.get("restored") or 0) + int(sidecar_repair.get("materialized") or 0)
+    prompt_preflight = _session_recovery_required_prompt_preflight_receipt()
+    autonomy_policy = _session_recovery_action_policy_receipt()
+    progress_event = _session_recovery_progress_event(clean)
     return {
         "clean": clean,
         "ok": clean,
-        "repaired": int(backup_repair.get("restored") or 0) + int(sidecar_repair.get("materialized") or 0),
+        "repaired": repaired,
         "before": before,
         "backup_repair": backup_repair,
         "sidecar_repair": sidecar_repair,
         "after": after,
-        "prompt_preflight": _session_recovery_required_prompt_preflight_receipt(),
-        "autonomy_policy": _session_recovery_action_policy_receipt(),
-        "progress_event": _session_recovery_progress_event(clean),
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "output_compaction": _session_recovery_output_compaction_receipt(
+            clean=clean,
+            repaired=repaired,
+            before=before,
+            after=after,
+            backup_repair=backup_repair,
+            sidecar_repair=sidecar_repair,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+        ),
     }
 
 

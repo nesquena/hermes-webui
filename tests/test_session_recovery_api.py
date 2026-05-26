@@ -56,6 +56,14 @@ def test_repair_safe_session_recovery_restores_backup_and_rebuilds_index(tmp_pat
     assert progress["family"] == "tool"
     assert progress["run_id"] == "session.recovery.repair_safe"
     assert progress["redaction_status"] == "metadata_only"
+    compaction = result["output_compaction"]
+    assert compaction["tool"] == "capy-session-recovery"
+    assert compaction["command"] == "session.recovery.repair_safe"
+    assert compaction["exit_status"] == 0
+    assert compaction["redaction_status"] == "none"
+    assert "repair_status: clean" in compaction["text"]
+    assert "repaired_sessions: 1" in compaction["text"]
+    assert "approval_required: yes" in compaction["text"]
     assert live.exists()
     assert audit_session_recovery(tmp_path)["status"] == "ok"
     idx = json.loads(index.read_text(encoding="utf-8"))
@@ -82,6 +90,7 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
             "prompt_preflight": result["prompt_preflight"],
             "autonomy_policy": result["autonomy_policy"],
             "progress_event": result["progress_event"],
+            "output_compaction": result["output_compaction"],
         },
         sort_keys=True,
     ).lower()
@@ -90,6 +99,11 @@ def test_repair_safe_session_recovery_records_failed_progress_when_manual_review
     assert result["progress_event"]["event_type"] == "tool.failed"
     assert result["progress_event"]["run_id"] == "session.recovery.repair_safe"
     assert result["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
+    compaction = result["output_compaction"]
+    assert compaction["exit_status"] == 1
+    assert "repair_status: manual_review_required" in compaction["text"]
+    assert "unsafe_remaining: 1" in compaction["text"]
+    assert str(tmp_path).lower() not in serialized_receipts
     assert "secret" not in serialized_receipts
     assert "api_key" not in serialized_receipts
     assert "<script" not in serialized_receipts
