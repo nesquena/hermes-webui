@@ -8029,6 +8029,99 @@ def test_space_tool_adapter_meta_layout_repair_rearrange_output_compaction_recei
     assert "api_key" not in meta_without_instructions_serialized
 
 
+@pytest.mark.parametrize(
+    "action",
+    [
+        "space.spaces.repositionCurrentSpace",
+        "space.current.reposition",
+        "space.current.reposition_viewport",
+    ],
+)
+def test_space_tool_adapter_current_reposition_output_compaction_receipts_metadata_only(monkeypatch, tmp_path, action):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "current-reposition-compaction-lab",
+            "name": "Current Reposition Compaction Lab SECRET_VALUE_DO_NOT_LEAK",
+            "description": "raw prompt/body-like text renderer source api_key <script>",
+            "agent_instructions": "Do not leak raw prompt/body-like text SECRET_SOURCE",
+            "layout": {"columns": 24, "renderer": "<script>stored()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather-card",
+            "kind": "weather",
+            "title": "Weather SECRET_VALUE_DO_NOT_LEAK",
+            "layout": {"x": 1, "y": 1, "w": 5, "h": 3},
+            "renderer": "<script>stored()</script>",
+            "source": "SECRET_SOURCE",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "prompt": "raw prompt/body-like text"},
+        },
+    )
+
+    result = spaces.run_space_tool(
+        action,
+        {
+            "activeSpaceId": created["space_id"],
+            "spaceId": created["space_id"],
+            "resetCamera": True,
+            "viewport": {
+                "x": 12,
+                "y": 34,
+                "zoom": 0.75,
+                "renderer": "<script>viewport()</script>",
+                "source": "SECRET_SOURCE",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "prompt": "raw prompt/body-like text must not leak",
+                "secret": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "renderer": "<script>top()</script>",
+            "source": "SECRET_SOURCE",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "prompt": "raw prompt/body-like text must not leak",
+        },
+    )
+    serialized = json.dumps(result, sort_keys=True).lower()
+    compaction = result["output_compaction"]
+    text = compaction["text"].lower()
+
+    assert result["ok"] is True
+    assert result["action"] == action.lower()
+    assert result["autonomy_policy"]["metadata_only"] is True
+    assert result["progress_event"]["redaction_status"] == "metadata_only"
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == action.lower()
+    assert compaction["exit_status"] == 0
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert f"space_action: {action.lower()}" in text
+    assert "space_id: current-reposition-compaction-lab" in text
+    assert "widget_count: 1" in text
+    assert "prompt_preflight_status: required" in text
+    assert "model_route_hint: hint:fast" in text
+    assert "progress_run_id: layout.reposition:current-reposition-compaction-lab" in text
+    assert "progress_status: completed" in text
+    assert {"kind": "space", "handle": "space:current-reposition-compaction-lab", "label": "Space action metadata"} in compaction[
+        "retained_artifact_handles"
+    ]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source" not in serialized
+    assert "raw prompt/body-like text" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '\"source\":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in text
+    assert "secret_source" not in text
+    assert "raw prompt/body-like text" not in text
+    assert "<script" not in text
+    assert "renderer" not in text
+    assert "source" not in text
+    assert "api_key" not in text
+
+
 @pytest.mark.parametrize("action", ["space.spaces.duplicateSpace", "space.spaces.cloneSpace"])
 def test_space_tool_adapter_duplicate_clone_rejects_conflicting_target_aliases_before_create_metadata_only(
     monkeypatch, tmp_path, action

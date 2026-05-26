@@ -6834,7 +6834,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         }
         prompt_preflight = _space_layout_prompt_preflight_receipt(request)
         space_detail = read_space_detail(space_id)
+        widgets = space_detail.get("widgets") if isinstance(space_detail, dict) else None
+        widget_count = len(widgets) if isinstance(widgets, list) else None
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.reposition")
+        autonomy_policy = _space_layout_action_policy_receipt(name)
         return {
             "ok": True,
             "action": name,
@@ -6842,8 +6845,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "space": space_detail,
             "reposition": {"mode": "metadata-only", "applied": False, "request": request},
             "prompt_preflight": prompt_preflight,
-            "autonomy_policy": _space_layout_action_policy_receipt(name),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=widget_count,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
     if name in {"space.spaces.duplicatespace", "space.spaces.clonespace"}:
         _space_tool_reject_ambient_current_selectors(data)
