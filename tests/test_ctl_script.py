@@ -184,6 +184,17 @@ def assert_process_exits(pid: int, timeout: float = 3.0) -> None:
     while time.time() < deadline:
         if not process_exists(pid):
             return
+        try:
+            stat = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "stat="],
+                text=True,
+                capture_output=True,
+                timeout=1.0,
+            )
+            if stat.returncode == 0 and "Z" in stat.stdout:
+                return
+        except Exception:
+            pass
         time.sleep(0.05)
     _kill_tree(pid)
     raise AssertionError(f"process {pid} did not exit")
