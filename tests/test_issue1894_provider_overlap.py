@@ -1,21 +1,22 @@
 # Copyright 2025 the Hermes WebUI contributors
 # SPDX-License-Identifier: MIT
 
-# Regression tests for GitHub issue #1894.
-#
-# Symptom: when the WebUI's configured provider (e.g. `opencode-go`) and a
-# `custom_providers[]` entry both expose the same bare model id (e.g.
-# `deepseek-v4-pro`), the resolver was routing to `custom:<name>` instead of
-# the configured `opencode-go` endpoint.
-#
-# Root cause: `resolve_model_provider()` in `api/config.py` guarded the custom-
-# provider skip only when `model_id == model.default`.  If `model.default`
-# was a different model (e.g. `glm-5.1`), the overlap was not detected and
-# `deepseek-v4-pro` was matched against `custom_providers[]` first, routing
-# the WebUI to the wrong endpoint.
-#
-# Fix: widen the guard so an explicit non-custom provider wins for any model
-# it owns in `_PROVIDER_MODELS[config_provider]`.
+"""Regression tests for GitHub issue #1894.
+
+Symptom: when the WebUI's configured provider (e.g. ``opencode-go``) and a
+``custom_providers[]`` entry both expose the same bare model id (e.g.
+``deepseek-v4-pro``), the resolver was routing to ``custom:<name>`` instead of
+the configured ``opencode-go`` endpoint.
+
+Root cause: ``resolve_model_provider()`` in ``api/config.py`` guarded the
+custom-provider skip only when ``model_id == model.default``. If
+``model.default`` was a different model (e.g. ``glm-5.1``), the overlap was
+not detected and ``deepseek-v4-pro`` was matched against
+``custom_providers[]`` first, routing the WebUI to the wrong endpoint.
+
+Fix: widen the guard so an explicit non-custom provider wins for any model
+it owns in ``_PROVIDER_MODELS[config_provider]``.
+"""
 
 from api.config import resolve_model_provider, model_with_provider_context
 
@@ -101,10 +102,6 @@ def test_selected_opencode_go_wins_direct_resolve():
         _restore_config(cfg_mod, old_model, old_custom)
 
 
-# ---------------------------------------------------------------------------
-# Case 2 — custom-only model: custom provider routing must stay intact
-# ---------------------------------------------------------------------------
-
 def test_custom_only_model_still_routes_to_custom_provider():
     """Case 2 — custom-only model routing must stay intact.
 
@@ -130,10 +127,6 @@ def test_custom_only_model_still_routes_to_custom_provider():
         _restore_config(cfg_mod, old_model, old_custom)
 
 
-# ---------------------------------------------------------------------------
-# Case 3 — explicit custom provider selection still works
-# ---------------------------------------------------------------------------
-
 def test_explicit_custom_provider_selection_intact():
     """Case 3 — explicit custom provider selection still works.
 
@@ -143,10 +136,6 @@ def test_explicit_custom_provider_selection_intact():
     assert provider == 'custom:ds2api', f'Expected provider=custom:ds2api, got {provider!r}'
     assert model == 'deepseek-v4-pro'
 
-
-# ---------------------------------------------------------------------------
-# Case 4 — existing suffix syntax is preserved
-# ---------------------------------------------------------------------------
 
 def test_openrouter_suffix_still_works():
     """Case 4 — existing suffix syntax is preserved.
