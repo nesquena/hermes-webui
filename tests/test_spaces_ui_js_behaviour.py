@@ -894,6 +894,20 @@ global.fetch = async function(path, opts = {}) {
           visual_qa_required: true,
           approve_commit_required: true,
         },
+        progress_event: {
+          event_id: 'creator-preview-progress-1',
+          event_type: 'tool.completed',
+          family: 'tool',
+          run_id: 'creator-preview-run-1',
+          redaction_status: 'metadata-only',
+          metadata_only: true,
+          raw_prompt: body.prompt,
+          prompt: body.prompt,
+          generated_code: '<script>bad()</script>',
+          renderer: '<script>bad()</script>',
+          source: 'generated renderer source SECRET_VALUE_DO_NOT_LEAK',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
         spec: {
           space: { space_id: 'creator-lab', name: 'Creator Lab <Safe>', description: 'Metadata-only preview', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
           widgets: [
@@ -7431,11 +7445,18 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "Approval required: yes" in out["rootHtml"]
     assert "Creator commit approval" in out["rootHtml"]
     assert "Model route hint: hint:summarize" in out["rootHtml"]
+    assert "Creator preview progress" in out["rootHtml"]
+    assert "tool.completed" in out["rootHtml"]
+    assert "run creator-preview-run-1" in out["rootHtml"]
+    assert "metadata-only progress receipt" in out["rootHtml"]
+    assert "Structured event metadata only; raw prompts, tool bodies, and generated contents are omitted." in out["rootHtml"]
     assert "metadata-only" in out["rootHtml"]
     assert "local-only" in out["rootHtml"]
     assert "raw prompt not stored" in out["rootHtml"]
     assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "Create an ops dashboard" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
+    assert "bad()" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
     assert "raw_prompt" not in out["rootHtml"]
