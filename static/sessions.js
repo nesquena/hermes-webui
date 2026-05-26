@@ -618,6 +618,13 @@ async function loadSession(sid){
   }
   // Stale response? A newer loadSession() call has already started (#1060).
   if (_loadingSessionId !== sid) return;
+  const continuationSid=(data.session&&data.session.continuation_session_id)||'';
+  if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
+    try{localStorage.setItem('hermes-webui-session',continuationSid);}catch(_){}
+    _setActiveSessionUrl(continuationSid);
+    _loadingSessionId=null;
+    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true});
+  }
   S.session=data.session;
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
