@@ -43,6 +43,7 @@ import logging
 import queue
 import threading
 import time
+import uuid
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -315,17 +316,53 @@ def format_wakeup_prompt(evt: dict) -> str:
 
 
 def _build_payload(evt: dict, session_id: str) -> dict:
-    """Build the SSE data payload — pure data, no host-side state."""
-    return {
+    """Build the SSE data payload.
+
+    Shape per maintainer decision on PR #2242 (R2 §Q1):
+        ``{session_id, task_id, completed_at, summary?, event_id}``
+    Minimal by design — consumers re-fetch task detail by ``task_id`` if
+    they need ``command`` / ``exit_code`` / ``stdout_preview`` etc.
+
+    - ``task_id``: the background process id (registry uuid). Stable across
+      the process's lifetime; was previously surfaced as ``process_id``.
+    - ``completed_at``: float wall-clock seconds; was ``emitted_at``.
+    - ``summary``: optional one-liner derived from the completion event when
+      available (e.g. ``[IMPORTANT: …]`` synthetic body's first line); omitted
+      otherwise to honour "keep the payload minimal".
+    - ``event_id``: server-generated uuid hex — per-emit, so a re-emit for the
+      same ``task_id`` (shouldn't happen today, but the spec is forward-looking)
+      still produces a distinct id. The cross-A/B dedupe stays keyed on
+      ``task_id`` (it prevents double-emit at the source, which is the right
+      layer); the WebUI consumer-side ring buffer (PR (b)) keys on
+      ``(session_id, event_id)`` to dedupe across reconnects.
+    """
+    payload: dict[str, Any] = {
         "session_id": str(session_id),
-        "process_id": str(evt.get("session_id") or ""),
-        "command": _truncate(str(evt.get("command") or ""), 200),
-        "exit_code": evt.get("exit_code"),
-        "type": str(evt.get("type") or "completion"),
-        "stdout_preview": _truncate(str(evt.get("output") or ""), 4000),
-        "wakeup_prompt": format_wakeup_prompt(evt),
-        "emitted_at": time.time(),
+        "task_id": str(evt.get("session_id") or ""),
+        "completed_at": time.time(),
+        "event_id": uuid.uuid4().hex,
     }
+    # Best-effort optional summary: the first non-empty line of the synthetic
+    # wakeup body, trimmed. Omitted entirely when nothing useful is available.
+    try:
+        wakeup_body = format_wakeup_prompt(evt)
+        if wakeup_body:
+            # Strip leading "[IMPORTANT: " marker noise — take the first
+            # informative line, cap length.
+            first_line = next(
+                (
+                    ln.strip().lstrip("[").rstrip("]").strip()
+                    for ln in wakeup_body.splitlines()
+                    if ln.strip()
+                ),
+                "",
+            )
+            if first_line:
+                payload["summary"] = _truncate(first_line, 200)
+    except Exception:
+        # Summary is optional; never let its derivation block the emit.
+        logger.debug("summary derivation failed", exc_info=True)
+    return payload
 
 
 def _emit_to_session_streams(session_id: str, event: str, data: dict) -> int:
@@ -622,6 +659,16 @@ def _process_one(evt: dict) -> None:
     if process_id:
         seen.add(process_id)
     payload = _build_payload(evt, session_id)
+    # T1 emit rename: the canonical event name is now ``bg_task_complete``
+    # (per maintainer decision on PR #2242). Until PR (b) lands the new
+    # consumer-side listener, we ALSO emit the legacy ``process_complete``
+    # name so any in-flight WebUI build (subscribed to the old listener)
+    # still receives the wakeup. PR (b) will:
+    #   1. Add `bg_task_complete` listeners on the WebUI side.
+    #   2. Remove this dual-emit shim (drop the legacy alias).
+    # Both emits carry the SAME trimmed payload + the SAME event_id, so a
+    # consumer that ever sees both can dedupe by ``event_id``.
+    _emit_to_session_streams(session_id, "bg_task_complete", payload)
     _emit_to_session_streams(session_id, "process_complete", payload)
     _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
     # Mark the event consumed in the agent's process registry so the REAL
@@ -655,7 +702,13 @@ def _process_one(evt: dict) -> None:
     # the registry _completion_consumed marker mean this process_id reached
     # here at most once, so the wakeup turn starts at most once.
     try:
-        wakeup_prompt = str(payload.get("wakeup_prompt") or "").strip()
+        # ``wakeup_prompt`` is server-internal state used only by the
+        # Option Z server-side wakeup; it was previously surfaced on the
+        # SSE payload but T1 trimmed the payload to the minimal shape
+        # `{session_id, task_id, completed_at, summary?, event_id}`, so
+        # we derive the prompt directly from the evt here (same source the
+        # prior _build_payload used).
+        wakeup_prompt = format_wakeup_prompt(evt).strip()
         if wakeup_prompt:
             if _session_has_active_turn(session_id):
                 # Defer-path fix: persist the prompt so a turn-teardown
