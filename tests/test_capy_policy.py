@@ -42,6 +42,7 @@ def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
                 "browser_surface",
                 "local_service_template",
                 "model_provider_template",
+                "template_reset",
             ],
         },
         "model_routing": {

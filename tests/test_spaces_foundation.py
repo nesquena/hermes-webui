@@ -10663,7 +10663,12 @@ def test_space_tool_template_reset_accepts_camelcase_space_id_metadata_only(monk
     assert result["autonomy_policy"]["label"] == "Supervised"
     assert result["autonomy_policy"]["approval_required"] is True
     assert "creator_commit" in result["autonomy_policy"]["approval_gates"]
-    assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert result["prompt_preflight"]["action"] == "capy.prompt_preflight"
+    assert result["prompt_preflight"]["boundary"] == "template_reset"
+    assert result["prompt_preflight"]["status"] == "pass"
+    assert result["prompt_preflight"]["raw_prompt_stored"] is False
+    assert result["prompt_preflight"]["metadata_only"] is True
+    assert result["autonomy_policy"]["prompt_preflight_status"] == "pass"
     assert result["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
     assert result["autonomy_policy"]["metadata_only"] is True
     assert result["autonomy_policy"]["local_only"] is True
@@ -16502,6 +16507,13 @@ def test_reset_big_bang_template_restores_canonical_metadata_and_removes_extra_w
         "bigbang-next-steps",
     ]
     assert spaces.list_revision_events(space_id)[0]["event_type"] == "template.reset"
+    assert reset["prompt_preflight"]["action"] == "capy.prompt_preflight"
+    assert reset["prompt_preflight"]["boundary"] == "template_reset"
+    assert reset["prompt_preflight"]["status"] == "pass"
+    assert reset["prompt_preflight"]["raw_prompt_stored"] is False
+    assert reset["prompt_preflight"]["metadata_only"] is True
+    assert reset["autonomy_policy"]["action"] == "space.template.reset"
+    assert reset["autonomy_policy"]["prompt_preflight_status"] == "pass"
     serialized = json.dumps(reset).lower()
     assert "custom-generated" not in serialized
     assert "renderer" not in serialized
@@ -16529,6 +16541,11 @@ def test_big_bang_template_reset_route_returns_safe_metadata(monkeypatch, tmp_pa
     assert body["progress_event"]["event_type"] == "tool.completed"
     assert body["progress_event"]["run_id"] == f"template.reset:{space_id}"
     assert body["progress_event"]["redaction_status"] == "metadata_only"
+    assert body["prompt_preflight"]["boundary"] == "template_reset"
+    assert body["prompt_preflight"]["status"] == "pass"
+    assert body["prompt_preflight"]["raw_prompt_stored"] is False
+    assert body["prompt_preflight"]["metadata_only"] is True
+    assert body["autonomy_policy"]["prompt_preflight_status"] == "pass"
     assert [widget["id"] for widget in body["installed_widgets"]] == [
         "bigbang-welcome",
         "bigbang-demo-launcher",

@@ -58,6 +58,7 @@ _PROTECTED_BOUNDARIES = [
     "browser_surface",
     "local_service_template",
     "model_provider_template",
+    "template_reset",
 ]
 
 _MODEL_HINT_ORDER = [

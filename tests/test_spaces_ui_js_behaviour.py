@@ -2115,7 +2115,8 @@ global.fetch = async function(path, opts = {}) {
         { id: 'bigbang-next-steps', kind: 'checklist', title: 'Next steps' },
       ],
       progress_event: { event_id: 'evt-template-reset', event_type: 'tool.completed', family: 'tool', run_id: 'template.reset:' + (body.space_id || 'big-bang-onboarding'), redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
-      autonomy_policy: { available: true, action: 'space.template.reset', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit'], prompt_preflight_status: 'required', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      prompt_preflight: { available: true, action: 'capy.prompt_preflight', boundary: 'template_reset', status: 'pass', severity: 'none', categories: [], metadata_only: true, raw_prompt_stored: false, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      autonomy_policy: { available: true, action: 'space.template.reset', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
     });
   }
   if (path === 'api/spaces/revision/restore') {
@@ -7383,6 +7384,10 @@ def test_spaces_ui_reset_big_bang_uses_shared_confirm_and_renders_metadata_only(
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "Big Bang Onboarding" in out["rootHtml"]
     assert "Template reset progress" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Status: pass" in out["rootHtml"]
+    assert "Boundary: template_reset" in out["rootHtml"]
+    assert "source text omitted" in out["rootHtml"]
     assert "Action policy" in out["rootHtml"]
     assert "Action: space.template.reset" in out["rootHtml"]
     assert "Model route hint: hint:reasoning" in out["rootHtml"]

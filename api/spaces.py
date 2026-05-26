@@ -796,13 +796,22 @@ def _model_provider_template_action_policy_receipt(preflight_receipt: dict[str, 
     )
 
 
-def _template_reset_action_policy_receipt() -> dict[str, Any]:
+def _template_reset_prompt_preflight_receipt() -> dict[str, Any]:
+    from api.capy_policy import prompt_preflight
+
+    return prompt_preflight(
+        "Reset Big Bang onboarding to the canonical metadata-only template state; remove unsafe generated widgets while preserving revision history.",
+        boundary="template_reset",
+    )
+
+
+def _template_reset_action_policy_receipt(preflight_receipt: dict[str, Any]) -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
     receipt = action_policy_receipt(
         "space.template.reset",
         approval_gates=["creator_commit"],
-        prompt_preflight_status="required",
+        prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
         model_route_hint="hint:reasoning",
     )
     receipt["mode"] = "supervised"
@@ -9822,7 +9831,9 @@ def reset_template(template: str, *, space_id: str | None = None, record_progres
     }
     if record_progress:
         result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="template.reset")
-    result["autonomy_policy"] = _template_reset_action_policy_receipt()
+    preflight_receipt = _template_reset_prompt_preflight_receipt()
+    result["prompt_preflight"] = preflight_receipt
+    result["autonomy_policy"] = _template_reset_action_policy_receipt(preflight_receipt)
     return result
 
 
