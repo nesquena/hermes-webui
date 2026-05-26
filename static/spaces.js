@@ -1876,6 +1876,22 @@
     }
   }
 
+  function widgetEventPayloadSummaryForDisplay(payloadSummary){
+    if (!payloadSummary || typeof payloadSummary !== 'object' || Array.isArray(payloadSummary)) return {};
+    const promptCarrierKeys = ['agentprompt', 'agent_prompt', 'content', 'description', 'input', 'instruction', 'instructions', 'message', 'messages', 'prompt', 'question', 'query', 'request', 'summary', 'text'];
+    const bodyMarkers = ['body', 'generated', 'generatedbody', 'generatedcode', 'rawbody', 'rawcode', 'widgetbody'];
+    const safe = {};
+    Object.keys(payloadSummary).slice(0, 50).forEach(function(key){
+      const normalized = String(key || '').toLowerCase().replace(/[^a-z0-9_]+/g, '');
+      const compact = String(key || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+      if (promptCarrierKeys.indexOf(normalized) >= 0 || promptCarrierKeys.indexOf(compact) >= 0) return;
+      if (compact !== 'messagetype' && promptCarrierKeys.some(function(carrier){ return compact.endsWith(carrier.replace(/_/g, '')); })) return;
+      if (bodyMarkers.some(function(marker){ return compact.indexOf(marker) >= 0; })) return;
+      safe[key] = payloadSummary[key];
+    });
+    return safe;
+  }
+
   function renderWidgetEventInbox(events){
     const safeEvents = Array.isArray(events) ? events.slice(0, 10) : [];
     const rows = safeEvents.length ? safeEvents.map(function(event){
@@ -1887,15 +1903,25 @@
       const eventMeta = eventId || eventTime
         ? '<div class="capy-spaces-muted">'+escapeHtml((eventId ? 'Event: '+eventId : 'Event: unknown') + (eventTime ? ' · '+eventTime : ''))+'</div>'
         : '';
-      const details = Object.assign({}, event && event.payload_summary && typeof event.payload_summary === 'object' && !Array.isArray(event.payload_summary) ? event.payload_summary : {});
+      const details = widgetEventPayloadSummaryForDisplay(event && event.payload_summary && typeof event.payload_summary === 'object' && !Array.isArray(event.payload_summary) ? event.payload_summary : {});
       if (event && event.prompt_preview) details.prompt = event.prompt_preview;
       const detailText = formatRevisionDetails(details);
+      const eventReceiptHtml = function(html){
+        return String(html || '')
+          .replace(/raw prompt not stored/g, 'prompt text not stored')
+          .replace(/raw prompt text remains omitted/g, 'prompt text remains omitted')
+          .replace(/credentials remain omitted/g, 'secrets remain omitted');
+      };
+      const promptPreflightEvidence = eventReceiptHtml(renderPromptPreflightEvidence(event && event.prompt_preflight));
       const policyEvidence = renderActionPolicyEvidence(event && event.autonomy_policy);
+      const compactionEvidence = eventReceiptHtml(renderCompactionEvidence(event && event.output_compaction));
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventName)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(widgetId)+' · '+escapeHtml(status)+'</div>' +
         eventMeta +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
+        promptPreflightEvidence +
         policyEvidence +
+        compactionEvidence +
         '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No queued widget events.</div>';
     return '<div class="capy-spaces-card"><h3>Queued widget events</h3>' +

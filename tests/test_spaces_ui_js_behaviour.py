@@ -1392,7 +1392,7 @@ global.fetch = async function(path, opts = {}) {
     const widgetId = (isDemoWeather || isTimeTravelRestore || isRecovery) ? 'weather-current' : 'weather';
     return response({ events: [
       { event_id: 'evt-refresh', event_name: 'widget.refresh', widget_id: widgetId, status: 'queued', created_at: 1710000100, payload_summary: { action: 'refresh', note: 'bearer placeholder' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
-      { event_id: 'evt-agent', event_name: 'agent.prompt', widget_id: widgetId, status: 'queued', created_at: 1710000000, prompt_preview: 'Use token SECRET_VALUE_DO_NOT_LEAK', payload_summary: { query: 'forecast' }, autonomy_policy: { available: true, action: 'space.widget.event', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['generated_widget_execution', 'renderer'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'Use token SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
+      { event_id: 'evt-agent', event_name: 'agent.prompt', widget_id: widgetId, status: 'queued', created_at: 1710000000, prompt_preview: 'Use token SECRET_VALUE_DO_NOT_LEAK', payload_summary: { query: 'forecast' }, prompt_preflight: { available: true, status: 'pass', severity: 'none', categories: ['widget_runtime_prompt'], checks: ['prompt_injection'], metadata_only: true, raw_prompt: 'Use token SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, autonomy_policy: { available: true, action: 'space.widget.event', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['generated_widget_execution', 'renderer'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'Use token SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' }, output_compaction: { original_chars: 9400, compacted_chars: 320, redaction_status: 'none', rules_applied: ['cap_section_chars', 'preserve_error_blocks', 'renderer'], text: 'query: forecast', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
     ] });
   }
   if (path === 'api/spaces/widget?space_id=lab&widget_id=weather') {
@@ -4125,8 +4125,14 @@ def test_spaces_ui_widget_manager_shows_safe_queued_event_inbox(driver_path):
     assert "2024-03-09 16:01:40 UTC" in out["rootHtml"]
     assert "action: refresh" in out["rootHtml"]
     assert "note: [REDACTED]" in out["rootHtml"]
+    assert "query: forecast" not in out["rootHtml"]
     assert "prompt: [REDACTED]" in out["rootHtml"]
     assert "Action policy" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Status: pass" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 9400 chars · Compacted output: 320 chars · Redaction: none" in out["rootHtml"]
+    assert "Rules: cap_section_chars, preserve_error_blocks" in out["rootHtml"]
     assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in out["rootHtml"]
     assert "Gates: Generated widget execution approval" in out["rootHtml"]
     assert "Model route hint: hint:reasoning" in out["rootHtml"]

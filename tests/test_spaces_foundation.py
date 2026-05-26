@@ -1803,7 +1803,7 @@ def test_space_tool_adapter_supports_source_current_widget_read_helpers_metadata
     assert seen["widget"] == read_by_id["widget"]
     assert seen["contract"]["mode"] == "sandbox-contract-draft"
     assert seen["events"][0]["event_name"] == "agent.prompt"
-    assert seen["events"][0]["payload_summary"] == {"summary": "safe queued event"}
+    assert seen["events"][0]["payload_summary"] == {}
     assert "stored()" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
@@ -1973,6 +1973,247 @@ def test_space_tool_adapter_reload_widget_alias_without_prompt_returns_required_
     assert "renderer" not in serialized
     assert "api_key" not in serialized
     assert "token" not in serialized
+
+
+def test_space_tool_adapter_widget_event_returns_metadata_only_compaction_receipt(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-event-compaction-lab", "name": "Widget Event Compaction Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "agent-card", "kind": "markdown", "title": "Agent Card"})
+
+    queued = spaces.run_space_tool(
+        "space.current.widget.event",
+        {
+            "activeSpaceId": created["space_id"],
+            "widgetId": "agent-card",
+            "eventName": "agent.prompt",
+            "payload": {
+                "message": "Summarize safe metadata status for the visible card.",
+                "renderer": "<script>steal()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "prompt": "Use only metadata receipts.",
+            "session_id": "session-safe-1",
+            "token": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "agent-card")
+    serialized = json.dumps({"queued": queued, "events": events}, sort_keys=True).lower()
+
+    compaction = queued["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-widget-event"
+    assert compaction["command"] == "space.current.widget.event"
+    assert compaction["redaction_status"] == "none"
+    assert compaction["text"]
+    assert "widget_event_status: queued" in compaction["text"]
+    assert "prompt_preflight_status: pass" in compaction["text"]
+    assert events[0]["output_compaction"]["tool"] == "capy-spaces-widget-event"
+    assert queued["prompt_preflight"]["status"] == "pass"
+    assert queued["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert queued["progress_event"]["redaction_status"] == "metadata_only"
+    assert "summarize safe metadata status" not in serialized
+    assert "use only metadata receipts" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+
+
+def test_widget_event_payload_summary_omits_prompt_carriers_and_generated_bodies(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-event-payload-safety-lab", "name": "Widget Event Payload Safety Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "agent-card", "kind": "markdown", "title": "Agent Card"})
+
+    queued = spaces.queue_widget_event(
+        created["space_id"],
+        "agent-card",
+        "agent.prompt",
+        {
+            "messageType": "capy:agent:prompt",
+            "kind": "safe-event-metadata",
+            "note": "Summarize Claude Mythos private request must not persist.",
+            "title": "Write the private widget prompt must not persist.",
+            "question": "Forecast tomorrow must not persist.",
+            "message": "Message prompt must not persist.",
+            "text": "Text prompt must not persist.",
+            "content": "Content prompt must not persist.",
+            "instruction": "Instruction prompt must not persist.",
+            "instructions": "Instructions prompt must not persist.",
+            "query": "Query prompt must not persist.",
+            "summary": "Summary prompt must not persist.",
+            "body": "benign generated body must not persist",
+            "generated_body": "generated body must not persist",
+            "generatedBody": "generated camel body must not persist",
+            "raw_body": "raw body must not persist",
+            "renderer": "<script>steal()</script>",
+            "api_auth": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+        prompt="Safe top-level prompt for preflight only.",
+    )
+    events = spaces.list_widget_events(created["space_id"], "agent-card")
+    serialized = json.dumps({"queued": queued, "events": events}, sort_keys=True).lower()
+
+    assert queued["payload_summary"] == {"messageType": "capy:agent:prompt", "kind": "safe-event-metadata"}
+    assert events[0]["payload_summary"] == queued["payload_summary"]
+    for unsafe in (
+        "message prompt must not persist",
+        "text prompt must not persist",
+        "content prompt must not persist",
+        "instruction prompt must not persist",
+        "instructions prompt must not persist",
+        "query prompt must not persist",
+        "summary prompt must not persist",
+        "generated body must not persist",
+        "generated camel body must not persist",
+        "forecast tomorrow",
+        "raw body must not persist",
+        "safe top-level prompt",
+        "summarize claude mythos private request",
+        "what did the user ask privately",
+        "write the private widget prompt",
+        "steal",
+        "secret_value_do_not_leak",
+        "renderer",
+        "api_auth",
+    ):
+        assert unsafe not in serialized
+
+
+def test_list_widget_events_redacts_forged_persisted_output_compaction(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "forged-widget-compaction-lab", "name": "Forged Widget Compaction Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "agent-card", "kind": "markdown", "title": "Agent Card"})
+    queued_with_forged_action = spaces.queue_widget_event(
+        created["space_id"],
+        "agent-card",
+        "agent.prompt",
+        {"messageType": "capy:agent:prompt"},
+        prompt="Summarize safe metadata status for the visible card.",
+        action="query: action prompt text must not persist",
+    )
+    assert queued_with_forged_action["output_compaction"]["command"] == "space.widget.event"
+    legacy_event_id = spaces._record_event(
+        created["space_id"],
+        "widget.event.queued",
+        {
+            "widget_id": "agent-card",
+            "event_name": "agent.prompt",
+            "status": "queued",
+            "prompt_preview": "Summarize legacy private request must not persist.",
+            "payload_summary": {"messageType": "capy:agent:prompt", "note": "Legacy private request must not persist."},
+        },
+        event_id="legacy-missing-receipts",
+    )
+    event_id = spaces._record_event(
+        created["space_id"],
+        "widget.event.queued",
+        {
+            "widget_id": "agent-card",
+            "event_name": "Summarize safe metadata status for visible card",
+            "prompt_preview": "Summarize safe metadata status for the visible card.",
+            "payload_summary": {
+                "messageType": "capy:agent:prompt",
+                "kind": "safe-event-metadata",
+                "message": "Message prompt must not persist.",
+                "query": "Query prompt must not persist.",
+                "body": "Generated body must not persist.",
+                ("x" * 96) + "generated_body": "Long generated key must not persist.",
+                ("x" * 96) + "message": "Long message key must not persist.",
+            },
+            "status": "Summarize Claude Mythos status must not persist",
+            "prompt_preflight": {
+                "available": True,
+                "action": "query: preflight action prompt must not persist",
+                "boundary": "query: preflight boundary prompt must not persist",
+                "status": "query: preflight status prompt must not persist",
+                "severity": "query: preflight severity prompt must not persist",
+                "categories": ["query: preflight category prompt must not persist"],
+                "checks": ["query: preflight check prompt must not persist"],
+                "metadata_only": True,
+                "raw_prompt_stored": True,
+            },
+            "autonomy_policy": {
+                "available": True,
+                "action": "query: policy action prompt must not persist",
+                "mode": "query: policy mode prompt must not persist",
+                "label": "query: policy label prompt must not persist",
+                "approval_required": True,
+                "approval_gates": ["query: policy gate prompt must not persist"],
+                "prompt_preflight_status": "query: policy preflight prompt must not persist",
+                "model_route_hint": "query: policy route prompt must not persist",
+                "metadata_only": True,
+            },
+            "output_compaction": {
+                "tool": "capy-spaces-widget-event",
+                "command": "query: Summarize safe metadata status for the visible card.",
+                "text": "query: Summarize safe metadata status for the visible card.",
+                "renderer": "<script>steal()</script>",
+            },
+        },
+    )
+    spaces._record_event(
+        created["space_id"],
+        "widget.event.queued",
+        {
+            "widget_id": "summarize-claude-mythos",
+            "event_name": "agent.prompt",
+            "status": "queued",
+            "prompt_preview": "[REDACTED]",
+            "payload_summary": {},
+        },
+        event_id="forged-missing-widget-event",
+    )
+
+    events = spaces.list_widget_events(created["space_id"], "agent-card")
+    all_events = spaces.list_widget_events(created["space_id"])
+    serialized = json.dumps(events, sort_keys=True).lower()
+    all_serialized = json.dumps(all_events, sort_keys=True).lower()
+
+    assert events[0]["event_id"] == event_id
+    assert events[0]["output_compaction"]["tool"] == "capy-spaces-widget-event"
+    assert events[0]["output_compaction"]["command"] == "space.widget.event"
+    assert events[0]["event_name"] == "widget.event"
+    assert events[0]["status"] == "queued"
+    assert events[0]["prompt_preview"] == "[REDACTED]"
+    assert events[0]["prompt_preflight"]["status"] in {"required", "blocked", "pass"}
+    assert events[0]["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert "widget_event_status: queued" in events[0]["output_compaction"]["text"]
+    assert events[0]["payload_summary"] == {"messageType": "capy:agent:prompt", "kind": "safe-event-metadata"}
+    legacy_event = next(event for event in events if event["event_id"] == legacy_event_id)
+    assert legacy_event["prompt_preflight"]["status"] == "required"
+    assert legacy_event["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert legacy_event["output_compaction"]["tool"] == "capy-spaces-widget-event"
+    assert legacy_event["payload_summary"] == {"messageType": "capy:agent:prompt"}
+    assert "legacy private request" not in serialized
+    assert "summarize safe metadata status" not in serialized
+    assert "summarize-claude-mythos" not in all_serialized
+    assert "summarize claude mythos status" not in serialized
+    assert "action prompt text must not persist" not in serialized
+    assert "preflight action prompt must not persist" not in serialized
+    assert "preflight boundary prompt must not persist" not in serialized
+    assert "preflight status prompt must not persist" not in serialized
+    assert "preflight severity prompt must not persist" not in serialized
+    assert "preflight category prompt must not persist" not in serialized
+    assert "preflight check prompt must not persist" not in serialized
+    assert "policy action prompt must not persist" not in serialized
+    assert "policy mode prompt must not persist" not in serialized
+    assert "policy label prompt must not persist" not in serialized
+    assert "policy gate prompt must not persist" not in serialized
+    assert "policy preflight prompt must not persist" not in serialized
+    assert "policy route prompt must not persist" not in serialized
+    assert "message prompt must not persist" not in serialized
+    assert "query prompt must not persist" not in serialized
+    assert "generated body must not persist" not in serialized
+    assert "long generated key must not persist" not in serialized
+    assert "long message key must not persist" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "raw prompt" not in serialized
+    assert "<script" not in serialized
+    assert "steal" not in serialized
+    assert "renderer" not in serialized
+
 
 
 def test_space_tool_adapter_blocks_hostile_reload_widget_prompt_before_queueing(monkeypatch, tmp_path):
@@ -7972,12 +8213,12 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
     assert patched["widget"]["title"] == "Research Patched"
     assert patched["widget"]["layout"] == {"x": 4, "y": 5, "w": 8, "h": 5, "minimized": False}
     assert queued["queued"] is True
-    assert queued["payload_summary"] == {"query": "Claude Mythos"}
+    assert queued["payload_summary"] == {}
     assert event_list["ok"] is True
     assert event_list["action"] == "space.widget.events"
     assert event_list["events"][0]["widget_id"] == "research-card"
     assert event_list["events"][0]["event_name"] == "agent.prompt"
-    assert event_list["events"][0]["payload_summary"] == {"query": "Claude Mythos"}
+    assert event_list["events"][0]["payload_summary"] == {}
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
@@ -8021,13 +8262,13 @@ def test_space_tool_adapter_supports_camelcase_current_widget_event_aliases_meta
     assert queued["action"] == "space.current.widget.event"
     assert queued["space_id"] == created["space_id"]
     assert queued["widget_id"] == "research-card"
-    assert queued["payload_summary"] == {"query": "Claude Mythos"}
+    assert queued["payload_summary"] == {}
     assert events["ok"] is True
     assert events["action"] == "space.current.widget.events"
     assert events["active_space_id"] == created["space_id"]
     assert events["events"][0]["widget_id"] == "research-card"
     assert events["events"][0]["event_name"] == "agent.prompt"
-    assert events["events"][0]["payload_summary"] == {"query": "Claude Mythos"}
+    assert events["events"][0]["payload_summary"] == {}
     assert events["events"][0]["prompt_preview"] == "[REDACTED]"
     assert "steal" not in serialized
     assert "<script" not in serialized
@@ -8507,7 +8748,7 @@ def test_space_tool_adapter_supports_camelcase_widget_event_runtime_aliases_meta
     assert queued["space_id"] == created["space_id"]
     assert queued["widget_id"] == "research-card"
     assert queued["event_name"] == "agent.prompt"
-    assert queued["payload_summary"]["query"] == "Claude Mythos"
+    assert "query" not in queued["payload_summary"]
     assert queued["payload_summary"]["type"] == "form.submit"
     assert events["ok"] is True
     assert events["action"] == "space.widget.events"
@@ -8588,9 +8829,9 @@ def test_space_tool_adapter_ignores_blank_widget_event_name_aliases_metadata_onl
     assert queued["ok"] is True
     assert queued["queued"] is True
     assert queued["event_name"] == "agent.prompt"
-    assert queued["payload_summary"]["query"] == "Claude Mythos"
+    assert "query" not in queued["payload_summary"]
     assert events["events"][0]["event_name"] == "agent.prompt"
-    assert events["events"][0]["payload_summary"]["query"] == "Claude Mythos"
+    assert "query" not in events["events"][0]["payload_summary"]
     assert "secret" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
@@ -8879,7 +9120,7 @@ def test_space_tool_adapter_lists_widget_events_with_positional_space_only(monke
     assert listed["active_space_id"] == created["space_id"]
     assert [event["event_id"] for event in listed["events"]] == [queued["event_id"]]
     assert listed["events"][0]["widget_id"] == "research-card"
-    assert listed["events"][0]["payload_summary"] == {"query": "Claude Mythos", "messageType": "capy:agent:prompt"}
+    assert listed["events"][0]["payload_summary"] == {"messageType": "capy:agent:prompt"}
 
 
 def test_space_tool_adapter_event_list_rejects_conflicting_selector_aliases_before_read(monkeypatch, tmp_path):
@@ -20808,7 +21049,7 @@ def test_widget_event_queues_agent_bridge_request_without_widget_bodies_or_secre
     assert queued["space_id"] == created["space_id"]
     assert queued["widget_id"] == "research-form"
     assert queued["event_name"] == "agent.prompt"
-    assert queued["payload_summary"]["query"] == "Summarize Claude Mythos"
+    assert "query" not in queued["payload_summary"]
     serialized = json.dumps(queued)
     assert "SECRET_VALUE_DO_NOT_LEAK" not in serialized
     assert "also-secret" not in serialized
@@ -21156,7 +21397,7 @@ def test_widget_event_route_accepts_camelcase_runtime_aliases_metadata_only(monk
     assert body["space_id"] == created["space_id"]
     assert body["widget_id"] == "sandbox"
     assert body["event_name"] == "agent.prompt"
-    assert body["payload_summary"]["query"] == "safe camel route prompt"
+    assert "query" not in body["payload_summary"]
     assert len(events) == 1
     assert "secret_value_do_not_leak" not in serialized
     assert "<script" not in serialized
@@ -21197,7 +21438,7 @@ def test_widget_event_route_ignores_blank_selector_and_event_aliases(monkeypatch
     assert body["space_id"] == created["space_id"]
     assert body["widget_id"] == "sandbox"
     assert body["event_name"] == "agent.prompt"
-    assert body["payload_summary"]["query"] == "safe blank alias route prompt"
+    assert "query" not in body["payload_summary"]
     assert len(events) == 1
     assert "secret_value_do_not_leak" not in serialized
     assert "<script" not in serialized
@@ -21455,7 +21696,7 @@ def test_widget_event_route_preserves_benign_payload_type_with_runtime_message_a
     assert status == 200
     assert body["queued"] is True
     assert body["payload_summary"]["type"] == "form.submit"
-    assert body["payload_summary"]["query"] == "safe benign type"
+    assert "query" not in body["payload_summary"]
     assert len(events) == 1
 
 
@@ -21543,7 +21784,7 @@ def test_list_widget_events_and_route_return_safe_newest_first_inbox(monkeypatch
     assert events[0]["event_name"] == "widget.refresh"
     assert events[0]["status"] == "queued"
     assert events[1]["widget_id"] == "weather"
-    assert events[1]["payload_summary"]["query"] == "forecast"
+    assert "query" not in events[1]["payload_summary"]
     assert events[1]["payload_summary"]["note"] == "[REDACTED]"
     assert events[1]["prompt_preview"] == "[REDACTED]"
 

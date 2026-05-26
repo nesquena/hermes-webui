@@ -55,6 +55,32 @@ _OMITTED_PAYLOAD_KEYS = {
     "source",
     "token",
 }
+_WIDGET_RUNTIME_PROMPT_CARRIER_KEYS = {
+    "agentprompt",
+    "agent_prompt",
+    "content",
+    "description",
+    "input",
+    "instruction",
+    "instructions",
+    "message",
+    "messages",
+    "prompt",
+    "question",
+    "query",
+    "request",
+    "summary",
+    "text",
+}
+_WIDGET_EVENT_BODY_KEY_MARKERS = (
+    "body",
+    "generated",
+    "generatedbody",
+    "generatedcode",
+    "rawbody",
+    "rawcode",
+    "widgetbody",
+)
 _SECRET_LIKE_VALUE_RE = re.compile(
     r"(^|[^a-z0-9])(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token)([^a-z0-9]|$)",
     re.IGNORECASE,
@@ -401,22 +427,6 @@ def _is_widget_runtime_prompt_boundary(event_name: str, payload: dict[str, Any])
 
 
 def _widget_runtime_prompt_text_parts(prompt: str, payload: dict[str, Any]) -> list[str]:
-    carrier_keys = {
-        "agentprompt",
-        "agent_prompt",
-        "content",
-        "description",
-        "input",
-        "instruction",
-        "instructions",
-        "message",
-        "messages",
-        "prompt",
-        "query",
-        "request",
-        "summary",
-        "text",
-    }
     skipped_keys = {"type", "message_type", "messagetype"}
     parts: list[str] = []
     inspected = 0
@@ -445,7 +455,7 @@ def _widget_runtime_prompt_text_parts(prompt: str, payload: dict[str, Any]) -> l
                 key = normalized_key(raw_key)
                 if key in skipped_keys:
                     continue
-                is_prompt_carrier = key in carrier_keys or _payload_key_is_prompt_bearing(str(raw_key))
+                is_prompt_carrier = key in _WIDGET_RUNTIME_PROMPT_CARRIER_KEYS or _payload_key_is_prompt_bearing(str(raw_key))
                 visit(child, in_carrier=in_carrier or is_prompt_carrier, depth=depth + 1)
             return
         if isinstance(value, (list, tuple)):
@@ -2429,6 +2439,71 @@ def _payload_summary(value: Any, depth: int = 0) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return _payload_text_summary(value, 500)
     return _payload_text_summary(type(value).__name__, 80)
+
+
+_WIDGET_EVENT_UNSAFE_SCALAR_RE = re.compile(
+    r"prompt|privat|claude\s+mythos|system\s+instruction|ignore\s+previous|generated\s+code|widget\s+body|widget\s+code",
+    re.IGNORECASE,
+)
+
+
+def _widget_event_payload_key_is_safe(key: str) -> bool:
+    raw_key = str(key or "")
+    safe_key = _context_value(raw_key, 80)
+    normalized_key = re.sub(r"[^a-z0-9_]+", "", raw_key.lower())
+    compact_key = re.sub(r"[^a-z0-9]+", "", raw_key.lower())
+    if normalized_key in _WIDGET_RUNTIME_PROMPT_CARRIER_KEYS or compact_key in _WIDGET_RUNTIME_PROMPT_CARRIER_KEYS:
+        return False
+    if compact_key != "messagetype" and any(compact_key.endswith(carrier.replace("_", "")) for carrier in _WIDGET_RUNTIME_PROMPT_CARRIER_KEYS):
+        return False
+    if _payload_key_is_prompt_bearing(raw_key):
+        return False
+    if compact_key == "body" or any(marker in compact_key for marker in _WIDGET_EVENT_BODY_KEY_MARKERS):
+        return False
+    return _payload_key_is_safe(raw_key) and _payload_key_is_safe(safe_key)
+
+
+def _widget_event_payload_scalar_summary(key: str, value: Any) -> Any:
+    compact_key = re.sub(r"[^a-z0-9]+", "", str(key or "").lower())
+    text = _payload_text_summary(value, 500)
+    if text == "[REDACTED]":
+        return text
+    if compact_key == "messagetype" and re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", text or ""):
+        return text
+    if text and _WIDGET_EVENT_UNSAFE_SCALAR_RE.search(text):
+        return ""
+    return text
+
+
+def _widget_event_payload_summary(value: Any, depth: int = 0, key: str = "") -> Any:
+    """Summarize queued widget-event payloads without raw runtime message text.
+
+    Widget events are runtime prompt boundaries. Filter known prompt/body carrier
+    keys, redact credentials/executable markers, and omit scalar text that looks
+    like private prompt or generated-code content even when it arrives under
+    otherwise innocuous metadata keys.
+    """
+    if depth > 3:
+        return "[omitted]"
+    if isinstance(value, dict):
+        summary: dict[str, Any] = {}
+        for index, (raw_key, child) in enumerate(value.items()):
+            if index >= 50:
+                break
+            safe_key = _context_value(raw_key, 80)
+            if not _widget_event_payload_key_is_safe(raw_key):
+                continue
+            child_summary = _widget_event_payload_summary(child, depth + 1, str(raw_key))
+            if child_summary in ({}, [], ""):
+                continue
+            summary[safe_key] = child_summary
+        return summary
+    if isinstance(value, list):
+        items = [_widget_event_payload_summary(child, depth + 1, key) for child in value[:20]]
+        return [item for item in items if item not in ({}, [], "")]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return _widget_event_payload_scalar_summary(key, value)
+    return _widget_event_payload_scalar_summary(key, type(value).__name__)
 
 
 def _widget_patch_payload_key_is_safe(key: str, *, allow_plain_body: bool = False) -> bool:
@@ -7346,6 +7421,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             payload,
             prompt=data.get("prompt") or "",
             session_id=data.get("session_id") or "",
+            action=name,
         )
         response = {"ok": True, "action": name, **result}
         if prompt_preflight:
@@ -7465,6 +7541,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             payload,
             prompt=data.get("prompt") or "",
             session_id=data.get("session_id") or "",
+            action=name,
         )
         return {"ok": True, "action": name, **result}
     if name in {"space.camera.add_stream", "camera.add_stream"}:
@@ -10406,7 +10483,228 @@ def _action_policy_receipt_metadata_summary(receipt: dict[str, Any]) -> dict[str
     return summary
 
 
-def _widget_event_summary(event: dict[str, Any], sid: str, widget_id: str | None = None) -> dict[str, Any] | None:
+_SAFE_WIDGET_EVENT_ACTIONS = frozenset(
+    {
+        "widget.event",
+        "space.widget.event",
+        "space.current.widget.event",
+        "widget.reload",
+        "widget.refresh",
+        "space.widget.reload",
+        "space.widget.refresh",
+        "space.current.widget.reload",
+        "space.current.widget.refresh",
+        "space.current.reloadwidget",
+        "space.spaces.reloadwidget",
+        "space.spaces.refreshwidget",
+    }
+)
+
+
+def _safe_widget_event_action(value: Any, default: str = "space.widget.event") -> str:
+    action = str(value or "").strip().lower()
+    return action if action in _SAFE_WIDGET_EVENT_ACTIONS else default
+
+
+def _safe_widget_preflight_status(value: Any, default: str = "required") -> str:
+    status = str(value or "").strip().lower()
+    return status if status in {"pass", "required", "block", "blocked"} else default
+
+
+_SAFE_WIDGET_RECEIPT_TOKENS = frozenset(
+    {
+        "autonomous",
+        "block",
+        "blocked",
+        "capy.prompt_preflight",
+        "critical",
+        "generated_widget_execution",
+        "guarded",
+        "high",
+        "low",
+        "manual",
+        "medium",
+        "none",
+        "pass",
+        "prompt_injection",
+        "required",
+        "role_override",
+        "space.widget.event",
+        "supervised",
+        "system_prompt_exfiltration",
+        "tool_coercion",
+        "widget_runtime_prompt",
+    }
+)
+
+_SAFE_WIDGET_ROUTE_TEXT = frozenset(
+    {
+        "configured fast model",
+        "configured reasoning model",
+        "configured summarize model",
+        "current Hermes provider",
+        "Fast",
+        "Reasoning",
+        "Summarize",
+    }
+)
+
+
+def _safe_widget_policy_route_hint(value: Any, default: str = "hint:reasoning") -> str:
+    hint = str(value or "").strip()
+    return hint if hint.lower() in {"hint:reasoning", "hint:fast", "hint:summarize"} else default
+
+
+def _safe_widget_receipt_token(value: Any, *, default: str = "") -> str:
+    token = str(value or "").strip()
+    if token.lower() in _SAFE_WIDGET_RECEIPT_TOKENS and _widget_event_label_summary(token) != "[REDACTED]":
+        return token
+    return default
+
+
+def _safe_widget_model_route_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if text in _SAFE_WIDGET_ROUTE_TEXT:
+        return text
+    if text.lower() in {item.lower() for item in _SAFE_WIDGET_ROUTE_TEXT}:
+        return text
+    return ""
+
+
+def _widget_event_prompt_preview_for_read(value: Any) -> str:
+    return "[REDACTED]" if str(value or "").strip() else ""
+
+
+def _widget_prompt_preflight_receipt_read_summary(receipt: dict[str, Any]) -> dict[str, Any]:
+    raw_categories_value = receipt.get("categories")
+    raw_categories: list[Any] = raw_categories_value if isinstance(raw_categories_value, list) else []
+    raw_checks_value = receipt.get("checks")
+    raw_checks: list[Any] = raw_checks_value if isinstance(raw_checks_value, list) else raw_categories
+    categories = [token for item in raw_categories[:20] if (token := _safe_widget_receipt_token(item))]
+    checks = [token for item in raw_checks[:20] if (token := _safe_widget_receipt_token(item))]
+    prompt_hash = _context_value(receipt.get("prompt_hash"), 80)
+    summary = {
+        "available": bool(receipt.get("available")),
+        "action": _safe_widget_receipt_token(receipt.get("action"), default="capy.prompt_preflight"),
+        "boundary": "widget_runtime_prompt",
+        "status": _safe_widget_preflight_status(receipt.get("status")),
+        "severity": _safe_widget_receipt_token(receipt.get("severity"), default="none"),
+        "categories": categories,
+        "checks": checks,
+        "metadata_only": True,
+        "raw_prompt_stored": bool(receipt.get("raw_prompt_stored")),
+        "local_only": True,
+    }
+    if re.fullmatch(r"[a-f0-9]{64}", prompt_hash):
+        summary["prompt_hash"] = prompt_hash
+    return summary
+
+
+def _widget_action_policy_receipt_read_summary(receipt: dict[str, Any]) -> dict[str, Any]:
+    raw_gates_value = receipt.get("approval_gates")
+    raw_gates: list[Any] = raw_gates_value if isinstance(raw_gates_value, list) else []
+    gates = [token for item in raw_gates[:20] if (token := _safe_widget_receipt_token(item))]
+    summary = {
+        "available": bool(receipt.get("available")),
+        "action": _safe_widget_event_action(receipt.get("action")),
+        "mode": _safe_widget_receipt_token(receipt.get("mode"), default="guarded"),
+        "label": _safe_widget_receipt_token(receipt.get("label"), default=""),
+        "approval_required": bool(receipt.get("approval_required")),
+        "approval_gates": gates,
+        "prompt_preflight_status": _safe_widget_preflight_status(receipt.get("prompt_preflight_status")),
+        "model_route_hint": _safe_widget_policy_route_hint(receipt.get("model_route_hint")),
+        "metadata_only": True,
+        "local_only": True,
+    }
+    raw_route = receipt.get("model_route") if isinstance(receipt.get("model_route"), dict) else None
+    if raw_route and raw_route.get("metadata_only") is True:
+        route_hint = _safe_widget_policy_route_hint(raw_route.get("hint"), default="")
+        route_label = _safe_widget_model_route_text(raw_route.get("label"))
+        route_provider = _safe_widget_model_route_text(raw_route.get("resolved_provider"))
+        route_model = _safe_widget_model_route_text(raw_route.get("resolved_model"))
+        if route_hint and route_label and route_provider and route_model:
+            summary["model_route"] = {
+                "hint": route_hint,
+                "label": route_label,
+                "resolved_provider": route_provider,
+                "resolved_model": route_model,
+                "metadata_only": True,
+            }
+    raw_route_resolution = receipt.get("model_route_resolution") if isinstance(receipt.get("model_route_resolution"), dict) else None
+    if raw_route_resolution and raw_route_resolution.get("metadata_only") is True:
+        route_hint = _safe_widget_policy_route_hint(raw_route_resolution.get("hint"), default="")
+        route_label = _safe_widget_model_route_text(raw_route_resolution.get("label"))
+        route_provider = _safe_widget_model_route_text(raw_route_resolution.get("resolved_provider"))
+        route_model = _safe_widget_model_route_text(raw_route_resolution.get("resolved_model"))
+        route_resolution = str(raw_route_resolution.get("resolution") or "").strip().lower()
+        fallback_reason = str(raw_route_resolution.get("fallback_reason") or "").strip().lower()
+        if route_hint and route_label and route_provider and route_model and route_resolution in {"configured", "default_fallback"}:
+            model_route_resolution = {
+                "hint": route_hint,
+                "label": route_label,
+                "resolved_provider": route_provider,
+                "resolved_model": route_model,
+                "resolution": route_resolution,
+                "metadata_only": True,
+                "local_only": bool(raw_route_resolution.get("local_only")),
+            }
+            if fallback_reason in {"unsafe_config", "unknown_hint", "unconfigured_hint"}:
+                model_route_resolution["fallback_reason"] = fallback_reason
+            summary["model_route_resolution"] = model_route_resolution
+    return summary
+
+
+def _safe_widget_event_name_for_read(value: Any) -> str:
+    label = _widget_event_label_summary(value, 120)
+    if not label or label == "[REDACTED]":
+        return label or "widget.event"
+    try:
+        return validate_event_name(label)
+    except ValueError:
+        return "widget.event"
+
+
+def _safe_widget_event_status_for_read(value: Any) -> str:
+    label = _widget_event_label_summary(value, 80)
+    if label == "[REDACTED]":
+        return label
+    status = str(label or "queued").strip().lower()
+    return status if status in {"queued", "local-noop"} else "queued"
+
+
+def _widget_event_output_compaction_read_summary(
+    receipt: dict[str, Any],
+    *,
+    space_id: str,
+    widget_id: str,
+    event_name: str,
+    status: str,
+    preflight_receipt: dict[str, Any] | None = None,
+    autonomy_policy_receipt: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Regenerate a metadata-only widget-event compaction receipt for read surfaces.
+
+    Persisted event JSON is untrusted. Keep safe receipt metadata such as the
+    command, but do not echo persisted receipt text because forged or legacy rows
+    can contain raw runtime prompts without obvious secret/script markers.
+    """
+    return _widget_event_output_compaction_receipt(
+        action=_safe_widget_event_action(receipt.get("command")),
+        space_id=space_id,
+        widget_id=widget_id,
+        event_name=event_name,
+        status=status,
+        preflight_receipt=preflight_receipt,
+        autonomy_policy_receipt=autonomy_policy_receipt,
+    )
+
+
+def _widget_event_summary(
+    event: dict[str, Any],
+    sid: str,
+    widget_id: str | None = None,
+    valid_widget_ids: set[str] | None = None,
+) -> dict[str, Any] | None:
     event_id = str(event.get("event_id") or "")
     if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
         return None
@@ -10420,24 +10718,43 @@ def _widget_event_summary(event: dict[str, Any], sid: str, widget_id: str | None
     wid = _context_value(details.get("widget_id"), 120)
     if not wid or (widget_id and wid != widget_id):
         return None
-    payload_summary = details.get("payload_summary") if isinstance(details.get("payload_summary"), dict) else {}
+    if valid_widget_ids is not None and wid not in valid_widget_ids:
+        return None
+    raw_payload_summary = raw_details.get("payload_summary") if isinstance(raw_details.get("payload_summary"), dict) else {}
+    payload_summary = _widget_event_payload_summary(raw_payload_summary)
+    if not isinstance(payload_summary, dict):
+        payload_summary = {}
+    event_name = _safe_widget_event_name_for_read(raw_details.get("event_name"))
     summary = {
         "schema_version": event.get("schema_version", SCHEMA_VERSION),
         "event_id": event_id,
         "space_id": sid,
         "widget_id": wid,
-        "event_name": _widget_event_label_summary(details.get("event_name"), 120),
-        "status": _widget_event_label_summary(details.get("status") or "queued", 80),
-        "prompt_preview": _payload_text_summary(raw_details.get("prompt_preview"), 1000),
+        "event_name": event_name,
+        "status": _safe_widget_event_status_for_read(raw_details.get("status")),
+        "prompt_preview": _widget_event_prompt_preview_for_read(raw_details.get("prompt_preview")),
         "payload_summary": payload_summary,
         "created_at": event.get("created_at"),
     }
-    prompt_preflight = raw_details.get("prompt_preflight") if isinstance(raw_details.get("prompt_preflight"), dict) else None
-    if prompt_preflight:
-        summary["prompt_preflight"] = _prompt_preflight_receipt_metadata_summary(prompt_preflight)
-    autonomy_policy = raw_details.get("autonomy_policy") if isinstance(raw_details.get("autonomy_policy"), dict) else None
-    if autonomy_policy:
-        summary["autonomy_policy"] = _action_policy_receipt_metadata_summary(autonomy_policy)
+    raw_prompt_preflight = raw_details.get("prompt_preflight")
+    prompt_preflight: dict[str, Any] = raw_prompt_preflight if isinstance(raw_prompt_preflight, dict) else {}
+    safe_prompt_preflight = _widget_prompt_preflight_receipt_read_summary(prompt_preflight)
+    summary["prompt_preflight"] = safe_prompt_preflight
+    raw_autonomy_policy = raw_details.get("autonomy_policy")
+    autonomy_policy: dict[str, Any] = raw_autonomy_policy if isinstance(raw_autonomy_policy, dict) else {}
+    safe_autonomy_policy = _widget_action_policy_receipt_read_summary(autonomy_policy)
+    summary["autonomy_policy"] = safe_autonomy_policy
+    raw_output_compaction = raw_details.get("output_compaction")
+    output_compaction: dict[str, Any] = raw_output_compaction if isinstance(raw_output_compaction, dict) else {}
+    summary["output_compaction"] = _widget_event_output_compaction_read_summary(
+        output_compaction,
+        space_id=sid,
+        widget_id=wid,
+        event_name=summary["event_name"],
+        status=summary["status"],
+        preflight_receipt=safe_prompt_preflight,
+        autonomy_policy_receipt=safe_autonomy_policy,
+    )
     return summary
 
 
@@ -10450,6 +10767,13 @@ def list_widget_events(space_id: str, widget_id: str | None = None, limit: int =
     wid = validate_widget_id(widget_id) if widget_id else None
     if wid:
         _widget_index(space, wid)
+    widgets_value = space.get("widgets")
+    widgets = widgets_value if isinstance(widgets_value, list) else []
+    valid_widget_ids = {
+        str(widget.get("id"))
+        for widget in widgets
+        if isinstance(widget, dict) and widget.get("id")
+    }
     max_events = _clamped_int(limit, 20, 1, 100)
     summaries: list[dict[str, Any]] = []
     _ensure_dirs()
@@ -10462,7 +10786,7 @@ def list_widget_events(space_id: str, widget_id: str | None = None, limit: int =
             continue
         if not isinstance(event, dict):
             continue
-        summary = _widget_event_summary(event, sid, wid)
+        summary = _widget_event_summary(event, sid, wid, valid_widget_ids)
         if summary is not None:
             summaries.append(summary)
     summaries.sort(key=lambda event: float(event.get("created_at") or 0), reverse=True)
@@ -10554,6 +10878,47 @@ def _record_widget_event_progress_event(space_id: str, event_id: str) -> dict[st
         }
 
 
+def _widget_event_output_compaction_receipt(
+    *,
+    action: str,
+    space_id: str,
+    widget_id: str,
+    event_name: str,
+    status: str,
+    preflight_receipt: dict[str, Any] | None = None,
+    autonomy_policy_receipt: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return metadata-only compaction evidence for queued widget events."""
+    from api.capy_compaction import compact_output
+
+    safe_action = _safe_widget_event_action(action)
+    safe_space_id = _context_value(space_id, 120) or "redacted-space"
+    safe_widget_id = _context_value(widget_id, 120) or "redacted-widget"
+    safe_event_name = _widget_event_label_summary(event_name) or "widget.event"
+    safe_status = _context_value(status, 40) or "queued"
+    lines = [
+        f"action: {safe_action}",
+        f"space_id: {safe_space_id}",
+        f"widget_id: {safe_widget_id}",
+        f"event_name: {safe_event_name}",
+        f"widget_event_status: {safe_status}",
+        "payload: sanitized widget-event metadata only",
+    ]
+    if isinstance(preflight_receipt, dict):
+        lines.append(f"prompt_preflight_status: {_safe_widget_preflight_status(preflight_receipt.get('status'))}")
+        lines.append("prompt_preflight_boundary: widget_runtime_prompt")
+    if isinstance(autonomy_policy_receipt, dict):
+        lines.append(f"approval_required: {bool(autonomy_policy_receipt.get('approval_required'))}")
+        lines.append(f"model_route_hint: {_safe_widget_policy_route_hint(autonomy_policy_receipt.get('model_route_hint'))}")
+    return compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-widget-event",
+        command=safe_action,
+        max_chars=1200,
+    )
+
+
+
 def queue_widget_event(
     space_id: str,
     widget_id: str,
@@ -10562,6 +10927,7 @@ def queue_widget_event(
     *,
     prompt: str = "",
     session_id: str = "",
+    action: str = "space.widget.event",
 ) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
@@ -10615,7 +10981,16 @@ def queue_widget_event(
                 model_route_hint="hint:reasoning",
             )
     prompt_preview = "[REDACTED]" if _context_value(prompt, 1) else ""
-    payload_summary = _payload_summary(payload_data)
+    payload_summary = _widget_event_payload_summary(payload_data)
+    output_compaction = _widget_event_output_compaction_receipt(
+        action=action,
+        space_id=sid,
+        widget_id=wid,
+        event_name=name,
+        status="queued",
+        preflight_receipt=preflight_receipt,
+        autonomy_policy_receipt=autonomy_policy_receipt,
+    )
     event_details = {
         "widget_id": wid,
         "event_name": name,
@@ -10623,6 +10998,7 @@ def queue_widget_event(
         "payload_summary": payload_summary,
         "session_id": _context_value(session_id, 120),
         "status": "queued",
+        "output_compaction": copy.deepcopy(output_compaction),
     }
     if preflight_receipt:
         event_details["prompt_preflight"] = copy.deepcopy(preflight_receipt)
@@ -10645,6 +11021,7 @@ def queue_widget_event(
         "prompt_preview": prompt_preview,
         "payload_summary": payload_summary,
         "progress_event": progress_event,
+        "output_compaction": copy.deepcopy(output_compaction),
     }
     if preflight_receipt:
         response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
