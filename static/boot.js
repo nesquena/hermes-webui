@@ -987,15 +987,21 @@ function clearPreview(opts={}){
   // Restore directory breadcrumb after closing file preview
   if(typeof renderBreadcrumb==='function') renderBreadcrumb();
   const closePanelAfter=_workspacePanelMode==='preview'&&!keepPanelOpen;
-  const pa=$('previewArea');if(pa)pa.classList.remove('visible');
-  const pi=$('previewImg');if(pi){pi.onerror=null;pi.src='';}
-  const pdf=$('previewPdfFrame');if(pdf)pdf.src='';
-  const html=$('previewHtmlIframe');if(html)html.src='';
-  const pm=$('previewMd');if(pm)pm.innerHTML='';
-  const pc=$('previewCode');if(pc)pc.textContent='';
-  const pp=$('previewPathText');if(pp)pp.textContent='';
+  if(typeof _closePreviewSurface==='function'){
+    _closePreviewSurface();
+  }else{
+    const pa=$('previewArea');if(pa)pa.classList.remove('visible');
+    const pi=$('previewImg');if(pi){pi.onerror=null;pi.src='';}
+    const pdf=$('previewPdfFrame');if(pdf)pdf.src='';
+    const html=$('previewHtmlIframe');if(html)html.src='';
+    const pm=$('previewMd');if(pm)pm.innerHTML='';
+    const pc=$('previewCode');if(pc)pc.textContent='';
+    const pp=$('previewPathText');if(pp)pp.textContent='';
+    _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  }
   const ft=$('fileTree');if(ft)ft.style.display='';
-  _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  if(S.git)S.git.selectedDiff=null;
+  if(typeof renderWorkspacePanelTabState==='function')renderWorkspacePanelTabState();
   if(closePanelAfter)closeWorkspacePanel();
   else if(keepPanelOpen&&_workspacePanelMode==='preview')openWorkspacePanel('browse');
   else syncWorkspacePanelUI();
