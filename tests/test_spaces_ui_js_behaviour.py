@@ -2227,6 +2227,7 @@ global.fetch = async function(path, opts = {}) {
       widgets: {'widgets/weather.yaml': 'id: weather\nscript: <script>bad()</script>\ntoken: SECRET'},
       progress_event: { event_id: 'evt-export-package', event_type: 'tool.completed', family: 'tool', run_id: 'package.export:' + (body.space_id || 'lab'), redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       autonomy_policy: { available: true, action: 'space.agent.export', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit', 'generated_widget_execution'], prompt_preflight_status: 'required', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      output_compaction: { tool: 'capy-spaces-package-export', command: 'space.agent.export', exit_status: 0, original_chars: 7200, compacted_chars: 260, compacted: true, rules_applied: ['retain_artifact_handles'], redaction_status: 'metadata_only', redacted_count: 0, retained_artifact_handles: [{ kind: 'space-agent-package', handle: 'package.export:' + (body.space_id || 'lab'), label: (body.format === 'zip' ? 'space-agent-zip' : 'space-agent-yaml') + ' export' }], retained_citations: [], text: 'format: ' + (body.format === 'zip' ? 'space-agent-zip' : 'space-agent-yaml') + '\nwidget_count: 3\nprogress_run_id: package.export:' + (body.space_id || 'lab') + '\nspace_yaml archive_b64 renderer api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>' },
       archive_b64: body.format === 'zip' ? 'U0VDUkVUX0FSQ0hJVkVfSU1BR0lOQVJZ=' : undefined,
       zip_b64: body.format === 'zip' ? 'U0VDUkVUX1pJUF9JTUFHSU5BUlk=' : undefined,
     });
@@ -2261,6 +2262,7 @@ global.fetch = async function(path, opts = {}) {
       prompt_preflight: { available: true, action: 'capy.prompt_preflight', boundary: 'active_space_instructions', status: 'pass', severity: 'none', categories: [], checks: [], prompt_hash: 'abcdef012345abcdef012345abcdef012345abcdef012345abcdef012345abcd', metadata_only: true, raw_prompt_stored: false, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK' },
       autonomy_policy: { available: true, action: 'space.agent.import', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit', 'generated_widget_execution'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       progress_event: { event_id: 'evt-import-package', event_type: 'tool.completed', family: 'tool', run_id: 'package.import:' + (isZip ? 'imported-zip-lab' : 'imported-lab'), redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      output_compaction: { tool: 'capy-spaces-package-import', command: 'space.agent.import', exit_status: 0, original_chars: 6400, compacted_chars: 240, compacted: true, rules_applied: ['retain_artifact_handles'], redaction_status: 'metadata_only', redacted_count: 0, retained_artifact_handles: [{ kind: 'space-agent-import', handle: 'package.import:' + (isZip ? 'imported-zip-lab' : 'imported-lab'), label: (isZip ? 'space-agent-zip' : 'space-agent-yaml') + ' import' }], retained_citations: [], text: 'package_format: ' + (isZip ? 'space-agent-zip' : 'space-agent-yaml') + '\nwidget_count: 1\nprogress_run_id: package.import:' + (isZip ? 'imported-zip-lab' : 'imported-lab') + '\nspace_yaml archive_b64 renderer api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>' },
       space_yaml: body.space_yaml,
       widgets: body.widgets,
       archive_b64: body.archive_b64,
@@ -7179,6 +7181,11 @@ def test_spaces_ui_export_yaml_posts_space_id_and_renders_safe_metadata_only(dri
     assert "Package progress" in out["rootHtml"]
     assert "tool.completed" in out["rootHtml"]
     assert "metadata-only progress receipt" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 7200 chars" in out["rootHtml"]
+    assert "Compacted output: 260 chars" in out["rootHtml"]
+    assert "metadata_only" in out["rootHtml"]
+    assert "retain_artifact_handles" in out["rootHtml"]
     assert "Action policy" in out["rootHtml"]
     assert "space.agent.export" in out["rootHtml"]
     assert "Prompt preflight: required" in out["rootHtml"]
@@ -7271,6 +7278,10 @@ def test_spaces_ui_import_yaml_posts_safe_payload_and_renders_metadata_only(driv
     assert "Creator commit approval" in out["rootHtml"]
     assert "Generated widget execution approval" in out["rootHtml"]
     assert "Package progress" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 6400 chars" in out["rootHtml"]
+    assert "Compacted output: 240 chars" in out["rootHtml"]
+    assert "retain_artifact_handles" in out["rootHtml"]
     assert "Weather" in out["rootHtml"]
     assert "1 widget" in out["rootHtml"]
     assert "Import warnings" in out["rootHtml"]

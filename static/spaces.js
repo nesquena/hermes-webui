@@ -1633,7 +1633,7 @@
       '<div class="capy-spaces-muted">Safe metadata package generated. Package contents are intentionally not displayed in this UI.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(filename)+'</strong>' +
       '<div class="capy-spaces-muted">Format: '+escapeHtml(format)+' · Space ID: '+escapeHtml(safeSpaceId)+' · Widgets: '+widgetCount+'</div></div></div></div>' +
-      renderActionPolicyEvidence(data && data.autonomy_policy) + renderPackageProgressEvidence(data && data.progress_event) + '</div>';
+      renderActionPolicyEvidence(data && data.autonomy_policy) + renderPackageProgressEvidence(data && data.progress_event) + renderCompactionEvidence(data && data.output_compaction) + '</div>';
   }
 
   function safeImportMetadataText(value, fallback){
@@ -1669,7 +1669,7 @@
       '<div class="capy-spaces-muted">Imported package metadata only. Generated widget bodies remain quarantined/disabled for review by the backend.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(name)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId || 'redacted-import')+' · '+count+' widget'+(count === 1 ? '' : 's')+'</div></div></div>'+widgetRows+'</div>' +
-      renderPromptPreflightEvidence(data && data.prompt_preflight) + renderActionPolicyEvidence(data && data.autonomy_policy) + renderPackageProgressEvidence(data && data.progress_event) + '</div>' + warningRows;
+      renderPromptPreflightEvidence(data && data.prompt_preflight) + renderActionPolicyEvidence(data && data.autonomy_policy) + renderPackageProgressEvidence(data && data.progress_event) + renderCompactionEvidence(data && data.output_compaction) + '</div>' + warningRows;
   }
 
   function renderSpaceImportError(message){

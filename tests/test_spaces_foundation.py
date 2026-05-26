@@ -14913,6 +14913,24 @@ layout:
     assert imported["progress_event"]["space_id"] == "package-progress-lab"
     assert imported["progress_event"]["redaction_status"] == "metadata_only"
 
+    import_compaction = imported["output_compaction"]
+    assert import_compaction["tool"] == "capy-spaces-package-import"
+    assert import_compaction["command"] == "space.agent.import"
+    assert import_compaction["exit_status"] == 0
+    assert import_compaction["redaction_status"] == "metadata_only"
+    assert import_compaction["original_chars"] >= import_compaction["compacted_chars"]
+    assert import_compaction["rules_applied"]
+    import_compaction_text = json.dumps(import_compaction, sort_keys=True).lower()
+    assert "package_format: space-agent-yaml" in import_compaction_text
+    assert "widget_count: 1" in import_compaction_text
+    assert "progress_run_id: package.import:package-progress-lab" in import_compaction_text
+    assert "space_yaml" not in import_compaction_text
+    assert "archive_b64" not in import_compaction_text
+    assert "secret_value_do_not_leak" not in import_compaction_text
+    assert "<script" not in import_compaction_text
+    assert "renderer" not in import_compaction_text
+    assert "api_key" not in import_compaction_text
+
     assert exported["progress_event"]["event_type"] == "tool.completed"
     assert exported["progress_event"]["family"] == "tool"
     assert exported["progress_event"]["run_id"] == "package.export:package-progress-lab"
@@ -14926,6 +14944,24 @@ layout:
     assert exported["autonomy_policy"]["prompt_preflight_status"] == "required"
     assert exported["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
     assert exported["autonomy_policy"]["metadata_only"] is True
+
+    compaction = exported["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-package-export"
+    assert compaction["command"] == "space.agent.export"
+    assert compaction["exit_status"] == 0
+    assert compaction["redaction_status"] == "metadata_only"
+    assert compaction["original_chars"] >= compaction["compacted_chars"]
+    assert compaction["rules_applied"]
+    compaction_text = json.dumps(compaction, sort_keys=True).lower()
+    assert "format: space-agent-yaml" in compaction_text
+    assert "widget_count: 1" in compaction_text
+    assert "progress_run_id: package.export:package-progress-lab" in compaction_text
+    assert "space_yaml" not in compaction_text
+    assert "archive_b64" not in compaction_text
+    assert "secret_value_do_not_leak" not in compaction_text
+    assert "<script" not in compaction_text
+    assert "renderer" not in compaction_text
+    assert "api_key" not in compaction_text
 
     assert scoped_progress["recent_event_count"] == 2
     assert scoped_progress["recent_family_counts"] == {"tool": 2}

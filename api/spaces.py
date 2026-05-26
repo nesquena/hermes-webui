@@ -8044,6 +8044,98 @@ def _space_agent_export_action_policy_receipt() -> dict[str, Any]:
     )
 
 
+def _space_agent_export_output_compaction_receipt(
+    *,
+    export_format: str,
+    space_id: str,
+    widget_count: int,
+    autonomy_policy_receipt: dict[str, Any] | None,
+    progress_event: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build metadata-only compaction evidence for package exports."""
+    from api.capy_compaction import compact_output
+
+    safe_format = _context_value(export_format, 80) or "space-agent-yaml"
+    safe_space_id = _context_value(space_id, 120) or "[REDACTED]"
+    safe_widget_count = max(0, int(widget_count or 0))
+    policy_action = _context_value((autonomy_policy_receipt or {}).get("action"), 120) or "space.agent.export"
+    model_route_hint = _context_value((autonomy_policy_receipt or {}).get("model_route_hint"), 80) or "hint:reasoning"
+    progress_run_id = _context_value((progress_event or {}).get("run_id"), 160) or "package.export:[REDACTED]"
+    lines = [
+        "Capy Spaces package export metadata-only receipt",
+        f"format: {safe_format}",
+        f"space_id: {safe_space_id}",
+        f"widget_count: {safe_widget_count}",
+        "exit_status: 0",
+        f"policy_action: {policy_action}",
+        f"model_route_hint: {model_route_hint}",
+        f"progress_run_id: {progress_run_id}",
+        "payload: sanitized package metadata only",
+    ]
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-package-export",
+        command="space.agent.export",
+        exit_status=0,
+        max_chars=700,
+        artifact_handles=[
+            {
+                "kind": "space-agent-package",
+                "handle": f"package.export:{safe_space_id}",
+                "label": f"{safe_format} export",
+            }
+        ],
+    )
+    receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
+def _space_agent_import_output_compaction_receipt(
+    *,
+    source_label: str,
+    space_id: str,
+    widget_count: int,
+    autonomy_policy_receipt: dict[str, Any] | None,
+    progress_event: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build metadata-only compaction evidence for package imports."""
+    from api.capy_compaction import compact_output
+
+    safe_source = _context_value(source_label, 80) or "space-agent-yaml"
+    safe_space_id = _context_value(space_id, 120) or "[REDACTED]"
+    safe_widget_count = max(0, int(widget_count or 0))
+    policy_action = _context_value((autonomy_policy_receipt or {}).get("action"), 120) or "space.agent.import"
+    model_route_hint = _context_value((autonomy_policy_receipt or {}).get("model_route_hint"), 80) or "hint:reasoning"
+    progress_run_id = _context_value((progress_event or {}).get("run_id"), 160) or "package.import:[REDACTED]"
+    lines = [
+        "Capy Spaces package import metadata-only receipt",
+        f"package_format: {safe_source}",
+        f"space_id: {safe_space_id}",
+        f"widget_count: {safe_widget_count}",
+        "exit_status: 0",
+        f"policy_action: {policy_action}",
+        f"model_route_hint: {model_route_hint}",
+        f"progress_run_id: {progress_run_id}",
+        "payload: sanitized package metadata only",
+    ]
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-package-import",
+        command="space.agent.import",
+        exit_status=0,
+        max_chars=700,
+        artifact_handles=[
+            {
+                "kind": "space-agent-import",
+                "handle": f"package.import:{safe_space_id}",
+                "label": f"{safe_source} import",
+            }
+        ],
+    )
+    receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
 def _space_agent_import_warnings(space_yaml: str, widget_files: dict[str, str]) -> list[dict[str, str]]:
     warnings: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -8142,6 +8234,13 @@ def import_space_agent_package(
         "warnings": warnings,
         "autonomy_policy": autonomy_policy_receipt,
         "progress_event": progress_event,
+        "output_compaction": _space_agent_import_output_compaction_receipt(
+            source_label=source_label,
+            space_id=created["space_id"],
+            widget_count=len(imported_widgets),
+            autonomy_policy_receipt=autonomy_policy_receipt,
+            progress_event=progress_event,
+        ),
     }
     if preflight_receipt:
         response["prompt_preflight"] = copy.deepcopy(preflight_receipt)
@@ -8272,8 +8371,17 @@ def export_space_agent_package(space_id: str, *, format: str = "yaml") -> dict[s
         }
     else:
         raise ValueError("Unsupported export format")
-    response["autonomy_policy"] = _space_agent_export_action_policy_receipt()
-    response["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="package.export")
+    autonomy_policy_receipt = _space_agent_export_action_policy_receipt()
+    progress_event = _record_space_tool_progress_event(sid, run_prefix="package.export")
+    response["autonomy_policy"] = autonomy_policy_receipt
+    response["progress_event"] = progress_event
+    response["output_compaction"] = _space_agent_export_output_compaction_receipt(
+        export_format=response["format"],
+        space_id=export_space_id,
+        widget_count=len(widgets),
+        autonomy_policy_receipt=autonomy_policy_receipt,
+        progress_event=progress_event,
+    )
     return response
 
 
