@@ -55,6 +55,17 @@ _REAPER_THREAD: Optional[threading.Thread] = None
 _REAPER_STOP = threading.Event()
 _REAPER_INTERVAL_SECS = 60.0
 
+# T3: per-session coalesce gate for the public bg_task_complete SSE emit.
+# The server-side wakeup path remains immediate; only the browser-observation
+# frame is throttled so a burst of background task completions does not flood an
+# open tab. The first emit for a session fires immediately, then any further
+# emits inside the 1s window are payload-replaced and flushed after 1s of quiet.
+_EMIT_COALESCE_WINDOW_SECS = 1.0
+_EMIT_COALESCE_LOCK = threading.Lock()
+_LAST_EMIT_TS: dict[str, float] = {}
+_PENDING_EMIT_PAYLOADS: dict[str, dict] = {}
+_PENDING_EMIT_TIMERS: dict[str, threading.Timer] = {}
+
 
 # ── Persistent per-session SSE channel (Option X) ──────────────────────────
 # SESSION_CHANNELS maps WebUI session_id -> SessionChannel. Each channel owns
@@ -420,6 +431,94 @@ def _emit_to_session_streams(session_id: str, event: str, data: dict) -> int:
     return emitted
 
 
+def _emit_bg_task_complete_events_now(session_id: str, payload: dict) -> int:
+    """Emit the canonical bg_task_complete event and temporary legacy alias."""
+    # T1 emit rename: the canonical event name is now ``bg_task_complete``
+    # (per maintainer decision on PR #2242). Until PR (b) lands the new
+    # consumer-side listener, we ALSO emit the legacy ``process_complete``
+    # name so any in-flight WebUI build (subscribed to the old listener)
+    # still receives the wakeup. PR (b) will:
+    #   1. Add `bg_task_complete` listeners on the WebUI side.
+    #   2. Remove this dual-emit shim (drop the legacy alias).
+    # Both emits carry the SAME trimmed payload + the SAME event_id, so a
+    # consumer that ever sees both can dedupe by ``event_id``.
+    return (
+        _emit_to_session_streams(session_id, "bg_task_complete", payload)
+        + _emit_to_session_streams(session_id, "process_complete", payload)
+    )
+
+
+def _flush_coalesced_bg_task_complete(session_id: str) -> None:
+    """Timer callback: flush the latest pending payload for one session."""
+    payload: dict | None = None
+    with _EMIT_COALESCE_LOCK:
+        payload = _PENDING_EMIT_PAYLOADS.pop(session_id, None)
+        _PENDING_EMIT_TIMERS.pop(session_id, None)
+        if payload is not None:
+            _LAST_EMIT_TS[session_id] = time.time()
+    if payload is None:
+        return
+    try:
+        _emit_bg_task_complete_events_now(session_id, payload)
+    except Exception:
+        logger.debug(
+            "coalesced bg_task_complete flush failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+
+
+def _emit_bg_task_complete_events_coalesced(session_id: str, payload: dict) -> int:
+    """Per-session 1s coalesce gate around the bg_task_complete dual emit.
+
+    The first payload for a session emits immediately. If another payload for
+    that session arrives within ``_EMIT_COALESCE_WINDOW_SECS`` of the last emit,
+    replace the pending payload and reset the quiet timer. The deferred flush
+    therefore uses the latest payload from a burst.
+    """
+    if not session_id:
+        return 0
+    should_emit_now = False
+    now = time.time()
+    with _EMIT_COALESCE_LOCK:
+        last = _LAST_EMIT_TS.get(session_id)
+        has_pending = session_id in _PENDING_EMIT_TIMERS
+        if last is None or (now - last) >= _EMIT_COALESCE_WINDOW_SECS:
+            if not has_pending:
+                _LAST_EMIT_TS[session_id] = now
+                should_emit_now = True
+            else:
+                # A quiet-window timer already owns the deferred delivery;
+                # latest payload still wins.
+                _PENDING_EMIT_PAYLOADS[session_id] = payload
+        else:
+            _PENDING_EMIT_PAYLOADS[session_id] = payload
+
+        if not should_emit_now:
+            old_timer = _PENDING_EMIT_TIMERS.get(session_id)
+            if old_timer is not None:
+                try:
+                    old_timer.cancel()
+                except Exception:
+                    logger.debug(
+                        "coalesced bg_task_complete timer cancel failed for session %s",
+                        session_id,
+                        exc_info=True,
+                    )
+            timer = threading.Timer(
+                _EMIT_COALESCE_WINDOW_SECS,
+                _flush_coalesced_bg_task_complete,
+                args=(session_id,),
+            )
+            timer.daemon = True
+            _PENDING_EMIT_TIMERS[session_id] = timer
+            timer.start()
+
+    if should_emit_now:
+        return _emit_bg_task_complete_events_now(session_id, payload)
+    return 0
+
+
 # ── Coupling contract: agent ProcessRegistry cross-A/B dedupe key ──────────
 # This WebUI drain (B) and the merged upstream PR #2279 next-turn drain (A)
 # dedupe a process_id against a SINGLE shared key inside the agent's
@@ -659,17 +758,7 @@ def _process_one(evt: dict) -> None:
     if process_id:
         seen.add(process_id)
     payload = _build_payload(evt, session_id)
-    # T1 emit rename: the canonical event name is now ``bg_task_complete``
-    # (per maintainer decision on PR #2242). Until PR (b) lands the new
-    # consumer-side listener, we ALSO emit the legacy ``process_complete``
-    # name so any in-flight WebUI build (subscribed to the old listener)
-    # still receives the wakeup. PR (b) will:
-    #   1. Add `bg_task_complete` listeners on the WebUI side.
-    #   2. Remove this dual-emit shim (drop the legacy alias).
-    # Both emits carry the SAME trimmed payload + the SAME event_id, so a
-    # consumer that ever sees both can dedupe by ``event_id``.
-    _emit_to_session_streams(session_id, "bg_task_complete", payload)
-    _emit_to_session_streams(session_id, "process_complete", payload)
+    _emit_bg_task_complete_events_coalesced(session_id, payload)
     _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)
     # Mark the event consumed in the agent's process registry so the REAL
     # merged PR #2279's next-turn drain

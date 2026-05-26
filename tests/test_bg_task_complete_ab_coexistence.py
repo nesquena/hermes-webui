@@ -73,6 +73,7 @@ def _install_fake_registry(monkeypatch, fake):
 
 def _reset_cfg_state():
     from api import config as _cfg
+    from api import background_process as bp
     with _cfg.PROCESS_SESSION_INDEX_LOCK:
         _cfg.PROCESS_SESSION_INDEX.clear()
     _cfg.PENDING_BG_TASK_COMPLETIONS.clear()
@@ -81,6 +82,12 @@ def _reset_cfg_state():
         _cfg.STREAMS.clear()
     if hasattr(_cfg, "ACTIVE_RUNS"):
         _cfg.ACTIVE_RUNS.clear()
+    if hasattr(bp, "_LAST_EMIT_TS"):
+        bp._LAST_EMIT_TS.clear()
+    if hasattr(bp, "_PENDING_EMIT_PAYLOADS"):
+        bp._PENDING_EMIT_PAYLOADS.clear()
+    if hasattr(bp, "_PENDING_EMIT_TIMERS"):
+        bp._PENDING_EMIT_TIMERS.clear()
 
 
 def test_b_sse_first_then_a_drain_skips_same_process_id(monkeypatch):
@@ -331,6 +338,7 @@ def test_event_id_is_unique_per_emit(monkeypatch):
     from api import background_process as bp
 
     bp.register_process_session("sess-evt-2", "sess-evt-2")
+    monkeypatch.setattr(bp, "_EMIT_COALESCE_WINDOW_SECS", 0.0)
 
     emits: list[tuple[str, dict]] = []
 
