@@ -1,0 +1,6 @@
+{
+  "id": "courier",
+  "displayName": "Courier Bot",
+  "description": "A lively jet-powered courier robot companion for Hermes task delivery.",
+  "spritesheetPath": "spritesheet.webp"
+}

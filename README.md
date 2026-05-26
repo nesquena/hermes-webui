@@ -43,6 +43,12 @@ shows token usage at a glance. All settings and session tools are in the
 
 This gives you nearly **1:1 parity with Hermes CLI from a convenient web UI** which you can access securely through an SSH tunnel from your Hermes setup. Single command to start this up, and a single command to SSH tunnel for access on your computer. Every single part of the web UI uses your existing Hermes agent and existing models, without requiring any additional setup.
 
+Optional desktop companion beta: desktop users can run the source-only Desktop
+Pet shell as an ambient status surface for long-running Hermes sessions. It
+shows running, ready, approval, and clarify states outside the browser while
+keeping the main WebUI unchanged by default. See
+[`docs/desktop-pet.md`](docs/desktop-pet.md).
+
 ---
 
 ## Why Hermes
@@ -489,6 +495,7 @@ Production data and real cron jobs are never touched. Current snapshot:
 - **Hermes Control Center** (sidebar launcher button) -- Conversation tab (export/import/clear), Preferences tab (model, send key, theme, language, all toggles), System tab (version, password)
 - Send key: Enter (default) or Ctrl/Cmd+Enter
 - Show/hide CLI sessions toggle (enabled by default)
+- Optional Desktop Pet (Beta) companion control for the source-only desktop surface
 - Token usage display toggle (off by default, also via `/usage` command)
 - Control Center always opens on the Conversation tab; resets on close
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
@@ -497,7 +504,7 @@ Production data and real cron jobs are never touched. Current snapshot:
 
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown
-- Built-in: `/help`, `/clear`, `/compress [focus topic]`, `/compact` (alias), `/model <name>`, `/workspace <name>`, `/new`, `/usage`, `/theme`
+- Built-in: `/help`, `/clear`, `/compress [focus topic]`, `/compact` (alias), `/model <name>`, `/workspace <name>`, `/new`, `/usage`, `/theme`, `/pet wakeup`, `/pet sleep`
 - Arrow keys navigate, Tab/Enter select, Escape closes
 - Unrecognized commands pass through to the agent
 
@@ -576,6 +583,7 @@ State lives outside the repo at `~/.hermes/webui/` by default
 - `docs/onboarding.md` -- first-run wizard, provider setup, local model server Base URLs, and safe re-runs
 - `docs/onboarding-agent-checklist.md` -- safety rules, evidence commands, and pass/fail checks for assistant-led install or reinstall support
 - `docs/troubleshooting.md` -- diagnostic flows for common failures (e.g. "AIAgent not available")
+- `docs/desktop-pet.md` -- optional Desktop Pet beta behavior, runtime boundaries, and manual acceptance notes
 - `docs/wsl-autostart.md` -- WSL2 auto-start at Windows login
 - `docs/EXTENSIONS.md` -- administrator-controlled WebUI extension injection
 - `docs/rfcs/README.md` -- RFC index for larger architecture and durability proposals

@@ -985,6 +985,15 @@
               <div id="tabVisibilityChips" class="tab-visibility-chips" role="group" aria-labelledby="tabVisibilityLabel"></div>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tab_visibility">Choose which tabs appear in the sidebar and rail. Chat and Settings are always visible.</div>
             </div>
+            <div class="settings-field" id="settingsDesktopPetField">
+              <label class="settings-switch-row">
+                <input class="settings-switch-input" type="checkbox" role="switch" id="settingsDesktopPetEnabled" aria-describedby="settingsDesktopPetDesc" onchange="toggleDesktopPetFromAppearance(this.checked)">
+                <span class="settings-switch-ui" aria-hidden="true"></span>
+                <span data-i18n="settings_label_desktop_pet_autostart">Desktop Pet (Beta)</span>
+              </label>
+              <div id="settingsDesktopPetDesc" style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_desktop_pet">Show a small native companion that stays outside the browser, surfaces running sessions, completed work, approvals, and quick replies, and opens the matching WebUI session when you click a bubble. First launch may set up the local desktop shell.</div>
+              <div id="desktopPetInlineStatus" style="font-size:11px;color:var(--muted);margin-top:6px" aria-live="polite"></div>
+            </div>
             <div id="settingsAppearanceAutosaveStatus" class="settings-autosave-status" aria-live="polite"></div>
           </div>
           <div class="settings-pane" id="settingsPanePreferences">
@@ -1405,8 +1414,9 @@
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/sessions.js?v=__WEBUI_VERSION__&pet_nav=2" defer></script>
+<script src="static/pet_bridge.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/commands.js?v=__WEBUI_VERSION__&pet_cmd=1" defer></script>
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>

@@ -15,6 +15,57 @@
 
 ---
 
+## Desktop Pet macOS Beta Acceptance
+
+SETUP:
+  1. Start an isolated dev runtime, for example:
+     `HERMES_HOME=/tmp/hermes-webui-pet-home HERMES_WEBUI_STATE_DIR=/tmp/hermes-webui-pet-state HERMES_WEBUI_PORT=8788 python3 bootstrap.py --no-browser --foreground --host 127.0.0.1 8788`.
+  2. Confirm `curl http://127.0.0.1:8788/health` returns ok and `curl http://127.0.0.1:8788/api/crons` returns the isolated dev cron list.
+  3. Launch the pet from the dev runtime with `POST /api/pet/install` followed by `POST /api/pet/launch`.
+
+EXPECT:
+  - The pet connects to the current WebUI base URL, not a hard-coded 8787 URL.
+  - `POST /api/pet/status` reports `running=true` only when the registered pet process matches the current WebUI base URL.
+  - `/api/pet/skins` reports `keeper` as default and returns normalized skin layout.
+  - Settings and `/pet wakeup` / `/pet sleep` update the shared `desktop_pet_enabled` preference separately from process running state.
+  - On a missing-shell first launch, Settings and `/pet wakeup` show continuing setup feedback, do not get stuck on one static message, and do not repeat the short progress sequence indefinitely.
+  - The native pet does not flash a first-start install card before the pet appears.
+  - After launch, active session attention appears before onboarding. If no attention exists, a Welcome Card appears with a closing countdown and a `Got it` action.
+  - A zero-attention badge update from the main pet window does not immediately hide an already visible Welcome Card.
+  - The native right-click menu supports installed skin switching, pet reload, and close. Close persists `desktop_pet_enabled=false`.
+  - Attention bubbles show `action_required`, `running`, and `ready` states from `/api/pet/attention`.
+  - With 3+ bubbles, the window height caps at about 2.7 cards, scrolls internally, shows `+N`, and exposes the Latest control after scrolling.
+  - The pet can be dragged; bubbles reposition from the pet window rectangle.
+  - Near the top edge, bubbles fall below the pet. Near the right edge, bubbles clamp inside the viewport.
+  - Collapsing the badge hides the bubble native window; the hidden bubble window must not remain as a clickable transparent overlay.
+  - Clicking a normal bubble uses the WebUI bridge when a page is available, waits briefly for acknowledgement, and falls back to opening the sanitized loopback session URL only when no page consumes the command.
+  - Clicking the ready-state green dot on a completed bubble opens the session and the bubble disappears immediately from the pet window.
+  - The visible bubble native window has a higher macOS floating window level than the pet window, and all native show/hide/click-through changes go through the shared bubble visibility path.
+
+FAIL:
+  - The pet connects to 8787 when launched from another loopback port.
+  - 8788 launch silently reuses, or kills and replaces, a running pet process that has not registered a matching 8788 base URL.
+  - Close only exits the process but leaves `desktop_pet_enabled=true`.
+  - First launch appears frozen with one static setup message for the whole build.
+  - A native install card or pet image flashes briefly before the real pet window appears.
+  - The Welcome Card flashes for only a moment, disappears without user action or countdown expiry, and is then marked as seen.
+  - Hidden bubbles remain visible in macOS accessibility window listings or intercept clicks.
+  - The pet window covers the visible bubble window, causing card or green-dot clicks to do nothing.
+  - Edge placement overlaps the pet body or lets bubbles extend offscreen.
+
+PR EVIDENCE CHECKLIST:
+  - Include screenshots or a short video for the Settings entry, pet window, running/ready bubbles, approval/clarify bubbles, overflow controls, and edge placement.
+  - Record whether validation used the isolated 8788 runtime, including `HERMES_WEBUI_STATE_DIR`, `HERMES_HOME`, and the observed `/api/crons` result.
+  - Record the WebUI base URL used by the native shell so reviewers can distinguish 8787, 8788, and any stale native process.
+  - Run the targeted pet route/static/regression/slash-command tests before PR review.
+  - Run the static JavaScript syntax checks for the touched pet and bridge files.
+  - Run `cargo fmt --manifest-path desktop-pet/src-tauri/Cargo.toml -- --check` and `cargo clippy --manifest-path desktop-pet/src-tauri/Cargo.toml -- -D warnings`.
+  - Run `npm --prefix desktop-pet audit --audit-level=moderate`.
+  - State the manual host gates plainly: macOS local QA passed or pending; Windows host validation passed or pending.
+  - State the scope boundary plainly: source-only beta, no signed installer, no release package, and no auto-update channel in this slice.
+
+---
+
 ## How to Use This Document
 
 Each test has:

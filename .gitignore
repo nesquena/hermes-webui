@@ -59,3 +59,9 @@ graphify-out/
 .graphify_uncached.txt
 
 .venv/
+
+# Desktop pet local dependencies/build output
+desktop-pet/node_modules/
+desktop-pet/node_modules.*/
+desktop-pet/src-tauri/gen/
+desktop-pet/src-tauri/target/

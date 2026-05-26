@@ -29,6 +29,7 @@ const COMMANDS=[
   {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
+  {name:'pet',       desc:t('cmd_pet'),      fn:cmdPet,       arg:'wakeup|sleep', subArgs:['wakeup','sleep'], noEcho:true},
   {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
   {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
@@ -705,6 +706,51 @@ async function cmdTheme(args){
     return;
   }
   showToast(t('theme_usage')+themes.join('|')+' | '+skins.join('|')+' | legacy:'+legacyThemes.join('|'));
+}
+
+function _petCommandAvailableOnThisDevice(){
+  if(typeof isDesktopPetAvailableOnThisDevice==='function') return isDesktopPetAvailableOnThisDevice();
+  const ua=(navigator.userAgent||'').toLowerCase();
+  const touch=Number(navigator.maxTouchPoints||0)>1;
+  const coarse=!!(window.matchMedia&&window.matchMedia('(pointer: coarse)').matches);
+  return !(/android|iphone|ipad|ipod|mobile|tablet|kindle|silk/.test(ua)||(/macintosh/.test(ua)&&touch)||(touch&&coarse));
+}
+
+async function cmdPet(args){
+  const action=String(args||'').trim().toLowerCase();
+  if(!['wakeup','sleep'].includes(action)){
+    if(typeof showToast==='function') showToast(t('cmd_pet_usage'),3000);
+    return;
+  }
+  if(!_petCommandAvailableOnThisDevice()){
+    if(typeof showToast==='function') showToast(t('cmd_pet_unavailable'),3000);
+    return;
+  }
+  if(action==='wakeup'){
+    let ok=false;
+    if(typeof toggleDesktopPetFromAppearance==='function'){
+      ok=await toggleDesktopPetFromAppearance(true,{notifySetup:true})!==false;
+    }else if(typeof startDesktopPet==='function'){
+      ok=await startDesktopPet({notifySetup:true})!==false;
+    }else{
+      if(typeof showToast==='function') showToast(t('cmd_pet_unavailable'),3000);
+      return;
+    }
+    if(!ok) return;
+    if(typeof showToast==='function') showToast(t('cmd_pet_wakeup_done'),2200);
+    return;
+  }
+  let ok=false;
+  if(typeof toggleDesktopPetFromAppearance==='function'){
+    ok=await toggleDesktopPetFromAppearance(false)!==false;
+  }else if(typeof closeDesktopPet==='function'){
+    ok=await closeDesktopPet()!==false;
+  }else{
+    if(typeof showToast==='function') showToast(t('cmd_pet_unavailable'),3000);
+    return;
+  }
+  if(!ok) return;
+  if(typeof showToast==='function') showToast(t('cmd_pet_sleep_done'),2200);
 }
 
 async function cmdSkills(args){

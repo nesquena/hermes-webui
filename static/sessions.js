@@ -84,6 +84,41 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // Files restoration is skipped for now (requires S.pendingFiles plumbing).
 }
 
+async function _applyExternalComposerDraft(targetSid,draft,autosend){
+  const ta=$('msg');
+  if(!ta) return false;
+  if(typeof switchPanel==='function'&&_currentPanel&&_currentPanel!=='chat') switchPanel('chat');
+  ta.value=String(draft||'');
+  ta.focus();
+  ta.dispatchEvent(new Event('input',{bubbles:true}));
+  if(typeof autoResize==='function') autoResize();
+  if(typeof updateSendBtn==='function') updateSendBtn();
+  if(targetSid) _saveComposerDraftNow(targetSid, ta.value, S.pendingFiles ? [...S.pendingFiles] : []);
+  if(autosend&&typeof send==='function'&&ta.value.trim()){
+    await new Promise(resolve=>setTimeout(resolve,0));
+    if(!S.session||S.session.session_id!==targetSid) return false;
+    if(($('msg')||{}).value&&String(($('msg')||{}).value).trim()) await send();
+  }
+  return true;
+}
+
+function _consumeExternalComposerDraft(targetSid) {
+  if(typeof window==='undefined'||!window.location) return false;
+  let url;
+  try{url=new URL(window.location.href);}catch(_e){return false;}
+  const draft=url.searchParams.get('draft');
+  if(draft===null) return false;
+  const pathSid=typeof _sessionIdFromLocation==='function'?_sessionIdFromLocation():null;
+  if(targetSid&&pathSid&&pathSid!==targetSid) return false;
+  url.searchParams.delete('draft');
+  url.searchParams.delete('autosend');
+  if(window.history&&window.history.replaceState){
+    window.history.replaceState({session_id:targetSid||pathSid||null},'',url.pathname+url.search+url.hash);
+  }
+  void _applyExternalComposerDraft(targetSid||pathSid,draft,false);
+  return true;
+}
+
 // Clear the saved draft for a session (called when message is sent).
 function _clearComposerDraft(sid) {
   if (!sid) return;
@@ -833,6 +868,7 @@ async function loadSession(sid){
   if (_loadingSessionId === sid) _loadingSessionId = null;
 
   if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
+  if (typeof _consumeExternalComposerDraft === 'function') _consumeExternalComposerDraft(sid);
 
   // ── Cross-channel handoff hint ──
   // After session fully loaded, check if this is a messaging session with
@@ -4210,6 +4246,20 @@ async function _confirmDeleteProject(proj){
   await renderSessionList();
   showToast('Project deleted');
 }
+
+window.__hermesApplyPetNavigationCommand=async function(command){
+  if(!command||!command.id||!command.session_id) return;
+  const sid=String(command.session_id);
+  if(typeof loadSession!=='function') return;
+  if(!S.session||S.session.session_id!==sid){
+    await loadSession(sid);
+  }
+  if(command.draft){
+    await _applyExternalComposerDraft(sid, command.draft, !!command.autosend);
+  }
+  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  if(typeof switchPanel==='function'&&_currentPanel&&_currentPanel!=='chat') switchPanel('chat');
+};
 
 // Global Escape handler for batch select mode
 document.addEventListener('keydown',(e)=>{

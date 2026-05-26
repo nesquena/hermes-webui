@@ -3,6 +3,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- Desktop Pet macOS beta adds an optional `/pet` companion surface, a thin Tauri desktop shell, bundled May/courier/shiba skins, Settings -> Appearance Desktop Pet (Beta) preference plumbing, `/pet wakeup|sleep` slash commands, and pet-owned `/api/pet/*` routes for skins, attention state, launch/status/close, preference sync, and session navigation.
+
+### Fixed
+
+- Desktop Pet attention bubbles now surface running elapsed time, ready completions, approvals, clarify choices, Other/custom clarify replies, inline replies, local dismiss/open state, immediate opening feedback, and localized bubble copy.
+- Desktop Pet session navigation now uses a narrow WebUI bridge with loopback-only pet commands, acknowledged in-page jumps, browser focus/reuse on macOS, sanitized loopback fallback URLs, and cold-start behavior that avoids waiting for an ACK when no WebUI bridge has recently polled.
+- Desktop Pet bubble clicks now surface the correct reused browser tab for ready and running sessions, cache blocked macOS Automation probes to avoid repeat click latency, and fall back to permission-free app activation when AppleScript focus is unavailable.
+- Desktop Pet `/pet wakeup` now shares the Settings install-before-launch path when the native shell is missing, uses a long install timeout for first-time Tauri/Rust builds, keeps setup feedback visible during long builds with non-repeating progress copy plus elapsed-time updates, advances through load/start messages, and only reports success after launch succeeds.
+- Desktop Pet attention bubbles now take priority over first-start install and ready messages, so newly started pets show session updates immediately instead of requiring a native shell restart.
+- Desktop Pet first launch now uses feature-first Settings copy, removes the native install-card flash, and shows a Welcome Card with a visible closing countdown and Got it action only after the pet has confirmed there is no active session bubble to show first; zero-attention badge updates no longer immediately hide that Welcome Card.
+- Desktop Pet Settings switch now fully suppresses the native checkbox rendering layer, so the custom switch no longer shows a ghost checkmark while it is checked and disabled during launch.
+- Desktop Pet native windows now keep bubble clicks above the pet window, support first-click interaction on macOS, avoid hidden transparent click overlays, follow drag and multi-display placement, and give the green update badge plus hover dismiss control larger reliable hit targets.
+- Desktop Pet launch/status now records a PID and WebUI base URL per state directory, avoids replacing unregistered pet processes, keeps 8787/8788 runtimes distinct, refreshes stale native shells, and uses central Hermes app icon assets.
+- Desktop Pet pages now add a pet-specific asset version query to avoid stale WebView caches, while the main service worker no longer pre-caches optional pet pages or spritesheets for ordinary WebUI users.
+
+### Documentation
+
+- Added Desktop Pet manual acceptance coverage to `TESTING.md`, including isolated 8788 validation, dynamic WebUI base URL checks, action/running/ready bubbles, overflow controls, edge placement, and hidden bubble behavior.
+- Added `docs/desktop-pet.md` plus README and native-shell README links covering Desktop Pet beta scope, install/launch and Welcome Card requirements, runtime boundaries, included surfaces, troubleshooting, and pre-ready PR evidence requirements.
+
 ## [v0.51.137] — 2026-05-25 — Release DI (stage-batch19 — 6-PR medium-risk batch)
 
 ### Added

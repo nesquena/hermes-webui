@@ -4620,7 +4620,7 @@ def load_settings() -> dict:
     return settings
 
 
-_SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
+_SETTINGS_ALLOWED_KEYS = (set(_SETTINGS_DEFAULTS.keys()) | {"desktop_pet_enabled"}) - {
     "password_hash",
     "default_model",
 }
@@ -4660,6 +4660,7 @@ _SETTINGS_BOOL_KEYS = {
     "api_redact_enabled",
     "session_jump_buttons",
     "session_endless_scroll",
+    "desktop_pet_enabled",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
