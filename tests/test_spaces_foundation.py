@@ -2406,6 +2406,20 @@ def test_space_tool_path_helpers_return_policy_and_progress_receipts_metadata_on
         assert result["progress_event"]["run_id"] == "path.helper:path-helper-policy-lab"
         assert result["progress_event"]["space_id"] == created["space_id"]
         assert result["progress_event"]["redaction_status"] == "metadata_only"
+        compaction = result["output_compaction"]
+        assert compaction["tool"] == "capy-spaces-tool-action"
+        assert compaction["command"] == normalized_action
+        assert compaction["exit_status"] == 0
+        assert compaction["metadata_only"] is True
+        assert compaction["redaction_status"] == "metadata_only"
+        compaction_text = json.dumps(compaction, sort_keys=True).lower()
+        assert "space_action: " + normalized_action in compaction_text
+        assert "space_id: path-helper-policy-lab" in compaction_text
+        assert "widget_count: 0" in compaction_text
+        assert "model_route_hint: hint:fast" in compaction_text
+        assert "progress_run_id: path.helper:path-helper-policy-lab" in compaction_text
+        assert "path:" not in compaction_text
+        assert expected_path.lower() not in compaction_text
         assert "steal" not in serialized
         assert "<script" not in serialized
         assert "renderer" not in serialized

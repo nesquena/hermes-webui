@@ -6866,13 +6866,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         path = _space_tool_build_source_path(name, data)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="path.helper")
+        autonomy_policy = _space_path_helper_action_policy_receipt(name)
         return {
             "ok": True,
             "action": name,
             "path": path,
             "paths": {"mode": "metadata-only"},
-            "autonomy_policy": _space_path_helper_action_policy_receipt(name),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=0,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
     if name in {"space.spaces.normalizespaceid", "space.spaces.normalizewidgetid"}:
         kind = "space" if name.endswith("spaceid") else "widget"
