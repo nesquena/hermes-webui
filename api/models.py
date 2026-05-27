@@ -239,6 +239,44 @@ def _write_session_index(updates=None):
         _write_session_index(updates=None)
 
 
+def prune_session_from_index(session_id: str) -> None:
+    """Remove one session row from the persisted sidebar index if present."""
+    sid = str(session_id or "")
+    if not sid or not SESSION_INDEX_FILE.exists():
+        return
+    _tmp = SESSION_INDEX_FILE.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+
+    _fallback = False
+    with _INDEX_WRITE_LOCK:
+        try:
+            with LOCK:
+                existing = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+                if not isinstance(existing, list):
+                    raise ValueError("session index must be a list")
+                pruned = [e for e in existing if e.get('session_id') != sid]
+                if len(pruned) == len(existing):
+                    return
+                _payload = json.dumps(pruned, ensure_ascii=False, indent=2)
+
+            try:
+                with open(_tmp, 'w', encoding='utf-8') as f:
+                    f.write(_payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(_tmp, SESSION_INDEX_FILE)
+            except Exception:
+                try:
+                    _tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+        except Exception:
+            _fallback = True
+
+    if _fallback:
+        _write_session_index(updates=None)
+
+
 def _active_stream_ids():
     with STREAMS_LOCK:
         active_ids = set(STREAMS.keys())
@@ -576,9 +614,10 @@ class Session:
             'enabled_toolsets', 'composer_draft',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        meta['message_count'] = len(self.messages or [])
         meta['messages'] = self.messages
         meta['tool_calls'] = self.tool_calls
-        # Fields not in METADATA_FIELDS (e.g. last_usage, message_count) go at the end
+        # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in ('messages', 'tool_calls')
                  and not k.startswith('_')}
@@ -3187,6 +3226,53 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False, pr
     return msgs
 
 
+def get_state_db_session_summary(sid, *, profile=None) -> dict:
+    """Return a cheap message count/timestamp summary for one state.db session."""
+    try:
+        import sqlite3
+    except ImportError:
+        return {"message_count": 0, "last_message_at": 0.0}
+
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
+    if not sid or not db_path.exists():
+        return {"message_count": 0, "last_message_at": 0.0}
+
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(messages)")
+            available = {str(row['name']) for row in cur.fetchall()}
+            if 'session_id' not in available:
+                return {"message_count": 0, "last_message_at": 0.0}
+            if 'timestamp' in available:
+                cur.execute(
+                    "SELECT COUNT(*) AS message_count, MAX(timestamp) AS last_message_at "
+                    "FROM messages WHERE session_id = ?",
+                    (str(sid),),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return {"message_count": 0, "last_message_at": 0.0}
+                return {
+                    "message_count": max(0, int(row["message_count"] or 0)),
+                    "last_message_at": float(row["last_message_at"] or 0) if row["last_message_at"] is not None else 0.0,
+                }
+            cur.execute("SELECT COUNT(*) AS message_count FROM messages WHERE session_id = ?", (str(sid),))
+            row = cur.fetchone()
+            return {
+                "message_count": max(0, int(row["message_count"] or 0)) if row else 0,
+                "last_message_at": 0.0,
+            }
+    except Exception:
+        return {"message_count": 0, "last_message_at": 0.0}
+
+
 def _normalized_message_timestamp_for_key(value):
     if value is None or value == "":
         return ""
@@ -3258,19 +3344,38 @@ def _session_message_visible_key(msg: dict):
     )
 
 
-def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]):
+def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
+    by_role = {}
+    loose_by_key = {}
+    for key in visible_keys:
+        try:
+            role, content = key
+        except (TypeError, ValueError):
+            continue
+        if not content:
+            continue
+        by_role.setdefault(role, []).append(key)
+        loose_by_key[key] = _loose_session_message_content(content)
+    return {"keys": visible_keys, "by_role": by_role, "loose_by_key": loose_by_key}
+
+
+def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
     if visible_key in visible_keys:
         return visible_key
     role, content = visible_key
     if not content:
         return None
-    for existing_role, existing_content in visible_keys:
+    if lookup is None:
+        lookup = _build_visible_duplicate_lookup(visible_keys)
+    loose_content = None
+    for existing_role, existing_content in lookup.get("by_role", {}).get(role, []):
         if role != existing_role or not existing_content:
             continue
         if content in existing_content or existing_content in content:
             return (existing_role, existing_content)
-        loose_content = _loose_session_message_content(content)
-        loose_existing = _loose_session_message_content(existing_content)
+        if loose_content is None:
+            loose_content = _loose_session_message_content(content)
+        loose_existing = lookup.get("loose_by_key", {}).get((existing_role, existing_content), "")
         if loose_content and loose_existing and (
             loose_content in loose_existing or loose_existing in loose_content
         ):
@@ -3376,6 +3481,7 @@ def merge_session_messages_append_only(
         sidecar_visible_counts[visible_key] = sidecar_visible_counts.get(visible_key, 0) + 1
         sidecar_visible_sequence.append(visible_key)
         merged_messages.append(msg)
+    sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
     state_replay_idx = 0
     skipped_state_visible_counts = {}
     for msg in state_messages:
@@ -3391,7 +3497,11 @@ def merge_session_messages_append_only(
                 replays_sidecar_prefix = True
                 state_replay_idx += 1
         if replays_sidecar_prefix:
-            matched_visible_key = _matching_visible_duplicate(visible_key, sidecar_visible_keys)
+            matched_visible_key = _matching_visible_duplicate(
+                visible_key,
+                sidecar_visible_keys,
+                sidecar_visible_lookup,
+            )
             if matched_visible_key is not None:
                 skipped_state_visible_counts[matched_visible_key] = (
                     skipped_state_visible_counts.get(matched_visible_key, 0) + 1
@@ -3411,7 +3521,11 @@ def merge_session_messages_append_only(
                 continue
         if key in seen_message_keys:
             continue
-        matched_visible_key = _matching_visible_duplicate(visible_key, sidecar_visible_keys)
+        matched_visible_key = _matching_visible_duplicate(
+            visible_key,
+            sidecar_visible_keys,
+            sidecar_visible_lookup,
+        )
         if matched_visible_key is not None:
             skipped_count = skipped_state_visible_counts.get(matched_visible_key, 0)
             sidecar_count = sidecar_visible_counts.get(matched_visible_key, 0)

@@ -709,6 +709,7 @@ _PROVIDER_DISPLAY = {
     "openai-codex": "OpenAI Codex",
     "xai-oauth": "xAI Grok OAuth",
     "copilot": "GitHub Copilot",
+    "cursor-acp": "Cursor ACP",
     "zai": "Z.AI / GLM",
     "kimi-coding": "Kimi / Moonshot",
     "deepseek": "DeepSeek",
@@ -1130,6 +1131,13 @@ _PROVIDER_MODELS = {
         {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"},
         {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
         {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+    ],
+    # Cursor ACP — models served via Cursor CLI agent acp
+    "cursor-acp": [
+        {"id": "cursor/composer-2.5", "label": "Composer 2.5"},
+        {"id": "cursor/composer-2", "label": "Composer 2"},
+        {"id": "cursor/default", "label": "Default"},
+        {"id": "cursor-acp", "label": "Cursor ACP"},
     ],
     # OpenCode Zen — curated models via opencode.ai/zen (pay-as-you-go credits)
     "opencode-zen": [
@@ -1987,6 +1995,12 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     return None, None
 
 
+# Subprocess ACP transports (Cursor/Copilot CLI). Model IDs often contain '/'
+# but must still route via explicit @provider:model so they do not fall through
+# to the configured default HTTP provider (e.g. openai-codex).
+_ACP_SUBPROCESS_PROVIDERS = frozenset({"cursor-acp", "copilot-acp"})
+
+
 def model_with_provider_context(model_id: str, model_provider: str | None = None) -> str:
     """Return the model string to pass to ``resolve_model_provider()``.
 
@@ -2005,6 +2019,11 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     config_provider = None
     if isinstance(model_cfg, dict):
         config_provider = str(model_cfg.get("provider") or "").strip().lower()
+
+    # ACP subprocess providers always need the explicit hint — their slash IDs
+    # are not OpenRouter paths and must not inherit config_provider routing.
+    if provider in _ACP_SUBPROCESS_PROVIDERS:
+        return f"@{provider}:{model}"
 
     # If the selected provider is already the configured provider, leaving the
     # model bare preserves provider-specific base_url/proxy settings.
@@ -2069,7 +2088,121 @@ def parse_reasoning_effort(effort):
     return None
 
 
-def get_reasoning_status() -> dict:
+def _strip_provider_hint_for_reasoning(model_id: str) -> str:
+    """Remove WebUI routing hints before provider-specific capability lookup."""
+    model = str(model_id or "").strip()
+    if model.startswith("@") and ":" in model:
+        return model.split(":", 1)[1]
+    return model
+
+
+def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
+    """Fallback when hermes_cli is unavailable."""
+    model = _strip_provider_hint_for_reasoning(model_id).lower()
+    provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
+    if not model or provider in {"cursor-acp", "copilot-acp"}:
+        return []
+    bare = model.rsplit("/", 1)[-1]
+    if provider == "openai-codex" and bare.startswith(("gpt-5", "o1", "o3", "o4")):
+        if bare.startswith(("o1", "o3", "o4")):
+            return ["low", "medium", "high"]
+        return list(VALID_REASONING_EFFORTS)
+    if provider in {"copilot", "github-copilot"}:
+        if bare.startswith(("gpt-5", "o1", "o3", "o4")):
+            if bare.startswith(("o1", "o3", "o4")):
+                return ["low", "medium", "high"]
+            return list(VALID_REASONING_EFFORTS)
+    prefixes = (
+        "deepseek/",
+        "anthropic/",
+        "openai/",
+        "x-ai/",
+        "google/gemini-2",
+        "google/gemma-4",
+        "qwen/qwen3",
+        "tencent/hy3-preview",
+        "xiaomi/",
+    )
+    if any(model.startswith(prefix) for prefix in prefixes):
+        return list(VALID_REASONING_EFFORTS)
+    return []
+
+
+def resolve_model_reasoning_efforts(
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> list[str]:
+    """Return supported reasoning-effort levels for *model_id*, or [] if none."""
+    model = str(model_id or "").strip()
+    if not model:
+        return []
+
+    provider = str(provider_id or "").strip().lower() if provider_id else ""
+    resolved_base_url = str(base_url or "").strip() or None
+    if not provider:
+        try:
+            _, provider, resolved_base_url = resolve_model_provider(model)
+        except Exception:
+            provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
+
+    provider = _resolve_provider_alias(provider)
+    if provider in {"cursor-acp", "copilot-acp"}:
+        return []
+
+    try:
+        from hermes_cli.models import (
+            github_model_reasoning_efforts,
+            lmstudio_model_reasoning_options,
+        )
+    except Exception:
+        return _heuristic_reasoning_efforts(model, provider)
+
+    hinted_model = _strip_provider_hint_for_reasoning(model)
+    if provider in {"copilot", "github-copilot"}:
+        return github_model_reasoning_efforts(hinted_model)
+
+    if provider == "openai-codex":
+        bare = hinted_model.rsplit("/", 1)[-1]
+        return github_model_reasoning_efforts(bare)
+
+    if provider == "lmstudio":
+        probe_base = resolved_base_url or _get_provider_base_url(provider)
+        opts = lmstudio_model_reasoning_options(model, probe_base)
+        normalized = [str(opt).strip().lower() for opt in opts if str(opt).strip()]
+        if not normalized or set(normalized).issubset({"off"}):
+            return []
+        level_opts = [opt for opt in normalized if opt in VALID_REASONING_EFFORTS]
+        if level_opts:
+            return list(dict.fromkeys(level_opts))
+        if set(normalized).issubset({"off", "on"}):
+            return []
+        return []
+
+    model_lower = model.lower()
+    prefixes = (
+        "deepseek/",
+        "anthropic/",
+        "openai/",
+        "x-ai/",
+        "google/gemini-2",
+        "google/gemma-4",
+        "qwen/qwen3",
+        "tencent/hy3-preview",
+        "xiaomi/",
+    )
+    if any(model_lower.startswith(prefix) for prefix in prefixes):
+        return list(VALID_REASONING_EFFORTS)
+
+    return []
+
+
+def get_reasoning_status(
+    *,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> dict:
     """Return current reasoning configuration from the active profile's
     config.yaml — the same source of truth the CLI reads from.
 
@@ -2082,10 +2215,17 @@ def get_reasoning_status() -> dict:
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
     effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    supported_efforts = resolve_model_reasoning_efforts(
+        model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
         "reasoning_effort": str(effort_raw or "").strip().lower(),
+        "supported_efforts": supported_efforts,
+        "supports_reasoning_effort": bool(supported_efforts),
     }
 
 
@@ -2533,11 +2673,131 @@ def _models_cache_catalog_fingerprint() -> dict:
     }
 
 
+# Credential-rotation fields inside auth.json that churn on a ~14-minute
+# period (credential-pool / OAuth token refresh rewrites the whole file) but
+# DO NOT change the set of available providers or models that /api/models
+# returns. mtime/size-based fingerprinting (#1699's _models_cache_file_
+# fingerprint) treats every one of these rewrites as a cache-invalidating
+# change, so the 24h models cache is effectively dead — every few minutes a
+# tab pays a full cold get_available_models() rebuild (see RCA t_d127953d /
+# t_16551f61). We strip ONLY these known-inert fields and fingerprint the
+# rest of auth.json by content, so token rotation no longer busts the cache.
+#
+# This is a DENY-list, not an allow-list, on purpose: a field we don't know
+# about stays IN the fingerprint, so any genuine change to provider
+# enablement / endpoint / api-base / model-allow (active_provider, a NEW
+# credential_pool entry id, base_url, source, label, key_source, auth_type,
+# priority, the providers{} block, …) still correctly invalidates the cache.
+# The safety invariant is one-directional: excluding these fields can only
+# ever make the fingerprint MORE stable, never make it miss a real
+# provider/model-set change — because none of these fields feed
+# detected_providers / the catalog in _build_available_models_uncached().
+_AUTH_FINGERPRINT_VOLATILE_KEYS = frozenset({
+    # Secret material — rotates on refresh, never gates the provider/model set.
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "api_key",
+    "secret",
+    "client_secret",
+    # Expiry / liveness — bumped every refresh, derived from the token above.
+    "expires_at",
+    "expires_at_ms",
+    "expires_in",
+    # Per-credential status/telemetry — churns on every request, not config.
+    "last_status",
+    "last_status_at",
+    "last_error_code",
+    "last_error_reason",
+    "last_error_message",
+    "last_error_reset_at",
+    "request_count",
+    # Whole-file save timestamp — rewritten on every _save_auth_store().
+    "updated_at",
+})
+
+
+def _strip_volatile_auth_fields(obj):
+    """Recursively drop credential-rotation-only keys from an auth.json tree.
+
+    Pure structural transform; never mutates the input. Any key NOT in the
+    deny-list is preserved verbatim so real provider/endpoint changes still
+    show through in the fingerprint.
+    """
+    if isinstance(obj, dict):
+        return {
+            k: _strip_volatile_auth_fields(v)
+            for k, v in obj.items()
+            if k not in _AUTH_FINGERPRINT_VOLATILE_KEYS
+        }
+    if isinstance(obj, list):
+        return [_strip_volatile_auth_fields(v) for v in obj]
+    return obj
+
+
+def _auth_store_semantic_fingerprint(path: Path) -> dict:
+    """Return a content fingerprint of auth.json that ignores token churn.
+
+    Unlike _models_cache_file_fingerprint() (mtime_ns + size), this hashes
+    the JSON content with the credential-rotation fields stripped, so the
+    ~14-min token-refresh rewrite of auth.json does NOT invalidate the 24h
+    /api/models cache. A change to anything that actually affects the
+    provider/model set (active_provider, a new credential_pool entry, a
+    changed base_url/source/label/auth_type, the providers{} block, …)
+    still changes the hash and correctly busts the cache.
+
+    Failure modes are deliberately conservative — if the file is missing we
+    record that, and if it can't be read/parsed we fall back to the old
+    mtime/size fingerprint so behaviour is never *less* safe than #1699.
+    """
+    p = Path(path).expanduser()
+    fp: dict = {"path": str(p)}
+    try:
+        st = p.stat()
+    except OSError:
+        fp["missing"] = True
+        return fp
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        # Unreadable / corrupt / mid-write: fall back to the stat-based
+        # fingerprint. Strictly no less safe than the pre-fix behaviour
+        # (every write still invalidates) for this rare path only.
+        fp["mtime_ns"] = st.st_mtime_ns
+        fp["size"] = st.st_size
+        fp["semantic"] = "unparsed-fallback"
+        return fp
+    stripped = _strip_volatile_auth_fields(raw)
+    try:
+        encoded = json.dumps(
+            stripped,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+        fp["semantic_sha256"] = hashlib.sha256(encoded).hexdigest()
+    except Exception:
+        fp["mtime_ns"] = st.st_mtime_ns
+        fp["size"] = st.st_size
+        fp["semantic"] = "encode-fallback"
+    return fp
+
+
 def _models_cache_source_fingerprint() -> dict:
-    """Return the current config/auth/catalog fingerprint for /api/models cache."""
+    """Return the current config/auth/catalog fingerprint for /api/models cache.
+
+    The auth.json axis uses a *content* fingerprint that excludes pure
+    credential-rotation fields (see _auth_store_semantic_fingerprint): the
+    auth store is rewritten roughly every 14 minutes by token refresh, and
+    a stat-based (mtime/size) fingerprint made the 24h cache churn on every
+    one of those rewrites (RCA t_16551f61). config.yaml keeps the cheap
+    mtime/size fingerprint because it is only rewritten on deliberate user
+    edits (which can change anything) and does not churn on a timer.
+    """
     return {
         "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
-        "auth_json": _models_cache_file_fingerprint(_get_auth_store_path()),
+        "auth_json": _auth_store_semantic_fingerprint(_get_auth_store_path()),
         "catalog": _models_cache_catalog_fingerprint(),
     }
 

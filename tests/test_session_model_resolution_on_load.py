@@ -1,10 +1,9 @@
-"""Regression tests for stale session model hydration in the WebUI.
+"""Regression tests for session switch model hydration in the WebUI.
 
 Old sessions can persist provider-shaped model IDs such as ``openai/gpt-5.4-mini``
-after the active runtime moved to OpenAI Codex ``gpt-5.5``.  The first
-``loadSession()`` metadata request must ask the backend for the resolved model so
-that the composer state cannot briefly use the stale raw value for display or the
-next chat-start payload.
+after the active runtime moved to OpenAI Codex ``gpt-5.5``.  The UI still needs
+to repair those stale values, but session switching first paint must not pay the
+model catalog cost synchronously.
 """
 
 from pathlib import Path
@@ -30,17 +29,24 @@ def _extract_function(src: str, signature: str) -> str:
     raise AssertionError(f"unterminated function body for: {signature}")
 
 
-def test_load_session_initial_metadata_request_resolves_model_before_state_assignment():
+def test_load_session_initial_metadata_request_defers_model_resolution_until_after_state_assignment():
     body = _extract_function(SESSIONS_JS, "async function loadSession(sid")
-    metadata_fetch = "messages=0&resolve_model=1"
-    stale_metadata_fetch = "messages=0&resolve_model=0"
+    fast_metadata_fetch = "messages=0&resolve_model=0"
+    deferred_metadata_fetch = "messages=0&resolve_model=1"
     assignment = "S.session=data.session"
 
-    assert metadata_fetch in body, (
-        "loadSession() must resolve model metadata on the initial fetch so stale "
-        "persisted models like openai/gpt-5.4-mini cannot become active composer state"
+    assert fast_metadata_fetch in body[: body.index(assignment)], (
+        "loadSession() first paint must use the metadata fast path so session "
+        "switching cannot block on cold model catalog hydration"
     )
-    assert stale_metadata_fetch not in body[: body.index(assignment)], (
-        "loadSession() must not assign S.session from unresolved metadata before the "
-        "backend has normalized stale model/provider combinations"
+    assert deferred_metadata_fetch not in body[: body.index(assignment)], (
+        "loadSession() must not resolve model metadata before assigning S.session; "
+        "stale model/provider correction belongs to the deferred path"
+    )
+    assert "_resolveSessionModelForDisplaySoon(sid)" in body[body.index(assignment):], (
+        "stale persisted model/provider correction must still happen after first paint"
+    )
+    assert body.count("_resolveSessionModelForDisplaySoon(sid)") == 1, (
+        "deferred model repair should run once per session switch, not once after "
+        "metadata and again after message hydration"
     )

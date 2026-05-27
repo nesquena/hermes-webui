@@ -274,13 +274,28 @@ class Handler(BaseHTTPRequestHandler):
         """Structured JSON logs for each request."""
         import json as _json
         duration_ms = round((time.time() - getattr(self, '_req_t0', time.time())) * 1000, 1)
-        record = _json.dumps({
+        remote = '-'
+        try:
+            if getattr(self, 'client_address', None):
+                remote = str(self.client_address[0])
+        except Exception:
+            remote = '-'
+        forwarded_for = None
+        try:
+            forwarded_for = (self.headers.get('X-Forwarded-For') or '').split(',')[0].strip() or None
+        except Exception:
+            forwarded_for = None
+        record_data = {
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+            'remote': remote,
             'method': getattr(self, 'command', None) or '-',
             'path': getattr(self, 'path', None) or '-',
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
-        })
+        }
+        if forwarded_for:
+            record_data['forwarded_for'] = forwarded_for
+        record = _json.dumps(record_data)
         print(f'[webui] {record}', flush=True)
 
     def do_GET(self) -> None:

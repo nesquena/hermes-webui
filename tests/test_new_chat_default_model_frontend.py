@@ -94,6 +94,21 @@ def test_new_chat_does_not_send_stale_dropdown_model_when_session_has_default_mo
     assert "model_provider:S.session.model_provider||null" in MESSAGES_JS
 
 
+def test_new_session_posts_picker_model_before_server_default():
+    fn = _new_session_function()
+    assert "reqBody.model=newModelState.model" in fn
+    assert "reqBody.model_provider=newModelState.model_provider||null" in fn
+    assert "_readPersistedModelState" in fn
+
+
+def test_model_picker_persists_without_active_session():
+    boot_js = Path("static/boot.js").read_text(encoding="utf-8")
+    body = boot_js[boot_js.index("$('modelSelect').onchange=async()=>") : boot_js.index("$('msg').addEventListener", boot_js.index("$('modelSelect').onchange=async()=>"))]
+    assert "_writePersistedModelState(modelState.model,modelState.model_provider)" in body
+    assert "if(!S.session){" in body
+    assert body.index("if(!S.session){") < body.index("await api('/api/session/update'")
+
+
 def test_changelog_mentions_new_chat_default_model_provider_sync():
     unreleased = CHANGELOG.split("## [v0.51.103]", 1)[0]
     assert "New conversations now resync" in unreleased

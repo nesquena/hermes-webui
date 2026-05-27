@@ -470,6 +470,20 @@ async function newSession(flash, options={}){
     if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
     if(options&&options.worktree) reqBody.worktree=true;
     if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
+    // Carry the visible picker selection into the new session. Without this,
+    // /api/session/new falls back to config.yaml defaults (e.g. gpt-5.5) even
+    // when the user already chose cursor/composer-2.5 in the composer chip.
+    const modelSelForNew=$('modelSelect');
+    let newModelState=null;
+    if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
+      newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
+    }else if(typeof _readPersistedModelState==='function'){
+      newModelState=_readPersistedModelState();
+    }
+    if(newModelState&&newModelState.model){
+      reqBody.model=newModelState.model;
+      reqBody.model_provider=newModelState.model_provider||null;
+    }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=data.session;S.messages=data.session.messages||[];
     S.lastUsage={...(data.session.last_usage||{})};
@@ -579,15 +593,13 @@ async function loadSession(sid){
     const _msgInner = $('msgInner');
     if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
   }
-  // Phase 1: Load metadata only (~1KB) for fast session switching.
-  // Resolve model immediately: old sessions can persist stale provider-shaped
-  // IDs (e.g. openai/gpt-5.4-mini) and assigning those to S.session creates a
-  // short race where the composer can display/send the wrong model before the
-  // deferred resolver catches up.
+  // Phase 1: Load metadata only (~1KB) for fast session switching. Keep model
+  // resolution out of the first-paint path; old provider-shaped model IDs are
+  // repaired by the deferred resolver after S.session is assigned.
   // Guard against network/server failures to prevent a permanently stuck loading state.
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=1`);
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const _msgInner = $('msgInner');
     if(_msgInner){
@@ -628,6 +640,7 @@ async function loadSession(sid){
     try { window._resetScrollDirectionTracker(); } catch (_) {}
   }
   if(typeof _applyPendingSessionModelForSession==='function') _applyPendingSessionModelForSession(sid);
+  _resolveSessionModelForDisplaySoon(sid);
   // Sync workspace display immediately so the chip label reflects the new session's workspace
   // before any async message-loading begins (mirrors how model is handled).
   if(typeof syncTopbar==='function') syncTopbar();
@@ -828,7 +841,6 @@ async function loadSession(sid){
     _restoreComposerDraft(_draft, sid, {preserveActiveInput:currentSid===sid&&forceReload});
   }
 
-  _resolveSessionModelForDisplaySoon(sid);
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
 
@@ -892,6 +904,29 @@ function _isCliSession(session) {
   // If messaging-like, don't classify as legacy CLI even when is_cli_session is true.
   if (_isMessagingSession(session)) return false;
   return session.is_cli_session === true;
+}
+
+function _sessionSourceLabel(filter, count) {
+  const n = Number(count) || 0;
+  return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
+}
+
+function _setSessionSourceFilter(filter) {
+  const next = filter === 'cli' ? 'cli' : 'webui';
+  if (_sessionSourceFilter === next) return;
+  _sessionSourceFilter = next;
+  _activeProject = null;
+  _selectedSessions.clear();
+  _sessionSelectMode = false;
+  try { localStorage.setItem('hermes-session-source-filter', next); } catch (_e) {}
+  renderSessionListFromCache();
+}
+
+function _restoreSessionSourceFilter() {
+  try {
+    const raw = localStorage.getItem('hermes-session-source-filter');
+    if (raw === 'cli' || raw === 'webui') _sessionSourceFilter = raw;
+  } catch (_e) {}
 }
 
 function _normalizeMessageForCliImportComparison(message) {
@@ -1361,7 +1396,15 @@ async function _loadOlderMessages() {
   // rebuilt transcript (#1937).
   const startGeneration = _messagesGeneration;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
+    // Ask the server for a larger authoritative tail window instead of a
+    // separate msg_before page. The same /api/session contract handles both —
+    // post-#2716 the backend always runs the full append-only merge, so a
+    // larger msg_limit on the same call produces the same merged transcript
+    // we'd get by stitching pages, but without client-side index bookkeeping.
+    // Cumulative growth: each "load more" asks for currentLoaded + 30, and the
+    // newly exposed head is what we expose to the user.
+    const requestedLimit = Math.max(_INITIAL_MSG_LIMIT, (S.messages || []).length + _INITIAL_MSG_LIMIT);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${requestedLimit}`);
     // Guard: api() may have redirected (401) and returned undefined.
     if (!data || !data.session) { _loadingOlder = false; return; }
     //  - response shape sane
@@ -1379,13 +1422,50 @@ async function _loadOlderMessages() {
     // counter and abort cleanly. _oldestIdx and _messagesTruncated were
     // already reset by the wholesale-replace path, so no rollback needed.
     if (_messagesGeneration !== startGeneration) return;
-    const olderMsgs = (data.session.messages || []).filter(m => m && m.role);
-    if (!olderMsgs.length) { _messagesTruncated = false; return; }
-    // Prepend older messages
+    let responseSession = data.session;
+    let expandedMsgs = (responseSession.messages || []).filter(m => m && m.role);
+    const currentMsgs = (S.messages || []).filter(m => m && m.role);
+    const currentLen = currentMsgs.length;
+    // Suffix-continuity check: the cumulative tail is only safe to wholesale-
+    // replace when our currently-displayed messages are still its suffix. If
+    // the server appended new messages (or merge filtered something) while we
+    // were awaiting, the suffix won't line up — fall back to the legacy
+    // msg_before page so we never drop visible older messages on the floor.
+    let tailMatches = expandedMsgs.length >= currentLen;
+    if (tailMatches && currentLen > 0) {
+      const start = expandedMsgs.length - currentLen;
+      for (let i = 0; i < currentLen; i++) {
+        if (!_sameTranscriptMessage(expandedMsgs[start + i], currentMsgs[i])) {
+          tailMatches = false;
+          break;
+        }
+      }
+    }
+    let olderCount = Math.max(0, expandedMsgs.length - currentLen);
+    let olderMsgs = expandedMsgs.slice(0, olderCount);
+    let nextMessages = expandedMsgs;
+    if (!tailMatches) {
+      // Race fallback: keep the legacy index-page request as the
+      // correctness-preserving alternative. Same guards reapplied because
+      // we just awaited again.
+      const fallback = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
+      if (!fallback || !fallback.session) { _loadingOlder = false; return; }
+      if (!S.session || S.session.session_id !== sid) return;
+      if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+      if (_messagesGeneration !== startGeneration) return;
+      responseSession = fallback.session;
+      olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
+      nextMessages = [...olderMsgs, ...S.messages];
+    }
+    if (!olderMsgs.length) { _messagesTruncated = !!responseSession._messages_truncated; return; }
+    // Replace with the larger tail window and preserve scroll as if older
+    // messages were prepended. When the suffix check fails, nextMessages
+    // already encodes the legacy prepend fallback so the visible behavior
+    // matches the old msg_before page path exactly.
     // Use $('messages') — the scrollable container (#msgInner is not scrollable).
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
-    S.messages = [...olderMsgs, ...S.messages];
+    S.messages = nextMessages;
     // renderMessages() windows long transcripts from the end. If we do not
     // expand that window before rendering, the newly prepended page stays
     // hidden and the "hidden" counter rises while the viewport appears stuck.
@@ -1399,8 +1479,8 @@ async function _loadOlderMessages() {
       return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||(typeof _messageHasReasoningPayload==='function'&&_messageHasReasoningPayload(m)))));
     }).length;
     _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
-    _messagesTruncated = !!data.session._messages_truncated;
-    _oldestIdx = data.session._messages_offset || 0;
+    _messagesTruncated = !!responseSession._messages_truncated;
+    _oldestIdx = responseSession._messages_offset || 0;
     renderMessages({ preserveScroll: true });
     if (container) {
       // Prepending older messages must not teleport the reader. Preserve the
@@ -1494,6 +1574,8 @@ const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
 let _showAllProfiles = false;  // false = filter to active profile only
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
+let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
+_restoreSessionSourceFilter();
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
@@ -2487,19 +2569,85 @@ function stopGatewaySSE(){
 
 let _searchDebounceTimer = null;
 let _contentSearchResults = [];  // results from /api/sessions/search content scan
+let _lastSessionSearchQuery = '';
+let _hideSearchPreviewsAfterSelect = false;
 let _serverTimeDelta = 0;       // ms offset: client clock - server clock (for clock-skew compensation)
 let _serverTz = '';              // server timezone offset string (e.g. "+0800", "+0000", "-0500")
 
+function _sessionSearchRanges(text, query){
+  const source=String(text||'');
+  const q=String(query||'').trim();
+  if(!source||!q) return [];
+  const lower=source.toLowerCase();
+  const full=q.toLowerCase();
+  const ranges=[];
+  const collect=(needle)=>{
+    if(!needle) return;
+    let from=0;
+    while(from<lower.length){
+      const idx=lower.indexOf(needle,from);
+      if(idx<0) break;
+      const end=idx+needle.length;
+      if(!ranges.some(r=>idx<r.end&&end>r.start)) ranges.push({start:idx,end});
+      from=Math.max(end,idx+1);
+    }
+  };
+  collect(full);
+  if(!ranges.length&&/\s/.test(full)){
+    const seen=new Set();
+    full.split(/\s+/).filter(Boolean).sort((a,b)=>b.length-a.length).forEach(token=>{
+      if(seen.has(token)) return;
+      seen.add(token);
+      collect(token);
+    });
+  }
+  return ranges.sort((a,b)=>a.start-b.start);
+}
+
+function _appendHighlightedText(parent, text, query, highlightClass){
+  const source=String(text||'');
+  const ranges=_sessionSearchRanges(source,query);
+  if(!ranges.length){
+    parent.appendChild(document.createTextNode(source));
+    return ranges;
+  }
+  let pos=0;
+  for(const r of ranges){
+    if(r.start>pos) parent.appendChild(document.createTextNode(source.slice(pos,r.start)));
+    const mark=document.createElement('span');
+    mark.className=highlightClass||'session-search-hit';
+    mark.textContent=source.slice(r.start,r.end);
+    parent.appendChild(mark);
+    pos=r.end;
+  }
+  if(pos<source.length) parent.appendChild(document.createTextNode(source.slice(pos)));
+  return ranges;
+}
+
+function _sessionSearchContentPreview(session, query){
+  if(!session||!query||_hideSearchPreviewsAfterSelect) return '';
+  if(session.match_type!=='content') return '';
+  const preview=String(session.match_preview||'').replace(/\s+/g,' ').trim();
+  return preview||'';
+}
+
 function filterSessions(){
   // Immediate client-side title filter (no flicker)
-  renderSessionListFromCache();
   // Debounced content search via API for message text
   const q = ($('sessionSearch').value || '').trim();
+  if(q!==_lastSessionSearchQuery){
+    _lastSessionSearchQuery=q;
+    _hideSearchPreviewsAfterSelect=false;
+  }
+  renderSessionListFromCache();
   clearTimeout(_searchDebounceTimer);
   if (!q) { _contentSearchResults = []; return; }
   _searchDebounceTimer = setTimeout(async () => {
+    const requestedQ = q;
     try {
-      const data = await api(`/api/sessions/search?q=${encodeURIComponent(q)}&content=1&depth=5`);
+      const data = await api(`/api/sessions/search?q=${encodeURIComponent(requestedQ)}&content=1&depth=5`);
+      const currentQ = ($('sessionSearch').value || '').trim();
+      if(currentQ!==requestedQ) return;
       const titleIds = new Set(_allSessions.filter(s => _sessionDisplayTitle(s).toLowerCase().includes(q.toLowerCase())).map(s=>s.session_id));
       _contentSearchResults = (data.sessions||[]).filter(s => s.match_type === 'content' && !titleIds.has(s.session_id));
       renderSessionListFromCache();
@@ -3096,7 +3244,8 @@ function renderSessionListFromCache(){
   // streaming. This runs on every list refresh to prevent memory leaks from
   // interrupted streams. (#2066)
   _purgeStaleInflightEntries();
-  const q=($('sessionSearch').value||'').toLowerCase();
+  const searchQueryRaw=($('sessionSearch').value||'').trim();
+  const q=searchQueryRaw.toLowerCase();
   const activeSidForSidebar=_activeSessionIdForSidebar();
   const titleMatches=q?_allSessions.filter(s=>_sessionDisplayTitle(s).toLowerCase().includes(q)):_allSessions;
   // Merge content matches (deduped): content matches appended after title matches
@@ -3114,6 +3263,14 @@ function renderSessionListFromCache(){
     (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0)
   );
+  const webuiSessionCount = withMessages.filter(s=>!_isCliSession(s)).length;
+  const cliSessionCount = withMessages.filter(s=>_isCliSession(s)).length;
+  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
+    _sessionSourceFilter='webui';
+  }
+  const sourceFiltered = _sessionSourceFilter==='cli'
+    ? withMessages.filter(s=>_isCliSession(s))
+    : withMessages.filter(s=>!_isCliSession(s));
   // The server is authoritative for profile scoping (#1611): it filters by
   // active profile when no query param is set, and returns the aggregate when
   // we send ?all_profiles=1. The renamed-root cross-alias (a row tagged
@@ -3121,7 +3278,7 @@ function renderSessionListFromCache(){
   // in _profiles_match, and a strict-equality client filter would reject those
   // rows incorrectly. So we trust the wire data and skip the redundant client
   // filter entirely.
-  const profileFiltered=withMessages;
+  const profileFiltered=sourceFiltered;
   // Filter by active project. NO_PROJECT_FILTER sentinel asks for sessions
   // with no project_id; otherwise filter to the matching project_id, or
   // pass through when no filter is active.
@@ -3161,6 +3318,21 @@ function renderSessionListFromCache(){
   list.appendChild(batchBar);
   if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';_renderBatchActionBar();}
   else{batchBar.style.display='none';}
+  if(window._showCliSessions || cliSessionCount>0){
+    const sourceTabs=document.createElement('div');
+    sourceTabs.className='session-source-tabs';
+    for(const filter of ['webui','cli']){
+      const count=filter==='cli'?cliSessionCount:webuiSessionCount;
+      const btn=document.createElement('button');
+      btn.type='button';
+      btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
+      btn.textContent=_sessionSourceLabel(filter,count);
+      btn.setAttribute('aria-pressed', _sessionSourceFilter===filter?'true':'false');
+      btn.onclick=()=>_setSessionSourceFilter(filter);
+      sourceTabs.appendChild(btn);
+    }
+    list.appendChild(sourceTabs);
+  }
   // Project filter bar — show when there are real projects OR there are
   // unassigned sessions (so the Unassigned chip has something to filter to).
   const hasUnprojected=profileFiltered.some(s=>!s.project_id);
@@ -3243,9 +3415,14 @@ function renderSessionListFromCache(){
     list.appendChild(toggle);
   }
   // Empty state for active project filter
-  if(_activeProject&&sessions.length===0){
+  if(_sessionSourceFilter==='cli'&&sessions.length===0){
     const empty=document.createElement('div');
-    empty.style.cssText='padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;';
+    empty.className='session-empty-note';
+    empty.textContent=window._showCliSessions?'No CLI sessions found.':'Enable Show agent sessions in Settings to list CLI sessions here.';
+    list.appendChild(empty);
+  } else if(_activeProject&&sessions.length===0){
+    const empty=document.createElement('div');
+    empty.className='session-empty-note';
     empty.textContent=_activeProject===NO_PROJECT_FILTER?'No unassigned sessions.':'No sessions in this project yet.';
     list.appendChild(empty);
   }
@@ -3452,7 +3629,10 @@ function renderSessionListFromCache(){
     }
     const title=document.createElement('span');
     title.className='session-title';
-    title.textContent=cleanTitle||'Untitled';
+    const displayTitle=cleanTitle||'Untitled';
+    const titleMatched=Boolean(searchQueryRaw&&displayTitle.toLowerCase().includes(searchQueryRaw.toLowerCase()));
+    if(titleMatched) _appendHighlightedText(title,displayTitle,searchQueryRaw,'session-search-hit');
+    else title.textContent=displayTitle;
     title.title=readOnly?'Read-only imported session':'Double-click to rename';
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
@@ -3549,6 +3729,14 @@ function renderSessionListFromCache(){
       meta.className='session-meta';
       meta.textContent=metaBits.join(' · ');
       sessionText.appendChild(meta);
+    }
+    const contentPreview=titleMatched?'':_sessionSearchContentPreview(s,searchQueryRaw);
+    if(contentPreview){
+      const preview=document.createElement('div');
+      preview.className='session-search-preview';
+      preview.title=contentPreview;
+      _appendHighlightedText(preview,contentPreview,searchQueryRaw,'session-search-hit session-search-hit-preview');
+      sessionText.appendChild(preview);
     }
     if(lineageSegmentsExpanded){
       const lineageList=document.createElement('div');
@@ -3811,6 +3999,7 @@ function renderSessionListFromCache(){
             await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:s.session_id})});
           }catch(e){ /* import failed -- fall through to read-only view */ }
         }
+        if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
         await loadSession(s.session_id);renderSessionListFromCache();
         if(typeof closeMobileSidebar==='function')closeMobileSidebar();
       }, delay);

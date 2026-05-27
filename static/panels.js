@@ -437,9 +437,14 @@ function _cronGatewayNoticeHtml(status) {
   const body = notConfigured
     ? 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon. If this is a single-container Docker install, jobs can be created and run manually here, but scheduled ticks need a gateway container or `hermes gateway` running outside the WebUI.'
     : 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon to be running. Start the gateway container or `hermes gateway` before relying on offline scheduled runs.';
+  const docsHref = 'https://github.com/nesquena/hermes-webui/blob/master/docs/docker.md#scheduled-jobs-and-the-gateway-daemon';
+  const helpLink = notConfigured
+    ? `<p><a href="${docsHref}" target="_blank" rel="noopener">How to enable scheduled jobs in Docker ↗</a></p>`
+    : '';
   return `
     <div class="detail-alert-title">${esc(title)}</div>
     <p>${esc(body)}</p>
+    ${helpLink}
   `;
 }
 
@@ -6874,7 +6879,19 @@ async function _removeProviderKey(providerId){
       if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
     }
   }catch(e){
-    showToast('Error: '+e.message);
+    // A 403 from /api/providers/delete fires when the CSRF cookie/header
+    // pair has drifted. The server distinguishes three reasons in
+    // api/routes.py:_csrf_rejection_error ("Session expired - reload the
+    // page", "Cross-origin mismatch - check reverse proxy headers", and
+    // the fallback "Cross-origin request rejected"); api()'s catch lifts
+    // that string onto e.message. Pass it through verbatim so the
+    // deployment-shape failure #2572 calls out keeps its actionable hint
+    // instead of being flattened to a single generic toast.
+    if(e&&e.status===403){
+      showToast(e.message||'Session expired. Reload the page and try again.',6000,'error');
+    }else{
+      showToast('Error: '+e.message);
+    }
     if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
   }
 }

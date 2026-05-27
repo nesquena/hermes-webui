@@ -100,5 +100,5 @@ def test_draft_save_does_not_touch_session_updated_at():
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
     persist_idx = src.find("s.composer_draft = draft")
     assert persist_idx != -1, "could not locate composer draft persist site"
-    save_idx = src.find("s.save(touch_updated_at=False)", persist_idx)
-    assert save_idx != -1, "composer draft save must preserve session updated_at"
+    save_idx = src.find("s.save(touch_updated_at=False, skip_index=True)", persist_idx)
+    assert save_idx != -1, "composer draft save must preserve session updated_at and skip index churn"

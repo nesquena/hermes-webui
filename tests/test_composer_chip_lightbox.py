@@ -46,7 +46,7 @@ class TestComposerChipLightboxDelegate:
         src = UI.read_text(encoding="utf-8")
         # The message-image branch must come first (so _openImgLightbox
         # fires for them without falling through to the .attach-thumb check).
-        msg_branch = "let img = e.target.closest('.msg-media-img');\n  if(img){ _openImgLightbox(img.src, img.alt); return; }"
+        msg_branch = "let img = e.target.closest('.msg-media-img');\n  if(img){ _openImgLightbox(img); return; }"
         assert msg_branch in src
 
     def test_delegate_excludes_audio_video_chips(self):
