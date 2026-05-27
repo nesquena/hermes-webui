@@ -191,8 +191,9 @@ def test_toast_block_uses_only_minimal_payload_fields():
 
 def test_toast_template_pins_copy():
     """The toast template (P-bc §3.3 Q-c-1 verbatim) wraps the task id in the
-    8-char prefix and falls back to ``' completed'`` when ``d.summary`` is
-    absent. Pin both literals so a future drift in copy is caught loud."""
+    8-char prefix and falls back to ``''`` (empty tail — just ``Task <id> done``)
+    when ``d.summary`` is absent. Pin both literals so a future drift in copy is
+    caught loud."""
     block = _toast_block()
     assert "slice(0, 8)" in block
     assert "slice(0, 80)" in block

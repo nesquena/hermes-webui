@@ -491,11 +491,10 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
 
-    # Start the bg_task_complete drain thread (canonical event; emits
-    # `process_complete` as a temporary backward-compat alias) for
-    # terminal(notify_on_complete=true) agent wakeup. Reads
-    # tools.process_registry.completion_queue and emits SSE bg_task_complete
-    # events to the matching session's stream.
+    # Start the bg_task_complete drain thread for terminal(notify_on_complete=true)
+    # agent wakeup. Reads tools.process_registry.completion_queue and emits SSE
+    # bg_task_complete events (canonical name; legacy process_complete alias is
+    # still emitted for back-compat) to the matching session's stream.
     try:
         from api.background_process import start_drain_thread
         if start_drain_thread():

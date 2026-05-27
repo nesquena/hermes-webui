@@ -2829,7 +2829,9 @@ function stopSessionStream() {
 // PR (c) UX surface: post-dedupe the handler marks the session viewed (when
 // the session pane is current and the doc is visible+focused), then runs the
 // T4 drop-when-focused gate; only out-of-focus or off-pane completions spawn
-// a toast. The diagnostic ack POST always fires.
+// a toast. The diagnostic ack POST fires on the toast path only;
+// the focused-viewer branch is a pure client-side drop (no ack, no
+// toast — bookkeeping already happened via _markSessionViewed).
 function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
   try {
     const d = JSON.parse(e.data || '{}');
@@ -2847,7 +2849,7 @@ function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
     }
     try {
       const tid = (d.task_id || '').slice(0, 8) || '?';
-      const tail = d.summary ? `: ${String(d.summary).slice(0, 80)}` : ' completed';
+      const tail = d.summary ? `: ${String(d.summary).slice(0, 80)}` : '';
       showToast(`Task ${tid} done${tail}`, 2600);
     } catch (_) {}
 
