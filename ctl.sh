@@ -17,6 +17,7 @@ Commands:
   stop                        Stop the daemon started by ctl.sh
   restart [bootstrap args...] Stop, then start again
   status                      Show daemon, host/port, log, and health status
+  cost-protection <command>   Manage WebUI runaway-cost guards (status|enable|disable)
   logs [--lines N] [--follow|--no-follow]
                               Show the daemon log (defaults to tail -n 100 -f)
 EOF
@@ -357,6 +358,64 @@ logs_cmd() {
   fi
 }
 
+cost_protection_cmd() {
+  ensure_home
+  _load_repo_dotenv_preserving_env
+  local action="${1:-status}"
+  local state_dir="${HERMES_WEBUI_STATE_DIR:-${DEFAULT_STATE_DIR}}"
+  local settings_file="${state_dir}/settings.json"
+  local python_exe
+  mkdir -p "${state_dir}"
+  python_exe="$(_find_python)"
+  case "${action}" in
+    status|enable|disable)
+      SETTINGS_FILE="${settings_file}" ACTION="${action}" "${python_exe}" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+settings_path = Path(os.environ["SETTINGS_FILE"]).expanduser()
+action = os.environ["ACTION"]
+settings = {}
+if settings_path.exists():
+    try:
+        loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            settings = loaded
+    except Exception:
+        settings = {}
+
+if action in {"enable", "disable"}:
+    settings["cost_protection_enabled"] = action == "enable"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+enabled = bool(settings.get("cost_protection_enabled", False))
+print(f"Cost Protection: {'enabled' if enabled else 'disabled'}")
+print(f"Settings: {settings_path}")
+if action == "enable":
+    print("Future WebUI chat runs will pause before another model call when runaway-cost signals accumulate.")
+elif action == "disable":
+    print("Future WebUI chat runs will continue without the runaway-cost pause gate.")
+else:
+    print("Coverage: WebUI chat run pause gate. Background runaway alerts are not implemented yet.")
+PY
+      ;;
+    -h|--help|help)
+      cat <<'EOF'
+Usage: ./ctl.sh cost-protection <status|enable|disable>
+
+Manage WebUI Cost Protection, an advanced runaway-cost guard for future WebUI
+chat runs. This writes WebUI-owned settings.json state, not Hermes Agent config.
+EOF
+      ;;
+    *)
+      echo "[ctl] Unknown cost-protection command: ${action}" >&2
+      return 2
+      ;;
+  esac
+}
+
 cmd="${1:-}"
 if [[ $# -gt 0 ]]; then
   shift
@@ -367,6 +426,7 @@ case "${cmd}" in
   stop) stop_cmd ;;
   restart) stop_cmd; start_cmd "$@" ;;
   status) status_cmd ;;
+  cost-protection) cost_protection_cmd "$@" ;;
   logs) logs_cmd "$@" ;;
   -h|--help|help|"") usage ;;
   *) echo "[ctl] Unknown command: ${cmd}" >&2; usage >&2; exit 2 ;;

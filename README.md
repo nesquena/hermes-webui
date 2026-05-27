@@ -114,6 +114,7 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 ```bash
 ./ctl.sh start              # background daemon, PID at ~/.hermes/webui.pid
 ./ctl.sh status             # PID, uptime, bound host/port, log path, /health
+./ctl.sh cost-protection status
 ./ctl.sh logs --lines 100   # tail ~/.hermes/webui.log
 ./ctl.sh restart
 ./ctl.sh stop
@@ -532,6 +533,10 @@ Production data and real cron jobs are never touched. Current snapshot:
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badge on Tasks tab
 - Background agent error alerts -- banner when a non-active session encounters an error
+- Optional Cost Protection pause -- disabled by default; use
+  `./ctl.sh cost-protection enable` to pause future WebUI chat runs at a safe
+  agent step boundary when runaway-cost signals are reached. The command writes
+  WebUI-owned `settings.json` state, not Hermes Agent `config.yaml`.
 
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown
