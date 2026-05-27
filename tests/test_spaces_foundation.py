@@ -1635,6 +1635,18 @@ def test_space_tool_adapter_supports_source_open_alias_and_camelcase_space_id_me
     assert opened["progress_event"]["event_type"] == "tool.completed"
     assert opened["progress_event"]["run_id"] == f"space.open:{created['space_id']}"
     assert opened["progress_event"]["redaction_status"] == "metadata_only"
+    open_compaction = opened["output_compaction"]
+    open_compaction_text = open_compaction["text"].lower()
+    assert open_compaction["tool"] == "capy-spaces-tool-action"
+    assert open_compaction["command"] == "space.spaces.open"
+    assert open_compaction["metadata_only"] is True
+    assert open_compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert "space_action: space.spaces.open" in open_compaction_text
+    assert "space_id: source-open-lab" in open_compaction_text
+    assert "widget_count: 1" in open_compaction_text
+    assert "prompt_preflight_status: required" in open_compaction_text
+    assert "model_route_hint: hint:fast" in open_compaction_text
+    assert "progress_run_id: space.open:source-open-lab" in open_compaction_text
     assert read_by_camelcase_id["space"] == opened["space"]
     assert get_by_camelcase_id["space"] == opened["space"]
     assert "stored()" not in serialized
@@ -9756,6 +9768,18 @@ def test_space_tool_adapter_supports_widget_see_and_reload_aliases_metadata_only
     assert source_current["autonomy_policy"]["metadata_only"] is True
     assert source_current["progress_event"]["run_id"] == f"space.reload:{created['space_id']}"
     assert source_current["progress_event"]["redaction_status"] == "metadata_only"
+    reload_compaction = source_current["output_compaction"]
+    reload_compaction_text = reload_compaction["text"].lower()
+    assert reload_compaction["tool"] == "capy-spaces-tool-action"
+    assert reload_compaction["command"] == "space.spaces.reloadcurrentspace"
+    assert reload_compaction["metadata_only"] is True
+    assert reload_compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert "space_action: space.spaces.reloadcurrentspace" in reload_compaction_text
+    assert "space_id: widget-see-reload-lab" in reload_compaction_text
+    assert "widget_count: 1" in reload_compaction_text
+    assert "prompt_preflight_status: required" in reload_compaction_text
+    assert "model_route_hint: hint:fast" in reload_compaction_text
+    assert "progress_run_id: space.reload:widget-see-reload-lab" in reload_compaction_text
     assert events["events"][0]["event_id"] == source_reloaded["event_id"]
     assert events["events"][1]["event_id"] == reloaded["event_id"]
     assert "steal" not in serialized
