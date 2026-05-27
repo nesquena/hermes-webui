@@ -6589,6 +6589,17 @@ def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only
     assert home_url["progress_event"]["family"] == "tool"
     assert home_url["progress_event"]["run_id"] == "resolve-app-url:space.spaces.resolveappurl"
     assert home_url["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = home_url["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == "space.spaces.resolveappurl"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert compaction["compacted_chars"] > 0
+    assert "space_action: space.spaces.resolveappurl" in compaction["text"]
+    assert "prompt_preflight_status: required" in compaction["text"]
+    assert "model_route_hint: hint:fast" in compaction["text"]
+    assert "progress_run_id: resolve-app-url:space.spaces.resolveappurl" in compaction["text"]
+    assert widget_url["output_compaction"]["command"] == "space.spaces.resolveappurl"
     assert widget_url["prompt_preflight"]["boundary"] == "browser_surface"
     assert widget_url["autonomy_policy"]["action"] == "space.spaces.resolveappurl"
     assert widget_url["progress_event"]["run_id"] == "resolve-app-url:space.spaces.resolveappurl"

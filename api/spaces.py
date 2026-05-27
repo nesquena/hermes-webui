@@ -6791,14 +6791,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         prompt_preflight = _space_resolve_app_url_required_prompt_preflight_receipt(name)
         resolved_url = _space_tool_resolve_app_url(data)
         progress_event = _record_resolve_app_url_progress_event(name)
+        autonomy_policy = _space_resolve_app_url_action_policy_receipt(name, prompt_preflight)
         return {
             "ok": True,
             "action": name,
             "url": resolved_url,
             "resolve": {"mode": "metadata-only"},
             "prompt_preflight": prompt_preflight,
-            "autonomy_policy": _space_resolve_app_url_action_policy_receipt(name, prompt_preflight),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                widget_count=0,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
     if name == "space.spaces.sizetotoken":
         return {"ok": True, "action": name, **_space_tool_size_to_token(data), "mode": "metadata-only"}
