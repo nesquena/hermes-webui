@@ -102,10 +102,11 @@ def _auth_store(*, active_provider="anthropic", extra_pool_provider=None,
 def _write_auth(tmp_path, monkeypatch, store: dict):
     """Point _get_auth_store_path() at a tmp auth.json and write `store`.
 
-    Sleeps 10ms and re-stats to guarantee mtime_ns/size would differ between
-    successive writes — proving the OLD stat-based fingerprint WOULD have
-    churned, so a stable result is attributable to the content fix, not to
-    the OS coincidentally reusing mtime/size.
+    Writes `store` as JSON to a tmp auth.json and monkeypatches
+    config._get_auth_store_path() to return that path. The mtime/size
+    sleep+restat dance lives at the call sites (the tests that actually
+    need to prove the OLD stat-based fingerprint WOULD have churned);
+    this helper itself only does the write + monkeypatch.
     """
     auth_path = tmp_path / "auth.json"
     auth_path.write_text(json.dumps(store, indent=2), encoding="utf-8")

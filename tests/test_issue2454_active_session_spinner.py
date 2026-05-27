@@ -120,3 +120,57 @@ console.log(JSON.stringify(merged[0]));
     assert row["pending_user_message"] is None
     assert row["pending_started_at"] is None
     assert row["is_streaming"] is False
+
+
+def test_optimistic_merge_preserves_server_running_state_when_local_cache_is_stale():
+    """If the server still says running, stale local optimism must not hide the spinner."""
+    helper_body = _function_body(SESSIONS_SRC, "function _isServerIdleSessionRow(")
+    local_body = _function_body(SESSIONS_SRC, "function _isSessionLocallyStreaming(")
+    optimistic_body = _function_body(SESSIONS_SRC, "function _isOptimisticFirstTurnSessionRow(")
+    keep_body = _function_body(SESSIONS_SRC, "function _shouldKeepLocalOnlyOptimisticSessionRow(")
+    drop_body = _function_body(SESSIONS_SRC, "function _dropStaleOptimisticSessionRow(")
+    merge_body = _function_body(SESSIONS_SRC, "function _mergeOptimisticFirstTurnSessions(")
+
+    script = f"""
+let S = {{ session: null, busy: false }};
+let _sendInProgress = false;
+let _sendInProgressSid = null;
+let INFLIGHT = {{}};
+let _sessionStreamingById = new Map();
+let _allSessions = [{{
+  session_id: 'dogfood-session',
+  title: 'Local stale optimistic row',
+  message_count: 1,
+  last_message_at: 1000,
+  updated_at: 1000,
+  active_stream_id: 'stale-local-stream',
+  pending_user_message: 'stale pending text',
+  pending_started_at: 900,
+  is_streaming: true,
+}}];
+function _isServerIdleSessionRow(s) {{{helper_body}}}
+function _isSessionLocallyStreaming(s) {{{local_body}}}
+function _isOptimisticFirstTurnSessionRow(s) {{{optimistic_body}}}
+function _shouldKeepLocalOnlyOptimisticSessionRow(local) {{{keep_body}}}
+function _dropStaleOptimisticSessionRow(sid) {{{drop_body}}}
+function _mergeOptimisticFirstTurnSessions(fetchedSessions) {{{merge_body}}}
+const merged = _mergeOptimisticFirstTurnSessions([{{
+  session_id: 'dogfood-session',
+  title: 'Server running row',
+  message_count: 2,
+  last_message_at: 1100,
+  updated_at: 1100,
+  active_stream_id: null,
+  pending_user_message: null,
+  pending_started_at: null,
+  is_streaming: true,
+}}]);
+console.log(JSON.stringify(merged[0]));
+"""
+    result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    row = json.loads(result.stdout)
+
+    assert row["session_id"] == "dogfood-session"
+    assert row["title"] == "Server running row"
+    assert row["message_count"] == 2
+    assert row["is_streaming"] is True

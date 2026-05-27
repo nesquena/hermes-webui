@@ -55,13 +55,18 @@ class TestSessionDBInjection(unittest.TestCase):
         )
 
     def test_sessiondb_init_in_try_except(self):
-        """SessionDB() init must be wrapped in try/except for non-fatal failure handling."""
-        # Check that the try/except pattern surrounding SessionDB() is present
-        pattern = r"try:\s*\n\s*from hermes_state import SessionDB\s*\n\s*_session_db\s*=\s*SessionDB\(\)"
+        """SessionDB init must be wrapped in try/except for non-fatal failure handling."""
+        # Check that the try/except pattern surrounding SessionDB(db_path=...) is present.
+        pattern = (
+            r"try:\s*\n"
+            r"\s*from hermes_state import SessionDB\s*\n"
+            r'\s*_state_db_path\s*=\s*\(Path\(_profile_home\)\s*/\s*"state\.db"\)\s*if\s*_profile_home\s*else\s*None\s*\n'
+            r"\s*_session_db\s*=\s*SessionDB\(db_path=_state_db_path\)"
+        )
         self.assertRegex(
             STREAMING_PY,
             pattern,
-            "SessionDB() init must be inside a try block for non-fatal error handling (PR #356)",
+            "SessionDB(db_path=...) init must be inside a try block for non-fatal error handling",
         )
 
     def test_sessiondb_failure_logs_warning(self):

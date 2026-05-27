@@ -2699,7 +2699,7 @@ _AUTH_FINGERPRINT_VOLATILE_KEYS = frozenset({
     "id_token",
     "api_key",
     "secret",
-    "client_secret",
+    "client_secret",  # rotation-only on purpose; not a model-cache differentiator
     # Expiry / liveness — bumped every refresh, derived from the token above.
     "expires_at",
     "expires_at_ms",

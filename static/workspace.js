@@ -255,10 +255,29 @@ function renderSessionArtifacts(){
   root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
 }
 
-function openArtifactPath(path){
+async function _workspacePathExists(path){
+  if(!S.session||!path) return false;
+  const parts=String(path).split('/').filter(Boolean);
+  const name=parts.pop();
+  if(!name) return false;
+  const dir=parts.length?parts.join('/'):'.';
+  const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`);
+  return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
+}
+
+async function openArtifactPath(path){
   if(!path) return;
   switchWorkspacePanelTab('files');
   const rel = path.replace(/^~\//,'').replace(/^\.\//,'');
+  try{
+    if(!(await _workspacePathExists(rel))){
+      setStatus(t('file_open_failed'));
+      return;
+    }
+  }catch(_){
+    setStatus(t('file_open_failed'));
+    return;
+  }
   openFile(rel);
 }
 
