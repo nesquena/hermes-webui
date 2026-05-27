@@ -6919,6 +6919,100 @@ def test_space_tool_adapter_supports_source_render_widget_helper_quarantines_gen
 
 
 
+def test_space_tool_adapter_widget_blueprint_and_render_receipts_include_output_compaction(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-blueprint-compaction-lab", "name": "Widget Blueprint Compaction Lab"})
+
+    cases = [
+        (
+            "space.spaces.defineWidget",
+            {
+                "spaceId": created["space_id"],
+                "definition": {
+                    "widgetId": "safe-blueprint",
+                    "name": "Safe Blueprint",
+                    "type": "markdown",
+                    "metadata": {"summary": "safe"},
+                },
+            },
+            "widget.blueprint.define:widget-blueprint-compaction-lab",
+        ),
+        (
+            "space.spaces.createWidgetSource",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "safe-source-blueprint",
+                "name": "Safe Source Blueprint",
+                "type": "markdown",
+                "metadata": {"summary": "safe"},
+                "renderer": "<script>source()</script>",
+                "html": "<img src=x onerror=steal()>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "widget.blueprint.create:widget-blueprint-compaction-lab",
+        ),
+        (
+            "space.spaces.previewWidgetRecord",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "safe-preview-blueprint",
+                "name": "Safe Preview Blueprint",
+                "type": "markdown",
+                "metadata": {"summary": "safe"},
+                "renderer": "<script>preview()</script>",
+                "source": "SECRET_SOURCE",
+            },
+            "widget.blueprint.preview:widget-blueprint-compaction-lab",
+        ),
+        (
+            "space.spaces.renderWidget",
+            {
+                "spaceId": created["space_id"],
+                "widgetId": "safe-render-card",
+                "name": "Safe Render Card",
+                "type": "markdown",
+                "metadata": {"summary": "safe"},
+                "renderer": "<script>render()</script>",
+                "generated_body": "raw generated widget body must not leak",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "widget.render:widget-blueprint-compaction-lab",
+        ),
+    ]
+
+    for action, payload, expected_run_id in cases:
+        result = spaces.run_space_tool(action, payload)
+        serialized = json.dumps(result, sort_keys=True).lower()
+        compaction = result["output_compaction"]
+        text = compaction["text"].lower()
+
+        assert result["ok"] is True
+        assert result["action"] == action.lower()
+        assert compaction["tool"] == "capy-spaces-tool-action"
+        assert compaction["command"] == action.lower()
+        assert compaction["exit_status"] == 0
+        assert compaction["metadata_only"] is True
+        assert compaction["redaction_status"] in {"metadata_only", "redacted"}
+        assert f"space_action: {action.lower()}" in text
+        assert "space_id: widget-blueprint-compaction-lab" in text
+        assert "widget_count: 1" in text
+        assert "prompt_preflight_status: pass" in text
+        assert "model_route_hint: hint:fast" in text
+        assert f"progress_run_id: {expected_run_id}" in text
+        assert "progress_status: completed" in text
+        assert {"kind": "space", "handle": "space:widget-blueprint-compaction-lab", "label": "Space action metadata"} in compaction[
+            "retained_artifact_handles"
+        ]
+        assert "secret_value_do_not_leak" not in serialized
+        assert "secret_source" not in serialized
+        assert "raw generated widget body" not in serialized
+        assert "<script" not in serialized
+        assert "renderer" not in serialized
+        assert '"source":' not in serialized
+        assert "api_key" not in serialized
+
+
+
 def test_space_tool_adapter_render_widget_sanitizes_non_scalar_display_fields(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "render-display-safety-lab", "name": "Render Display Safety Lab"})

@@ -7168,6 +7168,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if unsafe_fragments or prompt_preflight.get("status") != "pass":
             raise ValueError("Widget define prompt preflight blocked")
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.blueprint.define")
+        autonomy_policy = _space_widget_mutation_action_policy_receipt("space.widget.blueprint", prompt_preflight)
         return {
             "ok": True,
             "action": name,
@@ -7180,8 +7181,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 "omitted_field_count": omitted_count,
             },
             "prompt_preflight": prompt_preflight,
-            "autonomy_policy": _space_widget_mutation_action_policy_receipt("space.widget.blueprint", prompt_preflight),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=1,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
     if name == "space.spaces.createwidgetsource":
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -7195,6 +7203,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if prompt_preflight.get("status") != "pass":
             raise ValueError("Widget source prompt preflight blocked")
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.blueprint.create")
+        autonomy_policy = _space_widget_mutation_action_policy_receipt("space.widget.blueprint", prompt_preflight)
         return {
             "ok": True,
             "action": name,
@@ -7207,8 +7216,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 "omitted_field_count": omitted_count,
             },
             "prompt_preflight": prompt_preflight,
-            "autonomy_policy": _space_widget_mutation_action_policy_receipt("space.widget.blueprint", prompt_preflight),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=1,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
     if name == "space.spaces.previewwidgetrecord":
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -7226,6 +7242,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         preview_metadata = widget_payload.get("metadata") if isinstance(widget_payload.get("metadata"), dict) else {}
         if preview_metadata:
             widget_detail.setdefault("metadata", {})["preview_metadata"] = preview_metadata
+        autonomy_policy = _space_widget_mutation_action_policy_receipt("space.widget.blueprint", prompt_preflight)
         return {
             "ok": True,
             "action": name,
@@ -7238,8 +7255,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 "omitted_field_count": omitted_count,
             },
             "prompt_preflight": prompt_preflight,
-            "autonomy_policy": _space_widget_mutation_action_policy_receipt("space.widget.blueprint", prompt_preflight),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=1,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
     if name == "space.spaces.renderwidget":
         _space_tool_reject_ambient_current_selectors(data)
@@ -7255,6 +7279,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             raise ValueError("Widget render prompt preflight blocked")
         result = upsert_widget(space_id, widget_payload)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.render")
+        autonomy_policy = _space_widget_mutation_action_policy_receipt(name, prompt_preflight)
         widget_id = result["widget"]["id"]
         return {
             "ok": True,
@@ -7264,8 +7289,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "revision_event_id": result["revision_event_id"],
             "render": {"mode": "metadata-only", "executed": False, "omitted_field_count": omitted_count},
             "prompt_preflight": prompt_preflight,
-            "autonomy_policy": _space_widget_mutation_action_policy_receipt(name, prompt_preflight),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=1,
+                revision_event_id=result.get("revision_event_id"),
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
     if name in {"space.spaces.patchwidget", "space.current.patchwidget"}:
         if not name.startswith("space.current."):
