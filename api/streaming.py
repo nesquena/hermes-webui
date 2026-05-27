@@ -45,6 +45,7 @@ from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
     _is_empty_partial_activity_message,
+    _message_timestamp_as_float,
     get_state_db_session_messages,
     reconciled_state_db_messages_for_session,
 )
@@ -2618,6 +2619,35 @@ def _restore_display_reasoning_metadata(previous_messages, updated_messages):
     return updated_messages
 
 
+def _clamp_context_to_watermark(session, messages: list) -> list:
+    """Filter context_messages to the truncation watermark boundary (#2914).
+
+    When a user edits, regenerates, or undoes messages, the agent's result
+    may contain the full state.db history including turns the user deliberately
+    removed.  This helper drops messages whose timestamp exceeds the active
+    watermark so the next turn doesn't feed the agent "deleted" rows again.
+    """
+    _tw = getattr(session, 'truncation_watermark', None)
+    if _tw is None:
+        return messages
+    _tw_ts = _message_timestamp_as_float({'timestamp': _tw})
+    if _tw_ts is None:
+        return messages
+    _clamped = [
+        m for m in messages
+        # Keep m_ts <= watermark (messages AT the watermark boundary are kept).
+        # Matches the merge filter in models.py merge_session_messages_append_only,
+        # which drops state.db rows with timestamp > watermark_timestamp (strict).
+        if (m_ts := _message_timestamp_as_float(m)) is None or m_ts <= _tw_ts
+    ]
+    if len(_clamped) != len(messages):
+        logger.info(
+            "clamping context_messages: %d → %d (watermark=%.2f, session=%s)",
+            len(messages), len(_clamped), _tw_ts, session.session_id,
+        )
+    return _clamped
+
+
 def _session_context_messages(session):
     """Return model-facing history without assuming it matches the UI transcript."""
     context_messages = getattr(session, 'context_messages', None)
@@ -5148,6 +5178,7 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _next_context_messages,
                 )
+                _next_context_messages = _clamp_context_to_watermark(s, _next_context_messages)
                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                 s.messages = _merge_display_messages_after_agent_result(
                     _previous_messages,
@@ -5295,6 +5326,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
+                                _next_context_messages = _clamp_context_to_watermark(s, _next_context_messages)
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
@@ -6172,6 +6204,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
+                                _next_context_messages = _clamp_context_to_watermark(s, _next_context_messages)
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
