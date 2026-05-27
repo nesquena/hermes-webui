@@ -10341,13 +10341,26 @@ def disable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, 
     saved = _write_manifest(space, "space.recovery_disabled", {"reason": recovery["disabled_reason"]})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="disable")
     action = "space.recovery.disable"
+    prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(action)
+    output_compaction = _recovery_toggle_output_compaction_receipt(
+        action=action,
+        space_id=saved["space_id"],
+        target_kind="space",
+        disabled=True,
+        revision_event_id=saved["revision_event_id"],
+        prompt_preflight=prompt_preflight,
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_event,
+    )
     return {
         "disabled": True,
         "space_id": saved["space_id"],
         "revision_event_id": saved["revision_event_id"],
-        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
+        "prompt_preflight": prompt_preflight,
         "progress_event": progress_event,
-        "autonomy_policy": _recovery_toggle_action_policy_receipt(action),
+        "autonomy_policy": autonomy_policy,
+        "output_compaction": output_compaction,
     }
 
 
@@ -10366,13 +10379,26 @@ def enable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, A
     saved = _write_manifest(space, "space.recovery_enabled", {"reason": detail_reason})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="enable")
     action = "space.recovery.enable"
+    prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(action)
+    output_compaction = _recovery_toggle_output_compaction_receipt(
+        action=action,
+        space_id=saved["space_id"],
+        target_kind="space",
+        disabled=False,
+        revision_event_id=saved["revision_event_id"],
+        prompt_preflight=prompt_preflight,
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_event,
+    )
     return {
         "disabled": False,
         "space_id": saved["space_id"],
         "revision_event_id": saved["revision_event_id"],
-        "prompt_preflight": _recovery_required_prompt_preflight_receipt(action),
+        "prompt_preflight": prompt_preflight,
         "progress_event": progress_event,
-        "autonomy_policy": _recovery_toggle_action_policy_receipt(action),
+        "autonomy_policy": autonomy_policy,
+        "output_compaction": output_compaction,
     }
 
 

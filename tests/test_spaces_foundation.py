@@ -3689,6 +3689,47 @@ def test_space_recovery_primitives_record_metadata_only_progress_events(monkeypa
     assert "renderer" not in serialized
 
 
+def test_space_recovery_toggle_outputs_include_compaction_receipts_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "space-recovery-compaction-lab", "name": "Space Recovery Compaction Lab"})
+
+    disabled = spaces.disable_space_for_recovery(
+        created["space_id"],
+        reason="broken renderer <script>bad()</script> with SECRET_VALUE_DO_NOT_LEAK",
+    )
+    enabled = spaces.enable_space_for_recovery(
+        created["space_id"],
+        reason="safe after renderer cleanup with bearer placeholder",
+    )
+    serialized = json.dumps({"disabled": disabled, "enabled": enabled}, sort_keys=True).lower()
+
+    for result, action in [
+        (disabled, "space.recovery.disable"),
+        (enabled, "space.recovery.enable"),
+    ]:
+        compaction = result["output_compaction"]
+        assert compaction["tool"] == "capy-spaces-recovery-toggle"
+        assert compaction["command"] == action
+        assert compaction["metadata_only"] is True
+        assert compaction["original_chars"] > 0
+        assert compaction["compacted_chars"] <= 700
+        assert compaction["redaction_status"] == "metadata_only"
+        assert compaction["rules_applied"]
+        text = compaction["text"].lower()
+        assert f"action: {action}" in text
+        assert "space_id: space-recovery-compaction-lab" in text
+        assert "target_kind: space" in text
+        assert "raw_prompt_stored: false" in text
+        assert "broken renderer" not in text
+        assert "safe after" not in text
+        handles = compaction["retained_artifact_handles"]
+        assert any(handle.get("handle") == "space:space-recovery-compaction-lab" for handle in handles)
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "bearer" not in serialized
+
+
 def test_widget_recovery_enable_disable_tools_record_metadata_only_progress_events(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "widget-recovery-progress-lab", "name": "Widget Recovery Progress Lab"})
