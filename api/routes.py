@@ -14,6 +14,7 @@ import queue
 import re
 import platform
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -49,6 +50,12 @@ _CLIENT_DISCONNECT_ERRORS = (
     ConnectionResetError,
     ConnectionAbortedError,
     TimeoutError,
+    # socket.timeout is an alias of TimeoutError on Python 3.10+, but listing it
+    # explicitly keeps coverage robust against platform/version variation and
+    # documents that the SSE write-deadline path (api.streaming._sse_set_write_deadline)
+    # surfaces blocked writes as socket.timeout exceptions that must be classified
+    # as ordinary client disconnects rather than 500-class errors.
+    socket.timeout,
     OSError,
 )
 

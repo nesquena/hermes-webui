@@ -491,15 +491,16 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
 
-    # Start the process_complete drain thread for terminal(notify_on_complete=true)
+    # Start the bg_task_complete drain thread for terminal(notify_on_complete=true)
     # agent wakeup. Reads tools.process_registry.completion_queue and emits SSE
-    # process_complete events to the matching session's stream.
+    # bg_task_complete events (with a temporary process_complete alias for
+    # legacy clients) to the matching session's stream.
     try:
         from api.background_process import start_drain_thread
         if start_drain_thread():
-            print('[ok] process_complete drain thread started', flush=True)
+            print('[ok] bg_task_complete drain thread started', flush=True)
     except Exception as e:
-        print(f'[!!] WARNING: process_complete drain failed to start: {e}', flush=True)
+        print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
 
     # Start the SessionChannel reaper for the persistent per-session SSE
     # endpoint (/api/session/stream). Runs every 60s, collects channels with
@@ -548,12 +549,12 @@ def main() -> None:
             drain_all_on_shutdown()
         except Exception:
             logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
-        # Stop process_complete drain + SessionChannel reaper (ours-original)
+        # Stop bg_task_complete drain + SessionChannel reaper (ours-original)
         try:
             from api.background_process import stop_drain_thread
             stop_drain_thread()
         except Exception:
-            logger.debug("Failed to stop process_complete drain thread during shutdown")
+            logger.debug("Failed to stop bg_task_complete drain thread during shutdown")
         try:
             from api.background_process import stop_session_channel_reaper
             stop_session_channel_reaper()

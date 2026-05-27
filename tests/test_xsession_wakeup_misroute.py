@@ -111,6 +111,13 @@ def test_concurrent_turns_capture_their_own_session_under_env_race():
     ta.join(timeout=10)
     tb.join(timeout=10)
 
+    # Assert the worker threads actually terminated. If a thread deadlocks the
+    # join() above returns silently — surface that as a clear test failure
+    # instead of letting downstream asserts mask the hang or leak threads into
+    # the rest of the run.
+    assert not ta.is_alive(), "worker thread A did not terminate within join timeout"
+    assert not tb.is_alive(), "worker thread B did not terminate within join timeout"
+
     # Contextvar must be restored after the turn context exits (no thread-pool
     # residue → no new race for a reused worker).
     assert sc._SESSION_KEY.get() is sc._UNSET
