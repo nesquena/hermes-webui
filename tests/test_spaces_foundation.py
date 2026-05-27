@@ -10452,6 +10452,43 @@ def test_space_data_set_tool_records_metadata_only_progress_event(monkeypatch, t
     assert "secret_value_do_not_leak" not in stored
 
 
+def test_space_data_set_tool_returns_metadata_only_output_compaction_receipt(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress-events.jsonl"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "shared-data-set-compaction", "name": "Shared Data Set Compaction"})
+
+    result = spaces.run_space_tool(
+        "space.data.set",
+        {
+            "space_id": created["space_id"],
+            "key": "research-summary",
+            "value": {
+                "title": "Safe shared data",
+                "renderer": "<script>bad()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "metadata": {"source_widget": "research-summary", "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    compaction = result["output_compaction"]
+    serialized = json.dumps({"result": result}, sort_keys=True).lower()
+
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == "space.data.set"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert "space_action: space.data.set" in compaction["text"]
+    assert "prompt_preflight_status: pass" in compaction["text"]
+    assert "model_route_hint: hint:summarize" in compaction["text"]
+    assert "progress_run_id: shared-slot.set:shared-data-set-compaction" in compaction["text"]
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_data_set_prompt_preflight_redacts_prompt_like_slot_keys(monkeypatch, tmp_path):
     monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress-events.jsonl"))
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
@@ -10718,6 +10755,44 @@ def test_space_data_delete_tool_records_metadata_only_progress_event(monkeypatch
     assert "renderer" not in stored
     assert "api_key" not in stored
     assert "secret_value_do_not_leak" not in stored
+
+
+def test_space_data_delete_tool_returns_metadata_only_output_compaction_receipt(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress-events.jsonl"))
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "shared-data-delete-compaction", "name": "Shared Data Delete Compaction"})
+    spaces.set_shared_data_slot(
+        created["space_id"],
+        "research-summary",
+        {"title": "Safe shared data", "renderer": "<script>bad()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+    )
+
+    result = spaces.run_space_tool(
+        "space.data.delete",
+        {
+            "space_id": created["space_id"],
+            "key": "research-summary",
+            "renderer": "<script>deleteBad()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    compaction = result["output_compaction"]
+    serialized = json.dumps({"result": result}, sort_keys=True).lower()
+
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == "space.data.delete"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert "space_action: space.data.delete" in compaction["text"]
+    assert "prompt_preflight_status: required" in compaction["text"]
+    assert "model_route_hint: hint:summarize" in compaction["text"]
+    assert "progress_run_id: shared-slot.delete:shared-data-delete-compaction" in compaction["text"]
+    assert f"revision_event_id: {result['revision_event_id']}" in compaction["text"]
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
 
 
 def test_space_tool_adapter_shared_data_slots_are_metadata_only(monkeypatch, tmp_path):

@@ -7500,7 +7500,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = set_shared_data_slot(space_id, data.get("key"), data.get("value"), data.get("metadata"))
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="shared-slot.set")
         response = {"ok": True, "action": name, **result, "progress_event": progress_event}
-        response["autonomy_policy"] = _shared_data_slot_action_policy_receipt(name, result.get("prompt_preflight"))
+        autonomy_policy = _shared_data_slot_action_policy_receipt(name, result.get("prompt_preflight"))
+        response["autonomy_policy"] = autonomy_policy
+        response["output_compaction"] = _space_tool_action_output_compaction_receipt(
+            action=name,
+            space_id=result.get("space_id"),
+            widget_count=0,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+        )
         return response
     if name in {"space.data.list", "space.current.data.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -7514,7 +7522,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = delete_shared_data_slot(space_id, data.get("key"))
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="shared-slot.delete")
         response = {"ok": True, "action": name, **result, "progress_event": progress_event}
-        response["autonomy_policy"] = _shared_data_slot_action_policy_receipt(name, None)
+        autonomy_policy = _shared_data_slot_action_policy_receipt(name, None)
+        response["autonomy_policy"] = autonomy_policy
+        response["output_compaction"] = _space_tool_action_output_compaction_receipt(
+            action=name,
+            space_id=result.get("space_id"),
+            widget_count=0,
+            revision_event_id=result.get("revision_event_id"),
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+        )
         return response
     if name in {"space.research.artifact.set", "space.current.research.artifact.set", "space.research.report.set", "space.current.research.report.set"}:
         is_current = name.startswith("space.current.")
