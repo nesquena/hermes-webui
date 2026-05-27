@@ -395,8 +395,10 @@ def _emit_to_session_streams(session_id: str, event: str, data: dict) -> int:
     emitted = 0
     with _cfg.STREAMS_LOCK:
         items = list(_cfg.STREAMS.items())
+    with _cfg.ACTIVE_RUNS_LOCK:
+        active_runs = dict(_cfg.ACTIVE_RUNS or {})
     for stream_id, channel in items:
-        meta = _cfg.ACTIVE_RUNS.get(stream_id) if hasattr(_cfg, "ACTIVE_RUNS") else None
+        meta = active_runs.get(stream_id)
         owner_sid = (meta or {}).get("session_id") if isinstance(meta, dict) else None
         # Copilot review #3: only emit on the STREAMS loop when the stream's
         # owning session is KNOWN and matches. Previously, when no ACTIVE_RUNS

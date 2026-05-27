@@ -19,6 +19,8 @@ resolve from the cache-only path and never reach the live-rebuild seam
 carries a model_provider.
 """
 
+import ast
+import inspect
 import types
 
 import pytest
@@ -100,6 +102,23 @@ def test_session_display_resolvers_never_trigger_live_rebuild(
     assert rebuild_seam_tripwire["n"] == 0
 
 
+def _has_prefer_cached_catalog_true_call(fn) -> bool:
+    tree = ast.parse(inspect.getsource(fn))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "_resolve_compatible_session_model_state":
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "prefer_cached_catalog" and isinstance(
+                keyword.value, ast.Constant
+            ):
+                return keyword.value.value is True
+    return False
+
+
 def test_resolver_signature_passes_prefer_cached_catalog():
     """Static guard: both resolvers must opt into the cache-only catalog.
 
@@ -107,11 +126,9 @@ def test_resolver_signature_passes_prefer_cached_catalog():
     this pins the explicit contract at the call site so the intent survives
     refactors.
     """
-    import inspect
-
-    src = inspect.getsource(routes._resolve_effective_session_model_for_display)
-    assert "prefer_cached_catalog=True" in src
-    src_p = inspect.getsource(
+    assert _has_prefer_cached_catalog_true_call(
+        routes._resolve_effective_session_model_for_display
+    )
+    assert _has_prefer_cached_catalog_true_call(
         routes._resolve_effective_session_model_provider_for_display
     )
-    assert "prefer_cached_catalog=True" in src_p
