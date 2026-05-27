@@ -9249,6 +9249,97 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
     return "set"
 
 
+def _start_run(
+    s,
+    *,
+    msg: str,
+    attachments,
+    workspace: str,
+    model,
+    model_provider,
+    normalized_model,
+    source: str,
+    route: str,
+    diag=None,
+):
+    """Shared start-run helper for /api/chat/start and start_session_turn.
+
+    Centralizes the runtime-adapter selection block (Q-2979-A2 / Copilot
+    discussion_r3305864087/r3305864173) so both entrypoints honor
+    ``runtime_adapter_enabled()`` / ``runtime_adapter_runner_enabled()`` the
+    same way. Prior to this helper ``start_session_turn`` bypassed the
+    adapter path entirely, so a process-wakeup turn skipped the adapter that
+    a human-typed turn would have hit — a behavioral divergence.
+
+    ``source`` is the StartRunRequest.source (``"webui"`` for browser POSTs,
+    ``"process_wakeup"`` for the drain-thread wakeup). ``route`` is the
+    metadata.route label that lands on the run record for observability.
+
+    Returns a dict with ``_status`` plus the legacy chat-start response
+    fields (``stream_id``, ``session_id``, etc.). Adapter selection that
+    returns no adapter is surfaced as ``{"error": str(exc), "_status": 501}``
+    so both call sites can map it onto their own HTTP shape.
+    """
+    from api.runtime_adapter import (
+        LegacyJournalRuntimeAdapter,
+        StartRunRequest,
+        build_runtime_adapter,
+        runtime_adapter_enabled,
+        runtime_adapter_runner_enabled,
+    )
+
+    if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
+        def _legacy_start_run(request: StartRunRequest) -> dict:
+            return _start_chat_stream_for_session(
+                s,
+                msg=request.message,
+                attachments=request.attachments,
+                workspace=request.workspace or workspace,
+                model=request.model or model,
+                model_provider=request.provider or model_provider,
+                normalized_model=normalized_model,
+                diag=diag,
+            )
+
+        def _legacy_adapter_factory():
+            return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
+
+        try:
+            adapter = build_runtime_adapter(
+                legacy_adapter_factory=_legacy_adapter_factory,
+                runner_client_factory=_runtime_runner_client_factory,
+            )
+            if adapter is None:
+                raise NotImplementedError("runtime adapter selection returned no adapter")
+            result = adapter.start_run(
+                StartRunRequest(
+                    session_id=s.session_id,
+                    message=msg,
+                    attachments=attachments,
+                    workspace=workspace,
+                    profile=getattr(s, "profile", None),
+                    provider=model_provider,
+                    model=model,
+                    source=source,
+                    metadata={"route": route},
+                )
+            )
+        except NotImplementedError as exc:
+            return {"error": str(exc), "_status": 501}
+        return _chat_start_response_from_run_start(result)
+
+    return _start_chat_stream_for_session(
+        s,
+        msg=msg,
+        attachments=attachments,
+        workspace=workspace,
+        model=model,
+        model_provider=model_provider,
+        normalized_model=normalized_model,
+        diag=diag,
+    )
+
+
 def start_session_turn(
     session_id: str,
     message: str,
@@ -9308,7 +9399,7 @@ def start_session_turn(
         requested_provider,
         prefer_cached_catalog=True,
     )
-    resp = _start_chat_stream_for_session(
+    resp = _start_run(
         s,
         msg=msg,
         attachments=[],
@@ -9316,6 +9407,8 @@ def start_session_turn(
         model=model,
         model_provider=model_provider,
         normalized_model=normalized_model,
+        source="process_wakeup",
+        route="start_session_turn",
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
@@ -9589,64 +9682,27 @@ def _handle_chat_start(handler, body, diag=None):
             requested_model,
             requested_provider,
         )
-        from api.runtime_adapter import (
-            LegacyJournalRuntimeAdapter,
-            StartRunRequest,
-            build_runtime_adapter,
-            runtime_adapter_enabled,
-            runtime_adapter_runner_enabled,
+        # NOTE: runtime-adapter selection is delegated to _start_run (shared
+        # with start_session_turn so both entry points behave identically
+        # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
+        # — Q-2979-A2 / Copilot discussion_r3305864087/r3305864173).
+        response = _start_run(
+            s,
+            msg=msg,
+            attachments=attachments,
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            normalized_model=normalized_model,
+            source="webui",
+            route="/api/chat/start",
+            diag=diag,
         )
-
-        if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
-            def _legacy_start_run(request: StartRunRequest) -> dict:
-                return _start_chat_stream_for_session(
-                    s,
-                    msg=request.message,
-                    attachments=request.attachments,
-                    workspace=request.workspace or workspace,
-                    model=request.model or model,
-                    model_provider=request.provider or model_provider,
-                    normalized_model=normalized_model,
-                    diag=diag,
-                )
-
-            def _legacy_adapter_factory():
-                return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
-
-            try:
-                adapter = build_runtime_adapter(
-                    legacy_adapter_factory=_legacy_adapter_factory,
-                    runner_client_factory=_runtime_runner_client_factory,
-                )
-                if adapter is None:
-                    raise NotImplementedError("runtime adapter selection returned no adapter")
-                result = adapter.start_run(
-                    StartRunRequest(
-                        session_id=s.session_id,
-                        message=msg,
-                        attachments=attachments,
-                        workspace=workspace,
-                        profile=getattr(s, "profile", None),
-                        provider=model_provider,
-                        model=model,
-                        source="webui",
-                        metadata={"route": "/api/chat/start"},
-                    )
-                )
-            except NotImplementedError as exc:
-                return j(handler, {"error": str(exc)}, status=501)
-            response = _chat_start_response_from_run_start(result)
-        else:
-            response = _start_chat_stream_for_session(
-                s,
-                msg=msg,
-                attachments=attachments,
-                workspace=workspace,
-                model=model,
-                model_provider=model_provider,
-                normalized_model=normalized_model,
-                diag=diag,
-            )
+        # Map adapter-selection NotImplementedError (501) onto the legacy
+        # bad-request response shape that this route exposed historically
+        # before the helper extraction.
+        if response.get("_status") == 501 and "error" in response:
+            return j(handler, {"error": response["error"]}, status=501)
         status = int(response.pop("_status", 200) or 200)
         diag.stage("response_write") if diag else None
         return j(handler, response, status=status)
