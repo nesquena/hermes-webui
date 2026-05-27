@@ -125,6 +125,7 @@ def test_bg_task_complete_wakeup_emits_canonical_event_with_event_id(monkeypatch
 
     bp.register_process_session("sess-wakeup-1", "sess-wakeup-1")
     emits = _capture_emits(monkeypatch)
+    monkeypatch.setattr(bp, "_start_server_side_wakeup_turn", lambda *_args, **_kwargs: None)
 
     evt = {
         "type": "completion",

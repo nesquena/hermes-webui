@@ -1134,7 +1134,7 @@ def start_drain_thread() -> bool:
     _DRAIN_STOP.clear()
     _DRAIN_THREAD = threading.Thread(
         target=_drain_loop,
-        name="hermes-webui-process-complete-drain",
+        name="hermes-webui-bg-task-complete-drain",
         daemon=True,
     )
     _DRAIN_THREAD.start()
