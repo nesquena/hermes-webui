@@ -83,7 +83,8 @@ def _reset_cfg_state():
     with _cfg.STREAMS_LOCK:
         _cfg.STREAMS.clear()
     if hasattr(_cfg, "ACTIVE_RUNS"):
-        _cfg.ACTIVE_RUNS.clear()
+        with _cfg.ACTIVE_RUNS_LOCK:
+            _cfg.ACTIVE_RUNS.clear()
     if hasattr(bp, "_LAST_EMIT_TS"):
         bp._LAST_EMIT_TS.clear()
     if hasattr(bp, "_PENDING_EMIT_PAYLOADS"):

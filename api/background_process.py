@@ -15,7 +15,9 @@ The drain thread:
        intent to ``cli._format_process_notification`` and
        ``gateway.run._format_gateway_process_notification`` so the agent sees
        the same payload regardless of host,
-    4. emits a ``process_complete`` SSE event on the active stream(s) for that
+    4. emits a ``bg_task_complete`` SSE event (the canonical event name; a legacy
+       ``process_complete`` alias is retained for one release cycle and will be
+       removed by PR (b)) on the active stream(s) for that
        session (DEMOTED to pure live-view — an open tab streams the turn
        live), records a server-side marker in ``PENDING_BG_TASK_COMPLETIONS``,
        and — Option Z PIVOT — starts the agent wakeup turn **directly
@@ -159,11 +161,14 @@ class SessionChannel:
     def reaper_should_collect(self, now: float) -> bool:
         """True when the reaper should remove this channel.
 
-        Two collection conditions (per Option X spec):
+        TTL-based collection only applies when there are no subscribers —
+        sessions with active subscribers are never reaped regardless of TTL.
+        Two collection conditions (per Option X spec), both gated on empty
+        subscribers:
           1. Subscribers empty AND last_subscriber_drop_at is older than
              SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS (normal teardown).
-          2. created_at older than SESSION_CHANNEL_IDLE_TTL_SECS AND
-             subscribers empty (zombie cap — survived too long).
+          2. Subscribers empty AND created_at older than
+             SESSION_CHANNEL_IDLE_TTL_SECS (idle-channel sweep).
         """
         from api import config as _cfg
 
@@ -1052,21 +1057,26 @@ def _drain_loop() -> None:
         from tools import process_registry as _pr_mod  # noqa: F401
         from tools.process_registry import process_registry
     except Exception as exc:
-        logger.warning("process_complete drain unavailable: %s", exc)
+        logger.warning("bg_task_complete drain unavailable: %s", exc)
         return
-    logger.info("process_complete drain thread started")
+    logger.info("bg_task_complete drain thread started")
     while not _DRAIN_STOP.is_set():
         try:
             evt = process_registry.completion_queue.get(timeout=1.0)
-        except Exception:
-            # queue.Empty or transient — re-check stop flag and continue.
+        except queue.Empty:
+            # No event within timeout — re-check stop flag and continue.
             continue
+        except Exception:
+            logger.exception(
+                "bg_task_complete drain: unexpected error draining completion_queue; breaking"
+            )
+            break
         if not isinstance(evt, dict):
             continue
         try:
             _process_one(evt)
         except Exception:
-            logger.warning("process_complete event handling failed", exc_info=True)
+            logger.warning("bg_task_complete event handling failed", exc_info=True)
 
 
 def register_process_session(session_key: str, session_id: str) -> None:
@@ -1095,8 +1105,26 @@ def unregister_process_session(session_key: str) -> None:
 
 
 def start_drain_thread() -> bool:
-    """Start the background drain thread idempotently. Returns True on first start."""
+    """Start the background drain thread idempotently. Returns True on first start.
+
+    Performs an up-front dependency check: if ``tools.process_registry`` is not
+    importable or ``completion_queue`` is missing/None, the drain cannot
+    function — return False so callers know the wakeup path is disabled
+    rather than silently starting a thread that will immediately exit.
+    """
     global _DRAIN_THREAD
+    try:
+        from tools.process_registry import process_registry
+    except ImportError:
+        logger.warning(
+            "bg_task_complete drain: tools.process_registry missing; drain disabled"
+        )
+        return False
+    if getattr(process_registry, "completion_queue", None) is None:
+        logger.warning(
+            "bg_task_complete drain: completion_queue is None; drain disabled"
+        )
+        return False
     if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
         return False
     _DRAIN_STOP.clear()
