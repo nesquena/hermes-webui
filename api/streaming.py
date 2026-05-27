@@ -91,6 +91,62 @@ def _get_ai_agent():
     return AIAgent
 
 
+def _safe_streaming_progress_run_id(stream_id) -> str:
+    """Return a bounded public run id for WebUI streaming progress events."""
+    raw_stream_id = str(stream_id or "").strip()
+    unsafe_pattern = re.compile(
+        r"SECRET_VALUE_DO_NOT_LEAK|api[_ -]?(?:key|auth)|authorization|bearer|cookie|"
+        r"credential|password|secret|token|<\s*/?\s*script\b|javascript:|"
+        r"renderer|raw[_ -]?prompt|generated[_ -]?code|ignore[-_ ]+previous[-_ ]+instructions|"
+        r"(?:^|[^A-Za-z0-9])(?:html|script|source|data|body|code)(?:$|[^A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    if unsafe_pattern.search(raw_stream_id):
+        return "webui.tool:stream"
+    safe_stream_id = re.sub(r"[^A-Za-z0-9_.:-]+", "-", raw_stream_id)[:80]
+    safe_stream_id = safe_stream_id.strip(".-_:") or "stream"
+    if unsafe_pattern.search(safe_stream_id):
+        safe_stream_id = "stream"
+    if not re.match(r"^[A-Za-z0-9]", safe_stream_id):
+        safe_stream_id = f"stream-{safe_stream_id}"
+    return f"webui.tool:{safe_stream_id}"
+
+
+def _record_streaming_tool_progress_event(
+    *,
+    event_type,
+    stream_id,
+    tool_name=None,
+    preview=None,
+    args=None,
+    function_result=None,
+):
+    """Best-effort metadata-only progress receipt for WebUI tool lifecycle events.
+
+    The callback inputs may contain raw prompts, command bodies, URLs, renderer
+    details, secrets, or arbitrary tool output. Do not persist any of them; the
+    durable progress stream only needs the safe lifecycle boundary.
+    """
+    safe_event_type = "tool.failed" if event_type == "tool.failed" else "tool.completed"
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({
+            "event_type": safe_event_type,
+            "run_id": _safe_streaming_progress_run_id(stream_id),
+        })
+    except Exception:
+        logger.debug("Failed to record streaming tool progress event", exc_info=True)
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": safe_event_type,
+            "family": "tool",
+            "run_id": _safe_streaming_progress_run_id(stream_id),
+            "redaction_status": "metadata_only",
+        }
+
+
 def _is_quota_error_text(err_text: str) -> bool:
     """Return True when provider text looks like quota/usage exhaustion."""
     _err_lower = str(err_text or '').lower()
@@ -2691,6 +2747,13 @@ def _run_agent_streaming(
                     # Signal the checkpoint thread that new work has completed (Issue #765).
                     # Each completed tool call is a meaningful unit of progress worth persisting.
                     _checkpoint_activity[0] += 1
+                    _record_streaming_tool_progress_event(
+                        event_type='tool.failed' if bool(cb_kwargs.get('is_error', False)) else 'tool.completed',
+                        stream_id=stream_id,
+                        tool_name=name,
+                        preview=preview,
+                        args=args,
+                    )
                     put('tool_complete', {
                         'event_type': event_type,
                         'name': name,
