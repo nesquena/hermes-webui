@@ -56,6 +56,7 @@ _PROTECTED_BOUNDARIES = [
     "active_space_instructions",
     "shared_data_slot",
     "browser_surface",
+    "browser_navigation",
     "local_service_template",
     "model_provider_template",
     "template_reset",

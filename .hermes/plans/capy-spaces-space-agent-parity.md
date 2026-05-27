@@ -118,6 +118,11 @@ Recent completed slices:
   - Empty-prompt repair controls now expose the same visible safety envelope as prompted repairs; prompted repair queues also redact `prompt_preview`, so serialized responses/events/lists avoid raw prompts and hostile renderer/source/API-auth/script/secret fixture fields.
   - Validation at completion: focused RED failed on raw module prompt echo, focused GREEN passed, spec/quality reviews approved, full Spaces foundation suite passed (`567 passed`), `py_compile`, `git diff --check`, and `/tmp` real-static Visual/UI QA passed with no rendered DOM leaks. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_9b373a74d0e04cf4a6ec273a82320add.png`.
 
+- `feat(policy): protect browser navigation preflight`
+  - Added RED/GREEN policy coverage proving `browser_navigation` is now a central protected prompt-preflight boundary instead of normalizing to `unknown_boundary`.
+  - Aligned policy status/direct preflight classification with existing Spaces open/reload navigation receipts while preserving metadata-only output, `raw_prompt_stored: false`, and raw prompt/secret omission.
+  - Validation at completion: focused RED failed before implementation (`unknown_boundary`), focused GREEN passed (`2 passed`), full Capy policy suite passed (`17 passed`), focused Spaces navigation regression passed (`1 passed, 611 deselected`), `py_compile`, `git diff --check`, spec/quality reviews, backend receipt-envelope Visual/UI QA, and live local/tailnet health passed. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_0e12ec8a626e4a23b220e7fbaac942f2.png`.
+
 - `feat(spaces): gate widget definitions`
   - Added RED/GREEN backend coverage proving `space.spaces.defineWidget` blocks hostile prompt-injection definitions plus wrapper/direct/nested unsafe field variants before exposing non-persisted blueprint metadata, without echoing raw prompt/system-prompt/secret fixture text or emitting false progress completion.
   - Aligned successful `defineWidget` responses with sibling blueprint helpers by returning metadata-only prompt-preflight, autonomy-policy, and `widget.blueprint.define:<space_id>` progress receipts while keeping generated renderer/html/script/source/data/API-auth markers out of serialized output.
