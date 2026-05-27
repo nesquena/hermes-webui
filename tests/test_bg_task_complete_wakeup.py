@@ -240,6 +240,86 @@ def test_legacy_process_complete_ack_returns_410_gone_with_x_replaced_by():
     assert "gone" in payload.get("error", "").lower()
 
 
+def test_bg_task_complete_ack_marks_process_id_alias_deprecated(monkeypatch):
+    """The diagnostic ack endpoint keeps ``process_id`` as a transitional
+    request alias, but makes that legacy usage visible via ``Deprecation``.
+    """
+    import json as _json
+    import types as _types
+
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid: _types.SimpleNamespace(session_id=sid),
+    )
+    handler = _FakeHandler()
+
+    routes._handle_bg_task_complete_ack(
+        handler,
+        {"session_id": "sess-legacy-alias", "process_id": "proc-legacy-1"},
+    )
+
+    assert handler.status == 200
+    assert handler.sent_headers.get("Deprecation") == "true"
+    payload = _json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert payload["task_id"] == "proc-legacy-1"
+
+
+def test_bg_task_complete_ack_marks_mixed_process_id_presence_deprecated(monkeypatch):
+    """If a request still includes ``process_id``, surface the transitional
+    alias even when the canonical ``task_id`` is also present.
+    """
+    import json as _json
+    import types as _types
+
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid: _types.SimpleNamespace(session_id=sid),
+    )
+    handler = _FakeHandler()
+
+    routes._handle_bg_task_complete_ack(
+        handler,
+        {
+            "session_id": "sess-mixed-alias",
+            "task_id": "task-canonical-1",
+            "process_id": "proc-legacy-1",
+        },
+    )
+
+    assert handler.status == 200
+    assert handler.sent_headers.get("Deprecation") == "true"
+    payload = _json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert payload["task_id"] == "task-canonical-1"
+
+
+def test_bg_task_complete_ack_canonical_task_id_has_no_deprecation_header(monkeypatch):
+    """Canonical ``task_id`` requests should not be marked deprecated."""
+    import types as _types
+
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid: _types.SimpleNamespace(session_id=sid),
+    )
+    handler = _FakeHandler()
+
+    routes._handle_bg_task_complete_ack(
+        handler,
+        {"session_id": "sess-canonical", "task_id": "task-canonical-1"},
+    )
+
+    assert handler.status == 200
+    assert "Deprecation" not in handler.sent_headers
+
+
 def test_old_process_complete_wakeup_test_file_is_absent():
     """The legacy filename ``tests/test_process_complete_wakeup.py`` must
     remain absent on this branch — the rename is part of the BACKEND-tier

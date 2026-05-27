@@ -9475,17 +9475,24 @@ def _handle_bg_task_complete_ack(handler, body):
         s = get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
+    legacy_process_id_used = "process_id" in body
+    # process_id accepted as transitional alias; see Deprecation response header
+    # + maintainer decision on removal milestone / future Sunset header.
     pid = str(body.get("task_id") or body.get("process_id") or "").strip()
     # Post Option-Z pivot this endpoint owns no state: the server-side drain
     # thread starts the wakeup turn, the browser never re-POSTs /api/chat/start.
     # `noop` is returned so the diagnostic shape stays explicit about that and
     # matches the docstring ("pure no-op for state").
-    return j(handler, {
-        "ok": True,
-        "session_id": s.session_id,
-        "task_id": pid,
-        "noop": True,
-    })
+    return j(
+        handler,
+        {
+            "ok": True,
+            "session_id": s.session_id,
+            "task_id": pid,
+            "noop": True,
+        },
+        extra_headers={"Deprecation": "true"} if legacy_process_id_used else {},
+    )
 
 
 def _handle_goal_command(handler, body):
