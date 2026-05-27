@@ -8631,6 +8631,36 @@ def test_space_tool_adapter_exposes_widget_runtime_contract_metadata_only(monkey
         "network-fetch",
         "generated-code-enable",
     ]
+    for result, expected_action in (
+        (explicit, "space.widget.runtime_contract"),
+        (current, "space.current.widget.runtime_contract"),
+    ):
+        assert result["prompt_preflight"]["boundary"] == "widget_runtime_prompt"
+        assert result["prompt_preflight"]["status"] == "required"
+        assert result["prompt_preflight"]["metadata_only"] is True
+        assert result["prompt_preflight"]["raw_prompt_stored"] is False
+        assert result["autonomy_policy"]["action"] == expected_action
+        assert result["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+        assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+        assert result["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+        assert result["autonomy_policy"]["metadata_only"] is True
+        assert result["progress_event"]["event_type"] == "tool.completed"
+        assert result["progress_event"]["family"] == "tool"
+        assert result["progress_event"]["run_id"] == "runtime-contract:runtime-lab"
+        assert result["progress_event"]["space_id"] == created["space_id"]
+        assert result["progress_event"]["redaction_status"] == "metadata_only"
+        compaction = result["output_compaction"]
+        assert compaction["tool"] == "capy-spaces-tool-action"
+        assert compaction["command"] == expected_action
+        assert compaction["exit_status"] == 0
+        assert compaction["metadata_only"] is True
+        assert compaction["redaction_status"] == "metadata_only"
+        compaction_text = json.dumps(compaction, sort_keys=True).lower()
+        assert "space_action: " + expected_action in compaction_text
+        assert "space_id: runtime-lab" in compaction_text
+        assert "widget_count: 1" in compaction_text
+        assert "model_route_hint: hint:reasoning" in compaction_text
+        assert "progress_run_id: runtime-contract:runtime-lab" in compaction_text
     assert current["contract"] == explicit["contract"]
     assert "capy:raw:eval" in serialized
     assert "steal" not in serialized

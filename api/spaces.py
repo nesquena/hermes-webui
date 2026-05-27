@@ -6792,7 +6792,25 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
         widget = read_widget(space_id, widget_id)
-        return {"ok": True, "action": name, "active_space_id": space_id, "contract": _widget_runtime_contract_summary(widget)}
+        prompt_preflight = _widget_reload_required_prompt_preflight_receipt(name)
+        autonomy_policy = _widget_reload_action_policy_receipt(name, prompt_preflight)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="runtime-contract")
+        return {
+            "ok": True,
+            "action": name,
+            "active_space_id": space_id,
+            "contract": _widget_runtime_contract_summary(widget),
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=1,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
+        }
     if name in {"space.template.install", "space.templates.install", "template.install", "space.spaces.installexamplespace", "space.spaces.installtemplate"}:
         template_name = _space_tool_template_name(data, "weather")
         result = install_template(template_name, space_id=_space_tool_space_id_alias(data) or None, record_progress=True)
@@ -11734,6 +11752,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "recovery.widget.disable",
         "recovery.widget.enable",
         "recovery.widget.restore",
+        "runtime-contract",
         "save-meta",
         "save-layout",
         "shared-slot.set",
