@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Conversation filtering now shows a clear button inside the search field whenever text is present, letting users clear the filter with one click.
+
 ## [v0.51.145] — 2026-05-26 — Release DQ (stage-batch27 — sidebar running-state preservation)
 
 ### Fixed

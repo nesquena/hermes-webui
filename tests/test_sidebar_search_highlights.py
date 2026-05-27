@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SESSIONS_JS = ROOT / "static" / "sessions.js"
 STYLE_CSS = ROOT / "static" / "style.css"
+INDEX_HTML = ROOT / "static" / "index.html"
 
 
 def _run_js_ranges(cases):
@@ -85,3 +86,63 @@ def test_sidebar_search_rendering_uses_safe_dom_helpers():
     assert "if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;" in src
     assert ".session-search-preview" in css
     assert "-webkit-line-clamp:2" in css
+
+
+def test_session_search_has_accessible_clear_button():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert '<div class="session-search sidebar-search"><div class="session-search-field">' in html
+    clear = re.search(r'<button[^>]*id="sessionSearchClear"[^>]*>', html)
+    assert clear, "#sessionSearchClear button not found beside #sessionSearch"
+    tag = clear.group(0)
+    assert 'type="button"' in tag
+    assert 'hidden' in tag
+    assert 'onclick="clearSessionSearch()"' in tag
+    assert 'aria-label="Clear conversation filter"' in tag
+
+
+def test_session_search_clear_button_styles_do_not_shift_input_width():
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    assert ".session-search-field{position:relative;display:flex;align-items:center;width:100%;}" in css
+    assert ".session-search input{padding-right:34px;}" in css
+    assert ".sidebar-search-icon{position:absolute;left:10px;top:50%;transform:translateY(-50%);" in css
+    assert ".session-search .session-search-clear{position:absolute;" in css
+    assert "right:6px;top:50%;transform:translateY(-50%)" in css
+    assert "z-index:1" in css
+    assert ".session-search-clear[hidden]{display:none;}" in css
+    assert ".session-search-clear:focus-visible" in css
+
+
+def test_session_search_clear_sync_and_click_behaviour():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    start = src.index("function syncSessionSearchClear")
+    end = src.index("function filterSessions", start)
+    helper = src[start:end]
+    script = helper + r"""
+const input = { value: 'Psalm', focused: false, focus(){ this.focused = true; } };
+const clear = { hidden: true };
+let filtered = 0;
+function $(id){ return id === 'sessionSearch' ? input : clear; }
+function filterSessions(){ filtered += 1; syncSessionSearchClear(); }
+syncSessionSearchClear();
+const visibleAfterText = clear.hidden === false;
+clearSessionSearch();
+const clearedOnClick = input.value === '' && clear.hidden === true && filtered === 1 && input.focused === true;
+input.value = 'again';
+input.focused = false;
+clearSessionSearch(false);
+const preserveFocus = input.value === '' && clear.hidden === true && filtered === 2 && input.focused === false;
+console.log(JSON.stringify({visibleAfterText, clearedOnClick, preserveFocus}));
+"""
+    completed = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+    )
+    result = json.loads(completed.stdout)
+    assert result == {
+        "visibleAfterText": True,
+        "clearedOnClick": True,
+        "preserveFocus": True,
+    }

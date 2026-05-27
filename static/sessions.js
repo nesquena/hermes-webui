@@ -2631,9 +2631,29 @@ function _sessionSearchContentPreview(session, query){
   return preview||'';
 }
 
+function syncSessionSearchClear(){
+  const input=$('sessionSearch');
+  const clear=$('sessionSearchClear');
+  if(!input||!clear) return;
+  clear.hidden=!Boolean(input.value);
+}
+
+function clearSessionSearch(focusInput=true){
+  const input=$('sessionSearch');
+  if(!input) return;
+  if(input.value){
+    input.value='';
+    filterSessions();
+  }else{
+    syncSessionSearchClear();
+  }
+  if(focusInput) input.focus();
+}
+
 function filterSessions(){
   // Immediate client-side title filter (no flicker)
   // Debounced content search via API for message text
+  syncSessionSearchClear();
   const q = ($('sessionSearch').value || '').trim();
   if(q!==_lastSessionSearchQuery){
     _lastSessionSearchQuery=q;
