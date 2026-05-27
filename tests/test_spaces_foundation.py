@@ -456,6 +456,24 @@ def test_space_checkpoint_tool_creates_metadata_only_revision_anchor(monkeypatch
     assert result["progress_event"]["run_id"] == f"checkpoint:{created['space_id']}"
     assert result["progress_event"]["space_id"] == created["space_id"]
     assert result["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = result["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == "space.checkpoint"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert compaction["original_chars"] > 0
+    assert compaction["compacted_chars"] > 0
+    assert "space_action: space.checkpoint" in compaction["text"]
+    assert "widget_count" not in compaction["text"]
+    assert f"progress_run_id: checkpoint:{created['space_id']}" in compaction["text"]
+    handles = compaction["retained_artifact_handles"]
+    assert {"kind": "space", "handle": f"space:{created['space_id']}", "label": "Space action metadata"} in handles
+    assert any(handle.get("handle") == f"revision:{result['revision_event_id']}" for handle in handles)
+    serialized_compaction = json.dumps(compaction, sort_keys=True).lower()
+    assert "renderer" not in serialized_compaction
+    assert "<script" not in serialized_compaction
+    assert "api_key" not in serialized_compaction
+    assert "secret_value_do_not_leak" not in serialized_compaction
 
     loaded = spaces.read_space(created["space_id"])
     assert loaded["revision_event_id"] == result["revision_event_id"]

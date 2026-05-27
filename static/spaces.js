@@ -1687,6 +1687,7 @@
       '<div class="capy-spaces-muted">metadata-only rollback anchor'+(eventId ? ' · '+escapeHtml(eventId) : '')+'</div></div></div></div>' +
       renderActionPolicyEvidence(data && data.autonomy_policy) +
       renderPackageProgressEvidence(data && data.progress_event, 'Checkpoint progress') +
+      renderCompactionEvidence(data && (data.output_compaction || data.compaction)) +
       '</div>';
   }
 

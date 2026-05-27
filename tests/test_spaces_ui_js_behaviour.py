@@ -1580,6 +1580,22 @@ global.fetch = async function(path, opts = {}) {
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       },
+      output_compaction: {
+        tool: 'capy-spaces-tool-action',
+        command: 'space.checkpoint',
+        exit_status: 0,
+        original_chars: 385,
+        compacted_chars: 400,
+        redaction_status: 'metadata_only',
+        rules_applied: ['cap_chars'],
+        text: 'space_action: space.checkpoint\nprogress_run_id: checkpoint:lab',
+        retained_artifact_handles: [
+          { kind: 'space', handle: 'space:lab', label: 'Space action metadata' },
+          { kind: 'revision', handle: 'revision:0123456789abcdef0123456789abcdef', label: 'Space action revision' },
+        ],
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       reason: 'renderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK',
       renderer: '<script>bad()</script>',
       api_key: 'SECRET_VALUE_DO_NOT_LEAK',
@@ -7120,6 +7136,13 @@ def test_spaces_ui_space_detail_checkpoints_explicit_space_with_shared_prompt_me
     assert "tool.completed" in out["rootHtml"]
     assert "run checkpoint:lab" in out["rootHtml"]
     assert "metadata-only progress receipt" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 385 chars" in out["rootHtml"]
+    assert "Compacted output: 400 chars" in out["rootHtml"]
+    assert "Redaction: metadata_only" in out["rootHtml"]
+    assert "Artifacts: 2" in out["rootHtml"]
+    assert "revision:0123456789abcdef0123456789abcdef" in out["rootHtml"]
+    assert "space_action: space.checkpoint" not in out["rootHtml"]
     assert "before rollback" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"].lower()

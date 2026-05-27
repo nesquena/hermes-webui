@@ -1793,6 +1793,7 @@ def _space_tool_action_output_compaction_receipt(
     revision_event_ids: list[str] | None = None,
     autonomy_policy: dict[str, Any] | None = None,
     progress_event: dict[str, Any] | None = None,
+    include_widget_count: bool = True,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for source-style Space actions.
 
@@ -1829,7 +1830,8 @@ def _space_tool_action_output_compaction_receipt(
         lines.append(f"space_id: {safe_space_id}")
     if safe_target_space_id:
         lines.append(f"target_space_id: {safe_target_space_id}")
-    lines.append(f"widget_count: {safe_widget_count}")
+    if include_widget_count:
+        lines.append(f"widget_count: {safe_widget_count}")
     if public_revision_event_ids:
         if len(public_revision_event_ids) == 1:
             lines.append(f"revision_event_id: {public_revision_event_ids[0]}")
@@ -8097,6 +8099,7 @@ def create_space_checkpoint(space_id: str, *, reason: Any = "manual checkpoint")
     }
     saved = _write_manifest(space, "space.checkpointed", details)
     progress_event = _record_space_tool_progress_event(sid, run_prefix="checkpoint")
+    autonomy_policy = _recovery_restore_action_policy_receipt("space.checkpoint")
     return {
         "ok": True,
         "space_id": sid,
@@ -8105,8 +8108,16 @@ def create_space_checkpoint(space_id: str, *, reason: Any = "manual checkpoint")
         "generated_widgets_rendered": False,
         "reason": reason_text,
         "revision_event_id": saved["revision_event_id"],
-        "autonomy_policy": _recovery_restore_action_policy_receipt("space.checkpoint"),
+        "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
+        "output_compaction": _space_tool_action_output_compaction_receipt(
+            action="space.checkpoint",
+            space_id=sid,
+            revision_event_id=saved["revision_event_id"],
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+            include_widget_count=False,
+        ),
     }
 
 
