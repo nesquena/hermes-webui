@@ -5019,6 +5019,24 @@ def handle_post(handler, parsed) -> bool:
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
         return j(handler, result, status=200 if result.get("clean") else 409)
 
+    if parsed.path == "/api/actions":
+        from api.actions import register_builtins, default_registry
+        from api.actions_http import handle_actions_post
+
+        # Register v1 builtins exactly once against the module-level
+        # default_registry. ValueError on re-register is swallowed because
+        # the registry is process-global and idempotent registration is
+        # the right behavior for repeated POST requests in the same
+        # process. Per-test isolation uses an injected registry instead.
+        if "echo.test" not in default_registry.known_actions():
+            try:
+                register_builtins(default_registry)
+            except ValueError:
+                pass
+
+        body_dict, status = handle_actions_post(handler, body)
+        return j(handler, body_dict, status=status)
+
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post
 
