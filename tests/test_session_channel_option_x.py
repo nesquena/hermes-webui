@@ -457,29 +457,21 @@ def test_real_completion_event_shape_routes_to_session_channel():
 
 
 def _wait_for_wakeup(holder, timeout=3.0):
-    """Block until the server-side wakeup runner thread recorded a call."""
-    return holder["event"].wait(timeout=timeout)
+    """Thin wrapper preserving the legacy local name; the body lives in
+    ``tests/_wakeup_helpers.py`` and is shared with
+    ``test_wakeup_defer_race.py`` (Copilot PR #2971 r3305700944).
+    """
+    from tests._wakeup_helpers import wait_for_wakeup as _impl
+    return _impl(holder, timeout=timeout)
 
 
 def _install_fake_start_session_turn(monkeypatch, *, status=200):
-    """Patch api.routes.start_session_turn to record calls instead of running
-    a real agent turn. The drain helper does `from api.routes import
-    start_session_turn` inside a daemon thread, so patching the attribute on
-    the api.routes module is what the thread resolves at call time.
+    """Thin wrapper preserving the legacy local name; the body lives in
+    ``tests/_wakeup_helpers.py`` and is shared with
+    ``test_wakeup_defer_race.py`` (Copilot PR #2971 r3305700944).
     """
-    import api.routes as _routes
-
-    holder = {"calls": [], "event": threading.Event()}
-
-    def _fake(session_id, message, *, source="process_wakeup"):
-        holder["calls"].append(
-            {"session_id": session_id, "message": message, "source": source}
-        )
-        holder["event"].set()
-        return {"stream_id": "fake-stream", "session_id": session_id, "_status": status}
-
-    monkeypatch.setattr(_routes, "start_session_turn", _fake, raising=True)
-    return holder
+    from tests._wakeup_helpers import install_fake_start_session_turn as _impl
+    return _impl(monkeypatch, status=status)
 
 
 def test_server_side_wakeup_when_idle_no_tab(monkeypatch):

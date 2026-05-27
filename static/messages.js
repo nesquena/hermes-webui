@@ -1809,8 +1809,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // /api/chat/stream EventSource; if the tab is closed the turn still runs
     // server-side and persists to the session store.
     //
-    // Idempotency: dedupe by (session_id, task_id) here, swapped to
-    // (session_id, event_id) with a TTL ring buffer in D-b-2.
+    // Idempotency: dedupe by (session_id, event_id) via a Map+TTL ring
+    // buffer (`_bgTaskCompleteRingBufferAdd`).
     //
     // Option X: this handler is the in-turn (STREAMS-bound) path. The server
     // dual-emits to the persistent session-scoped channel too — the
