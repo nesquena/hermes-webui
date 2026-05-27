@@ -16,6 +16,7 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+
 const OFFLINE_RECHECK_MS=2500;
 let _offlineVisible=false;
 let _offlineReason='browser';
@@ -7195,6 +7196,7 @@ function postProcessRenderedMessages(container) {
   loadExcalidrawInline(container);
   loadPdfInline(container);
   loadHtmlInline(container);
+  highlightSkillsInMessages(container);
   renderMermaidBlocks(container);
   renderKatexBlocks(container);
   initTreeViews(container);

@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Chat messages now render registered Hermes skills as quiet inline chips using the current profile's `/api/skills` list. The composer remains a plain native textarea; skill chip rendering is limited to settled conversation content so composing, caret movement, autocomplete, paste, and workspace path insertion keep their existing behavior.
+
 ## [v0.51.141] — 2026-05-26 — Release DM (stage-batch23 — 4-PR second hold-bucket pass)
 
 ### Added

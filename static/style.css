@@ -3371,6 +3371,14 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .project-create-btn{font-size:10px;padding:3px 6px;border-radius:12px;cursor:pointer;border:1px dashed var(--border2);background:none;color:var(--muted);opacity:.6;transition:all .15s;}
 .project-create-btn:hover{opacity:1;border-color:var(--blue);color:var(--blue);}
 .project-create-input{font-size:10px;padding:3px 8px;border-radius:12px;border:1px solid var(--accent-bg);background:var(--surface);color:var(--text);outline:none;min-width:40px;max-width:180px;width:auto;font-family:inherit;box-shadow:0 0 0 2px var(--accent-bg);}
+
+.skill-chip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:12px;cursor:default;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;}
+
+.skill-chip:hover{
+  background:rgba(255,255,255,.08);
+  color:var(--text);
+}
+
 .project-picker{position:absolute;right:0;top:100%;background:var(--sidebar);border:1px solid var(--border2);border-radius:8px;padding:4px;z-index:30;min-width:160px;max-width:220px;width:max-content;box-shadow:0 4px 16px rgba(0,0,0,.3);}
 .batch-action-bar .batch-project-picker{position:static;right:auto;top:auto;min-width:100%;max-width:none;width:100%;box-shadow:none;margin-top:2px;background:var(--input-bg);}
 .project-picker-item{padding:5px 10px;font-size:11px;border-radius:6px;cursor:pointer;color:var(--muted);transition:all .1s;display:flex;align-items:center;gap:6px;}
