@@ -19780,6 +19780,10 @@ def test_space_tool_route_patches_widget_metadata_without_leaking_sources(monkey
     assert body["autonomy_policy"]["metadata_only"] is True
     assert body["progress_event"]["event_type"] == "tool.completed"
     assert body["progress_event"]["run_id"] == f"widget.patch:{created['space_id']}"
+    assert body["output_compaction"]["tool"] == "capy-spaces-tool-action"
+    assert body["output_compaction"]["command"] == "widget.patch"
+    assert body["output_compaction"]["metadata_only"] is True
+    assert body["output_compaction"]["redaction_status"] in {"metadata_only", "redacted"}
     stored = spaces.read_widget(created["space_id"], "unsafe-widget")
     assert stored["renderer"] == "<script>persistButDoNotReturn()</script>"
     assert stored["notes"] == {"summary": "safe notes survive"}

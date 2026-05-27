@@ -731,6 +731,18 @@ global.fetch = async function(path, opts = {}) {
           renderer: '<script>bad()</script>',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         },
+        output_compaction: {
+          tool: 'capy-spaces-tool-action',
+          command: 'space.widget.runtime_contract',
+          original_chars: 1200,
+          compacted_chars: 260,
+          redaction_status: 'metadata_only',
+          rules_applied: ['retain_artifact_handles', 'redact_unsafe_markers'],
+          retained_artifact_handles: [{ kind: 'widget-runtime-contract', handle: 'runtime-contract:' + (body.widget_id || 'weather'), label: 'Runtime contract' }],
+          text: 'runtime contract metadata-only receipt renderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK',
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
       });
     }
     if (body.action === 'space.creator.preview') {
@@ -4366,7 +4378,12 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "Blocked messages: capy:raw:eval, capy:data:put, capy:data:get, capy:asset:url" in out["rootHtml"]
     assert "Network policy: deny · schemes: https · agent-mediated" in out["rootHtml"]
     assert "Approval required: external-navigation, network-fetch, generated-code-enable" in out["rootHtml"]
-    assert "credential" not in out["rootHtml"].lower()
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 1200 chars · Compacted output: 260 chars · Redaction: metadata_only" in out["rootHtml"]
+    assert "Rules: retain_artifact_handles, redact_unsafe_markers" in out["rootHtml"]
+    assert "runtime-contract:weather" in out["rootHtml"]
+    assert "credential:" not in out["rootHtml"].lower()
+    assert "sensitive values remain omitted" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "onerror" not in out["rootHtml"]
@@ -6671,7 +6688,7 @@ def test_spaces_ui_recovery_repair_module_queues_metadata_only_event_from_safe_p
     assert "Original output: 640 chars · Compacted output: 188 chars · Redaction: redacted" in out["recoveryHtml"]
     assert "Rules: redact_unsafe_markers, cap_section_chars" in out["recoveryHtml"]
     assert "module · module:safe-module · Safe Module" in out["recoveryHtml"]
-    assert "Raw output, prompt bodies, widget bodies, and credentials remain omitted" in out["recoveryHtml"]
+    assert "Raw output, prompt bodies, widget bodies, and sensitive values remain omitted" in out["recoveryHtml"]
     assert "raw prompt not stored" in out["recoveryHtml"]
     assert "source" not in out["recoveryHtml"].lower()
     assert "<script>" not in out["recoveryHtml"]
@@ -7511,7 +7528,7 @@ def test_creator_preview_gate_uses_tool_api_without_leaking_prompt_or_generated_
     assert "Compaction evidence" in out["rootHtml"]
     assert "Original output: 2048 chars" in out["rootHtml"]
     assert "Compacted output: 512 chars" in out["rootHtml"]
-    assert "Raw output, prompt bodies, widget bodies, and credentials remain omitted" in out["rootHtml"]
+    assert "Raw output, prompt bodies, widget bodies, and sensitive values remain omitted" in out["rootHtml"]
     assert "Prompt preflight" in out["rootHtml"]
     assert "Status: pass" in out["rootHtml"]
     assert "Boundary: creator_preview" in out["rootHtml"]
@@ -7834,7 +7851,7 @@ def test_creator_commit_requires_shared_confirm_and_revision_gates(driver_path):
     assert "Compacted output: 420 chars" in out["rootHtml"]
     assert "Redaction: redacted" in out["rootHtml"]
     assert "Rules: redact_unsafe_markers, cap_section_chars" in out["rootHtml"]
-    assert "Raw output, prompt bodies, widget bodies, and credentials remain omitted" in out["rootHtml"]
+    assert "Raw output, prompt bodies, widget bodies, and sensitive values remain omitted" in out["rootHtml"]
     assert "Creator visual QA progress" in out["rootHtml"]
     assert "space.visual_qa.completed" in out["rootHtml"]
     assert "space.visual_qa" in out["rootHtml"]

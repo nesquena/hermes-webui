@@ -856,7 +856,7 @@
       '<div class="capy-spaces-muted">Rules: '+escapeHtml(safeRules.length ? safeRules.join(', ') : 'none')+'</div>' +
       (artifactRows.length ? '<div class="capy-spaces-muted">Artifacts: '+artifactRows.length+'</div>'+artifactRows.join('') : '') +
       (citationRows.length ? '<div class="capy-spaces-muted">Citations: '+citationRows.length+'</div>'+citationRows.join('') : '') +
-      '<div class="capy-spaces-muted">Raw output, prompt bodies, widget bodies, and credentials remain omitted from this receipt.</div>' +
+      '<div class="capy-spaces-muted">Raw output, prompt bodies, widget bodies, and sensitive values remain omitted from this receipt.</div>' +
       '</div>';
   }
 
@@ -2585,7 +2585,7 @@
       '</div>';
   }
 
-  function renderWidgetDetailPanel(spaceId, widget, runtimeContract){
+  function renderWidgetDetailPanel(spaceId, widget, runtimeContract, runtimeReceipt){
     const safeWidget = widget && typeof widget === 'object' ? widget : {};
     const widgetId = safeWidget.id || '';
     const title = safeDisplayMetadataText(safeWidget.title, widgetId || 'Untitled widget') || widgetId || 'Untitled widget';
@@ -2603,6 +2603,8 @@
     const eventBridge = safeWidget.event_bridge && typeof safeWidget.event_bridge === 'object' && !Array.isArray(safeWidget.event_bridge) ? safeWidget.event_bridge : {};
     const eventBridgeText = formatRevisionDetails({event_bridge: eventBridge});
     const eventBridgeRow = eventBridgeText ? '<div class="capy-spaces-muted">'+escapeHtml(eventBridgeText)+'</div>' : '';
+    const receipt = runtimeReceipt && typeof runtimeReceipt === 'object' && !Array.isArray(runtimeReceipt) ? runtimeReceipt : {};
+    const runtimeCompaction = receipt.output_compaction && typeof receipt.output_compaction === 'object' && !Array.isArray(receipt.output_compaction) ? receipt.output_compaction : null;
     const notesEditor = renderNotesEditor(spaceId, widgetId, kind, metadata);
     const exportMeta = metadata.export && typeof metadata.export === 'object' && !Array.isArray(metadata.export) ? metadata.export : {};
     const pdfExportAction = exportMeta.pdf ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="requestWidgetPdfExport" data-space-id="'+escapeHtml(spaceId || '')+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Request PDF export</button></div>' : '';
@@ -2616,6 +2618,7 @@
       metadataRow +
       eventBridgeRow +
       renderWidgetRuntimeContract(runtimeContract) +
+      renderCompactionEvidence(runtimeCompaction) +
       renderSandboxRuntimeShell(spaceId || '', widgetId, title) +
       '</div>'+pdfExportAction+'</div></div>' + renderWidgetPrompt(metadata) + renderWeatherObservation(metadata) + notesEditor + '</div>';
   }
@@ -3506,17 +3509,20 @@
       if (!spaceId || !widgetId || !root) return;
       const data = await fetchSpacesJson('api/spaces/widget?space_id='+encodeURIComponent(spaceId)+'&widget_id='+encodeURIComponent(widgetId));
       let runtimeContract = null;
+      let runtimeReceipt = null;
       try {
         const contractData = await postSpacesJson('api/spaces/tool', {
           action: 'space.widget.runtime_contract',
           space_id: spaceId,
           widget_id: widgetId,
         });
-        runtimeContract = contractData && contractData.contract;
+        runtimeReceipt = contractData && typeof contractData === 'object' && !Array.isArray(contractData) ? contractData : null;
+        runtimeContract = runtimeReceipt && runtimeReceipt.contract;
       } catch (contractErr) {
         runtimeContract = null;
+        runtimeReceipt = null;
       }
-      root.innerHTML = renderWidgetDetailPanel(spaceId, data && data.widget, runtimeContract) + root.innerHTML;
+      root.innerHTML = renderWidgetDetailPanel(spaceId, data && data.widget, runtimeContract, runtimeReceipt) + root.innerHTML;
       return;
     }
     if (action === 'editWidget') {

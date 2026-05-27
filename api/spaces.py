@@ -7986,13 +7986,22 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             raise ValueError("Widget patch prompt preflight blocked")
         result = patch_widget(space_id, widget_id, patch_payload)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.patch")
+        autonomy_policy = _space_widget_mutation_action_policy_receipt(name, prompt_preflight)
         return {
             "ok": True,
             "action": name,
             **result,
             "prompt_preflight": prompt_preflight,
-            "autonomy_policy": _space_widget_mutation_action_policy_receipt(name, prompt_preflight),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=1,
+                revision_event_id=result.get("revision_event_id"),
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
     if name in {
         "widget.reload",
