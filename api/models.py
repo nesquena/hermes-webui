@@ -637,18 +637,6 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def _maybe_clear_truncation_watermark(self) -> None:
-        watermark = _message_timestamp_as_float({"timestamp": self.truncation_watermark})
-        if watermark is None:
-            return
-        max_message_timestamp = None
-        for msg in self.messages or []:
-            timestamp = _message_timestamp_as_float(msg)
-            if timestamp is not None:
-                max_message_timestamp = timestamp if max_message_timestamp is None else max(max_message_timestamp, timestamp)
-        if max_message_timestamp is not None and max_message_timestamp > watermark:
-            self.truncation_watermark = None
-
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
@@ -671,7 +659,6 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
-        self._maybe_clear_truncation_watermark()
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -4012,6 +3999,20 @@ def merge_session_messages_append_only(
             and timestamp is not None
             and timestamp > watermark_timestamp
             and key not in seen_message_keys
+        ):
+            continue
+        # When a truncation watermark is active, state.db may contain original
+        # messages that were replaced by Edit (old content with old timestamp).
+        # The timestamp-based filter above catches messages AFTER the watermark,
+        # but messages BEFORE it (like the original pre-edit content) slip through.
+        # If a state.db message's content is not present in the sidecar and its
+        # timestamp is before the watermark, it's a replaced/stale row — skip it.
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp < watermark_timestamp
+            and key not in seen_message_keys
+            and _session_message_content_key(msg) not in seen_content_keys
         ):
             continue
         if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:

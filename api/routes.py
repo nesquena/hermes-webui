@@ -6057,13 +6057,28 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         keep = int(body["keep_count"])
         with _get_session_agent_lock(body["session_id"]):
+            old_msg_count = len(s.messages or [])
+            old_ctx_count = len(getattr(s, 'context_messages', None) or [])
             s.messages = s.messages[:keep]
+            # Truncate context_messages in sync with messages so the agent's
+            # model-facing context doesn't retain rows the user removed via
+            # Edit / Regenerate.  Without this, context_messages still contains
+            # the full pre-truncation history and the agent sees "deleted"
+            # turns on the next turn (#2914).
+            if isinstance(getattr(s, 'context_messages', None), list):
+                s.context_messages = s.context_messages[:keep]
             try:
                 from api.session_ops import _truncation_watermark_for
                 s.truncation_watermark = _truncation_watermark_for(s.messages)
             except Exception:
                 s.truncation_watermark = 0.0
             s.save()
+            logger.info(
+                "truncate %s: messages %d→%d, context_messages %d→%d, watermark=%.2f",
+                body["session_id"], old_msg_count, len(s.messages or []),
+                old_ctx_count, len(getattr(s, 'context_messages', None) or []),
+                s.truncation_watermark or 0,
+            )
         return j(
             handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
         )
