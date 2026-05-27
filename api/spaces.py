@@ -829,6 +829,60 @@ def _template_reset_action_policy_receipt(preflight_receipt: dict[str, Any]) -> 
     return receipt
 
 
+def _template_reset_output_compaction_receipt(
+    *,
+    space_id: str,
+    installed_widget_count: int,
+    revision_event_id: str | None = None,
+    prompt_preflight: dict[str, Any] | None = None,
+    autonomy_policy: dict[str, Any] | None = None,
+    progress_event: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return metadata-only compaction evidence for template reset results."""
+    from api.capy_compaction import compact_output
+
+    safe_space_id = _context_value(space_id, 120) or "big-bang-onboarding"
+    safe_revision_event_id = _public_revision_event_id(revision_event_id)
+    safe_widget_count = max(0, int(installed_widget_count or 0))
+    lines = [
+        "template_reset: completed",
+        "metadata_only: true",
+        "raw_prompt_stored: false",
+        "action: space.template.reset",
+        f"space_id: {safe_space_id}",
+        f"installed_widget_count: {safe_widget_count}",
+    ]
+    if safe_revision_event_id:
+        lines.append(f"revision_event_id: {safe_revision_event_id}")
+    if isinstance(prompt_preflight, dict):
+        lines.append(f"prompt_preflight_status: {_payload_text_summary(prompt_preflight.get('status') or 'required', 40) or 'required'}")
+    if isinstance(autonomy_policy, dict):
+        lines.append(f"autonomy_action: {_payload_text_summary(autonomy_policy.get('action') or 'space.template.reset', 120) or 'space.template.reset'}")
+        lines.append(f"model_route_hint: {_payload_text_summary(autonomy_policy.get('model_route_hint') or 'hint:reasoning', 80) or 'hint:reasoning'}")
+    if isinstance(progress_event, dict):
+        lines.append(f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or f'template.reset:{safe_space_id}', 160) or f'template.reset:{safe_space_id}'}")
+        lines.append(f"progress_status: {_payload_text_summary(progress_event.get('status') or 'completed', 40) or 'completed'}")
+
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-template-reset",
+        command="space.template.reset",
+        exit_status=0,
+        max_chars=700,
+        artifact_handles=[
+            {
+                "kind": "template-reset",
+                "handle": f"template.reset:{safe_space_id}",
+                "label": "Big Bang reset",
+            }
+        ],
+    )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
 def _space_dir(space_id: str) -> Path:
     sid = validate_space_id(space_id)
     root = manifests_dir().resolve()
@@ -10461,18 +10515,27 @@ def reset_template(template: str, *, space_id: str | None = None, record_progres
     space["revision_events"] = [
         str(rev) for rev in (existing.get("revision_events") or []) if _event_id_is_safe(rev)
     ]
-    _write_manifest(space, "template.reset", {"template": "big-bang"})
+    saved = _write_manifest(space, "template.reset", {"template": "big-bang"})
+    installed_widgets = list_widgets(sid)
     result = {
         "template": "big-bang",
         "reset": True,
         "space": read_space_detail(sid),
-        "installed_widgets": list_widgets(sid),
+        "installed_widgets": installed_widgets,
     }
     if record_progress:
         result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="template.reset")
     preflight_receipt = _template_reset_prompt_preflight_receipt()
     result["prompt_preflight"] = preflight_receipt
     result["autonomy_policy"] = _template_reset_action_policy_receipt(preflight_receipt)
+    result["output_compaction"] = _template_reset_output_compaction_receipt(
+        space_id=sid,
+        installed_widget_count=len(installed_widgets),
+        revision_event_id=saved.get("revision_event_id"),
+        prompt_preflight=preflight_receipt,
+        autonomy_policy=result["autonomy_policy"],
+        progress_event=result.get("progress_event"),
+    )
     return result
 
 

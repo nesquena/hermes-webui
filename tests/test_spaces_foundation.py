@@ -11786,6 +11786,15 @@ def test_space_tool_template_reset_accepts_camelcase_space_id_metadata_only(monk
     assert result["progress_event"]["run_id"] == "template.reset:tool-reset-camel"
     assert result["progress_event"]["space_id"] == "tool-reset-camel"
     assert result["progress_event"]["redaction_status"] == "metadata_only"
+    assert result["output_compaction"]["tool"] == "capy-spaces-template-reset"
+    assert result["output_compaction"]["command"] == "space.template.reset"
+    assert result["output_compaction"]["exit_status"] == 0
+    assert result["output_compaction"]["original_chars"] > 0
+    assert result["output_compaction"]["compacted_chars"] <= 700
+    assert result["output_compaction"]["retained_artifact_handles"] == [
+        {"kind": "template-reset", "handle": "template.reset:tool-reset-camel", "label": "Big Bang reset"}
+    ]
+    assert "retain_artifact_handles" in result["output_compaction"]["rules_applied"]
     assert result["autonomy_policy"]["available"] is True
     assert result["autonomy_policy"]["action"] == "space.template.reset"
     assert result["autonomy_policy"]["mode"] == "supervised"

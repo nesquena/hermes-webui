@@ -2133,6 +2133,7 @@ global.fetch = async function(path, opts = {}) {
       progress_event: { event_id: 'evt-template-reset', event_type: 'tool.completed', family: 'tool', run_id: 'template.reset:' + (body.space_id || 'big-bang-onboarding'), redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
       prompt_preflight: { available: true, action: 'capy.prompt_preflight', boundary: 'template_reset', status: 'pass', severity: 'none', categories: [], metadata_only: true, raw_prompt_stored: false, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       autonomy_policy: { available: true, action: 'space.template.reset', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      output_compaction: { tool: 'capy-spaces-template-reset', command: 'space.template.reset', exit_status: 0, original_chars: 520, compacted_chars: 180, compacted: true, rules_applied: ['retain_artifact_handles'], redaction_status: 'metadata_only', redacted_count: 0, retained_artifact_handles: [{ kind: 'template-reset', handle: 'template.reset:' + (body.space_id || 'big-bang-onboarding'), label: 'Big Bang reset' }], retained_citations: [], text: 'template reset metadata only\nrenderer <script>bad()</script> SECRET_VALUE_DO_NOT_LEAK' },
     });
   }
   if (path === 'api/spaces/revision/restore') {
@@ -7421,6 +7422,11 @@ def test_spaces_ui_reset_big_bang_uses_shared_confirm_and_renders_metadata_only(
     assert "Action: space.template.reset" in out["rootHtml"]
     assert "Model route hint: hint:reasoning" in out["rootHtml"]
     assert "Creator commit approval" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 520 chars" in out["rootHtml"]
+    assert "Compacted output: 180 chars" in out["rootHtml"]
+    assert "Rules: retain_artifact_handles" in out["rootHtml"]
+    assert "Artifacts: 1" in out["rootHtml"]
     assert "tool.completed" in out["rootHtml"]
     assert "run template.reset:big-bang-onboarding" in out["rootHtml"]
     assert "metadata-only progress receipt" in out["rootHtml"]
