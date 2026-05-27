@@ -198,6 +198,71 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertEqual(captured.get('base_url'), 'http://openrouter:4000/v1')
         self.assertEqual(captured.get('api_key'), 'test-title-api-key')
 
+    def test_title_prompt_requires_matching_user_language(self):
+        """German conversation starts should not invite English title output."""
+        from api.streaming import generate_title_raw_via_aux
+
+        mock_resp = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content='Alte Session Bilder'),
+                    finish_reason='stop',
+                )
+            ]
+        )
+        captured = {}
+
+        def fake_call_llm(**kwargs):
+            captured.update(kwargs)
+            return mock_resp
+
+        with _patch_tg_config({'provider': '', 'model': 'title-model', 'base_url': ''}):
+            with patch('agent.auxiliary_client.call_llm', side_effect=fake_call_llm, create=True):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Warum werden hier die Bilder der alten Session nicht mehr angezeigt?',
+                    assistant_text='Ich prüfe die Attachment-Pfade im WebUI.',
+                )
+
+        self.assertEqual(result, 'Alte Session Bilder')
+        self.assertEqual(status, 'llm_aux')
+        messages = captured.get('messages') or []
+        self.assertIn('Match the language of the user question', messages[0]['content'])
+        self.assertIn('If the user writes German, output a German title', messages[0]['content'])
+
+    def test_german_source_rejects_english_aux_title(self):
+        """Regression: an English aux title must not overwrite a German conversation."""
+        from api.streaming import _generate_llm_session_title_via_aux
+
+        mock_resp = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content='Old Session Image Display Issue'),
+                    finish_reason='stop',
+                )
+            ]
+        )
+
+        with _patch_tg_config({'provider': '', 'model': 'title-model', 'base_url': ''}):
+            with patch('agent.auxiliary_client.call_llm', return_value=mock_resp, create=True):
+                title, status, raw_preview = _generate_llm_session_title_via_aux(
+                    'Warum werden hier die Bilder der alten Session nicht mehr angezeigt?',
+                    'Ich prüfe die Attachment-Pfade im WebUI.',
+                )
+
+        self.assertIsNone(title)
+        self.assertEqual(status, 'llm_language_mismatch_aux')
+        self.assertEqual(raw_preview, 'Old Session Image Display Issue')
+
+    def test_german_fallback_keeps_german_topic_words(self):
+        from api.streaming import _fallback_title_from_exchange
+
+        title = _fallback_title_from_exchange(
+            'Warum werden hier die Bilder der alten Session nicht mehr angezeigt?',
+            'Ich prüfe die Rendering- und Attachment-Pfade im WebUI.',
+        )
+
+        self.assertEqual(title, 'Alte Session Bilder')
+
     def test_configured_api_key_is_not_sent_to_caller_supplied_route(self):
         """Regression: title task keys must not leak to explicit fallback routes.
 

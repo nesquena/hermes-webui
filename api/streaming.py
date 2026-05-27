@@ -1378,12 +1378,60 @@ def _is_provisional_title(current_title: str, messages) -> bool:
     return current == candidate
 
 
+def _detect_title_language(text: str) -> str:
+    """Best-effort language hint for title generation/validation."""
+    s = re.sub(r'\s+', ' ', str(text or '')).strip().lower()
+    if not s:
+        return ''
+    german_markers = {
+        'warum', 'werden', 'wird', 'wurde', 'hier', 'nicht', 'mehr', 'alte', 'alten',
+        'bilder', 'angezeigt', 'session', 'prüfe', 'ich', 'die', 'der', 'das', 'den',
+        'und', 'oder', 'mit', 'für', 'von', 'zu', 'ist', 'sind', 'bitte', 'kannst',
+    }
+    tokens = re.findall(r'[A-Za-zÀ-ÖØ-öø-ÿ]+', s)
+    german_hits = sum(1 for tok in tokens if tok in german_markers)
+    if re.search(r'[äöüß]', s) or german_hits >= 2:
+        return 'de'
+    return ''
+
+
+def _title_prompt_language_rule(user_text: str) -> str:
+    lang = _detect_title_language(user_text)
+    if lang == 'de':
+        return (
+            "Match the language of the user question.\n"
+            "If the user writes German, output a German title.\n"
+            "German good: Alte Session Bilder, WebUI Attachment-Pfade, Kontextkompression Status.\n"
+        )
+    return "Match the language of the user question.\n"
+
+
+def _title_language_mismatch(user_text: str, title: str) -> bool:
+    """Reject obvious English titles for German conversation starts."""
+    if _detect_title_language(user_text) != 'de':
+        return False
+    candidate = str(title or '').strip().lower()
+    if not candidate:
+        return False
+    if _detect_title_language(candidate) == 'de':
+        return False
+    english_markers = {
+        'old', 'image', 'display', 'issue', 'problem', 'discussion', 'conversation',
+        'session', 'title', 'fix', 'bug', 'attachment', 'attachments', 'context',
+    }
+    tokens = re.findall(r'[a-z]+', candidate)
+    english_hits = sum(1 for tok in tokens if tok in english_markers)
+    return english_hits >= 2
+
+
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
+    language_rule = _title_prompt_language_rule(user_text)
     prompts = [
         (
             "Generate a short session title from this conversation start.\n"
             "Use BOTH the user's question and the assistant's visible answer.\n"
+            f"{language_rule}"
             "Return only the title text, 3-8 words, as a topic label.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
             "Do not output a full sentence.\n"
@@ -1395,6 +1443,7 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
         (
             "Rewrite this conversation start as a concise noun-phrase title.\n"
             "Use the actual topic, not the task outcome.\n"
+            f"{language_rule}"
             "Return title text only.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
             "Never output acknowledgements, completion status, or meta commentary."
@@ -1750,6 +1799,8 @@ def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text:
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
+        if _title_language_mismatch(user_text, title):
+            return None, 'llm_language_mismatch', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid', str(raw)[:120]
 
@@ -1782,6 +1833,8 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         return None, status, ''
     title = _sanitize_generated_title(raw)
     if title:
+        if _title_language_mismatch(user_text, title):
+            return None, 'llm_language_mismatch_aux', str(raw)[:120]
         return title, status, ''
     return None, 'llm_invalid_aux', str(raw)[:120]
 
@@ -1816,6 +1869,12 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     assistant_text = re.sub(r'\s+', ' ', assistant_text).strip()
     combined = f"{user_text} {assistant_text}".strip().lower()
     combined_raw = f"{user_text} {assistant_text}".strip()
+    source_lang = _detect_title_language(user_text)
+
+    if source_lang == 'de' and 'bilder' in combined and 'session' in combined:
+        if 'alt' in combined or 'alte' in combined or 'alten' in combined:
+            return 'Alte Session Bilder'
+        return 'Session Bilder'
 
     def _contains_latin(text: str) -> bool:
         return bool(re.search(r'[A-Za-z]', text or ''))
