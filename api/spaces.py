@@ -6619,11 +6619,32 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         }
     if name in {"space.current.widgets", "space.current.widget.list", "space.current.listwidgets"}:
         space_id = validate_space_id(_space_tool_current_id(data))
-        return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
+        widgets = list_widgets(space_id)
+        return {
+            "ok": True,
+            "action": name,
+            "active_space_id": space_id,
+            "widgets": widgets,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=len(widgets),
+            ),
+        }
     if name in {"space.current.byid", "space.current.widgetsbyid"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         widgets = list_widgets(space_id)
-        return {"ok": True, "action": name, "active_space_id": space_id, "widgets_by_id": {widget["id"]: widget for widget in widgets}}
+        return {
+            "ok": True,
+            "action": name,
+            "active_space_id": space_id,
+            "widgets_by_id": {widget["id"]: widget for widget in widgets},
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=len(widgets),
+            ),
+        }
     if name in {"space.current.agentinstructions", "space.current.specialinstructions"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         instructions = str(read_space(space_id).get("agent_instructions", ""))
@@ -6640,18 +6661,60 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         }
     if name in {"space.spaces.listwidgets", "space.spaces.widgets"}:
         space_id = validate_space_id(_space_tool_current_id(data))
-        return {"ok": True, "action": name, "space_id": space_id, "widgets": list_widgets(space_id)}
+        widgets = list_widgets(space_id)
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "widgets": widgets,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=len(widgets),
+            ),
+        }
     if name in {"space.widget.list", "space.widgets.list", "space.current.widgets.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
-        return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
+        widgets = list_widgets(space_id)
+        return {
+            "ok": True,
+            "action": name,
+            "active_space_id": space_id,
+            "widgets": widgets,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=len(widgets),
+            ),
+        }
     if name in {"space.spaces.readwidget", "space.spaces.getwidget"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
-        return {"ok": True, "action": name, "space_id": space_id, "widget": read_widget_detail(space_id, widget_id)}
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "widget": read_widget_detail(space_id, widget_id),
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=1,
+            ),
+        }
     if name in {"space.widget.read", "space.widget.get", "space.current.widget.read", "space.current.widget.get", "space.current.readwidget", "space.current.getwidget"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
-        return {"ok": True, "action": name, "active_space_id": space_id, "widget": read_widget_detail(space_id, widget_id)}
+        return {
+            "ok": True,
+            "action": name,
+            "active_space_id": space_id,
+            "widget": read_widget_detail(space_id, widget_id),
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=1,
+            ),
+        }
     if name in {"space.widget.see", "space.current.widget.see", "space.current.seewidget", "widget.see"}:
         space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
@@ -6663,6 +6726,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widget": read_widget_detail(space_id, widget_id),
             "contract": _widget_runtime_contract_summary(widget),
             "events": list_widget_events(space_id, widget_id, data.get("limit", 5)),
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=1,
+            ),
         }
     if name in {"space.widget.runtime_contract", "space.current.widget.runtime_contract", "widget.runtime_contract"}:
         space_id = validate_space_id(_space_tool_current_id(data))

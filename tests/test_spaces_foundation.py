@@ -1739,13 +1739,19 @@ def test_space_tool_adapter_supports_source_widget_list_and_read_helpers_metadat
             "layout": {"x": 2, "y": 3, "w": 7, "h": 4, "minimized": False},
         }
     ]
+    assert listed["output_compaction"]["metadata_only"] is True
+    assert listed["output_compaction"]["redaction_status"] == "metadata_only"
+    assert "space:source-widget-read-lab" in json.dumps(listed["output_compaction"])
     assert read_by_id["ok"] is True
     assert read_by_id["action"] == "space.spaces.readwidget"
     assert read_by_id["space_id"] == created["space_id"]
     assert read_by_id["widget"]["id"] == "notes-card"
     assert read_by_id["widget"]["metadata"]["notes"] == {"body": "safe metadata note", "format": "markdown"}
+    assert read_by_id["output_compaction"]["metadata_only"] is True
+    assert read_by_id["output_compaction"]["redaction_status"] == "metadata_only"
     assert read_by_get_alias["widget"] == read_by_id["widget"]
-    assert "stored" not in serialized
+    assert read_by_get_alias["output_compaction"]["metadata_only"] is True
+    assert "stored()" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
@@ -1801,15 +1807,18 @@ def test_space_tool_adapter_supports_source_current_widget_read_helpers_metadata
     assert listed["action"] == "space.current.listwidgets"
     assert listed["active_space_id"] == created["space_id"]
     assert listed["widgets"][0]["id"] == "notes-card"
+    assert listed["output_compaction"]["metadata_only"] is True
     assert read_by_id["ok"] is True
     assert read_by_id["action"] == "space.current.readwidget"
     assert read_by_id["active_space_id"] == created["space_id"]
     assert read_by_id["widget"]["id"] == "notes-card"
     assert read_by_id["widget"]["metadata"]["notes"] == {"body": "visible safe note", "format": "markdown"}
+    assert read_by_id["output_compaction"]["metadata_only"] is True
     assert seen["ok"] is True
     assert seen["action"] == "space.current.seewidget"
     assert seen["active_space_id"] == created["space_id"]
     assert seen["widget"] == read_by_id["widget"]
+    assert seen["output_compaction"]["metadata_only"] is True
     assert seen["contract"]["mode"] == "sandbox-contract-draft"
     assert seen["events"][0]["event_name"] == "agent.prompt"
     assert seen["events"][0]["payload_summary"] == {}
@@ -8638,8 +8647,10 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
     assert listed["ok"] is True
     assert listed["action"] == "space.widget.list"
     assert listed["widgets"][0]["id"] == "research-card"
+    assert listed["output_compaction"]["metadata_only"] is True
     assert read["ok"] is True
     assert read["widget"]["id"] == "research-card"
+    assert read["output_compaction"]["metadata_only"] is True
     assert patched["widget"]["title"] == "Research Patched"
     assert patched["widget"]["layout"] == {"x": 4, "y": 5, "w": 8, "h": 5, "minimized": False}
     assert queued["queued"] is True
