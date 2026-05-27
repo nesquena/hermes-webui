@@ -7674,6 +7674,17 @@ def test_space_tool_adapter_supports_current_widget_bulk_delete_helpers_metadata
     assert removed_all["progress_event"]["event_type"] == "tool.completed"
     assert removed_all["progress_event"]["run_id"] == f"widget.delete:{created['space_id']}"
     assert removed_all["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = removed_all["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == "space.current.removeallwidgets"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert "space_action: space.current.removeallwidgets" in compaction["text"]
+    assert f"space_id: {created['space_id']}" in compaction["text"]
+    assert "widget_count: 2" in compaction["text"]
+    assert "model_route_hint: hint:fast" in compaction["text"]
+    assert f"progress_run_id: widget.delete:{created['space_id']}" in compaction["text"]
+    assert compaction["retained_artifact_handles"]
     assert spaces.list_widgets(created["space_id"]) == []
     assert "steal" not in serialized
     assert "stored()" not in serialized
@@ -7685,6 +7696,103 @@ def test_space_tool_adapter_supports_current_widget_bulk_delete_helpers_metadata
     assert "api_key" not in serialized
     assert "token" not in serialized
     assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
+@pytest.mark.parametrize(
+    ("action", "payload", "expected_run_prefix", "expected_count"),
+    [
+        (
+            "space.spaces.patchWidget",
+            {"spaceId": "widget-mutation-compaction-lab", "widgetId": "patch-card", "title": "Patched Card"},
+            "widget.patch",
+            1,
+        ),
+        (
+            "space.current.deleteWidget",
+            {"activeSpaceId": "widget-mutation-compaction-lab", "widgetId": "single-delete-card"},
+            "widget.delete",
+            1,
+        ),
+        (
+            "space.current.removeWidgets",
+            {"activeSpaceId": "widget-mutation-compaction-lab", "widgetIds": ["bulk-one-card", "bulk-two-card"]},
+            "widget.delete",
+            2,
+        ),
+        (
+            "space.spaces.toggleWidgets",
+            {"spaceId": "widget-mutation-compaction-lab", "widgetIds": ["toggle-one-card", "toggle-two-card"]},
+            "layout.toggle",
+            2,
+        ),
+        (
+            "space.current.toggleWidgets",
+            {"activeSpaceId": "widget-mutation-compaction-lab", "widgetIds": ["toggle-one-card", "toggle-two-card"]},
+            "layout.toggle",
+            2,
+        ),
+    ],
+)
+def test_space_tool_widget_mutation_receipts_include_metadata_only_output_compaction(
+    monkeypatch, tmp_path, action, payload, expected_run_prefix, expected_count
+):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-mutation-compaction-lab", "name": "Widget Mutation Compaction Lab"})
+    for widget_id in [
+        "patch-card",
+        "single-delete-card",
+        "bulk-one-card",
+        "bulk-two-card",
+        "toggle-one-card",
+        "toggle-two-card",
+    ]:
+        spaces.upsert_widget(
+            created["space_id"],
+            {
+                "id": widget_id,
+                "kind": "markdown",
+                "title": widget_id.replace("-", " ").title(),
+                "renderer": "<script>stored()</script>",
+                "source": "SECRET_SOURCE",
+                "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            },
+        )
+
+    result = spaces.run_space_tool(
+        action,
+        {
+            **payload,
+            "renderer": "<script>steal()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "source": "SECRET_SOURCE",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "token": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    compaction = result["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == action.lower()
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert "space_action: " + action.lower() in compaction["text"]
+    assert "space_id: widget-mutation-compaction-lab" in compaction["text"]
+    assert f"widget_count: {expected_count}" in compaction["text"]
+    assert "model_route_hint: hint:fast" in compaction["text"]
+    assert f"progress_run_id: {expected_run_prefix}:widget-mutation-compaction-lab" in compaction["text"]
+    assert compaction["retained_artifact_handles"]
+    assert "steal" not in serialized
+    assert "stored()" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
     assert '"source":' not in serialized
 
 
@@ -8316,6 +8424,17 @@ def test_space_tool_adapter_supports_source_widget_bulk_delete_helpers_metadata_
     assert removed_all["progress_event"]["event_type"] == "tool.completed"
     assert removed_all["progress_event"]["run_id"] == f"widget.delete:{created['space_id']}"
     assert removed_all["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = removed_all["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == "space.spaces.removeallwidgets"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert "space_action: space.spaces.removeallwidgets" in compaction["text"]
+    assert f"space_id: {created['space_id']}" in compaction["text"]
+    assert "widget_count: 2" in compaction["text"]
+    assert "model_route_hint: hint:fast" in compaction["text"]
+    assert f"progress_run_id: widget.delete:{created['space_id']}" in compaction["text"]
+    assert compaction["retained_artifact_handles"]
     assert spaces.list_widgets(created["space_id"]) == []
     assert "steal" not in serialized
     assert "stored()" not in serialized
