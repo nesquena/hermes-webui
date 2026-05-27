@@ -1449,6 +1449,21 @@
   .reasoning-option{padding:8px 14px;border-radius:6px;cursor:pointer;font-size:13px;color:var(--text);white-space:nowrap;transition:background-color .12s;}
   .reasoning-option:hover{background:rgba(255,255,255,.07);}
   .reasoning-option.selected{background:var(--accent-bg);}
+  /* #2697 — scope picker at the top of the reasoning dropdown. Two pill-styled
+     options ("Set for this session only" / "Set as profile default") that
+     toggle where the next effort click writes. */
+  .reasoning-scope-group{display:flex;gap:4px;padding:2px 2px 4px;}
+  .reasoning-scope-option{flex:1 1 0;padding:6px 8px;border-radius:6px;cursor:pointer;font-size:11px;color:var(--muted);white-space:nowrap;text-align:center;transition:background-color .12s,color .12s;}
+  .reasoning-scope-option:hover{background:rgba(255,255,255,.05);color:var(--text);}
+  .reasoning-scope-option.selected{background:var(--accent-bg);color:var(--text);}
+  .reasoning-scope-divider{height:1px;background:var(--border2);margin:2px 4px 4px;}
+  /* Subtle visual indicator that the chip is showing a session-scoped override
+     rather than the profile default — italic label + small leading dot. */
+  .composer-reasoning-chip.session-override .composer-reasoning-label{font-style:italic;}
+  .composer-reasoning-chip.session-override::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--accent);margin-right:2px;flex-shrink:0;}
+  .composer-mobile-config-action.session-override .composer-mobile-config-value{font-style:italic;}
+  .reasoning-clear-override{padding:8px 14px;margin-top:4px;border-top:1px solid var(--border2);border-radius:0 0 6px 6px;cursor:pointer;font-size:12px;color:var(--muted);white-space:nowrap;transition:background-color .12s,color .12s;}
+  .reasoning-clear-override:hover{background:rgba(255,255,255,.07);color:var(--text);}
   /* Toolsets chip — session-level toolset override (#493) */
   .composer-toolsets-wrap{display:none;}
   .composer-toolsets-chip{display:inline-flex;align-items:center;gap:8px;max-width:180px;padding:8px 10px 8px 12px;border-radius:999px;border:1px solid transparent;background-color:transparent;color:var(--muted);font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;}

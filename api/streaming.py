@@ -4283,11 +4283,21 @@ def _run_agent_streaming(
             # active profile's config.yaml (the same key the CLI writes via
             # `/reasoning <level>`) and hand the parsed dict to AIAgent.  When
             # the key is absent or invalid, pass None → agent uses its default.
+            #
+            # #2697 — Per-session override precedence:
+            #   session.reasoning_effort (if set) > agent.reasoning_effort (config.yaml)
+            # The session sidecar stores the override as a plain string ('high',
+            # 'medium', 'low', etc., or 'none'). A None value means inherit the
+            # profile default, which is the v0.51.137- behaviour.
             try:
                 from api.config import parse_reasoning_effort as _parse_reff
-                _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
-                _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
-                _reasoning_config = _parse_reff(_effort_raw)
+                _session_effort = getattr(s, 'reasoning_effort', None)
+                if _session_effort:
+                    _reasoning_config = _parse_reff(_session_effort)
+                else:
+                    _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
+                    _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
+                    _reasoning_config = _parse_reff(_effort_raw)
             except Exception:
                 _reasoning_config = None
 

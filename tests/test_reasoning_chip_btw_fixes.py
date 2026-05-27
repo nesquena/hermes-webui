@@ -72,9 +72,12 @@ class TestReasoningDropdownEscapesComposerLeft:
         ]
         for name, pos in positions:
             assert pos > -1, f"{name} not found in index.html"
-        # They should all be in the same area of the document — within ~1.5 KB
+        # They should all be in the same area of the document — within ~3 KB
+        # (the reasoning dropdown grew when the per-session scope picker landed
+        # in #2697; the structural invariant — siblings, not nested inside
+        # composer-left's overflow-hidden — is still enforced by the test above).
         window = [p for _, p in positions]
-        assert max(window) - min(window) < 2000, (
+        assert max(window) - min(window) < 3000, (
             "composer dropdowns are no longer grouped — reasoning dropdown may "
             "have drifted back inside a nested container"
         )

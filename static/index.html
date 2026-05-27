@@ -709,12 +709,22 @@
           <div class="profile-dropdown" id="profileDropdown"></div>
           <div class="ws-dropdown ws-dropdown-footer" id="composerWsDropdown"></div>
           <div class="composer-reasoning-dropdown" id="composerReasoningDropdown">
+            <!-- #2697 — scope picker: write target for the effort options below.
+                 'session' writes /api/session/reasoning (no profile change);
+                 'profile' writes /api/reasoning (config.yaml, CLI parity). -->
+            <div class="reasoning-scope-group" role="group" aria-label="Apply effort to">
+              <div class="reasoning-scope-option" data-scope="session">Set for this session only</div>
+              <div class="reasoning-scope-option" data-scope="profile">Set as profile default</div>
+            </div>
+            <div class="reasoning-scope-divider" aria-hidden="true"></div>
             <div class="reasoning-option" data-effort="none">None</div>
             <div class="reasoning-option" data-effort="minimal">Minimal</div>
             <div class="reasoning-option" data-effort="low">Low</div>
             <div class="reasoning-option" data-effort="medium">Medium</div>
             <div class="reasoning-option" data-effort="high">High</div>
             <div class="reasoning-option" data-effort="xhigh">Extra High</div>
+            <!-- Visible only when the current session has an override active. -->
+            <div class="reasoning-clear-override" id="reasoningClearOverride" style="display:none">Clear session override</div>
           </div>
           <div class="composer-toolsets-dropdown" id="composerToolsetsDropdown">
             <div class="toolsets-dropdown-desc" id="toolsetsDropdownDesc"></div>

@@ -5049,6 +5049,9 @@ def handle_post(handler, parsed) -> bool:
                 # re-derive on the next turn.
                 personality=session.personality,
                 enabled_toolsets=getattr(session, "enabled_toolsets", None),
+                # #2697 — carry per-session reasoning effort override forward
+                # on duplicate so the copy behaves identically to the original.
+                reasoning_effort=getattr(session, "reasoning_effort", None),
                 context_length=getattr(session, "context_length", None),
                 threshold_tokens=getattr(session, "threshold_tokens", None),
                 created_at=time.time(),
@@ -5226,6 +5229,48 @@ def handle_post(handler, parsed) -> bool:
             s.personality = name if name else None
             s.save()
         return j(handler, {"ok": True, "personality": s.personality, "prompt": prompt})
+
+    if parsed.path == "/api/session/reasoning":
+        """Set or clear per-session reasoning effort override (#2697).
+
+        POST body: { session_id, effort: 'none'|'minimal'|'low'|'medium'|'high'|'xhigh' | null }
+        - effort: one of the valid reasoning effort strings (or 'none' to
+          disable reasoning entirely), or null/empty to clear the override and
+          inherit the active profile's ``agent.reasoning_effort`` default.
+
+        Mirrors the profile-default ``/api/reasoning`` shape but scopes the
+        write to a single session sidecar instead of config.yaml. Resolution
+        precedence (in api/streaming.py): session override > profile default.
+        """
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = body["session_id"]
+        effort_raw = body.get("effort")
+        # Validate effort: null/empty clears, otherwise must be a known value.
+        # Reject unknown levels with 400 so the UI can surface the error
+        # rather than silently writing garbage to the sidecar.
+        if effort_raw is None or (isinstance(effort_raw, str) and not effort_raw.strip()):
+            effort = None
+        else:
+            from api.config import VALID_REASONING_EFFORTS
+            effort = str(effort_raw).strip().lower()
+            if effort != "none" and effort not in VALID_REASONING_EFFORTS:
+                return bad(
+                    handler,
+                    "effort must be one of: none, "
+                    + ", ".join(VALID_REASONING_EFFORTS),
+                )
+        try:
+            s = get_session(sid)
+            s = _ensure_full_session_before_mutation(sid, s)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        with _get_session_agent_lock(sid):
+            s.reasoning_effort = effort
+            s.save()
+        return j(handler, {"ok": True, "reasoning_effort": s.reasoning_effort})
 
     if parsed.path == "/api/session/toolsets":
         """Set or clear per-session toolset override (#493).

@@ -1629,6 +1629,13 @@ window.addEventListener('resize',()=>{
 
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
+// #2697 — when a session has its own override the chip shows that value AND
+// flags it visually (italic + dot). Null means "no override / inherit profile".
+let _currentReasoningSessionOverride=null;
+// Where the next effort click writes: 'session' (default when a session is
+// active) or 'profile' (writes config.yaml for CLI parity). Picked via the
+// scope buttons at the top of the dropdown.
+let _reasoningWriteScope='session';
 
 function _normalizeReasoningEffort(eff){
   return String(eff||'').trim().toLowerCase();
@@ -1640,9 +1647,16 @@ function _formatReasoningEffortLabel(effort){
   return effort;
 }
 
-function _applyReasoningChip(eff){
+function _applyReasoningChip(eff,sessionOverride){
   const effort=_normalizeReasoningEffort(eff);
-  _currentReasoningEffort=effort;
+  // The two module-scoped trackers are defensively assigned via typeof so that
+  // unit-test drivers which `eval` this function in isolation (extracting it
+  // from ui.js without the surrounding `let` declarations) don't ReferenceError
+  // on the outer-scope read. See tests/test_reasoning_chip_js_behaviour.py.
+  if(typeof _currentReasoningEffort!=='undefined') _currentReasoningEffort=effort;
+  if(sessionOverride!==undefined&&typeof _currentReasoningSessionOverride!=='undefined'){
+    _currentReasoningSessionOverride=sessionOverride?_normalizeReasoningEffort(sessionOverride):null;
+  }
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
   const chip=$('composerReasoningChip');
@@ -1654,24 +1668,55 @@ function _applyReasoningChip(eff){
   const text=_formatReasoningEffortLabel(effort);
   label.textContent=text;
   if(mobileLabel) mobileLabel.textContent=text;
+  const hasOverride=(typeof _currentReasoningSessionOverride!=='undefined')
+    ?!!_currentReasoningSessionOverride
+    :!!sessionOverride;
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    chip.title='Reasoning effort: '+text;
+    // session-override class drives the italic + dot indicator (style.css).
+    chip.classList.toggle('session-override',hasOverride);
+    chip.title=hasOverride
+      ?'Reasoning effort: '+text+' (session override; profile default unchanged)'
+      :'Reasoning effort: '+text;
   }
-  if(mobileAction) mobileAction.classList.toggle('inactive',!effort||effort==='none');
+  if(mobileAction){
+    mobileAction.classList.toggle('inactive',!effort||effort==='none');
+    mobileAction.classList.toggle('session-override',hasOverride);
+  }
   _highlightReasoningOption(effort);
+  if(typeof _syncReasoningScopeUI==='function') _syncReasoningScopeUI();
+}
+
+function _syncReasoningScopeUI(){
+  // Highlight the active scope button and toggle the "Clear session override"
+  // row's visibility based on whether the current session actually has one.
+  const dd=$('composerReasoningDropdown');
+  if(!dd) return;
+  dd.querySelectorAll('.reasoning-scope-option').forEach(function(opt){
+    opt.classList.toggle('selected',opt.dataset.scope===_reasoningWriteScope);
+  });
+  const clearRow=$('reasoningClearOverride');
+  if(clearRow){
+    clearRow.style.display=_currentReasoningSessionOverride?'':'none';
+  }
 }
 
 function fetchReasoningChip(){
+  // #2697 — prefer the session-scoped value when a session is loaded. The
+  // profile default is the fallback (matches streaming.py resolution order).
+  const sid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null;
+  const sessionOverride=sid&&S.session?_normalizeReasoningEffort(S.session.reasoning_effort||''):'';
   api('/api/reasoning').then(function(st){
-    _applyReasoningChip((st&&st.reasoning_effort)||'');
-  }).catch(function(){_applyReasoningChip('');});
+    const profileEffort=(st&&st.reasoning_effort)||'';
+    const effective=sessionOverride||profileEffort;
+    _applyReasoningChip(effective,sessionOverride||null);
+  }).catch(function(){_applyReasoningChip(sessionOverride||'',sessionOverride||null);});
 }
 
 function syncReasoningChip(){
   if(_currentReasoningEffort===null){fetchReasoningChip();return;}
-  _applyReasoningChip(_currentReasoningEffort);
+  _applyReasoningChip(_currentReasoningEffort,_currentReasoningSessionOverride);
 }
 
 function _highlightReasoningOption(effort){
@@ -1731,18 +1776,60 @@ document.addEventListener('click',function(e){
     !e.target.closest('#composerMobileReasoningAction') &&
     !e.target.closest('#composerReasoningDropdown')
   ) closeReasoningDropdown();
+  // #2697 — scope picker (session-only vs profile-default). Clicking a scope
+  // option does NOT write yet; it just sets where the NEXT effort click goes.
+  const scopeOpt=e.target.closest('.reasoning-scope-option');
+  if(scopeOpt){
+    const scope=scopeOpt.dataset.scope;
+    if(scope==='session'||scope==='profile'){
+      _reasoningWriteScope=scope;
+      _syncReasoningScopeUI();
+    }
+    return;
+  }
+  // #2697 — clear session override row (only visible when one is set).
+  if(e.target.closest('#reasoningClearOverride')){
+    const sid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null;
+    if(!sid){showToast(t('no_active_session'));closeReasoningDropdown();return;}
+    api('/api/session/reasoning',{method:'POST',body:JSON.stringify({session_id:sid,effort:null})})
+      .then(function(){
+        if(S.session) S.session.reasoning_effort=null;
+        fetchReasoningChip();
+        showToast('🧠 Session reasoning override cleared');
+      })
+      .catch(function(){showToast('🧠 Failed to clear session override');});
+    closeReasoningDropdown();
+    return;
+  }
   if(e.target.closest('.reasoning-option')){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
-    if(effort){
+    if(!effort){closeReasoningDropdown();return;}
+    const sid=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)||null;
+    // Session scope requires an active session — fall back to profile-default
+    // write rather than silently failing when none is loaded.
+    if(_reasoningWriteScope==='session'&&sid){
+      api('/api/session/reasoning',{method:'POST',body:JSON.stringify({session_id:sid,effort:effort})})
+        .then(function(st){
+          const override=(st&&st.reasoning_effort)||effort;
+          if(S.session) S.session.reasoning_effort=override;
+          _applyReasoningChip(override,override);
+          showToast('🧠 Reasoning effort set to '+override+' (session only)');
+        })
+        .catch(function(){showToast('🧠 Failed to set session effort');});
+    }else{
       api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
         .then(function(st){
-          _applyReasoningChip((st&&st.reasoning_effort)||effort);
-          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
+          const profileEffort=(st&&st.reasoning_effort)||effort;
+          // Profile write does not change the session override; keep showing
+          // it if one is set, otherwise the new profile default takes over.
+          const effective=_currentReasoningSessionOverride||profileEffort;
+          _applyReasoningChip(effective,_currentReasoningSessionOverride);
+          showToast('🧠 Reasoning effort set to '+profileEffort+' (profile default)');
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
-      closeReasoningDropdown();
     }
+    closeReasoningDropdown();
   }
 });
 
