@@ -197,3 +197,22 @@ def test_coalesced_bg_task_complete_payload_replace_uses_latest_payload(monkeypa
     canonical_payloads = _canonical_payloads(emits)
     assert [payload["task_id"] for payload in canonical_payloads] == ["first", "latest"]
     assert canonical_payloads[-1]["summary"].endswith("latest completed (exit_code=0).")
+
+
+def test_outside_window_arrival_flushes_immediately_even_with_pending_timer(monkeypatch):
+    bp, fake, emits, clock, timers = _install_emit_harness(monkeypatch)
+
+    _process_completion(bp, fake, "first")
+    clock.advance(0.2)
+    _process_completion(bp, fake, "pending")
+    assert [payload["task_id"] for payload in _canonical_payloads(emits)] == ["first"]
+    assert len([timer for timer in timers if not timer.cancelled]) == 1
+
+    clock.advance(1.1)
+    _process_completion(bp, fake, "outside-window")
+
+    assert [payload["task_id"] for payload in _canonical_payloads(emits)] == [
+        "first",
+        "outside-window",
+    ]
+    assert not [timer for timer in timers if not timer.cancelled]

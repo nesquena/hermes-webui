@@ -483,13 +483,20 @@ def _emit_bg_task_complete_events_coalesced(session_id: str, payload: dict) -> i
         last = _LAST_EMIT_TS.get(session_id)
         has_pending = session_id in _PENDING_EMIT_TIMERS
         if last is None or (now - last) >= _EMIT_COALESCE_WINDOW_SECS:
-            if not has_pending:
-                _LAST_EMIT_TS[session_id] = now
-                should_emit_now = True
-            else:
-                # A quiet-window timer already owns the deferred delivery;
-                # latest payload still wins.
-                _PENDING_EMIT_PAYLOADS[session_id] = payload
+            _LAST_EMIT_TS[session_id] = now
+            should_emit_now = True
+            if has_pending:
+                _PENDING_EMIT_PAYLOADS.pop(session_id, None)
+                old_timer = _PENDING_EMIT_TIMERS.pop(session_id, None)
+                if old_timer is not None:
+                    try:
+                        old_timer.cancel()
+                    except Exception:
+                        logger.debug(
+                            "coalesced bg_task_complete timer cancel failed for session %s",
+                            session_id,
+                            exc_info=True,
+                        )
         else:
             _PENDING_EMIT_PAYLOADS[session_id] = payload
 
@@ -696,7 +703,11 @@ def _process_one(evt: dict) -> None:
                 exc_info=True,
             )
     if not session_key:
-        session_key = process_id
+        logger.debug(
+            "process_complete drop: no recoverable session_key for process_id=%r",
+            process_id,
+        )
+        return
     with _cfg.PROCESS_SESSION_INDEX_LOCK:
         session_id = _cfg.PROCESS_SESSION_INDEX.get(session_key)
     if not session_id:
