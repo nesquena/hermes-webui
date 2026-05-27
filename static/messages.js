@@ -433,7 +433,7 @@ async function send(){
   setComposerStatus('');
 
   const uploadedNames=uploaded.map(u=>u.name||u);
-  const uploadedPaths=uploaded.map(u=>u&&u.is_image?(u.name||u.filename||u):(u.path||u.name||u));
+  const uploadedPaths=uploaded.map(u=>u&&u.path?u.path:(u&&u.name?u.name:(u&&u.filename?u.filename:u)));
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
@@ -609,10 +609,11 @@ async function send(){
 
 const LIVE_STREAMS={};
 
-function closeLiveStream(sessionId, streamId){
+function closeLiveStream(sessionId, streamId, source){
   const live=LIVE_STREAMS[sessionId];
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
+  if(source&&live.source!==source) return;
   try{live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
 }
@@ -747,8 +748,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_persistTimer) return;
     _persistTimer=setTimeout(()=>{_persistTimer=null;persistInflightState();},2000);
   }
-  function _closeSource(){
-    closeLiveStream(activeSid, streamId);
+  function _closeSource(source){
+    closeLiveStream(activeSid, streamId, source);
   }
   function _stripLiveVisibleAssistantEchoFromThinking(text, snippets){
     let out=String(text||'');
@@ -1002,8 +1003,35 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdWrittenLen=0;
     _smdWrittenText='';
     if(!window.smd){_smdParser=null;return;}
-    const renderer=fade ? _streamFadeRenderer(el) : window.smd.default_renderer(el);
+    const baseRenderer=fade ? _streamFadeRenderer(el) : window.smd.default_renderer(el);
+    const renderer=_smdRendererWithoutUnderscoreEmphasis(baseRenderer);
     _smdParser=window.smd.parser(renderer);
+  }
+  function _smdRendererWithoutUnderscoreEmphasis(renderer){
+    if(!renderer||!window.smd) return renderer;
+    const baseAddToken=renderer.add_token;
+    const baseEndToken=renderer.end_token;
+    const baseAddText=renderer.add_text;
+    const tokenStack=[];
+    renderer.add_token=(data,token)=>{
+      if(token===window.smd.ITALIC_UND||token===window.smd.STRONG_UND){
+        const marker=token===window.smd.STRONG_UND?'__':'_';
+        tokenStack.push(marker);
+        baseAddText(data,marker);
+        return;
+      }
+      tokenStack.push(null);
+      baseAddToken(data,token);
+    };
+    renderer.end_token=(data)=>{
+      const marker=tokenStack.pop();
+      if(marker){
+        baseAddText(data,marker);
+        return;
+      }
+      baseEndToken(data);
+    };
+    return renderer;
   }
   // Helper: end the current smd parser (flushes remaining state) and null it out.
   function _smdEndParser(){
@@ -1351,9 +1379,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     step();
   }
-  function _flushPendingSegmentRender(){
-    if(!assistantBody||!_renderPending) return;
-    _cancelAnimationFramePendingStreamRender();
+  function _flushPendingSegmentRender(options={}){
+    const force=!!(options&&options.force);
+    if(!assistantBody||(!force&&!_renderPending)) return;
+    if(_renderPending) _cancelAnimationFramePendingStreamRender();
     const displayText=segmentStart===0
       ? _parseStreamState().displayText
       : _stripXmlToolCalls(assistantText.slice(segmentStart));
@@ -1455,6 +1484,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
+    const existingLive=LIVE_STREAMS[activeSid];
+    if(existingLive&&existingLive.source&&existingLive.source!==source){
+      try{existingLive.source.close();}catch(_){ }
+    }
+    LIVE_STREAMS[activeSid]={streamId,source};
+
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
     // the accumulators here so the re-sent tokens wouldn't double the prefix.
@@ -1505,8 +1540,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(typeof updateThinking==='function') updateThinking(_liveThinkingText());
         else appendThinking(_liveThinkingText());
       }
-      _flushPendingSegmentRender();
       ensureAssistantRow(true);
+      _flushPendingSegmentRender({force:true});
+      if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
       _resetAssistantSegment();
       _scheduleRender();
     });
@@ -1558,7 +1594,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Reset the live assistant row reference so that any text tokens arriving
       // after this tool call create a NEW segment appended below the tool card,
       // rather than updating the old segment that sits above it in the DOM.
-      _flushPendingSegmentRender();
+      _flushPendingSegmentRender({force:true});
       _freshSegment=true;
       _smdEndParser();
       _resetAssistantSegment();
@@ -2081,13 +2117,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('error',async e=>{
       if(_terminalStateReached || _streamFinalized){
-        _closeSource();
+        _closeSource(source);
         return;
       }
       if(typeof recordClientSSEError==='function') recordClientSSEError('chat-response',{ready_state:source?source.readyState:null,session_id:activeSid,stream_id:streamId,reason:'chat EventSource.onerror'});
       source.close();
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden()) return;
+      _closeSource(source);
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
@@ -2677,12 +2714,63 @@ function _syncClarifyCollapseButton(card) {
   collapse.title = label;
 }
 
+let _clarifyResizeListenerReady = false;
+
+function _clarifyMessagesNearBottom(messages) {
+  if (!messages) return false;
+  return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 150;
+}
+
+function _syncClarifyTranscriptSpace(card, opts) {
+  opts = opts || {};
+  const messages = $("messages");
+  if (!messages) return;
+  const wasNearBottom = _clarifyMessagesNearBottom(messages);
+  if (!card || !card.classList.contains("visible")) {
+    messages.classList.remove("clarify-open");
+    messages.classList.remove("clarify-collapsed");
+    messages.style.removeProperty("--clarify-card-height");
+    messages.style.removeProperty("--clarify-dock-height");
+    if (wasNearBottom && typeof scrollToBottom === "function" && typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(scrollToBottom);
+    }
+    return;
+  }
+  const collapsed = card.classList.contains("collapsed");
+  messages.classList.add("clarify-open");
+  messages.classList.toggle("clarify-collapsed", collapsed);
+  const measure = () => {
+    if (!card.classList.contains("visible")) return;
+    const target = collapsed ? card : (card.querySelector(".clarify-inner") || card);
+    const h = target && target.getBoundingClientRect().height;
+    if (h > 0) {
+      messages.style.setProperty(collapsed ? "--clarify-dock-height" : "--clarify-card-height", Math.ceil(h + 24) + "px");
+    }
+    if (wasNearBottom && typeof scrollToBottom === "function") scrollToBottom();
+  };
+  if (opts.immediate) measure();
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(measure);
+  setTimeout(measure, 420);
+}
+
+function _ensureClarifyResizeListener() {
+  if (_clarifyResizeListenerReady || typeof window === "undefined") return;
+  _clarifyResizeListenerReady = true;
+  window.addEventListener("resize", () => {
+    const card = $("clarifyCard");
+    if (card && card.classList.contains("visible")) {
+      _syncClarifyTranscriptSpace(card, {immediate: true});
+    }
+  }, {passive: true});
+}
+
 function toggleClarifyCardCollapsed(forceCollapsed) {
   const card = $("clarifyCard");
   if (!card) return;
   const collapsed = typeof forceCollapsed === "boolean" ? forceCollapsed : !card.classList.contains("collapsed");
   card.classList.toggle("collapsed", collapsed);
   _syncClarifyCollapseButton(card);
+  _syncClarifyTranscriptSpace(card, {immediate: true});
 }
 
 function _clearClarifyHideTimer() {
@@ -2797,6 +2885,7 @@ function hideClarifyCard(force=false, reason="dismissed") {
   _clarifySessionId = null;
   _resetClarifyCardState();
   card.classList.remove("visible");
+  _syncClarifyTranscriptSpace(null);
   if (typeof unlockComposerForClarify === "function") unlockComposerForClarify();
   $("clarifyQuestion").textContent = "";
   $("clarifyChoices").innerHTML = "";
@@ -2911,8 +3000,10 @@ function showClarifyCard(pending) {
     lockComposerForClarify(question ? `Clarification needed: ${question}` : "Clarification needed");
   }
   _clarifySetControlsDisabled(false, false);
+  _ensureClarifyResizeListener();
   card.classList.add("visible");
   _syncClarifyCollapseButton(card);
+  _syncClarifyTranscriptSpace(card, {immediate: true});
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   // Move focus to clarify input synchronously (not in setTimeout) and
   // only if the user wasn't mid-type in the composer textarea.

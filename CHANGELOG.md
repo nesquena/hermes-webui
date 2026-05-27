@@ -7,6 +7,107 @@
 
 - Chat messages now render registered Hermes skills as quiet inline chips using the current profile's `/api/skills` list. The composer remains a plain native textarea; skill chip rendering is limited to settled conversation content so composing, caret movement, autocomplete, paste, and workspace path insertion keep their existing behavior.
 
+## [v0.51.141] — 2026-05-26 — Release DM (stage-batch23 — 4-PR second hold-bucket pass)
+
+### Added
+
+- WebUI can now opt into a `webui_prefill_messages_script` / `HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT` hook for dynamic browser-turn prefill context from local notes or recall systems. The script output is capped at 256 KiB, normalized to ephemeral prefill messages, and browser status still hides message bodies while redacting script errors.
+- Added a read-only WebUI/CLI session source switch in the chat sidebar when agent session sync is enabled. WebUI conversations stay in the default list, while imported CLI/agent sessions are surfaced under a separate `CLI sessions` tab with counts so large CLI histories do not clutter the normal conversation list. (Refs #2351)
+
+### Fixed
+
+- Compact tool activity now keeps visible interim assistant progress in the live Session timeline instead of making that progress effectively collapsed-only inside Activity details. The interim assistant stream path creates and flushes a visible assistant segment before resetting for later tool/compression activity.
+
+## [v0.51.140] — 2026-05-26 — Release DL (stage-batch22 — 5-PR hold-bucket reassessment)
+
+### Fixed
+
+- Live streamed assistant Markdown now treats underscores in ordinary text and identifiers literally, matching the settled message renderer while preserving asterisk-based emphasis.
+- Models cache no longer churns every ~14 minutes when the auth.json credential pool refreshes. The auth.json fingerprint now hashes provider-identity fields (active_provider, credential_pool ids, base_url, auth_type) and excludes pure credential-rotation fields (access_token, refresh_token, expires_at, last_status, request_count, updated_at). Real provider/model-set changes still invalidate the cache. (RCA t_16551f61)
+- Paginated `/api/session?msg_limit=N` windows now anchor on the newest renderable transcript row instead of the raw message-array tail. Long sessions whose newest rows are only hidden tool-result entries no longer open to an empty visible transcript with non-empty `S.messages`.
+- `_loadOlderMessages()` now requests a larger cumulative tail window (`msg_limit=current+30`) rather than a separate `msg_before` page. Suffix-continuity check guards against races and falls back to the legacy index-page request when the loaded transcript is no longer the suffix of the new server response.
+
+### Performance
+
+- `renderMessages()` now caches `renderMd()` / `_renderUserFencedBlocks()` output keyed on message text, caches the visible-message scan across renders, scopes the question→assistant lookup to the visible window, and Prism-highlights only newly-mounted code blocks. Long sessions with many messages no longer freeze the browser tab on every render.
+
+## [v0.51.139] — 2026-05-25 — Release DK (stage-batch21 — 5-PR tier-2 batch)
+
+### Added
+
+- Image lightbox now supports prev/next navigation when multiple images are present in the same message. Click `‹` / `›` buttons or use `←` / `→` keyboard arrows to browse; an image counter (`1 / 5`) is shown at the bottom. (#2967)
+
+### Fixed
+
+- Session switching now keeps the initial metadata fetch on `/api/session?messages=0&resolve_model=0` and defers stale model/provider repair until after the new session is assigned, so first paint does not block on cold model catalog hydration.
+- Metadata-only session loads now use a cheap state summary instead of full transcript reconciliation, while still detecting real external state.db growth and ignoring restamped replay rows that would otherwise retrigger refresh polling.
+- Session transcript reconciliation now precomputes visible-duplicate lookup state instead of recomputing loose-content normalization for every state.db row, reducing long-session tail-load latency without changing the append-only merge contract.
+- Vendored KaTeX CSS, JavaScript, and fonts locally so math rendering no longer triggers CSP font reports for `cdn.jsdelivr.net` font files.
+- Vendored `js-yaml` locally so YAML tree-view loading no longer triggers CSP script reports for `cdnjs.cloudflare.com`.
+- Session delete now prunes the deleted row from `_index.json` in place instead of discarding the whole index, and composer draft saves skip the sidebar index entirely. Both reduce churn on new-session sends after a delete or while typing.
+
+### Changed
+
+- Sidebar chat search now highlights matching title text and shows a subtle content preview for body-only matches.
+
+## [v0.51.138] — 2026-05-25 — Release DJ (stage-batch20 — 7-PR ultra-safe batch)
+
+### Added
+
+- **PR #2972** by @Michaelyklam (refs #1925) — Advance the runtime-adapter RFC after the Slice 4e route-selection harness shipped in v0.51.129. The RFC now defines the Slice 4f supervised local runner client backend gate: replace the bounded `runner-local` 501 only when explicitly configured, prove restart/reattach from durable runner/journal state, preserve the public chat-start field whitelist, require cancel as the first live runner-owned control, and keep active-run discovery/supervision out of new WebUI process-local runtime-surrogate globals.
+
+### Changed
+
+- Contributor guidance now requires explicit `Contract Routing` for contract-affecting PRs and `Contract Change` when a PR intentionally changes an existing product, runtime, or review contract. Contract tests must move with the corresponding docs instead of silently redefining behavior by themselves, with the current static coverage documented as advisory rather than a GitHub policy gate.
+- Removing a provider key now surfaces the server's specific CSRF rejection reason ("Session expired - reload the page", "Cross-origin mismatch - check reverse proxy headers", or the fallback "Cross-origin request rejected") when the underlying POST is rejected with 403, instead of swallowing all three into one generic toast. (Refs #2572)
+- Tool cards in the transcript now use a slightly stronger border and a 2px left edge so tool output stays visually distinct from final assistant prose without requiring hover. (#2867)
+- Tasks panel "Gateway not configured" banner now includes a direct link to the new `docs/docker.md#scheduled-jobs-and-the-gateway-daemon` section that walks through running the gateway container so scheduled cron jobs actually tick. (Refs #2785)
+- WebUI structured request logs now include `remote` (client IP) and an optional `forwarded_for` field when an `X-Forwarded-For` header is present, making failed-login and unauthorized-access logs usable by downstream security tooling like fail2ban behind a reverse proxy.
+
+### Internal
+
+- Test cleanup in `tests/test_issue1894_provider_overlap.py`: canonicalize the `opencode-go` base URL to `opencode.ai/zen/go/v1` (matching `hermes_cli/auth.py` and `api/config.py`), drop a vestigial `# noqa: N801`, and convert section banner comments to per-test docstrings.
+
+## [v0.51.137] — 2026-05-25 — Release DI (stage-batch19 — 6-PR medium-risk batch)
+
+### Added
+
+- Operators can now set `HERMES_WEBUI_CSP_CONNECT_EXTRA` to append validated extra origins to the report-only CSP `connect-src` directive for reverse-proxy or tunnel deployments.
+
+### Fixed
+
+- Trim session-level tool call payloads to the returned message window for paginated `/api/session` loads, so long tool-heavy sessions do not send historical tool call summaries during ordinary session switching.
+- Sidebar compression lineage collapse now prefers the current continuation tip over a preserved parent snapshot when both rows share the same backend segment count. This keeps reloads after context compression from reopening the older parent transcript and making the active conversation appear to disappear.
+- Reloading a stale `/session/<parent>` compression URL now resolves to the visible continuation tip from the sidebar payload instead of reopening the archived parent snapshot.
+- Undo, retry, and explicit session truncation now persist a sidecar truncation watermark, preventing older `state.db` rows from reappearing after the WebUI transcript was intentionally shortened.
+- Chat uploads with the same filename in one session now keep distinct attachment files instead of overwriting the earlier upload.
+- Compression reference card no longer disappears behind the "Load earlier messages" cutoff after subsequent turns. The post-compression anchor is now calculated from the position of the last `[CONTEXT COMPACTION]` marker in the transcript instead of pointing at the visible tail, so the anchor stays at the compression boundary regardless of how many turns have been added since.
+
+## [v0.51.136] — 2026-05-25 — Release DH (stage-batch18 — 5-PR streaming + session index batch)
+
+### Fixed
+
+- When the session index is missing, WebUI now starts a background rebuild while preserving the first sidebar full-scan result, so the index is primed for later requests without temporarily hiding existing sessions.
+- Live token-usage hints now cap the cumulative in-flight tool-result prompt estimate per assistant turn, preventing many large tool callbacks from temporarily inflating the context ring before exact provider accounting arrives.
+- Streaming checkpoint saves now run under the session's profile environment, so periodic background checkpoints no longer risk falling back to the process-global profile when a WebUI tab is using a non-default profile.
+- Chat streaming now keeps a single live EventSource registered per session/stream, preventing reconnect or context-compaction paths from stacking subscribers and rendering one assistant token stream multiple times.
+- Streaming visible-progress text emitted simultaneously through token, reasoning, and interim-assistant callbacks now renders once in the chat transcript instead of duplicating inside Thinking cards.
+
+## [v0.51.135] — 2026-05-25 — Release DG (stage-batch17 — 9-PR small-fix batch)
+
+### Added
+
+- Added a proposed canonical session resolution RFC covering URL routes, query parameters, localStorage, sidebar rows, and compression-lineage IDs so future session-routing fixes have one review contract.
+
+### Fixed
+
+- Browser session links that use the API-style `?session_id=<id>` query parameter now open the requested conversation instead of falling back to the last locally stored session.
+- Gateway status now treats existing messaging-session metadata as configured when `gateway.status` is unavailable, avoiding a misleading "Gateway not configured" warning for multi-container deployments with active gateway sessions.
+- Session sidebar Archive/Delete menu actions now repaint from local sidebar state immediately after the server confirms the mutation, instead of waiting for the full `/api/sessions` refresh before the row disappears.
+- Clarification dialogs now reserve transcript space while open or collapsed, so the question prompt no longer covers the assistant text needed to answer it.
+- Chat uploads now send the absolute server-side path for image attachments in the agent text context, restoring immediate tool access (e.g. `vision_analyze`) to files uploaded in the current turn.
+- Pending uploaded-file user turns no longer double-render when both the optimistic bubble and the server's pending-message hydration produce the same `[Attached files: ...]` suffix.
+
 ## [v0.51.134] — 2026-05-25 — Release DF (stage-batch16 — single-PR Windows path defaults)
 
 ### Fixed
@@ -27,12 +128,17 @@
 ## [v0.51.132] — 2026-05-24 — Release DD (stage-batch14 — 4-PR replayed-context + interrupted-response + shutdown affordance + passkey opt-in)
 
 ### Added
+- **Cursor ACP provider integration** — Add `cursor-acp` to the WebUI model picker and route slash model IDs (for example `cursor/composer-2.5`) through explicit `@cursor-acp:` provider hints so they do not fall through to the configured default HTTP provider.
 
 - **PR #2859** by @AJV20 — Optional passkey/WebAuthn sign-in for password-protected WebUI instances. Authenticated users can register/remove passkeys from Settings -> System, and `/login` shows a passwordless sign-in button only after a passkey exists. Password auth remains the default-off bootstrap and recovery path. **Opt-in default-off behind `HERMES_WEBUI_PASSKEY=1` env var or `webui_passkey_enabled: true` config flag** — when disabled, the UI block hides, all 6 `/api/auth/passkey/*` endpoints return 404, and `is_auth_enabled()` ignores any pre-existing credential file so the auth posture cannot silently flip if the flag is unset later.
 
 - **PR #2824** by @gavinssr — A "Stop server" affordance in Settings → System that gracefully shuts down the local WebUI server. Useful when WebUI was launched via `./ctl.sh start` or the native macOS/Windows app and the user wants to stop it without context-switching to a terminal. Confirmation dialog before the actual shutdown. The `/api/shutdown` route is CSRF-gated and intended for local-loopback use. Originally a title-bar button; relocated to Settings per the project's deep-UX rule (default-hidden for niche destructive actions on always-visible surfaces).
 
 ### Fixed
+
+### Fixed
+- **Reasoning effort chip visibility** — `/api/reasoning` now accepts `model` and `provider` query params and returns `supported_efforts` so the composer chip hides for models without configurable reasoning levels (for example Cursor Composer) while remaining available for models like GPT-5.5. Model picker changes now re-sync the chip after the session model/provider update instead of querying with stale session state. Composer dropdown selections now pass the provider id into `selectModelFromDropdown()` so duplicate bare model ids (for example `gpt-5.5` under OpenAI Codex vs OpenRouter) no longer fall back to the profile default provider when refreshing the chip.
+- **Cursor ACP routing and new-chat defaults** — New conversations now carry the visible composer picker selection into `POST /api/session/new`, persist model changes before a session exists, and evict cached session agents when the model/provider changes mid-session.
 
 - **PR #2685** by @LumenYoung — Prevent replayed context in chat reconciliation and metering. When a WebUI session is recovered (e.g., after a process restart, network drop, or browser reload), the sidebar/`state.db` reconciliation logic walks the sidecar transcript in order and only skips rows that can actually be aligned with the remaining sidecar context. The prior set-membership check was too broad: a legitimate fresh message that happened to share a key with any older repeated short message in the sidecar was mis-classified as already-seen and dropped from the replay, leading to lost context and inconsistent metering. Also caps the per-turn live-tool-prompt token estimate at 12,000 to prevent unbounded growth on bursts of large tool reads before exact provider accounting overrides.
 

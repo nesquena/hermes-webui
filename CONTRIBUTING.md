@@ -20,6 +20,24 @@ Use those documents as review guardrails: keep the change scoped, preserve the
 no-build-step architecture, update docs/changelog when behavior changes, include
 UI evidence for UI changes, and add tests for behavior changes where practical.
 
+### Contract-affecting PRs
+
+A contract-affecting PR is any change that updates a public contract document,
+an RFC, a contributor guide, a product-semantics test, or behavior that those
+documents already describe. These PRs need an explicit `Contract Routing` section
+in the PR body that names the touched contract family and the evidence used.
+See [`docs/CONTRACTS.md#contract-routing`](docs/CONTRACTS.md#contract-routing)
+for the short routing shape and [`docs/CONTRACTS.md#contract-changes`](docs/CONTRACTS.md#contract-changes)
+for intentional contract changes.
+
+If the PR intentionally changes an existing contract, add a `Contract Change`
+section that states the old rule, the new rule, and why the change is justified.
+Do not silently redefine product behavior by changing tests alone; update the
+corresponding docs in the same PR.
+
+A release batch should call out included contract-affecting PRs separately
+from ordinary fixes, even when the code diff is small and CI is green.
+
 ## Two Paths to a Strong Pull Request
 
 ### Path 1: Small, Focused Changes

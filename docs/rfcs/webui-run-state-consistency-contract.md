@@ -82,6 +82,9 @@ while WebUI still has multiple overlapping state stores.
    browser-facing timeline renderer as live SSE events so recovery does not
    downgrade a structured Thinking / progress / tool / compression turn into a
    separate flattened presentation.
+   Visible interim assistant progress must remain visible timeline content; a
+   compact Activity disclosure may summarize adjacent tool/debug detail, but it
+   must not be the only place where the user can see emitted progress text.
 6. **Compression is not current intent.** Automatic compression summaries and
    reference cards are recovery/handoff material. They must not be treated as a
    new user request, active-turn content, or the default visible explanation for

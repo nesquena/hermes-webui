@@ -124,7 +124,8 @@ def test_gateway_status_running_true_and_platforms_when_agent_health_alive_and_s
 
 def test_gateway_status_alive_none_falls_back_to_identity_map_heuristic(monkeypatch):
     """When alive=None (not configured) but sessions exist, running reflects identity_map.
-    configured=false tells the frontend to show 'not configured' state."""
+    configured=true because sessions metadata proves a gateway is configured
+    even if gateway.status cannot be imported in this WebUI process."""
     from api import routes
 
     monkeypatch.setattr(
@@ -144,8 +145,8 @@ def test_gateway_status_alive_none_falls_back_to_identity_map_heuristic(monkeypa
     result = handler.get_json()
     # Fallback to identity_map: sessions exist → running=true
     assert result["running"] is True
-    # But configured=false because alive was None (no gateway metadata)
-    assert result["configured"] is False
+    # Existing gateway sessions prove the gateway has been configured.
+    assert result["configured"] is True
 
 
 def test_gateway_status_handles_corrupted_sessions_json(monkeypatch):

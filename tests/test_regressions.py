@@ -312,11 +312,8 @@ def test_deleted_session_does_not_appear_in_list(cleanup_test_sessions):
     assert sid not in ids_after,         f"Deleted session {sid} still appears in list -- index not invalidated on delete"
 
 
-def test_server_delete_invalidates_index(cleanup_test_sessions):
-    """R8b: session/delete handler must unlink _index.json.
-    Static check that the fix is in place.
-    Sprint 11: handler moved from server.py to api/routes.py -- check both.
-    """
+def test_server_delete_prunes_session_index(cleanup_test_sessions):
+    """session/delete should prune the deleted row without discarding the index."""
     src = (REPO_ROOT / "server.py").read_text()
     routes_src = (REPO_ROOT / "api" / "routes.py").read_text() if (REPO_ROOT / "api" / "routes.py").exists() else ""
     # Find the delete handler in either file
@@ -327,12 +324,9 @@ def test_server_delete_invalidates_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            # Use 1200 chars to accommodate any validation/guard code added
-            # before the SESSION_INDEX_FILE.unlink() call (e.g. session_id
-            # character checks, path traversal guards).
-            delete_block = text[delete_idx:delete_idx+1200]
-            assert "SESSION_INDEX_FILE" in delete_block, \
-                f"{label} session/delete must invalidate SESSION_INDEX_FILE"
+            delete_block = text[delete_idx:delete_idx+1800]
+            assert "prune_session_from_index(sid)" in delete_block, \
+                f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
     assert False, "session/delete handler not found in server.py or api/routes.py"
 
@@ -650,6 +644,25 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     )
 
 
+
+def test_browser_session_url_accepts_api_session_id_param(cleanup_test_sessions):
+    """External links using ?session_id=... should open that session in the browser.
+
+    The API endpoint uses `session_id`, while the browser URL historically used
+    `session`/`/session/<id>`. Auth/cookie bridges and external callers can
+    legitimately produce `/?session_id=<sid>`; ignoring it falls back to stale
+    localStorage and renders the wrong or empty conversation.
+    """
+    src = (REPO_ROOT / "static/sessions.js").read_text()
+    start = src.find("function _sessionIdFromLocation")
+    assert start >= 0, "session URL parser not found"
+    end = src.find("function _sessionUrlForSid", start)
+    assert end > start, "session URL parser block end not found"
+    block = src[start:end]
+    assert "qs.get('session')" in block or 'qs.get("session")' in block
+    assert "qs.get('session_id')" in block or 'qs.get("session_id")' in block
+
+
 def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     """Uploaded-file turns render optimistically before the server stores the
     final pending text with an `[Attached files: ...]` suffix.  The INFLIGHT
@@ -664,6 +677,12 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     )
     assert "role==='user'" in src, (
         "attached-files normalization should be limited to user turns"
+    )
+    pending_idx = src.find("function _mergePendingSessionMessage")
+    assert pending_idx >= 0, "pending session merge helper not found"
+    pending_block = src[pending_idx:pending_idx+500]
+    assert "_sameTranscriptMessage(existing,pendingMsg)" in pending_block, (
+        "pending-user merge should reuse transcript identity dedupe before inserting the server pending message"
     )
 
 

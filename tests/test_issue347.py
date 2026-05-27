@@ -176,14 +176,15 @@ def test_katex_lazy_load_follows_mermaid_pattern():
     assert '_katexReady' in UI_JS,   '_katexReady flag not found'
 
 
-def test_katex_js_loaded_from_cdn():
-    """KaTeX JS must be loaded from jsdelivr CDN."""
-    assert 'katex@0.16' in UI_JS, \
-        'KaTeX JS CDN URL not found in ui.js — expected katex@0.16.x'
+def test_katex_js_loaded_from_vendored_asset():
+    """KaTeX JS must be loaded from the vendored local asset."""
+    assert 'static/vendor/katex/0.16.22/katex.min.js' in UI_JS, \
+        'KaTeX JS vendored URL not found in ui.js — expected local 0.16.22 asset'
+    assert 'https://cdn.jsdelivr.net/npm/katex@0.16' not in UI_JS
 
 
 def test_katex_js_has_sri_hash():
-    """KaTeX JS CDN tag must have an SRI integrity hash."""
+    """KaTeX JS tag must keep an SRI integrity hash for the pinned asset."""
     # The hash is in the script.integrity assignment
     assert "script.integrity='sha384-" in UI_JS or 'script.integrity="sha384-' in UI_JS, \
         'KaTeX JS SRI integrity hash not found in ui.js'
@@ -229,15 +230,16 @@ def test_mermaid_render_failure_removes_temporary_error_dom():
 # ── index.html ────────────────────────────────────────────────────────────────
 
 def test_katex_css_in_index_html():
-    """KaTeX CSS must be loaded in index.html."""
-    assert 'katex@0.16' in INDEX, \
-        'KaTeX CSS CDN link not found in index.html'
+    """KaTeX CSS must be loaded from the vendored local asset."""
+    assert 'static/vendor/katex/0.16.22/katex.min.css' in INDEX, \
+        'KaTeX CSS vendored link not found in index.html'
+    assert 'https://cdn.jsdelivr.net/npm/katex@0.16' not in INDEX
 
 
-def test_katex_css_has_sri_hash():
-    """KaTeX CSS link in index.html must have an SRI integrity hash."""
-    assert 'sha384-5TcZemv2l' in INDEX or 'integrity' in INDEX and 'katex' in INDEX, \
-        'KaTeX CSS SRI integrity hash not found in index.html'
+def test_katex_css_is_pinned_local_asset():
+    """KaTeX CSS is pinned by vendored path instead of CDN integrity metadata."""
+    assert 'static/vendor/katex/0.16.22/katex.min.css' in INDEX, \
+        'KaTeX CSS local pinned asset not found in index.html'
 
 
 # ── style.css ─────────────────────────────────────────────────────────────────

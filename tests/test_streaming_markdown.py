@@ -21,6 +21,8 @@ Tests are static (regex / AST-level) — no browser required.
 
 import pathlib
 import re
+import json
+import subprocess
 
 REPO = pathlib.Path(__file__).parent.parent
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
@@ -267,6 +269,103 @@ class TestSmdHelpers:
         assert fn and "_smdParser" in fn, (
             "_smdWrite must guard on _smdParser before calling parser_write"
         )
+
+
+class TestSmdUnderscoreEmphasisParity:
+    """Live smd rendering must match renderMd()'s emphasis semantics.
+
+    The settled renderMd() path only treats asterisks as emphasis markers. The
+    smd parser also emits underscore emphasis tokens, so the live renderer wraps
+    smd's renderer and emits those tokens as literal underscores instead.
+    """
+
+    def test_smd_underscore_renderer_wrapper_exists(self):
+        fn = extract_fn(MESSAGES_JS, "_smdRendererWithoutUnderscoreEmphasis")
+        assert fn is not None, (
+            "messages.js must define _smdRendererWithoutUnderscoreEmphasis()"
+        )
+
+    def test_smd_new_parser_wraps_renderer(self):
+        fn = extract_fn(MESSAGES_JS, "_smdNewParser")
+        assert fn and "_smdRendererWithoutUnderscoreEmphasis(" in fn, (
+            "_smdNewParser must wrap the smd renderer before parser creation"
+        )
+
+    def test_smd_wrapper_targets_only_underscore_tokens(self):
+        fn = extract_fn(MESSAGES_JS, "_smdRendererWithoutUnderscoreEmphasis")
+        assert fn and "ITALIC_UND" in fn and "STRONG_UND" in fn, (
+            "The smd wrapper must neutralize underscore emphasis tokens"
+        )
+        assert fn and "ITALIC_AST" not in fn and "STRONG_AST" not in fn, (
+            "The smd wrapper must preserve asterisk emphasis tokens"
+        )
+
+    def test_smd_wrapper_keeps_nested_token_stack(self):
+        fn = extract_fn(MESSAGES_JS, "_smdRendererWithoutUnderscoreEmphasis")
+        assert fn and "tokenStack" in fn and "tokenStack.push(null)" in fn, (
+            "The wrapper must track non-suppressed tokens so nested links/code "
+            "inside underscore text still close through the base renderer"
+        )
+
+    def test_smd_wrapper_runtime_matches_render_md_emphasis_policy(self):
+        helper = extract_fn(MESSAGES_JS, "_smdRendererWithoutUnderscoreEmphasis")
+        assert helper, "_smdRendererWithoutUnderscoreEmphasis function not found"
+        script = f"""
+import * as smd from './static/vendor/smd.min.js';
+globalThis.window = {{ smd }};
+{helper}
+function render(input){{
+  const out=[];
+  const stack=[];
+  const renderer=_smdRendererWithoutUnderscoreEmphasis({{
+    data: {{}},
+    add_token(_data, token){{
+      let tag='';
+      if(token===smd.ITALIC_AST||token===smd.ITALIC_UND) tag='em';
+      if(token===smd.STRONG_AST||token===smd.STRONG_UND) tag='strong';
+      stack.push(tag);
+      if(tag) out.push('<'+tag+'>');
+    }},
+    end_token() {{
+      const tag=stack.pop();
+      if(tag) out.push('</'+tag+'>');
+    }},
+    add_text(_data, text) {{ out.push(text); }},
+    set_attr() {{}},
+  }});
+  const parser=smd.parser(renderer);
+  smd.parser_write(parser,input);
+  smd.parser_end(parser);
+  return out.join('');
+}}
+const cases = {{
+  identifiers: render('agent_response and foo_bar stay literal'),
+  singleUnderscore: render('this is _not emphasis_ now'),
+  doubleUnderscore: render('this is __not strong__ now'),
+  asteriskItalic: render('this is *emphasis* now'),
+  asteriskStrong: render('this is **strong** now'),
+  nestedLinkShape: render('keep _[label](https://example.com)_ literal'),
+}};
+console.log(JSON.stringify(cases));
+"""
+        completed = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=REPO,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        cases = json.loads(completed.stdout)
+        assert "<em>" not in cases["identifiers"]
+        assert "agent_response" in cases["identifiers"]
+        assert "foo_bar" in cases["identifiers"]
+        assert cases["singleUnderscore"].count("<em>") == 0
+        assert "_not emphasis_" in cases["singleUnderscore"]
+        assert cases["doubleUnderscore"].count("<strong>") == 0
+        assert "__not strong__" in cases["doubleUnderscore"]
+        assert "<em>emphasis</em>" in cases["asteriskItalic"]
+        assert "<strong>strong</strong>" in cases["asteriskStrong"]
+        assert "_label_" in cases["nestedLinkShape"]
 
 
 # ── 4. _scheduleRender: smd path vs fallback ──────────────────────────────────

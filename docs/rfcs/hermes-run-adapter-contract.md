@@ -905,6 +905,12 @@ Non-goals for Slice 4d:
 
 #### Slice 4e: Default-off runner chat-start route-selection harness
 
+Status as of 2026-05-24: shipped in v0.51.129 via #2794. The route-selection
+harness now makes adapter mode selection explicit: `legacy-direct` remains the
+default, `legacy-journal` still delegates to the existing journaled legacy path,
+and `runner-local` returns a bounded not-configured response instead of silently
+starting an in-process legacy run.
+
 The first implementation after the Slice 4d gate should wire the
 `/api/chat/start` selection point to the existing `RuntimeAdapter` factory
 without adding a supervised runner process yet. The harness must make the
@@ -947,6 +953,65 @@ Non-goals for Slice 4e:
 - no execution-survives-WebUI-restart claim for production chat turns;
 - no removal of `legacy-direct` or `legacy-journal`;
 - no server-side queue endpoint or queue scheduler just for adapter symmetry.
+
+#### Slice 4f: Supervised local runner client backend gate
+
+After the route-selection harness ships, the next reviewable step is not to make
+`runner-local` the default. It is to define the first concrete supervised/local
+runner client backend that can replace the bounded 501 path under the existing
+feature flag and prove execution ownership has moved out of the main WebUI
+request process.
+
+This slice is a contract gate before backend code lands. The goal is to pin the
+minimum runner client behavior so the implementation cannot become a renamed
+`STREAMS` / `CANCEL_FLAGS` / cached `AIAgent` surrogate inside `api/routes.py`.
+
+Scope:
+
+- define the runner client process boundary and lifecycle: how `start_run`
+  spawns or hands off work, how the child is supervised, and how terminal state
+  is recorded without a main-process active-run dictionary;
+- require a durable runner-owned run id plus session-to-run lookup that a freshly
+  restarted WebUI process can discover without consulting old `STREAMS` entries;
+- require ordered event replay through the existing journal/cursor surface, so
+  token, reasoning, progress, tool, usage, error, and done events render through
+  the same browser path as legacy replay;
+- define cancel as the first required live control for active runner-owned runs,
+  with approval, clarify, goal, and queue either mapped to explicit runner
+  capabilities or returned as bounded unsupported/conflict `ControlResult`
+  values;
+- keep profile, workspace, attachments, provider/model, toolset, source, and
+  metadata as explicit payload fields at the runner boundary rather than
+  depending on process-global WebUI environment mutation.
+
+Acceptance tests for Slice 4f:
+
+1. **501 path replaced only when configured.** Unset adapter mode and
+   `legacy-journal` behavior stay unchanged; `runner-local` uses the supervised
+   runner client only when the backend is explicitly configured.
+2. **Restart/reattach proves ownership moved.** Start a runner-owned run,
+   discard/restart the WebUI server process, rediscover the active or terminal
+   run from durable runner/journal state, replay from cursor without duplicates,
+   and preserve cancel if the run is still active.
+3. **No runtime-surrogate globals.** The main WebUI server does not gain new
+   module-level maps for runner-owned streams, cancel flags, approval/clarify
+   callbacks, cached agents, goal state, queue schedulers, or child-process run
+   registries. Supervision state belongs to the runner client/backend boundary.
+4. **Stable browser contracts.** Successful chat-start responses remain limited
+   to the legacy-compatible field whitelist unless a later contract revision
+   explicitly exposes `run_id`, `status`, or `active_controls`.
+5. **Bounded control gaps.** Unsupported runner controls return safe
+   `unsupported`, `not-active`, or `conflict` results; they must not fall back to
+   legacy callback queues for a runner-owned run.
+
+Non-goals for Slice 4f:
+
+- no default-on runner mode;
+- no removal of the legacy in-process backends;
+- no broad WebUI product-surface migration;
+- no server-side queue scheduler just for adapter symmetry;
+- no permanent WebUI-owned active-run discovery cache that duplicates runner or
+  future Hermes Runtime API responsibility.
 
 ## First Meaningful Success Criteria
 

@@ -10,7 +10,9 @@ import mimetypes
 import os
 import queue
 import re
+import shlex
 import sys
+import subprocess
 import threading
 import time
 import traceback
@@ -285,29 +287,117 @@ def _resolve_prefill_path(raw: str) -> Path:
     return path
 
 
+_PREFILL_SCRIPT_OUTPUT_LIMIT = 262_144
+
+
+def _prefill_not_configured() -> dict:
+    return {"status": "not_configured", "source": "none", "label": "", "messages": [], "message_count": 0}
+
+
+def _load_prefill_messages_file(file_raw: str, *, source: str = "file", status: str = "loaded") -> dict:
+    path = _resolve_prefill_path(file_raw)
+    label = path.name or "prefill file"
+    if not path.exists():
+        return {"status": "error", "source": source, "label": label, "messages": [], "message_count": 0, "error": "prefill file not found"}
+    try:
+        messages = _valid_prefill_messages(json.loads(path.read_text(encoding="utf-8")))
+        return {"status": status, "source": source, "label": label, "messages": messages, "message_count": len(messages)}
+    except Exception as exc:
+        return {"status": "error", "source": source, "label": label, "messages": [], "message_count": 0, "error": _redact_prefill_status_text(str(exc))}
+
+
+def _prefill_script_timeout(config_data: dict) -> float:
+    raw = os.getenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT_TIMEOUT", "") or str(config_data.get("webui_prefill_messages_script_timeout") or "")
+    try:
+        return max(0.1, min(float(raw or 5), 30.0))
+    except Exception:
+        return 5.0
+
+
+def _prefill_script_command(raw) -> list[str]:
+    if isinstance(raw, (list, tuple)):
+        return [str(part) for part in raw if str(part)]
+    parts = shlex.split(str(raw or ""))
+    if not parts:
+        return []
+    # A single script path mirrors prefill_messages_file path resolution.  More
+    # complex commands keep their argv untouched so admins can pass arguments.
+    if len(parts) == 1:
+        parts[0] = str(_resolve_prefill_path(parts[0]))
+    return parts
+
+
+def _messages_from_prefill_script_output(text: str) -> list[dict]:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return []
+    try:
+        payload = json.loads(stripped)
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        payload = payload.get("messages")
+    messages = _valid_prefill_messages(payload)
+    if messages:
+        return messages
+    return [{"role": "system", "content": stripped}]
+
+
+def _load_prefill_messages_script(config_data: dict) -> dict:
+    script_raw = os.getenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", "") or config_data.get("webui_prefill_messages_script")
+    if not script_raw:
+        return _prefill_not_configured()
+    command = _prefill_script_command(script_raw)
+    label = Path(command[0]).name if command else "prefill script"
+    if not command:
+        return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script is empty"}
+    try:
+        proc = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=_prefill_script_timeout(config_data),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script timed out"}
+    except Exception as exc:
+        return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": _redact_prefill_status_text(str(exc))}
+    if proc.returncode != 0:
+        err = _redact_prefill_status_text(proc.stderr or proc.stdout or f"prefill script exited {proc.returncode}")
+        return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": err}
+    if len(proc.stdout.encode("utf-8")) > _PREFILL_SCRIPT_OUTPUT_LIMIT:
+        return {
+            "status": "error",
+            "source": "script",
+            "label": label,
+            "messages": [],
+            "message_count": 0,
+            "error": f"prefill script output exceeded {_PREFILL_SCRIPT_OUTPUT_LIMIT} bytes",
+        }
+    messages = _messages_from_prefill_script_output(proc.stdout)
+    return {"status": "loaded", "source": "script", "label": label, "messages": messages, "message_count": len(messages)}
+
+
 def _load_webui_prefill_context(
     config_data: Optional[dict] = None,
 ) -> dict:
     """Load configured WebUI session prefill messages.
 
-    Supports the same bounded JSON-file shape used by Hermes Agent.  WebUI does
-    not execute a configured prefill script here; session recall that requires
-    code execution should go through the normal MCP/tool path instead of an
-    always-on per-turn subprocess before SSE starts.
+    Supports the same bounded JSON-file shape used by Hermes Agent.  WebUI also
+    supports its own explicitly opt-in script hook so admins can bridge Joplin,
+    Obsidian, Notion, llm-wiki, or another local notes source into ephemeral
+    turn context without baking any one note provider into the WebUI.
     """
     cfg = config_data if isinstance(config_data, dict) else get_config()
+    script_context = _load_prefill_messages_script(cfg)
+    if script_context.get("status") != "not_configured":
+        return script_context
     file_raw = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") or str(cfg.get("prefill_messages_file") or "")
     if file_raw:
-        path = _resolve_prefill_path(file_raw)
-        label = path.name or "prefill file"
-        if not path.exists():
-            return {"status": "error", "source": "file", "label": label, "messages": [], "message_count": 0, "error": "prefill file not found"}
-        try:
-            messages = _valid_prefill_messages(json.loads(path.read_text(encoding="utf-8")))
-            return {"status": "loaded", "source": "file", "label": label, "messages": messages, "message_count": len(messages)}
-        except Exception as exc:
-            return {"status": "error", "source": "file", "label": label, "messages": [], "message_count": 0, "error": _redact_prefill_status_text(str(exc))}
-    return {"status": "not_configured", "source": "none", "label": "", "messages": [], "message_count": 0}
+        return _load_prefill_messages_file(file_raw)
+    return _prefill_not_configured()
 
 
 def _public_prefill_context_status(prefill_context: dict) -> dict:
@@ -2557,6 +2647,18 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
     return history
 
 
+def _save_streaming_checkpoint(session):
+    """Persist a streaming checkpoint under the session's profile context."""
+    from api import profiles as profiles_api
+
+    with profiles_api.profile_env_for_background_worker(
+        session,
+        "streaming checkpoint",
+        logger_override=logger,
+    ):
+        session.save(skip_index=True)
+
+
 def _normalize_fresh_chat_text(text):
     text = _strip_workspace_prefix(str(text or ''), include_legacy=True)
     text = re.sub(r"\s+", " ", text).strip().lower()
@@ -2851,6 +2953,7 @@ _TOOL_RESULT_SNIPPET_MAX = 4000
 
 
 _LIVE_TOOL_PROMPT_DELTA_MAX = 12_000
+_LIVE_TOOL_PROMPT_TURN_MAX = 24_000
 
 
 def _bounded_live_tool_prompt_delta(messages, *, cap: int = _LIVE_TOOL_PROMPT_DELTA_MAX) -> int:
@@ -2878,19 +2981,32 @@ def live_usage_prompt_estimate_after_tool_delta(
     exact_prompt_tokens: int = 0,
     messages=None,
     cap: int = _LIVE_TOOL_PROMPT_DELTA_MAX,
+    turn_tool_prompt_tokens: int = 0,
+    turn_cap: int = _LIVE_TOOL_PROMPT_TURN_MAX,
 ) -> dict:
     """Compute the live `last_prompt_tokens` estimate after a tool update.
 
     Exact compressor/provider prompt accounting wins. When no newer exact prompt
-    is available, add only a bounded live tool delta to the persisted base.
+    is available, add only bounded live tool deltas to the persisted base.
     """
     base = int(base_prompt_tokens or 0)
     exact = int(exact_prompt_tokens or 0)
     if exact and exact != base:
-        return {'last_prompt_tokens': exact, 'estimated': False}
+        return {
+            'last_prompt_tokens': exact,
+            'estimated': False,
+            'turn_tool_prompt_tokens': 0,
+        }
+    prior_turn_delta = max(0, int(turn_tool_prompt_tokens or 0))
+    turn_ceiling = max(0, int(turn_cap or 0))
+    next_turn_delta = min(
+        prior_turn_delta + _bounded_live_tool_prompt_delta(messages, cap=cap),
+        turn_ceiling,
+    )
     return {
-        'last_prompt_tokens': base + _bounded_live_tool_prompt_delta(messages, cap=cap),
+        'last_prompt_tokens': base + next_turn_delta,
         'estimated': True,
+        'turn_tool_prompt_tokens': next_turn_delta,
     }
 
 
@@ -3396,6 +3512,7 @@ def _run_agent_streaming(
     agent = None
     _live_prompt_estimate_tokens = [0]
     _live_prompt_exact_tokens = [0]
+    _live_prompt_estimate_tool_delta_tokens = [0]
     _live_prompt_estimate_seen_ids = set()
 
     def _seed_live_prompt_estimate() -> int:
@@ -3425,10 +3542,15 @@ def _run_agent_streaming(
         """Increment a rough next-prompt estimate from live tool activity."""
         if not messages:
             return _live_prompt_estimate_tokens[0]
-        _delta = _bounded_live_tool_prompt_delta(messages)
-        if _delta > 0:
-            _seed_live_prompt_estimate()
-            _live_prompt_estimate_tokens[0] += _delta
+        _seed_live_prompt_estimate()
+        _usage = live_usage_prompt_estimate_after_tool_delta(
+            base_prompt_tokens=_live_prompt_exact_tokens[0],
+            exact_prompt_tokens=_live_prompt_exact_tokens[0],
+            messages=messages,
+            turn_tool_prompt_tokens=_live_prompt_estimate_tool_delta_tokens[0],
+        )
+        _live_prompt_estimate_tokens[0] = _usage['last_prompt_tokens']
+        _live_prompt_estimate_tool_delta_tokens[0] = _usage['turn_tool_prompt_tokens']
         return _live_prompt_estimate_tokens[0]
 
     def _live_usage_snapshot():
@@ -3490,6 +3612,7 @@ def _run_agent_streaming(
         if _real_prompt_tokens and _real_prompt_tokens != _live_prompt_exact_tokens[0]:
             _live_prompt_exact_tokens[0] = _real_prompt_tokens
             _live_prompt_estimate_tokens[0] = _real_prompt_tokens
+            _live_prompt_estimate_tool_delta_tokens[0] = 0
         elif _live_prompt_estimate_tokens[0] > _real_prompt_tokens:
             _usage['last_prompt_tokens'] = _live_prompt_estimate_tokens[0]
 
@@ -3804,6 +3927,18 @@ def _run_agent_streaming(
                 stats.setdefault('estimated', False)
                 put('metering', stats)
 
+            def _compact_for_echo_compare(value: str) -> str:
+                return re.sub(r'\s+', ' ', str(value or '')).strip()
+
+            def _is_visible_output_echo(text: str) -> bool:
+                candidate = _compact_for_echo_compare(text)
+                if not candidate:
+                    return False
+                visible_tail = _compact_for_echo_compare(
+                    STREAM_PARTIAL_TEXT.get(stream_id, '')[-max(len(str(text)) * 2, 512):]
+                )
+                return bool(visible_tail and visible_tail.endswith(candidate))
+
             def on_token(text):
                 nonlocal _token_sent
                 if text is None:
@@ -3824,11 +3959,18 @@ def _run_agent_streaming(
                 nonlocal _reasoning_text
                 if text is None:
                     return
-                _reasoning_text += str(text)
+                reasoning_delta = str(text)
+                # Some runtimes mirror user-visible progress text through the
+                # reasoning channel after it already streamed as normal assistant
+                # output. Treat that as an echo, otherwise the UI renders the
+                # same sentence again inside a Thinking card.
+                if _is_visible_output_echo(reasoning_delta):
+                    return
+                _reasoning_text += reasoning_delta
                 # Mirror to shared dict so cancel_stream() can persist it (#1361 §A)
                 if stream_id in STREAM_REASONING_TEXT:
-                    STREAM_REASONING_TEXT[stream_id] += str(text)
-                put('reasoning', {'text': str(text)})
+                    STREAM_REASONING_TEXT[stream_id] += reasoning_delta
+                put('reasoning', {'text': reasoning_delta})
                 # Track reasoning deltas in the meter so live TPS reflects all AI output.
                 _metering_reasoning_deltas[0] += 1
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
@@ -3840,9 +3982,10 @@ def _run_agent_streaming(
                 visible = str(text).strip()
                 if not visible:
                     return
+                already_streamed = bool(cb_kwargs.get('already_streamed', False)) or _is_visible_output_echo(visible)
                 put('interim_assistant', {
                     'text': visible,
-                    'already_streamed': bool(cb_kwargs.get('already_streamed', False)),
+                    'already_streamed': already_streamed,
                 })
 
             # Pre-initialise the activity counter here so on_tool (which
@@ -3912,11 +4055,17 @@ def _run_agent_streaming(
                 if event_type in ('reasoning.available', '_thinking'):
                     reason_text = preview if event_type == 'reasoning.available' else name
                     if reason_text:
-                        _reasoning_text += str(reason_text)
+                        reason_delta = str(reason_text)
+                        # Older tool-progress paths can mirror the same visible
+                        # progress text already emitted through stream_delta_callback.
+                        # Suppress those echoes like the dedicated reasoning callback.
+                        if _is_visible_output_echo(reason_delta):
+                            return
+                        _reasoning_text += reason_delta
                         # Mirror to shared dict so cancel_stream() can persist it (#1361 §A)
                         if stream_id in STREAM_REASONING_TEXT:
-                            STREAM_REASONING_TEXT[stream_id] += str(reason_text)
-                        put('reasoning', {'text': str(reason_text)})
+                            STREAM_REASONING_TEXT[stream_id] += reason_delta
+                        put('reasoning', {'text': reason_delta})
                         _metering_reasoning_deltas[0] += 1
                         meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
                         _emit_metering()
@@ -4552,7 +4701,7 @@ def _run_agent_streaming(
                         cur = _checkpoint_activity[0]
                         if cur > last_saved_activity:
                             with _agent_lock:
-                                s.save(skip_index=True)
+                                _save_streaming_checkpoint(s)
                             last_saved_activity = cur
                     except Exception as e:
                         logger.debug("Periodic checkpoint save failed: %s", e)
@@ -5001,11 +5150,56 @@ def _run_agent_streaming(
                 # Notify the frontend that compression happened
                 if _compressed:
                     visible_after = visible_messages_for_anchor(s.messages, auto_compression=True)
-                    s.compression_anchor_visible_idx = (
-                        max(0, len(visible_after) - 1) if visible_after else None
-                    )
+                    # Find the LAST [CONTEXT COMPACTION] marker in s.messages
+                    # and count visible messages before it. This is the correct
+                    # anchor — it points to the compression boundary regardless
+                    # of how many turns have been added since the boundary was
+                    # established. Using len(visible_before)-1 is fragile when
+                    # _previous_messages doesn't include markers or when extra
+                    # messages accumulate between compression and the done event.
+                    _last_marker_raw_idx = None
+                    for _mi, _m in enumerate(s.messages):
+                        if _is_context_compression_marker(_m):
+                            _last_marker_raw_idx = _mi
+                    if _last_marker_raw_idx is not None:
+                        _visible_before_marker = visible_messages_for_anchor(
+                            s.messages[:_last_marker_raw_idx], auto_compression=True,
+                        )
+                        s.compression_anchor_visible_idx = max(0, len(_visible_before_marker) - 1)
+                        logger.info(
+                            '[ANCHOR-MARKER] session=%s marker_raw=%d vis_before=%d anchor=%d',
+                            getattr(s, 'session_id', '?'),
+                            _last_marker_raw_idx,
+                            len(_visible_before_marker),
+                            s.compression_anchor_visible_idx,
+                        )
+                    else:
+                        # Fallback: use pre-turn display messages
+                        visible_before = visible_messages_for_anchor(
+                            _previous_messages, auto_compression=True,
+                        )
+                        if visible_before:
+                            s.compression_anchor_visible_idx = max(0, len(visible_before) - 1)
+                        elif visible_after:
+                            s.compression_anchor_visible_idx = 0
+                        else:
+                            s.compression_anchor_visible_idx = None
+                        logger.info(
+                            '[ANCHOR-FALLBACK] session=%s vis_before=%d anchor=%d',
+                            getattr(s, 'session_id', '?'),
+                            len(visible_before) if visible_before else 0,
+                            s.compression_anchor_visible_idx if s.compression_anchor_visible_idx is not None else -1,
+                        )
+                    # Pick anchor_msg for _compression_anchor_message_key
+                    _anchor_vis_idx = s.compression_anchor_visible_idx
+                    if _anchor_vis_idx is not None and visible_after and _anchor_vis_idx < len(visible_after):
+                        anchor_msg = visible_after[_anchor_vis_idx]
+                    elif visible_after:
+                        anchor_msg = visible_after[-1]
+                    else:
+                        anchor_msg = None
                     s.compression_anchor_message_key = (
-                        _compression_anchor_message_key(visible_after[-1]) if visible_after else None
+                        _compression_anchor_message_key(anchor_msg) if anchor_msg else None
                     )
                     s.compression_anchor_summary = _compact_summary_text(
                         _compression_summary_from_messages(s.messages)

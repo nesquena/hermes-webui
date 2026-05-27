@@ -106,13 +106,13 @@ def test_load_older_aborts_when_generation_changed():
     )
 
 
-def test_load_older_generation_check_runs_before_prepend():
-    """Generation check must come BEFORE the `S.messages = [...older, ...]` mutation."""
+def test_load_older_generation_check_runs_before_replace():
+    """Generation check must come BEFORE the `S.messages = nextMessages` mutation."""
     body = _function_body(SESSIONS_JS, "_loadOlderMessages")
     guard_idx = body.index("if (_messagesGeneration !== startGeneration) return;")
-    prepend_idx = body.index("S.messages = [...olderMsgs, ...S.messages];")
-    assert guard_idx < prepend_idx, (
-        "Generation guard must short-circuit BEFORE the prepend. "
+    replace_idx = body.index("S.messages = nextMessages;")
+    assert guard_idx < replace_idx, (
+        "Generation guard must short-circuit BEFORE the message-array mutation. "
         "Otherwise duplicate messages can still slip through. See #1937."
     )
 

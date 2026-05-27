@@ -558,6 +558,7 @@ def test_rfc_defines_slice4e_runner_chat_start_route_selection_harness():
     rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
 
     assert "#### Slice 4e: Default-off runner chat-start route-selection harness" in rfc
+    assert "Status as of 2026-05-24: shipped in v0.51.129 via #2794" in rfc
     assert "route `/api/chat/start` through `build_runtime_adapter(...)`" in rfc
     assert "`legacy-direct` stays default" in rfc
     assert "`legacy-journal`\ncontinues to delegate to the legacy in-process stream path" in rfc
@@ -565,6 +566,22 @@ def test_rfc_defines_slice4e_runner_chat_start_route_selection_harness():
     assert "return a bounded not-configured error for `runner-local`" in rfc
     assert "`run_id`, `status`, and\n   `active_controls` remain internal" in rfc
     assert "no supervised runner process yet" in rfc
+
+
+def test_rfc_defines_slice4f_supervised_local_runner_client_gate():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#### Slice 4f: Supervised local runner client backend gate" in rfc
+    assert "replace the bounded 501 path under the existing\nfeature flag" in rfc
+    assert "durable runner-owned run id plus session-to-run lookup" in rfc
+    assert "cancel as the first required live control" in rfc
+    assert "501 path replaced only when configured" in rfc
+    assert "Restart/reattach proves ownership moved" in rfc
+    assert "No runtime-surrogate globals" in rfc
+    assert "Successful chat-start responses remain limited\n   to the legacy-compatible field whitelist" in rfc
+    assert "Unsupported runner controls return safe\n   `unsupported`, `not-active`, or `conflict` results" in rfc
+    assert "no permanent WebUI-owned active-run discovery cache" in rfc
 
 def test_runner_runtime_adapter_passes_explicit_start_payload_without_env_mutation(monkeypatch):
     runtime = importlib.import_module("api.runtime_adapter")

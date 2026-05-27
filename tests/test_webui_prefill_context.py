@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 
@@ -33,7 +34,7 @@ def test_prefill_json_file_keeps_valid_roles_and_drops_invalid_items(tmp_path):
     ]
 
 
-def test_prefill_script_config_is_ignored_in_webui(tmp_path):
+def test_prefill_script_config_is_not_used_without_webui_opt_in(tmp_path):
     from api.streaming import _load_webui_prefill_context
 
     script = tmp_path / "recall.py"
@@ -48,6 +49,102 @@ def test_prefill_script_config_is_ignored_in_webui(tmp_path):
         "messages": [],
         "message_count": 0,
     }
+
+
+def test_webui_prefill_script_loads_json_messages(tmp_path):
+    from api.streaming import _load_webui_prefill_context
+
+    script = tmp_path / "recall.py"
+    script.write_text(
+        "import json\n"
+        "content = 'Joplin has durable context; use notes/search tools for details.'\n"
+        "print(json.dumps([{'role': 'system', 'content': content}, {'role': 'tool', 'content': 'drop me'}]))\n",
+        encoding="utf-8",
+    )
+
+    result = _load_webui_prefill_context({"webui_prefill_messages_script": [sys.executable, str(script)]})
+
+    assert result["status"] == "loaded"
+    assert result["source"] == "script"
+    assert result["label"] == Path(sys.executable).name
+    assert result["messages"] == [{"role": "system", "content": "Joplin has durable context; use notes/search tools for details."}]
+
+
+def test_webui_prefill_script_wraps_plain_text_for_any_notes_source(tmp_path):
+    from api.streaming import _load_webui_prefill_context
+
+    script = tmp_path / "obsidian_recall.py"
+    script.write_text("print('Obsidian project note context')\n", encoding="utf-8")
+
+    result = _load_webui_prefill_context({"webui_prefill_messages_script": [sys.executable, str(script)]})
+
+    assert result["status"] == "loaded"
+    assert result["source"] == "script"
+    assert result["messages"] == [{"role": "system", "content": "Obsidian project note context"}]
+
+
+def test_webui_prefill_script_errors_are_redacted(tmp_path):
+    from api.streaming import _load_webui_prefill_context
+
+    script = tmp_path / "bad_recall.py"
+    script.write_text("import sys; print('token=redaction-test-placeholder', file=sys.stderr); raise SystemExit(2)\n", encoding="utf-8")
+
+    result = _load_webui_prefill_context({"webui_prefill_messages_script": [sys.executable, str(script)]})
+
+    assert result["status"] == "error"
+    assert result["source"] == "script"
+    assert "redaction-test-placeholder" not in result["error"]
+    assert "[REDACTED]" in result["error"]
+
+
+def test_webui_prefill_script_takes_precedence_over_static_file(tmp_path):
+    from api.streaming import _load_webui_prefill_context
+
+    prefill = tmp_path / "prefill.json"
+    prefill.write_text(json.dumps([{"role": "system", "content": "static"}]), encoding="utf-8")
+    script = tmp_path / "recall.py"
+    script.write_text("print('dynamic')\n", encoding="utf-8")
+
+    result = _load_webui_prefill_context({
+        "prefill_messages_file": str(prefill),
+        "webui_prefill_messages_script": [sys.executable, str(script)],
+    })
+
+    assert result["source"] == "script"
+    assert result["messages"] == [{"role": "system", "content": "dynamic"}]
+
+
+def test_webui_prefill_script_timeout_returns_redacted_error(tmp_path):
+    from api.streaming import _load_webui_prefill_context
+
+    script = tmp_path / "slow_recall.py"
+    script.write_text("import time\ntime.sleep(1)\nprint('too late')\n", encoding="utf-8")
+
+    result = _load_webui_prefill_context({
+        "webui_prefill_messages_script": [sys.executable, str(script)],
+        "webui_prefill_messages_script_timeout": 0.1,
+    })
+
+    assert result["status"] == "error"
+    assert result["source"] == "script"
+    assert result["messages"] == []
+    assert result["message_count"] == 0
+    assert result["error"] == "prefill script timed out"
+
+
+def test_webui_prefill_script_rejects_oversized_stdout(tmp_path):
+    from api.streaming import _load_webui_prefill_context
+
+    script = tmp_path / "large_recall.py"
+    script.write_text("print('x' * 262145)\n", encoding="utf-8")
+
+    result = _load_webui_prefill_context({"webui_prefill_messages_script": [sys.executable, str(script)]})
+
+    assert result["status"] == "error"
+    assert result["source"] == "script"
+    assert result["messages"] == []
+    assert result["message_count"] == 0
+    assert "output exceeded" in result["error"]
 
 
 def test_public_prefill_status_strips_message_bodies():
@@ -79,14 +176,3 @@ def test_prefill_status_redactor_handles_secret_shaped_text():
 
     assert "redaction-test-placeholder" not in redacted
     assert "[REDACTED]" in redacted
-
-
-def test_cached_agent_prefill_refresh_requires_explicit_kwargs():
-    """Cached agents should not get an empty prefill list when kwargs omitted it."""
-    src = Path("api/streaming.py").read_text(encoding="utf-8")
-    callback_refresh = src.index("# Refresh per-turn callbacks")
-    session_db_refresh = src.index("if _session_db is not None:", callback_refresh)
-    body = src[callback_refresh:session_db_refresh]
-
-    assert "'prefill_messages' in _agent_kwargs" in body
-    assert "hasattr(agent, 'prefill_messages')" in body

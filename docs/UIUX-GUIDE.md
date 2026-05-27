@@ -74,6 +74,11 @@ terse, for example `Activity: 4 tools`, and should not duplicate the thinking
 area, list every tool name in the summary, or add redundant trailing count
 badges.
 
+Visible interim assistant progress is part of the live conversation timeline,
+not raw debug detail. Compact Activity may collapse tool arguments, long tool
+results, and low-level reasoning detail, but it must not make concise
+user-visible progress text available only inside a collapsed disclosure.
+
 The existing two-stage proposal in `docs/ui-ux/two-stage-proposal.html` records a
 compatible direction for long turns: live work can be grouped as a worklog, then
 settled history can collapse while the final answer reads as the calm
