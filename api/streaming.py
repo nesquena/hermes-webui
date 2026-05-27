@@ -127,7 +127,12 @@ def _record_streaming_tool_progress_event(
     details, secrets, or arbitrary tool output. Do not persist any of them; the
     durable progress stream only needs the safe lifecycle boundary.
     """
-    safe_event_type = "tool.failed" if event_type == "tool.failed" else "tool.completed"
+    if event_type == "tool.failed":
+        safe_event_type = "tool.failed"
+    elif event_type == "tool.started":
+        safe_event_type = "tool.started"
+    else:
+        safe_event_type = "tool.completed"
     try:
         from api.capy_progress import record_progress_event
 
@@ -2712,6 +2717,13 @@ def _run_agent_streaming(
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
                     put('metering', _tool_stats)
+                    _record_streaming_tool_progress_event(
+                        event_type='tool.started',
+                        stream_id=stream_id,
+                        tool_name=name,
+                        preview=preview,
+                        args=args,
+                    )
                     # Fallback: poll for pending approval in case notify_cb wasn't
                     # registered (e.g. older approval module without gateway support).
                     try:
