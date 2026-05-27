@@ -2520,6 +2520,46 @@ except (TypeError, ValueError):
     _LIVE_REBUILD_BUDGET_SECONDS = 4.0
 
 
+# ── Budget-exceeded warning rate-limit ───────────────────────────────────────
+# Q-2979-A3 / Copilot discussion_r3305864400: the live-rebuild-budget-exceeded
+# warning at _invoke_models_rebuild's slow-path is potentially high-volume —
+# every provider catalog refresh that runs past _LIVE_REBUILD_BUDGET_SECONDS
+# emits one, so a hung upstream probe (or a sustained burst of cold callers)
+# could flood the log at warning level. Rate-limit per reason: the FIRST
+# occurrence in a cooldown window logs at warning; subsequent occurrences in
+# the same window log at info (so log signal stays useful but volume bounded).
+# Override the default cooldown via HERMES_WEBUI_BUDGET_WARN_COOLDOWN (seconds).
+try:
+    _BUDGET_WARN_COOLDOWN_SECONDS: float = float(
+        os.getenv("HERMES_WEBUI_BUDGET_WARN_COOLDOWN", "300") or "300"
+    )
+except (TypeError, ValueError):
+    _BUDGET_WARN_COOLDOWN_SECONDS = 300.0
+
+_BUDGET_WARN_STATE: dict[str, float] = {}
+_BUDGET_WARN_LOCK = threading.Lock()
+
+
+def _should_warn_budget(reason: str, cooldown_s: float | None = None) -> bool:
+    """Return True iff the budget warning for ``reason`` should log at
+    warning level (first hit, or last warn-level emit was more than
+    ``cooldown_s`` seconds ago). Otherwise False — the caller should demote
+    to info for the same payload so the signal is retained but the noise is
+    capped. Thread-safe; the cooldown is shared across all live-rebuild
+    callers in this process.
+    """
+    cooldown = (
+        _BUDGET_WARN_COOLDOWN_SECONDS if cooldown_s is None else float(cooldown_s)
+    )
+    now = time.monotonic()
+    with _BUDGET_WARN_LOCK:
+        last = _BUDGET_WARN_STATE.get(reason)
+        if last is None or (now - last) >= cooldown:
+            _BUDGET_WARN_STATE[reason] = now
+            return True
+        return False
+
+
 def _invoke_models_rebuild(builder):
     """Indirection seam around the cold catalog rebuild.
 
@@ -4800,11 +4840,17 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
 
         # Genuinely slow/hung probe: serve the best fallback now; the worker
         # keeps going and refreshes the cache for the next caller.
-        logger.warning(
+        # Rate-limit the warning per Q-2979-A3 — see _should_warn_budget; a
+        # sustained budget breach demotes to info after the first emit in
+        # each cooldown window so log volume stays bounded.
+        _budget_log_msg = (
             "live provider-catalog rebuild exceeded %.1fs budget — serving "
-            "fallback, refreshing catalog out-of-band",
-            _LIVE_REBUILD_BUDGET_SECONDS,
+            "fallback, refreshing catalog out-of-band"
         )
+        if _should_warn_budget("live_rebuild_budget_exceeded"):
+            logger.warning(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
+        else:
+            logger.info(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
         # Note: ``disk_groups``, if non-None, was already consumed by the
         # cold-path early-return at the "Cold path: disk cache hit" branch
         # above (line ~4608). Any execution that reaches HERE necessarily
