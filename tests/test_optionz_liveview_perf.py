@@ -244,6 +244,20 @@ def test_streaming_exports_write_deadline_api():
     assert isinstance(streaming.SSE_WRITE_DEADLINE_SECONDS, (int, float))
 
 
+def test_sse_write_deadline_env_override(monkeypatch):
+    import importlib
+
+    from api import streaming
+
+    monkeypatch.setenv("HERMES_SSE_WRITE_DEADLINE", "7.25")
+    try:
+        reloaded = importlib.reload(streaming)
+        assert reloaded.SSE_WRITE_DEADLINE_SECONDS == 7.25
+    finally:
+        monkeypatch.delenv("HERMES_SSE_WRITE_DEADLINE", raising=False)
+        importlib.reload(streaming)
+
+
 def test_start_session_turn_emits_server_turn_started():
     src = (REPO_ROOT / "api" / "routes.py").read_text()
     assert "server_turn_started" in src

@@ -4952,6 +4952,7 @@ PROCESS_SESSION_INDEX: dict = {}  # process_registry session_key -> WebUI sessio
 PROCESS_SESSION_INDEX_LOCK = threading.Lock()
 PENDING_BG_TASK_COMPLETIONS: set = set()  # session_ids awaiting a process_complete wakeup turn
 BG_TASK_COMPLETE_EVENTS_SEEN: dict = {}  # session_id -> set[process_id] for idempotency
+BG_TASK_COMPLETE_EVENTS_SEEN_LOCK = threading.Lock()
 
 # Defer-path fix (fast-bg-task wakeup race): when a completion arrives while a
 # turn is active, Option Z's drain branch CANNOT start a turn (would 409). The

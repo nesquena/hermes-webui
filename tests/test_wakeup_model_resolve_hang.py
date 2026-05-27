@@ -250,10 +250,17 @@ def test_prefer_cache_kw_exists_and_skips_live_rebuild(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_get_available_models_has_prefer_cache_param():
-    src = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
-    assert "def get_available_models(*, prefer_cache: bool = False)" in src
-    assert "_LIVE_REBUILD_BUDGET_SECONDS" in src
-    assert "_minimal_static_models_catalog" in src
+    import inspect
+
+    from api import config as cfg
+
+    sig = inspect.signature(cfg.get_available_models)
+    assert "prefer_cache" in sig.parameters
+    param = sig.parameters["prefer_cache"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default is False
+    assert "_LIVE_REBUILD_BUDGET_SECONDS" in cfg.__dict__
+    assert "_minimal_static_models_catalog" in cfg.__dict__
 
 
 def test_start_session_turn_uses_cached_catalog():

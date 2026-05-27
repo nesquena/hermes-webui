@@ -9475,7 +9475,7 @@ def _handle_bg_task_complete_ack(handler, body):
         s = get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
-    legacy_process_id_used = "process_id" in body
+    legacy_process_id_used = bool(str(body.get("process_id") or "").strip())
     # process_id accepted as transitional alias; see Deprecation response header
     # + maintainer decision on removal milestone / future Sunset header.
     pid = str(body.get("task_id") or body.get("process_id") or "").strip()

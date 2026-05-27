@@ -4,6 +4,10 @@ function _markSessionViewed(sid, messageCount) {
   _setSessionViewedCount(sid, next);
 }
 
+function _apiUrl(path) {
+  return new URL(path, document.baseURI || location.href).href;
+}
+
 // Module-scope dedupe ring buffer for bg_task_complete events. Shared between
 // the in-turn STREAMS path (per-turn EventSource inside the chat-stream wirer)
 // and the persistent session-scoped path (/api/session/stream), so the
@@ -2727,7 +2731,7 @@ function startSessionStream(sid) {
   stopSessionStream();
   _sessionStreamSessionId = sid;
   try {
-    const es = new EventSource(new URL('api/session/stream?session_id=' + encodeURIComponent(sid), document.baseURI || location.href).href);
+    const es = new EventSource(_apiUrl('api/session/stream?session_id=' + encodeURIComponent(sid)));
     _sessionEventSource = es;
     es.addEventListener('initial', () => { /* connection confirmed */ });
     es.addEventListener('bg_task_complete', e => {
@@ -2858,7 +2862,7 @@ function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
     // in api/background_process._process_one → start_session_turn; the
     // browser is no longer in the wakeup path at all.)
     try {
-      fetch(new URL('api/bg-task-complete-ack', document.baseURI || location.href).href, {
+      fetch(_apiUrl('api/bg-task-complete-ack'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         credentials: 'include',

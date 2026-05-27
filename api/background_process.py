@@ -352,9 +352,13 @@ def _build_payload(evt: dict, session_id: str) -> dict:
       layer); the WebUI consumer-side ring buffer (PR (b)) keys on
       ``(session_id, event_id)`` to dedupe across reconnects.
     """
+    # ProcessRegistry completion events use the field name ``session_id`` for
+    # the process id. Alias it locally before exposing it as payload ``task_id``
+    # to avoid confusing that wire-format name with the WebUI session id.
+    process_id = str(evt.get("session_id") or "")
     payload: dict[str, Any] = {
         "session_id": str(session_id),
-        "task_id": str(evt.get("session_id") or ""),
+        "task_id": process_id,
         "completed_at": time.time(),
         "event_id": uuid.uuid4().hex,
     }
@@ -545,8 +549,8 @@ def _emit_bg_task_complete_events_coalesced(session_id: str, payload: dict) -> i
 # narrows the exception handling so a rename is logged at ERROR (visible in
 # errors.log + monitoring) rather than swallowed by a broad ``except`` at
 # DEBUG. ImportError stays best-effort (the registry is legitimately absent in
-# non-agent unit-test contexts; this module's own
-# ``BG_TASK_COMPLETE_EVENTS_SEEN`` still dedupes B's own duplicates there).
+# non-agent unit-test contexts; this module's own locked
+# ``BG_TASK_COMPLETE_EVENTS_SEEN`` gate still dedupes B's own duplicates there).
 _REGISTRY_CONSUMED_CONTRACT = ("_lock", "_completion_consumed", "is_completion_consumed")
 
 
@@ -567,7 +571,7 @@ def _mark_registry_completion_consumed(process_id: str) -> None:
         from tools.process_registry import process_registry as _pr
     except ImportError:
         # Agent registry not importable (e.g. isolated unit test) — B's own
-        # BG_TASK_COMPLETE_EVENTS_SEEN gate still prevents this module's
+        # locked BG_TASK_COMPLETE_EVENTS_SEEN gate still prevents this module's
         # duplicates; cross-A/B dedupe is moot when A isn't running either.
         logger.debug(
             "tools.process_registry not importable; skipping shared "
@@ -762,11 +766,12 @@ def _process_one(evt: dict) -> None:
     # (session_id, process_id) pair via THIS module, skip the duplicate. Two
     # _move_to_finished() callers (kill_process racing the reader thread) can
     # occasionally enqueue twice despite the process_registry guard.
-    seen = _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(session_id, set())
-    if process_id and process_id in seen:
-        return
-    if process_id:
-        seen.add(process_id)
+    with _cfg.BG_TASK_COMPLETE_EVENTS_SEEN_LOCK:
+        seen = _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.setdefault(session_id, set())
+        if process_id and process_id in seen:
+            return
+        if process_id:
+            seen.add(process_id)
     payload = _build_payload(evt, session_id)
     _emit_bg_task_complete_events_coalesced(session_id, payload)
     _cfg.PENDING_BG_TASK_COMPLETIONS.add(session_id)

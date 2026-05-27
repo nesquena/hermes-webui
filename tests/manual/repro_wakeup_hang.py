@@ -38,7 +38,6 @@ if _REPO_ROOT not in _sys.path:
 
 import sys
 import time
-import types
 
 HANG_SECONDS = 30.0  # stand-in for an unreachable Copilot endpoint
 

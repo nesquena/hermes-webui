@@ -320,6 +320,32 @@ def test_bg_task_complete_ack_canonical_task_id_has_no_deprecation_header(monkey
     assert "Deprecation" not in handler.sent_headers
 
 
+def test_bg_task_complete_ack_empty_process_id_alias_has_no_deprecation_header(monkeypatch):
+    """An empty transitional alias key should not signal real legacy usage."""
+    import types as _types
+
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid: _types.SimpleNamespace(session_id=sid),
+    )
+    handler = _FakeHandler()
+
+    routes._handle_bg_task_complete_ack(
+        handler,
+        {
+            "session_id": "sess-canonical-empty-alias",
+            "task_id": "task-canonical-1",
+            "process_id": "",
+        },
+    )
+
+    assert handler.status == 200
+    assert "Deprecation" not in handler.sent_headers
+
+
 def test_old_process_complete_wakeup_test_file_is_absent():
     """The legacy filename ``tests/test_process_complete_wakeup.py`` must
     remain absent on this branch — the rename is part of the BACKEND-tier
