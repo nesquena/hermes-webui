@@ -4758,11 +4758,9 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
         # publisher even at the budget boundary (no double write, no lost
         # refresh). The worker only touches _cache_build_cv after the
         # foreground releases the RLock by returning, so no lock inversion.
-        import threading as _threading
-
-        build_done = _threading.Event()
-        budget_exceeded = _threading.Event()
-        publish_lock = _threading.Lock()
+        build_done = threading.Event()
+        budget_exceeded = threading.Event()
+        publish_lock = threading.Lock()
         box: dict = {}
 
         def _publish_models_result(result):
@@ -4811,7 +4809,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     else:
                         _clear_build_in_progress()
 
-        _worker = _threading.Thread(
+        _worker = threading.Thread(
             target=_rebuild_worker,
             name="models-catalog-rebuild",
             daemon=True,

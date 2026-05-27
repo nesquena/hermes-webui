@@ -79,6 +79,13 @@ def test_concurrent_turns_capture_their_own_session_under_env_race():
     if bind is None:
         pytest.fail("Option 1 not implemented: _bind_turn_session_identity missing")
 
+    # The two turn() threads below stamp os.environ["HERMES_SESSION_KEY"]
+    # without owning it. Save/restore the prior value (sentinel for "was
+    # unset") so this test does not leak state into sibling tests when
+    # collection order interleaves it with another consumer.
+    _prev_env_sentinel = object()
+    _prev_env = os.environ.get("HERMES_SESSION_KEY", _prev_env_sentinel)
+
     SESS_A = "20260518_161627_60b5f4"   # board claude-code-import
     SESS_B = "47ec28f66dff"             # board mcp-optimize
 
@@ -144,6 +151,15 @@ def test_concurrent_turns_capture_their_own_session_under_env_race():
             os.environ.pop("HERMES_SESSION_KEY", None)
         elif _prev_env_session_key is not None:
             os.environ["HERMES_SESSION_KEY"] = _prev_env_session_key
+
+    # Restore HERMES_SESSION_KEY to its pre-test value (or unset if it was
+    # never set), independent of which assertion above might have failed —
+    # see save/restore note at the top of the test.
+    if _prev_env is _prev_env_sentinel:
+        os.environ.pop("HERMES_SESSION_KEY", None)
+    else:
+        assert isinstance(_prev_env, str)
+        os.environ["HERMES_SESSION_KEY"] = _prev_env
 
 
 def test_turn_identity_binder_restores_previous_value():
