@@ -7053,6 +7053,17 @@ def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(
     assert single["progress_event"]["run_id"] == "widget.upsert:source-widget-lab"
     assert single["progress_event"]["space_id"] == created["space_id"]
     assert single["progress_event"]["redaction_status"] == "metadata_only"
+    single_compaction = single["output_compaction"]
+    assert single_compaction["tool"] == "capy-spaces-tool-action"
+    assert single_compaction["command"] == "space.spaces.upsertwidget"
+    assert single_compaction["metadata_only"] is True
+    assert single_compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert "space_action: space.spaces.upsertwidget" in single_compaction["text"]
+    assert "space_id: source-widget-lab" in single_compaction["text"]
+    assert "widget_count: 1" in single_compaction["text"]
+    assert "prompt_preflight_status: pass" in single_compaction["text"]
+    assert "model_route_hint: hint:fast" in single_compaction["text"]
+    assert "progress_run_id: widget.upsert:source-widget-lab" in single_compaction["text"]
     assert bulk["ok"] is True
     assert bulk["action"] == "space.spaces.upsertwidgets"
     assert bulk["widget_count"] == 1
@@ -7070,6 +7081,17 @@ def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(
     assert bulk["progress_event"]["run_id"] == "widget.upsert:source-widget-lab"
     assert bulk["progress_event"]["space_id"] == created["space_id"]
     assert bulk["progress_event"]["redaction_status"] == "metadata_only"
+    bulk_compaction = bulk["output_compaction"]
+    assert bulk_compaction["tool"] == "capy-spaces-tool-action"
+    assert bulk_compaction["command"] == "space.spaces.upsertwidgets"
+    assert bulk_compaction["metadata_only"] is True
+    assert bulk_compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert "space_action: space.spaces.upsertwidgets" in bulk_compaction["text"]
+    assert "space_id: source-widget-lab" in bulk_compaction["text"]
+    assert "widget_count: 1" in bulk_compaction["text"]
+    assert "prompt_preflight_status: pass" in bulk_compaction["text"]
+    assert "model_route_hint: hint:fast" in bulk_compaction["text"]
+    assert "progress_run_id: widget.upsert:source-widget-lab" in bulk_compaction["text"]
     assert stored_weather["kind"] == "weather"
     assert stored_weather["weather"] == {"location": "Prague"}
     assert "prompt" not in stored_weather

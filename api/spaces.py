@@ -7128,6 +7128,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             saved_widgets.append(read_widget_detail(space_id, result["widget"]["id"]))
             revision_event_ids.append(result["revision_event_id"])
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.upsert")
+        autonomy_policy = _space_widget_mutation_action_policy_receipt(name, prompt_preflight)
         response: dict[str, Any] = {
             "ok": True,
             "action": name,
@@ -7136,8 +7137,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widget_count": len(saved_widgets),
             "revision_event_ids": revision_event_ids,
             "prompt_preflight": prompt_preflight,
-            "autonomy_policy": _space_widget_mutation_action_policy_receipt(name, prompt_preflight),
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=len(saved_widgets),
+                revision_event_ids=revision_event_ids,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
         }
         if name.endswith("upsertwidget") and saved_widgets:
             response["widget"] = saved_widgets[0]
