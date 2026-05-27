@@ -50,7 +50,7 @@ def test_onboarding_uses_i18n_helpers():
 
 
 def test_bootstrap_script_contains_official_installer_and_windows_guard():
-    src = read("bootstrap.py")
+    src = read("hermes_webui/bootstrap.py")
     assert (
         "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
         in src

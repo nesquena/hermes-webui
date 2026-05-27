@@ -22,7 +22,7 @@ HERMES_WEBUI_LOCK_FILE="${HERMES_WEBUI_LOCK_FILE:-/tmp/hermes-webui-autostart.lo
 AUTOSTART_LOG="${HERMES_WEBUI_LOG_DIR}/webui_autostart.log"
 WEBUI_LOG="${HERMES_WEBUI_LOG_DIR}/hermes_webui.log"
 
-# Make the WSL launcher knobs visible to start.sh/bootstrap.py.
+# Make the WSL launcher knobs visible to hermes-webui.
 export HERMES_WEBUI_HOST HERMES_WEBUI_PORT
 
 mkdir -p "${HERMES_WEBUI_LOG_DIR}"
@@ -50,8 +50,8 @@ validate_repo() {
     log "Hermes WebUI repo not found: ${HERMES_WEBUI_REPO}"
     exit 1
   fi
-  if [[ ! -f "${HERMES_WEBUI_REPO}/start.sh" ]]; then
-    log "start.sh not found under HERMES_WEBUI_REPO=${HERMES_WEBUI_REPO}"
+  if [[ ! -f "${HERMES_WEBUI_REPO}/pyproject.toml" ]]; then
+    log "pyproject.toml not found under HERMES_WEBUI_REPO=${HERMES_WEBUI_REPO}"
     exit 1
   fi
 }
@@ -100,7 +100,7 @@ start_webui() {
 
   (
     cd "${HERMES_WEBUI_REPO}"
-    nohup bash "${HERMES_WEBUI_REPO}/start.sh" --foreground >>"${WEBUI_LOG}" 2>&1 &
+    nohup python3 -m hermes_webui.cli serve >>"${WEBUI_LOG}" 2>&1 &
     printf '%s\n' "$!" >"${HERMES_WEBUI_PID_FILE}"
   )
 

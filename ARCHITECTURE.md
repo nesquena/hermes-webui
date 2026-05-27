@@ -10,7 +10,7 @@
 > Current shipped build: `v0.51.54` (May 13, 2026).
 > Automated coverage: 5303 tests via `pytest tests/ --collect-only -q`. CI runs on Python 3.11, 3.12, and 3.13 against every PR.
 >
-> Notable architecture state as of v0.51.54: the bootstrap and first-run onboarding flow own setup discovery; the default WebUI state directory is `~/.hermes/webui`; `ctl.sh` provides a daemon wrapper for homelab installs; chat streaming is still WebUI-owned SSE with stream-ownership guards, cancellation, async manual compression, and turn-journal audit plumbing; provider/model discovery is profile-aware with live-model cache invalidation and custom-provider scoping.
+> Notable architecture state as of v0.51.54: the packaged `hermes-webui` CLI owns setup discovery and daemon control; the default WebUI state directory is `~/.hermes/webui`; legacy shell scripts are compatibility wrappers; chat streaming is still WebUI-owned SSE with stream-ownership guards, cancellation, async manual compression, and turn-journal audit plumbing; provider/model discovery is profile-aware with live-model cache invalidation and custom-provider scoping.
 
 ---
 
@@ -29,8 +29,9 @@ before the main stylesheet loads. Desktop CSS honors that preload marker immedia
 and `static/boot.js` keeps the dataset synchronized with the runtime panel state machine.
 
 The design philosophy is deliberately minimal. There is no build step, no bundler, no
-frontend framework. The Python server is split into a routing shell (server.py) and
-business logic modules (api/). The frontend is seven vanilla JS modules loaded from static/.
+frontend framework. The Python server is split into a routing shell
+(`hermes_webui/server.py`) and business logic modules (`hermes_webui/api/`).
+The frontend is vanilla JS loaded from packaged static assets.
 This makes the code easy to modify from a terminal or by an agent.
 
 Hermes-level chrome is intentionally consolidated: the sidebar has no dedicated brand header.
@@ -43,14 +44,16 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 ## 2. File Inventory
 
     <repo>/
-    server.py              Thin routing shell + HTTP Handler + auth middleware. ~446 lines.
+    pyproject.toml         Python packaging metadata and hermes-webui console script.
+    hermes_webui/
+      cli.py               Packaged command surface: web, serve, daemon control, MCP.
+      server.py            Thin routing shell + HTTP Handler + auth middleware. ~446 lines.
                            Delegates all route handling to api/routes.py.
-    bootstrap.py           One-shot launcher: optional agent install, deps, health wait, browser open.
-    start.sh               Thin wrapper around bootstrap.py for shell-based startup.
+      bootstrap.py         One-shot launcher: optional agent install, deps, health wait, browser open.
     Dockerfile             python:3.12-slim container image (~89 lines)
     docker-compose.yml     Compose config with named volume and optional auth (~57 lines)
     .dockerignore          Excludes .git, tests/, .env* from Docker builds
-    api/
+    hermes_webui/api/
       __init__.py          Package marker
       auth.py              Optional password authentication, signed cookies (~366 lines)
       config.py            Discovery, globals, model detection, reloadable config (~4139 lines)
@@ -63,7 +66,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       streaming.py         SSE engine, run_agent, cancel, HERMES_HOME save/restore (~4420 lines)
       upload.py            Multipart parser, file upload handler (~284 lines)
       workspace.py         File ops: list_dir, read_file_content, workspace helpers (~810 lines)
-    static/
+    hermes_webui/static/
       index.html           HTML template (~1323 lines)
       style.css            All CSS incl. mobile responsive (~3767 lines)
       ui.js                DOM helpers, renderMd, tool cards, model dropdown, file tree (~7216 lines)
@@ -85,7 +88,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
     TESTING.md             Manual browser test plan and automated coverage reference.
     CHANGELOG.md           Release notes per sprint.
     BUGS.md                Bug backlog and fixed items tracker.
-    requirements.txt       Python dependencies.
+    requirements.txt       Legacy dependency list; pyproject.toml is canonical.
     .env.example           Sample environment variable overrides.
 
 State directory (runtime data, separate from source):
@@ -99,8 +102,8 @@ State directory (runtime data, separate from source):
 
 Log file:
 
-    ~/.hermes/webui/bootstrap-8787.log   start.sh/bootstrap background server log
-    ~/.hermes/webui.log                  ctl.sh daemon log
+    ~/.hermes/webui/bootstrap-8787.log   legacy bootstrap background server log
+    ~/.hermes/webui.log                  hermes-webui daemon log
 
 ---
 
@@ -787,7 +790,7 @@ Replacing with marked.js + DOMPurify is a future improvement (not blocking).
 
 ### Phase G: Observability -- MOSTLY COMPLETE
 
-1. Structured JSON logging: COMPLETE (Sprint 1). Per-request JSON is printed to the active launcher log (`~/.hermes/webui/bootstrap-8787.log` for `start.sh`, `~/.hermes/webui.log` for `ctl.sh`).
+1. Structured JSON logging: COMPLETE (Sprint 1). Per-request JSON is printed to the active launcher log (`~/.hermes/webui/bootstrap-8787.log` for legacy bootstrap, `~/.hermes/webui.log` for `hermes-webui start`).
 2. Enhanced /health: COMPLETE (Sprint 7). Returns `active_streams`, `uptime_seconds`.
 3. GET /api/debug/stats: NOT YET IMPLEMENTED. Low priority.
 
@@ -898,7 +901,7 @@ The api() helper:
 
     # Tail the server log live
     tail -f ~/.hermes/webui/bootstrap-8787.log
-    tail -f ~/.hermes/webui.log  # when launched through ctl.sh
+    tail -f ~/.hermes/webui.log  # when launched through hermes-webui start
 
     # List all sessions (metadata only)
     curl -s http://127.0.0.1:8787/api/sessions | python3 -m json.tool
@@ -909,7 +912,7 @@ The api() helper:
 
     # Kill and restart server cleanly
     pkill -f "python.*server.py"
-    <repo>/start.sh
+    hermes-webui web --no-browser
 
     # Check if server process is running
     ps aux | grep "server.py"
@@ -1501,7 +1504,7 @@ B14: `document.addEventListener('keydown', ...)` at global scope catches Cmd/Ctr
 Moved <agent-dir>/webui-mvp/ to <repo>/.
 Symlink: <agent-dir>/webui-mvp -> <repo>
 The symlink means all existing import paths (sys.path.insert for hermes-agent modules)
-continue working unchanged. start.sh updated to reference new canonical path.
+continue working unchanged. Legacy wrappers delegate to the packaged CLI.
 
 Safe from: git pull, git reset --hard, git stash on hermes-agent repo.
 NOT safe from: git clean -fd (would delete symlink but not the target).

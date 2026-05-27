@@ -41,11 +41,11 @@ def test_wsl_autostart_launcher_has_safe_duplicate_prevention_and_exports_runtim
     assert "HERMES_WEBUI_LOCK_FILE" in script
     assert "HERMES_WEBUI_PID_FILE" in script
     assert "curl -fsS --max-time 3" in script
-    assert "bash \"${HERMES_WEBUI_REPO}/start.sh\" --foreground" in script
+    assert "python3 -m hermes_webui.cli serve" in script
     assert "nohup" in script
 
     # The launcher documents HERMES_WEBUI_HOST/PORT as runtime knobs; they must
-    # be exported so bootstrap.py/server.py receive the selected WSL values.
+    # be exported so the packaged CLI/server receive the selected WSL values.
     assert re.search(r"^export HERMES_WEBUI_HOST HERMES_WEBUI_PORT$", script, re.MULTILINE)
 
     assert "/root" not in script

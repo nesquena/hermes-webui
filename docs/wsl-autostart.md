@@ -11,7 +11,7 @@ Both paths use the same WSL launch script:
 scripts/wsl/hermes_webui_autostart.sh
 ```
 
-The script is safe to call repeatedly. It uses a lock file, checks the `/health` endpoint, checks a pid file, and writes logs before starting `start.sh --foreground` in the background. It does not hardcode a user path; by default it derives the repository root from its own location.
+The script is safe to call repeatedly. It uses a lock file, checks the `/health` endpoint, checks a pid file, and writes logs before starting `python3 -m hermes_webui.cli serve` in the background. It does not hardcode a user path; by default it derives the repository root from its own location.
 
 ## Script settings
 
@@ -21,7 +21,7 @@ The WSL launcher supports these environment variables:
 |---|---|---|
 | `HERMES_WEBUI_REPO` | repo containing the script | WebUI checkout to start |
 | `HERMES_WEBUI_LOG_DIR` | `$HOME/.hermes/webui/logs` | Autostart and WebUI logs |
-| `HERMES_WEBUI_HOST` | `127.0.0.1` | Host passed through to `start.sh` / `bootstrap.py` |
+| `HERMES_WEBUI_HOST` | `127.0.0.1` | Host passed through to `hermes-webui serve` |
 | `HERMES_WEBUI_PORT` | `8787` | WebUI port and health-check port |
 | `HERMES_WEBUI_HEALTH_URL` | `http://127.0.0.1:$HERMES_WEBUI_PORT/health` | URL used to decide whether WebUI is already running |
 | `HERMES_WEBUI_PID_FILE` | `$HERMES_WEBUI_LOG_DIR/hermes-webui.pid` | pid file used for duplicate prevention |

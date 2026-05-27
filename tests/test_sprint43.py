@@ -20,8 +20,8 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 GATEWAY_WATCHER_PY = (REPO_ROOT / "api" / "gateway_watcher.py").read_text()
 CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text()
-BOOTSTRAP_PY = (REPO_ROOT / "bootstrap.py").read_text()
-SERVER_PY = (REPO_ROOT / "server.py").read_text()
+BOOTSTRAP_PY = (REPO_ROOT / "hermes_webui" / "bootstrap.py").read_text()
+SERVER_PY = (REPO_ROOT / "hermes_webui" / "server.py").read_text()
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text()
 AUTH_PY = (REPO_ROOT / "api" / "auth.py").read_text()
 PROFILES_PY = (REPO_ROOT / "api" / "profiles.py").read_text()

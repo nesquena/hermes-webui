@@ -42,6 +42,7 @@ class TestDetectWebUIVersion:
             return ('', False)
 
         with patch.object(upd, '_run_git', side_effect=_run_git_side_effect), \
+             patch.object(upd, 'PACKAGE_ROOT', fake_root), \
              patch.object(upd, 'REPO_ROOT', fake_root):
             return upd._detect_webui_version()
 
@@ -62,7 +63,7 @@ class TestDetectWebUIVersion:
         assert result == 'v0.50.123-3-ge91325d'
 
     def test_git_failure_falls_back_to_version_file(self, tmp_path):
-        """When git fails (Docker image), falls back to api/_version.py."""
+        """When git fails (Docker image), falls back to packaged api/_version.py."""
         result = self._fresh_detect(
             mock_run_git=lambda args, cwd, timeout: ('', False),
             version_file_content="__version__ = 'v0.50.100'\n",
@@ -357,7 +358,7 @@ class TestServerVersionHeader:
 
     def test_server_version_not_old_hardcoded(self):
         """server.py Handler.server_version must not be the stale hardcoded value."""
-        src = (REPO_ROOT / 'server.py').read_text(encoding='utf-8')
+        src = (REPO_ROOT / 'hermes_webui' / 'server.py').read_text(encoding='utf-8')
         assert 'HermesWebUI/0.50.38' not in src, (
             'server.py still contains the old hardcoded server_version string. '
             'It should use WEBUI_VERSION from api.updates.'
@@ -365,7 +366,7 @@ class TestServerVersionHeader:
 
     def test_server_version_uses_webui_version(self):
         """server.py must reference WEBUI_VERSION when setting server_version."""
-        src = (REPO_ROOT / 'server.py').read_text(encoding='utf-8')
+        src = (REPO_ROOT / 'hermes_webui' / 'server.py').read_text(encoding='utf-8')
         assert 'WEBUI_VERSION' in src, (
             'server.py must import and use WEBUI_VERSION from api.updates '
             'to keep the HTTP Server: header in sync with git tags'
@@ -373,14 +374,14 @@ class TestServerVersionHeader:
 
     def test_server_py_imports_webui_version(self):
         """server.py must import WEBUI_VERSION from api.updates."""
-        src = (REPO_ROOT / 'server.py').read_text(encoding='utf-8')
+        src = (REPO_ROOT / 'hermes_webui' / 'server.py').read_text(encoding='utf-8')
         assert 'from api.updates import WEBUI_VERSION' in src, (
             'server.py must import WEBUI_VERSION from api.updates'
         )
 
     def test_server_version_no_slash_when_unknown(self):
         """When WEBUI_VERSION is 'unknown', server_version must be bare 'HermesWebUI' with no slash."""
-        src = (REPO_ROOT / 'server.py').read_text(encoding='utf-8')
+        src = (REPO_ROOT / 'hermes_webui' / 'server.py').read_text(encoding='utf-8')
         # The guard must be present so log aggregators don't see 'HermesWebUI/unknown'
         assert "'unknown'" in src or '"unknown"' in src, (
             "server.py must guard against emitting 'HermesWebUI/unknown' as the server header"
@@ -388,7 +389,7 @@ class TestServerVersionHeader:
 
     def test_server_version_uses_removeprefix_not_lstrip(self):
         """server.py must use str.removeprefix() to strip 'v', not lstrip() which strips chars."""
-        src = (REPO_ROOT / 'server.py').read_text(encoding='utf-8')
+        src = (REPO_ROOT / 'hermes_webui' / 'server.py').read_text(encoding='utf-8')
         assert 'lstrip' not in src, (
             "server.py must use removeprefix('v') not lstrip('v') — lstrip strips characters, "
             "not a prefix, and would incorrectly mangle strings like 'vvv0.50.124'"

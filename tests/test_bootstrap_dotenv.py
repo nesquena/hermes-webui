@@ -1,9 +1,8 @@
 """
 Tests for bootstrap.py .env loading fix (issue #730).
 
-bootstrap.py is the primary documented entry point ("python3 bootstrap.py").
-Previously it did not load REPO_ROOT/.env, so HERMES_WEBUI_HOST, HERMES_WEBUI_PORT
-etc. were silently ignored when launching without start.sh.
+The packaged CLI and legacy bootstrap wrapper both rely on bootstrap.py loading
+REPO_ROOT/.env before HERMES_WEBUI_HOST / HERMES_WEBUI_PORT defaults are read.
 
 Covers:
   1. _load_repo_dotenv() sets env vars from a repo .env file
@@ -11,10 +10,10 @@ Covers:
   3. _load_repo_dotenv() strips quotes from values
   4. _load_repo_dotenv() is a no-op when .env does not exist
   5. _load_repo_dotenv() prints a warning (not crash) on unreadable .env
-  6. _load_repo_dotenv() overwrites existing env vars (shell source semantics)
+  6. _load_repo_dotenv() preserves existing env vars (inline overrides win)
   7. _load_repo_dotenv() handles 'export FOO=bar' prefix
   8. _load_repo_dotenv() preserves values containing '='
-  9. Variables are set unconditionally (not setdefault)
+  9. Variables are loaded as defaults
   10. Structural: loader is called before DEFAULT_HOST/DEFAULT_PORT
 """
 import os
@@ -106,11 +105,11 @@ class TestLoadRepoDotenv:
             "_load_repo_dotenv() should print a warning to stderr on read failure"
         )
 
-    def test_overwrites_existing_env_var(self, tmp_path):
-        """Unconditional overwrite matches shell source semantics."""
+    def test_preserves_existing_env_var(self, tmp_path):
+        """Existing env wins so inline CLI overrides stay predictable."""
         os.environ["HERMES_WEBUI_HOST"] = "127.0.0.1"
         self._run(tmp_path, "HERMES_WEBUI_HOST=0.0.0.0\n")
-        assert os.environ.get("HERMES_WEBUI_HOST") == "0.0.0.0"
+        assert os.environ.get("HERMES_WEBUI_HOST") == "127.0.0.1"
 
     def test_preserve_existing_env_keeps_ctl_overrides(self, tmp_path):
         """ctl.sh can ask bootstrap.py to keep wrapper-provided env values."""
@@ -171,7 +170,7 @@ class TestBootstrapStructure:
 
     def test_dotenv_loaded_before_default_host_port(self):
         """_load_repo_dotenv() call must appear before DEFAULT_HOST/DEFAULT_PORT in source."""
-        src = (REPO_ROOT / "bootstrap.py").read_text(encoding="utf-8")
+        src = (REPO_ROOT / "hermes_webui" / "bootstrap.py").read_text(encoding="utf-8")
         load_pos = src.find("_load_repo_dotenv()")
         host_pos = src.find("DEFAULT_HOST")
         port_pos = src.find("DEFAULT_PORT")
@@ -186,12 +185,11 @@ class TestBootstrapStructure:
         )
 
     def test_start_sh_and_bootstrap_equivalent_env_loading(self):
-        """start.sh sources .env before bootstrap.py; bootstrap.py must now do the same."""
+        """start.sh delegates to the CLI; bootstrap.py owns .env loading."""
         start_sh = (REPO_ROOT / "start.sh").read_text(encoding="utf-8")
-        bootstrap_src = (REPO_ROOT / "bootstrap.py").read_text(encoding="utf-8")
-        # start.sh sources .env
-        assert "source" in start_sh and ".env" in start_sh, (
-            "start.sh should still source .env (regression guard)"
+        bootstrap_src = (REPO_ROOT / "hermes_webui" / "bootstrap.py").read_text(encoding="utf-8")
+        assert "hermes_webui.cli" in start_sh, (
+            "start.sh should delegate to the packaged CLI"
         )
         # bootstrap.py now loads it too
         assert "_load_repo_dotenv" in bootstrap_src, (

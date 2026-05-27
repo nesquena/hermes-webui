@@ -287,7 +287,7 @@ if [ -f $tmp_root_env ]; then
 fi
 
 ##
-if [ ! -f /app/server.py ] && [ -d /apptoo ]; then
+if [ ! -f /app/pyproject.toml ] && [ -d /apptoo ]; then
   echo ""; echo "-- Seeding /app from /apptoo (rootless startup)"
   cp -a /apptoo/. /app/ || error_exit "Failed to seed /app from /apptoo (is /app writable by the runtime user?)"
 fi
@@ -374,7 +374,7 @@ if [ -f /app/venv/.deps_installed ]; then
   echo ""; echo "== Dependencies already installed — skipping (fast restart)"
 else
   echo ""; echo "== Installing hermes-webui dependencies"
-  uv pip install -r requirements.txt --trusted-host pypi.org --trusted-host files.pythonhosted.org
+  uv pip install -e ".[mcp]" --trusted-host pypi.org --trusted-host files.pythonhosted.org
   uv pip install -U pip setuptools --trusted-host pypi.org --trusted-host files.pythonhosted.org
   test -x /app/venv/bin/pip
 
@@ -453,7 +453,7 @@ fi
 ensure_hindsight_client_docker_dependency
 
 echo ""; echo "== Running hermes-webui"
-cd /app; python server.py || error_exit "hermes-webui failed or exited with an error"
+cd /app; hermes-webui serve || error_exit "hermes-webui failed or exited with an error"
 
 # we should never be here because the server should be running indefinitely, but if we are, we exit safely
 ok_exit "Clean exit"

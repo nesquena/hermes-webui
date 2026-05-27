@@ -64,6 +64,33 @@ def test_ensure_python_fails_loudly_when_no_interpreter_can_import_agent(monkeyp
         raise AssertionError("expected RuntimeError")
 
 
+def test_no_agent_prefers_current_packaged_python(monkeypatch, tmp_path):
+    """`uv run hermes-webui web` must not repair a pip-less repo .venv."""
+    repo_venv_python = tmp_path / "webui" / ".venv" / "bin" / "python"
+    current_python = tmp_path / "uv-run" / "bin" / "python"
+    repo_venv_python.parent.mkdir(parents=True)
+    current_python.parent.mkdir(parents=True)
+    repo_venv_python.write_text("", encoding="utf-8")
+    current_python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(bootstrap.sys, "executable", str(current_python))
+    monkeypatch.setattr(
+        bootstrap,
+        "_python_can_run_webui_deps",
+        lambda python_exe: pathlib.Path(python_exe) == current_python,
+    )
+    monkeypatch.setattr(bootstrap, "_python_can_run_webui_and_agent", lambda *a, **k: False)
+
+    def fail_if_install_attempted(*args, **kwargs):
+        raise AssertionError("bootstrap should not invoke pip when current Python can run WebUI")
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", fail_if_install_attempted)
+
+    selected = bootstrap.ensure_python_has_webui_deps(str(repo_venv_python), None)
+
+    assert selected == str(current_python)
+
+
 def test_local_venv_is_created_with_symlinks(monkeypatch, tmp_path):
     """Regression: mise/asdf macOS Pythons need symlinks=True to avoid SIGABRT.
 
@@ -75,6 +102,7 @@ def test_local_venv_is_created_with_symlinks(monkeypatch, tmp_path):
     """
     local_python = tmp_path / "webui" / ".venv" / "bin" / "python"
     monkeypatch.setattr(bootstrap, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(bootstrap, "_python_can_run_webui_deps", lambda *a, **k: False)
     monkeypatch.setattr(bootstrap, "_python_can_run_webui_and_agent", lambda *a, **k: False)
     monkeypatch.setattr(bootstrap.subprocess, "run", lambda *a, **k: None)
 

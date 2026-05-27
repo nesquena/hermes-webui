@@ -95,31 +95,41 @@ ecosystem. See [docs/why-hermes.md](docs/why-hermes.md) for the full side-by-sid
 
 ## Quick start
 
-Run the repo bootstrap:
+Install the project in editable mode, then start the browser-oriented setup
+flow:
 
 ```bash
 git clone https://github.com/nesquena/hermes-webui.git hermes-webui
 cd hermes-webui
-python3 bootstrap.py
+python3 -m pip install -e .
+hermes-webui web
 ```
 
-Or keep using the shell launcher:
+With uv, the same command can be run directly from the checkout:
 
 ```bash
-./start.sh
+uv run hermes-webui web
 ```
 
-For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecycle commands without requiring `fuser` or `pkill`:
+For a headless foreground server, use `serve`:
 
 ```bash
-./ctl.sh start              # background daemon, PID at ~/.hermes/webui.pid
-./ctl.sh status             # PID, uptime, bound host/port, log path, /health
-./ctl.sh logs --lines 100   # tail ~/.hermes/webui.log
-./ctl.sh restart
-./ctl.sh stop
+hermes-webui serve
 ```
 
-`ctl.sh start` runs the bootstrap in foreground/no-browser mode behind the daemon wrapper, writes logs to `~/.hermes/webui.log`, and respects `.env` plus inline overrides such as `HERMES_WEBUI_HOST=0.0.0.0 ./ctl.sh start`.
+For self-hosted VM or homelab installs, the packaged CLI wraps the common daemon lifecycle commands without requiring `fuser` or `pkill`:
+
+```bash
+hermes-webui start              # background daemon, PID at ~/.hermes/webui.pid
+hermes-webui status             # PID, bound host/port, log path, /health
+hermes-webui logs --lines 100   # tail ~/.hermes/webui.log
+hermes-webui restart
+hermes-webui stop
+```
+
+`hermes-webui start` runs the packaged server in the background, writes logs to `~/.hermes/webui.log`, and respects `.env` plus inline overrides such as `HERMES_WEBUI_HOST=0.0.0.0 hermes-webui start`.
+
+The legacy `python3 bootstrap.py`, `./start.sh`, and `./ctl.sh` entrypoints are still present as compatibility wrappers, but new installs should use `hermes-webui`.
 
 ### Optional session recall prefill
 
@@ -275,15 +285,15 @@ For the deep dive on each of these, see [`docs/docker.md`](docs/docker.md).
 
 ---
 
-## What start.sh discovers automatically
+## What `hermes-webui` discovers automatically
 
 | Thing | How it finds it |
 |---|---|
-| Hermes agent dir | `HERMES_WEBUI_AGENT_DIR` env, then `$HERMES_HOME/hermes-agent` (Windows default `%LOCALAPPDATA%\hermes\hermes-agent`, POSIX default `~/.hermes/hermes-agent`), then sibling `../hermes-agent` |
-| Python executable | Agent venv first, then `.venv` in this repo, then system `python3` |
+| Hermes agent dir | `HERMES_WEBUI_AGENT_DIR` env, then `$HERMES_HOME/hermes-agent` (Windows default `%LOCALAPPDATA%\hermes\hermes-agent`, POSIX default `~/.hermes/hermes-agent`), sibling `../hermes-agent`, XDG data/state paths, then installed `hermes`/`hermes-agent` wrappers |
+| Python executable | `HERMES_WEBUI_PYTHON`, agent venv, installed `hermes`/`hermes-agent` wrapper Python, then `.venv` in this repo or system `python3` |
 | State directory | `HERMES_WEBUI_STATE_DIR` env, then `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) |
 | Default workspace | `HERMES_WEBUI_DEFAULT_WORKSPACE` env, then `~/workspace`, then state dir |
-| Port | `HERMES_WEBUI_PORT` env or first argument, default `8787` |
+| Port | `HERMES_WEBUI_PORT` env or `--port`, default `8787` |
 
 If discovery finds everything, nothing else is required.
 
@@ -296,20 +306,20 @@ export HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent
 export HERMES_WEBUI_PYTHON=/path/to/python
 export HERMES_WEBUI_PORT=9000
 export HERMES_WEBUI_AUTO_INSTALL=1  # enable auto-install of agent deps (disabled by default)
-./start.sh
+hermes-webui web
 ```
 
 Or inline:
 
 ```bash
-HERMES_WEBUI_AGENT_DIR=/custom/path ./start.sh 9000
+HERMES_WEBUI_AGENT_DIR=/custom/path hermes-webui web --port 9000
 ```
 
 Full list of environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `HERMES_WEBUI_AGENT_DIR` | auto-discovered | Path to the hermes-agent checkout |
+| `HERMES_WEBUI_AGENT_DIR` | auto-discovered | Override path to the hermes-agent checkout or installed `run_agent.py` import root |
 | `HERMES_WEBUI_PYTHON` | auto-discovered | Python executable |
 | `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback) |
 | `HERMES_WEBUI_PORT` | `8787` | Port |
@@ -343,7 +353,7 @@ ssh -N -L 8787:127.0.0.1:8787 user@your.server.com
 
 Then open `http://localhost:8787` in your local browser.
 
-`start.sh` will print this command for you automatically when it detects you
+`hermes-webui web` will print this command for you automatically when it detects you
 are running over SSH.
 
 ---
@@ -365,7 +375,7 @@ so it works well as a daily-driver agent interface from your phone.
 2. Start the WebUI listening on all interfaces with password auth enabled:
 
 ```bash
-HERMES_WEBUI_HOST=0.0.0.0 HERMES_WEBUI_PASSWORD=your-secret ./start.sh
+HERMES_WEBUI_HOST=0.0.0.0 HERMES_WEBUI_PASSWORD=your-secret hermes-webui web --no-browser
 ```
 
 3. Open `http://<server-tailscale-ip>:8787` in your phone's browser
@@ -398,13 +408,12 @@ or VM host may be needed for longer-running sessions.
 
 ---
 
-## Manual launch (without start.sh)
+## Manual launch
 
-If you prefer to launch the server directly:
+If you prefer to launch the foreground server directly:
 
 ```bash
-cd /path/to/hermes-agent          # or wherever sys.path can find Hermes modules
-HERMES_WEBUI_PORT=8787 venv/bin/python /path/to/hermes-webui/server.py
+HERMES_WEBUI_PORT=8787 hermes-webui serve
 ```
 
 Note: use the agent venv Python (or any Python environment that has the Hermes agent dependencies installed). System Python will be missing `openai`, `httpx`, and other required packages.
@@ -562,8 +571,8 @@ Production data and real cron jobs are never touched. Current snapshot:
 ## Architecture
 
 ```
-server.py               HTTP routing shell + auth middleware (~446 lines)
-api/
+hermes_webui/server.py  HTTP routing shell + auth middleware (~446 lines)
+hermes_webui/api/
   auth.py               Optional password authentication, signed cookies (~366 lines)
   config.py             Discovery, globals, model detection, reloadable config (~4139 lines)
   helpers.py            HTTP helpers, security headers (~302 lines)

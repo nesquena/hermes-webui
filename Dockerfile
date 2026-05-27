@@ -73,7 +73,8 @@ COPY --chown=root:root . /apptoo
 # CI passes: --build-arg HERMES_VERSION=$(git describe --tags --always)
 # Local builds that omit the arg get "unknown" as the fallback.
 ARG HERMES_VERSION=unknown
-RUN echo "__version__ = '${HERMES_VERSION}'" > /apptoo/api/_version.py
+RUN mkdir -p /apptoo/hermes_webui/api \
+    && echo "__version__ = '${HERMES_VERSION}'" > /apptoo/hermes_webui/api/_version.py
 
 # Default to binding all interfaces (required for container networking)
 ENV HERMES_WEBUI_HOST=0.0.0.0
@@ -88,4 +89,3 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # before starting the WebUI server. The production image does not ship sudo.
 USER root
 CMD ["/hermeswebui_init.bash"]
-

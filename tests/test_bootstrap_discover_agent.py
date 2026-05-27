@@ -9,6 +9,7 @@ venv-relative interpreter path there.
 
 from __future__ import annotations
 
+import subprocess
 import textwrap
 
 import bootstrap
@@ -46,9 +47,28 @@ def _make_hermes_cli(tmp_path, shebang_target: str | None):
     return hermes
 
 
+def _make_hermes_wrapper(tmp_path, python_exe):
+    bin_dir = tmp_path / "user-bin"
+    bin_dir.mkdir(exist_ok=True)
+    hermes = bin_dir / "hermes"
+    hermes.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env bash
+            export HERMES_PYTHON='{python_exe}'
+            exec "{python_exe}" -m hermes "$@"
+            """
+        ),
+        encoding="utf-8",
+    )
+    return hermes
+
+
 def _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes_path):
     """Point `which("hermes")` at our fake CLI and clear all standard candidates."""
-    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: str(hermes_path) if name == "hermes" else None)
+    fake_which = lambda name: str(hermes_path) if name == "hermes" else None
+    monkeypatch.setattr(bootstrap.shutil, "which", fake_which)
+    monkeypatch.setattr(bootstrap.agent_discovery.shutil, "which", fake_which)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "no-such-hermes-home"))
     monkeypatch.delenv("HERMES_WEBUI_AGENT_DIR", raising=False)
     # Force REPO_ROOT.parent to a dir that won't accidentally contain a
@@ -111,3 +131,57 @@ def test_explicit_candidate_takes_precedence_over_shebang(monkeypatch, tmp_path)
     monkeypatch.setenv("HERMES_WEBUI_AGENT_DIR", str(explicit_install))
 
     assert bootstrap.discover_agent_dir() == explicit_install.resolve()
+
+
+def test_discovers_agent_dir_from_hermes_python_wrapper(monkeypatch, tmp_path):
+    """Nix-style wrappers expose HERMES_PYTHON instead of a Python shebang."""
+    site_packages = tmp_path / "agent-env" / "lib" / "python3.12" / "site-packages"
+    site_packages.mkdir(parents=True)
+    (site_packages / "run_agent.py").write_text("", encoding="utf-8")
+    python_exe = tmp_path / "agent-env" / "bin" / "python3"
+    python_exe.parent.mkdir(parents=True)
+    python_exe.write_text("", encoding="utf-8")
+    hermes = _make_hermes_wrapper(tmp_path, python_exe)
+    _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes)
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[0] == str(python_exe)
+        return subprocess.CompletedProcess(cmd, 0, stdout=f"{site_packages}\n", stderr="")
+
+    monkeypatch.setattr(bootstrap.agent_discovery.subprocess, "run", fake_run)
+
+    assert bootstrap.discover_agent_dir() == site_packages.resolve()
+    assert bootstrap.discover_launcher_python(site_packages) == str(python_exe)
+
+
+def test_discovers_agent_dir_from_two_stage_nix_wrapper(monkeypatch, tmp_path):
+    """Home-manager/Nix profile wrappers exec a second script with HERMES_PYTHON."""
+    site_packages = tmp_path / "agent-env" / "lib" / "python3.12" / "site-packages"
+    site_packages.mkdir(parents=True)
+    (site_packages / "run_agent.py").write_text("", encoding="utf-8")
+    python_exe = tmp_path / "agent-env" / "bin" / "python3"
+    python_exe.parent.mkdir(parents=True)
+    python_exe.write_text("", encoding="utf-8")
+
+    bin_dir = tmp_path / "user-bin"
+    bin_dir.mkdir()
+    wrapped = tmp_path / "store" / ".hermes-wrapped"
+    wrapped.parent.mkdir()
+    wrapped.write_text(
+        f"#!/usr/bin/env bash\nexport HERMES_PYTHON='{python_exe}'\n",
+        encoding="utf-8",
+    )
+    hermes = bin_dir / "hermes"
+    hermes.write_text(
+        f"#!/usr/bin/env bash\nexec -a \"$0\" \"{wrapped}\" \"$@\"\n",
+        encoding="utf-8",
+    )
+    _isolate_discover_agent_dir(monkeypatch, tmp_path, hermes)
+
+    def fake_run(cmd, **kwargs):
+        assert cmd[0] == str(python_exe)
+        return subprocess.CompletedProcess(cmd, 0, stdout=f"{site_packages}\n", stderr="")
+
+    monkeypatch.setattr(bootstrap.agent_discovery.subprocess, "run", fake_run)
+
+    assert bootstrap.discover_agent_dir() == site_packages.resolve()

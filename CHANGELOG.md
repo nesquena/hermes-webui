@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Package Hermes WebUI as a first-class Python project with `pyproject.toml` and a `hermes-webui` console command. The new documented startup surface is `hermes-webui web`, `hermes-webui serve`, and `hermes-webui start/status/logs/stop`; legacy `bootstrap.py`, `start.sh`, and `ctl.sh` remain compatibility wrappers.
+- Treat `/nix/store` as a blocked system workspace root so NixOS-resolved `/etc/*` symlink targets and immutable store paths cannot be registered as writable workspaces.
+- Auto-detect Hermes Agent from XDG data/state paths and installed `hermes`/`hermes-agent` wrappers, including Nix-style wrappers that expose `HERMES_PYTHON`, so `hermes-webui serve` no longer requires manual `HERMES_WEBUI_AGENT_DIR` setup for packaged agent installs.
+
 ## [v0.51.145] — 2026-05-26 — Release DQ (stage-batch27 — sidebar running-state preservation)
 
 ### Fixed

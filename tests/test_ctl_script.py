@@ -1,213 +1,217 @@
-import os
-import shutil
+import argparse
+import builtins
 import subprocess
 import sys
-import textwrap
-import time
 from pathlib import Path
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-CTL = REPO_ROOT / "ctl.sh"
+import pytest
 
 
-def run_ctl(
-    home: Path,
-    *args: str,
-    env: dict[str, str] | None = None,
-    timeout: float = 5.0,
-    repo_root: Path = REPO_ROOT,
-):
-    merged = os.environ.copy()
-    for key in (
-        "HERMES_WEBUI_HOST",
-        "HERMES_WEBUI_PORT",
-        "HERMES_WEBUI_PYTHON",
-        "HERMES_WEBUI_STATE_DIR",
-        "HERMES_WEBUI_PID_FILE",
-        "HERMES_WEBUI_LOG_FILE",
-        "HERMES_WEBUI_CTL_STATE_FILE",
-    ):
-        merged.pop(key, None)
-    merged.update(
-        {
-            "HOME": str(home),
-            "HERMES_HOME": str(home / ".hermes"),
-            "PATH": os.environ.get("PATH", ""),
-        }
-    )
-    if env:
-        merged.update(env)
-    return subprocess.run(
-        ["bash", str(repo_root / "ctl.sh"), *args],
-        cwd=repo_root,
-        env=merged,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-    )
+def test_daemon_start_writes_pid_state_and_uses_packaged_bootstrap(monkeypatch, tmp_path):
+    from hermes_webui import cli
 
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.delenv("HERMES_WEBUI_STATE_DIR", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_HOST", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_PORT", raising=False)
 
-def write_fake_python(path: Path) -> None:
-    path.write_text(
-        textwrap.dedent(
-            """
-            #!/usr/bin/env bash
-            printf 'fake-python args:%s\n' "$*" >> "${FAKE_PYTHON_LOG}"
-            printf 'host=%s port=%s state=%s\n' "${HERMES_WEBUI_HOST:-}" "${HERMES_WEBUI_PORT:-}" "${HERMES_WEBUI_STATE_DIR:-}" >> "${FAKE_PYTHON_LOG}"
-            trap 'printf "terminated\n" >> "${FAKE_PYTHON_LOG}"; exit 0' TERM INT
-            while true; do sleep 0.1; done
-            """
-        ).lstrip(),
-        encoding="utf-8",
-    )
-    path.chmod(0o755)
+    captured = {}
 
+    class FakePopen:
+        pid = 43210
 
-def wait_for_pid_file(pid_file: Path, timeout: float = 3.0) -> int:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if pid_file.exists():
-            raw = pid_file.read_text(encoding="utf-8").strip()
-            if raw:
-                return int(raw)
-        time.sleep(0.05)
-    raise AssertionError(f"PID file was not written: {pid_file}")
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
 
+    monkeypatch.setattr(cli.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(cli, "_is_alive", lambda pid: True)
+    monkeypatch.setattr(cli, "_resolve_server_python", lambda: (sys.executable, None))
 
-def wait_for_file_text(path: Path, timeout: float = 3.0) -> str:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if path.exists():
-            text = path.read_text(encoding="utf-8")
-            if text:
-                return text
-        time.sleep(0.05)
-    raise AssertionError(f"File was not written: {path}")
+    args = argparse.Namespace(host="0.0.0.0", port=18991, bootstrap_args=[])
+    assert cli._daemon_start(args) == 0
 
-
-def assert_process_exits(pid: int, timeout: float = 3.0) -> None:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return
-        time.sleep(0.05)
-    raise AssertionError(f"process {pid} did not exit")
-
-
-def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(tmp_path):
-    fake_python = tmp_path / "fake-python"
-    fake_log = tmp_path / "fake-python.log"
-    write_fake_python(fake_python)
-
-    result = run_ctl(
-        tmp_path,
-        "start",
-        env={
-            "HERMES_WEBUI_PYTHON": str(fake_python),
-            "FAKE_PYTHON_LOG": str(fake_log),
-            "HERMES_WEBUI_HOST": "0.0.0.0",
-            "HERMES_WEBUI_PORT": "18991",
-        },
-    )
-
-    assert result.returncode == 0, result.stderr + result.stdout
     hermes_home = tmp_path / ".hermes"
-    pid_file = hermes_home / "webui.pid"
-    log_file = hermes_home / "webui.log"
-    pid = wait_for_pid_file(pid_file)
-    try:
-        assert pid > 1
-        assert log_file.exists()
-        fake_output = wait_for_file_text(fake_log)
-        assert "bootstrap.py --no-browser --foreground" in fake_output
-        assert "host=0.0.0.0 port=18991" in fake_output
-        assert str(hermes_home / "webui") in fake_output
-        status = run_ctl(tmp_path, "status")
-        assert status.returncode == 0
-        assert "running" in status.stdout
-        assert f"PID:     {pid}" in status.stdout
-        assert "Bound:   0.0.0.0:18991" in status.stdout
-        assert f"Log:     {log_file}" in status.stdout
-    finally:
-        stop = run_ctl(tmp_path, "stop")
-        assert stop.returncode == 0, stop.stderr + stop.stdout
-        assert_process_exits(pid)
-        assert not pid_file.exists()
+    assert (hermes_home / "webui.pid").read_text(encoding="utf-8").strip() == "43210"
+    state = (hermes_home / "webui.ctl.env").read_text(encoding="utf-8")
+    assert "HOST=0.0.0.0" in state
+    assert "PORT=18991" in state
+    assert captured["cmd"][:3] == [sys.executable, "-m", "hermes_webui.server"]
+    assert captured["kwargs"]["env"]["HERMES_WEBUI_STATE_DIR"] == str(hermes_home / "webui")
 
 
-def test_start_uses_nohup_so_daemon_survives_launcher_exit():
-    ctl_text = CTL.read_text(encoding="utf-8")
+def test_daemon_start_uses_discovered_agent_python(monkeypatch, tmp_path):
+    from hermes_webui import cli
 
-    assert "trap '' HUP" in ctl_text
-    assert 'exec nohup "${python_exe}"' in ctl_text
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    agent_dir = tmp_path / "agent-site"
+    agent_dir.mkdir()
+    agent_python = tmp_path / "agent-python"
+    agent_python.write_text("", encoding="utf-8")
+    captured = {}
 
+    class FakePopen:
+        pid = 43211
 
-def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    shutil.copy2(CTL, repo_root / "ctl.sh")
-    (repo_root / "bootstrap.py").write_text("# fake bootstrap target\n", encoding="utf-8")
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured["kwargs"] = kwargs
 
-    fake_python = tmp_path / "fake-python"
-    fake_log = tmp_path / "fake-python.log"
-    write_fake_python(fake_python)
-    (repo_root / ".env").write_text(
-        "HERMES_WEBUI_HOST=127.9.9.9\nHERMES_WEBUI_PORT=18888\n",
-        encoding="utf-8",
-    )
+    monkeypatch.setattr(cli.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(cli, "_is_alive", lambda pid: True)
+    monkeypatch.setattr(cli, "_resolve_server_python", lambda: (str(agent_python), agent_dir))
 
-    result = run_ctl(
-        tmp_path,
-        "start",
-        env={
-            "HERMES_WEBUI_PYTHON": str(fake_python),
-            "FAKE_PYTHON_LOG": str(fake_log),
-            "HERMES_WEBUI_HOST": "0.0.0.0",
-        },
-        repo_root=repo_root,
-    )
-    assert result.returncode == 0, result.stderr + result.stdout
-    pid = wait_for_pid_file(tmp_path / ".hermes" / "webui.pid")
-    try:
-        fake_output = wait_for_file_text(fake_log)
-        assert "fake-python args:" in fake_output
-        assert "host=0.0.0.0 port=18888" in fake_output
-    finally:
-        stop = run_ctl(tmp_path, "stop", repo_root=repo_root)
-        assert stop.returncode == 0, stop.stderr + stop.stdout
-        assert_process_exits(pid)
+    args = argparse.Namespace(host="127.0.0.1", port=18992, bootstrap_args=[])
+    assert cli._daemon_start(args) == 0
+
+    assert captured["cmd"][:3] == [str(agent_python), "-m", "hermes_webui.server"]
+    env = captured["kwargs"]["env"]
+    assert env["HERMES_WEBUI_AGENT_DIR"] == str(agent_dir)
+    assert env["HERMES_WEBUI_PYTHON"] == str(agent_python)
+    assert str(cli.PACKAGE_ROOT.parent) in env["PYTHONPATH"].split(":")
 
 
-def test_stale_pid_file_is_removed_without_killing_unrelated_process(tmp_path):
+def test_serve_reexecs_to_discovered_agent_python(monkeypatch, tmp_path):
+    from hermes_webui import cli
+
+    agent_dir = tmp_path / "agent-site"
+    agent_dir.mkdir()
+    agent_python = tmp_path / "agent-python"
+    agent_python.write_text("", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.delenv("HERMES_WEBUI_SERVER_REEXECED", raising=False)
+    monkeypatch.setattr(cli.sys, "executable", str(tmp_path / "uv-python"))
+    monkeypatch.setattr(cli, "_resolve_server_python", lambda: (str(agent_python), agent_dir))
+
+    captured = {}
+
+    def fake_execvpe(path, argv, env):
+        captured["path"] = path
+        captured["argv"] = argv
+        captured["env"] = env
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli.os, "execvpe", fake_execvpe)
+
+    with pytest.raises(SystemExit):
+        cli._serve(argparse.Namespace(host="127.0.0.1", port=18993))
+
+    assert captured["path"] == str(agent_python)
+    assert captured["argv"][:3] == [str(agent_python), "-m", "hermes_webui.cli"]
+    assert captured["argv"][-4:] == ["--host", "127.0.0.1", "--port", "18993"]
+    env = captured["env"]
+    assert env["HERMES_WEBUI_SERVER_REEXECED"] == "1"
+    assert env["HERMES_WEBUI_AGENT_DIR"] == str(agent_dir)
+    assert env["HERMES_WEBUI_PYTHON"] == str(agent_python)
+    assert str(cli.PACKAGE_ROOT.parent) in env["PYTHONPATH"].split(":")
+
+
+def test_daemon_stop_removes_stale_pid_without_killing(monkeypatch, tmp_path):
+    from hermes_webui import cli
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
-    pid_file = hermes_home / "webui.pid"
-    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    try:
-        pid_file.write_text(str(sleeper.pid), encoding="utf-8")
-        result = run_ctl(tmp_path, "stop")
-        assert result.returncode == 0
-        assert "stale" in (result.stdout + result.stderr).lower()
-        assert sleeper.poll() is None, "ctl.sh must not kill unrelated PIDs"
-        assert not pid_file.exists()
-    finally:
-        sleeper.terminate()
-        try:
-            sleeper.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            sleeper.kill()
+    (hermes_home / "webui.pid").write_text("999999\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_is_alive", lambda pid: False)
+
+    assert cli._daemon_stop(argparse.Namespace()) == 0
+    assert not (hermes_home / "webui.pid").exists()
 
 
-def test_logs_supports_non_following_line_count(tmp_path):
+def test_logs_supports_non_following_line_count(monkeypatch, tmp_path):
+    from hermes_webui import cli
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
     log_file = hermes_home / "webui.log"
     log_file.write_text("one\ntwo\nthree\n", encoding="utf-8")
 
-    result = run_ctl(tmp_path, "logs", "--lines", "2", "--no-follow")
+    calls = {}
 
+    def fake_call(cmd):
+        calls["cmd"] = cmd
+        return 0
+
+    monkeypatch.setattr(cli.subprocess, "call", fake_call)
+    assert cli._daemon_logs(argparse.Namespace(lines=2, follow=False)) == 0
+    assert calls["cmd"] == ["tail", "-n", "2", str(log_file)]
+
+
+def test_logs_reports_unwritable_log_path(monkeypatch, tmp_path, capsys):
+    from hermes_webui import cli
+
+    monkeypatch.setenv("HERMES_WEBUI_LOG_FILE", str(tmp_path / "webui.log"))
+    monkeypatch.setattr(Path, "touch", lambda *a, **k: (_ for _ in ()).throw(OSError("read-only")))
+
+    assert cli._daemon_logs(argparse.Namespace(lines=2, follow=False)) == 1
+    assert "cannot open log file" in capsys.readouterr().err
+
+
+def test_ctl_sh_delegates_to_packaged_cli():
+    ctl = Path(__file__).resolve().parents[1] / "ctl.sh"
+    result = subprocess.run(
+        ["bash", str(ctl), "--help"],
+        cwd=ctl.parent,
+        text=True,
+        capture_output=True,
+        timeout=5,
+    )
     assert result.returncode == 0
-    assert result.stdout == "two\nthree\n"
+    assert "hermes-webui" in result.stdout
+
+
+def test_version_flag_does_not_import_runtime_config(monkeypatch, capsys):
+    from hermes_webui import cli
+
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name in {"api.config", "api.updates"}:
+            raise AssertionError(f"--version should not import {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    monkeypatch.setattr(cli, "_cli_version", lambda: "test-version")
+
+    assert cli.main(["--version"]) == 0
+    assert capsys.readouterr().out.strip() == "test-version"
+
+
+def test_legacy_api_import_aliases_packaged_api_tree():
+    import hermes_webui  # noqa: F401 - package import installs the api alias.
+    import api.routes as legacy_routes
+
+    assert Path(legacy_routes.__file__).parts[-3:] == (
+        "hermes_webui",
+        "api",
+        "routes.py",
+    )
+
+
+def test_mcp_missing_extra_reports_actionable_error(monkeypatch, capsys):
+    from hermes_webui import cli
+
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "hermes_webui":
+            raise ModuleNotFoundError("No module named 'mcp'", name="mcp")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    assert cli._mcp(argparse.Namespace(profile=None)) == 1
+    assert "MCP support is not installed" in capsys.readouterr().err
+
+
+def test_server_reuses_address_for_fast_daemon_restart():
+    server = Path(__file__).resolve().parents[1] / "server.py"
+    source = server.read_text(encoding="utf-8")
+    assert "allow_reuse_address = True" in source

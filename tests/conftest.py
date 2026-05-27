@@ -11,7 +11,8 @@ PATH DISCOVERY:
     1. Environment variables (HERMES_WEBUI_AGENT_DIR, HERMES_WEBUI_PYTHON, etc.)
     2. Sibling checkout heuristics relative to this repo
     3. Common install paths (~/.hermes/hermes-agent)
-    4. System python3 as a last resort
+    4. Installed hermes/hermes-agent wrapper Python
+    5. System python3 as a last resort
 """
 import json
 import os
@@ -22,6 +23,8 @@ import time
 import urllib.request
 import urllib.error
 import pytest
+
+from hermes_webui import agent_discovery
 
 # ── Repo root discovery ────────────────────────────────────────────────────
 # conftest.py lives at <repo>/tests/conftest.py
@@ -82,8 +85,8 @@ if not SERVER_SCRIPT.exists():
         "Is conftest.py in the tests/ subdirectory of the repo?"
     )
 
-# ── Hermes agent discovery (mirrors api/config._discover_agent_dir) ───────
-def _discover_agent_dir() -> pathlib.Path:
+# ── Hermes agent discovery ────────────────────────────────────────────────
+def _discover_agent_dir() -> pathlib.Path | None:
     candidates = [
         os.getenv('HERMES_WEBUI_AGENT_DIR', ''),
         str(HERMES_HOME / 'hermes-agent'),
@@ -97,9 +100,9 @@ def _discover_agent_dir() -> pathlib.Path:
         p = pathlib.Path(c).expanduser()
         if p.exists() and (p / 'run_agent.py').exists():
             return p.resolve()
-    return None
+    return agent_discovery.agent_dir_from_hermes_cli()
 
-# ── Python discovery (mirrors api/config._discover_python) ────────────────
+# ── Python discovery ──────────────────────────────────────────────────────
 def _discover_python(agent_dir) -> str:
     if os.getenv('HERMES_WEBUI_PYTHON'):
         return os.getenv('HERMES_WEBUI_PYTHON')
@@ -107,6 +110,9 @@ def _discover_python(agent_dir) -> str:
         venv_py = agent_dir / 'venv' / 'bin' / 'python'
         if venv_py.exists():
             return str(venv_py)
+    hermes_python = agent_discovery.hermes_python_from_cli()
+    if hermes_python:
+        return hermes_python
     local_venv = REPO_ROOT / '.venv' / 'bin' / 'python'
     if local_venv.exists():
         return str(local_venv)
@@ -115,8 +121,13 @@ def _discover_python(agent_dir) -> str:
 HERMES_AGENT = _discover_agent_dir()
 VENV_PYTHON  = _discover_python(HERMES_AGENT)
 
-# Work dir: agent dir if found, else repo root
-WORKDIR = str(HERMES_AGENT) if HERMES_AGENT else str(REPO_ROOT)
+# Work dir: writable agent checkouts are fine, but packaged import roots can be
+# read-only (for example Nix store site-packages). Keep those runs in this repo.
+WORKDIR = (
+    str(HERMES_AGENT)
+    if HERMES_AGENT and os.access(HERMES_AGENT, os.W_OK)
+    else str(REPO_ROOT)
+)
 
 # ── Agent availability detection ─────────────────────────────────────────────
 # Tests that require hermes-agent modules (cron, skills, approval, chat/stream)

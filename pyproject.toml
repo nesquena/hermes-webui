@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-webui"
+version = "0.0.0"
+description = "Browser interface for Hermes Agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp"]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "pytest-timeout",
+]
+
+[project.scripts]
+hermes-webui = "hermes_webui.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["hermes_webui*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+hermes_webui = ["static/**/*"]

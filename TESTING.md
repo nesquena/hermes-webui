@@ -534,7 +534,7 @@ FAIL: Sidebar causes layout overflow or blocks chat.
 SETUP: SSH access to the server.
 STEPS:
   1. In a terminal: tail -f ~/.hermes/webui/bootstrap-8787.log
-     (or tail -f ~/.hermes/webui.log when launched through `ctl.sh`)
+     (or tail -f ~/.hermes/webui.log when launched through `hermes-webui start`)
   2. In browser: perform any action (load page, send message, click file)
 EXPECT:
   - Log entries appear in terminal as JSON: {"ts":"...","method":"GET","path":"/health","status":200,"ms":0.1}

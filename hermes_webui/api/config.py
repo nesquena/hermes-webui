@@ -17,6 +17,7 @@ import logging
 import os
 import queue
 import re
+import shutil
 import sys
 import threading
 import time
@@ -25,10 +26,14 @@ import uuid
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from hermes_webui import agent_discovery
+
 # ── Basic layout ──────────────────────────────────────────────────────────────
 HOME = Path.home()
-# REPO_ROOT is the directory that contains this file's parent (api/ -> repo root)
-REPO_ROOT = Path(__file__).parent.parent.resolve()
+# PACKAGE_ROOT contains the import package and packaged static assets.
+PACKAGE_ROOT = Path(__file__).resolve().parents[1]
+# REPO_ROOT points at the source checkout when running editable/from source.
+REPO_ROOT = PACKAGE_ROOT.parent if (PACKAGE_ROOT.parent / "pyproject.toml").exists() else PACKAGE_ROOT
 
 
 def _platform_default_hermes_home() -> Path:
@@ -102,7 +107,7 @@ def _env_mb_bytes(name: str, default_mb: int) -> int:
 
 
 # ── Hermes agent directory discovery ─────────────────────────────────────────
-def _discover_agent_dir() -> Path:
+def _discover_agent_dir() -> Path | None:
     """
     Locate the hermes-agent checkout using a multi-strategy search.
 
@@ -113,6 +118,9 @@ def _discover_agent_dir() -> Path:
       4. Parent of this repo             -- ../../hermes-agent (nested layout)
       5. Common install paths            -- ~/.hermes/hermes-agent (again as fallback)
       6. HOME / hermes-agent             -- ~/hermes-agent (simple flat layout)
+      7. XDG/WebUI-owned local paths     -- XDG-style local installs
+      8. System-wide install paths       -- /opt, /usr/local
+      9. hermes/hermes-agent wrapper     -- Nix and other wrapped installs
     """
     candidates = []
 
@@ -142,8 +150,17 @@ def _discover_agent_dir() -> Path:
     # 7. XDG_DATA_HOME / hermes-agent  (e.g. ~/.local/share/hermes-agent)
     xdg_data = Path(os.getenv("XDG_DATA_HOME", str(HOME / ".local" / "share")))
     candidates.append(xdg_data.expanduser() / "hermes-agent")
+    candidates.append(xdg_data.expanduser() / "hermes" / "hermes-agent")
+    candidates.append(xdg_data.expanduser() / "hermes-webui" / "hermes-agent")
 
-    # 8. System-wide install paths (e.g. /opt/hermes-agent, /usr/local/hermes-agent)
+    # 8. XDG_STATE_HOME / hermes-webui/hermes-agent for agent stateful installs
+    xdg_state = Path(os.getenv("XDG_STATE_HOME", str(HOME / ".local" / "state")))
+    candidates.append(xdg_state.expanduser() / "hermes-webui" / "hermes-agent")
+
+    # 9. Legacy non-XDG fallback owned by WebUI rather than the agent.
+    candidates.append(HOME / ".hermes-webui" / "hermes-agent")
+
+    # 10. System-wide install paths (e.g. /opt/hermes-agent, /usr/local/hermes-agent)
     for sys_prefix in ("/opt", "/usr/local", "/usr/local/share"):
         candidates.append(Path(sys_prefix) / "hermes-agent")
 
@@ -151,18 +168,19 @@ def _discover_agent_dir() -> Path:
         if path.exists() and (path / "run_agent.py").exists():
             return path.resolve()
 
-    return None
+    return agent_discovery.agent_dir_from_hermes_cli()
 
 
-def _discover_python(agent_dir: Path) -> str:
+def _discover_python(agent_dir: Path | None) -> str:
     """
     Locate a Python executable that has the Hermes agent dependencies installed.
 
     Priority:
       1. HERMES_WEBUI_PYTHON env var
       2. Agent venv at <agent_dir>/venv/bin/python
-      3. Local .venv inside this repo
-      4. System python3
+      3. Installed hermes/hermes-agent wrapper Python
+      4. Local .venv inside this repo
+      5. System python3
     """
     if os.getenv("HERMES_WEBUI_PYTHON"):
         return os.getenv("HERMES_WEBUI_PYTHON")
@@ -171,7 +189,7 @@ def _discover_python(agent_dir: Path) -> str:
         venv_py = agent_dir / "venv" / "bin" / "python"
         if venv_py.exists():
             return str(venv_py)
-        
+
         venv_py = agent_dir / ".venv" / "bin" / "python"
         if venv_py.exists():
             return str(venv_py)
@@ -180,10 +198,14 @@ def _discover_python(agent_dir: Path) -> str:
         venv_py_win = agent_dir / "venv" / "Scripts" / "python.exe"
         if venv_py_win.exists():
             return str(venv_py_win)
-        
+
         venv_py_win = agent_dir / ".venv" / "Scripts" / "python.exe"
         if venv_py_win.exists():
             return str(venv_py_win)
+
+    hermes_python = agent_discovery.hermes_python_from_cli()
+    if hermes_python:
+        return hermes_python
 
     # Local .venv inside this repo
     local_venv = REPO_ROOT / ".venv" / "bin" / "python"
@@ -191,8 +213,6 @@ def _discover_python(agent_dir: Path) -> str:
         return str(local_venv)
 
     # Fall back to system python3
-    import shutil
-
     for name in ("python3", "python"):
         found = shutil.which(name)
         if found:
@@ -503,6 +523,10 @@ def print_startup_config() -> None:
             "      To fix, set one of:\n"
             "        export HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent\n"
             "        export HERMES_HOME=/path/to/.hermes\n"
+            "\n"
+            "      WebUI also checks XDG data/state paths and installed\n"
+            "      hermes/hermes-agent wrappers on PATH. If Hermes Agent is\n"
+            "      installed by a package manager, make sure `hermes` is on PATH.\n"
             "\n"
             "      Or clone hermes-agent as a sibling of this repo:\n"
             "        git clone <hermes-agent-repo> ../hermes-agent\n",
@@ -4529,7 +4553,7 @@ def get_available_models() -> dict:
 
 
 # ── Static file path ─────────────────────────────────────────────────────────
-_INDEX_HTML_PATH = REPO_ROOT / "static" / "index.html"
+_INDEX_HTML_PATH = PACKAGE_ROOT / "static" / "index.html"
 
 # ── Thread synchronisation ───────────────────────────────────────────────────
 LOCK = threading.Lock()

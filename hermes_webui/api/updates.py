@@ -21,7 +21,7 @@ from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlparse
 
-from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+from api.config import PACKAGE_ROOT, REPO_ROOT, STREAMS, STREAMS_LOCK
 
 # Lazy -- may be None if agent not found
 try:
@@ -151,7 +151,7 @@ def _detect_webui_version() -> str:
     # Docker / baked-image fallback: api/_version.py written by CI at build time.
     # Parse with regex rather than exec() — the file holds exactly one assignment
     # and regex is sufficient; exec() on a build artifact is an unnecessary surface.
-    version_file = REPO_ROOT / 'api' / '_version.py'
+    version_file = PACKAGE_ROOT / 'api' / '_version.py'
     if version_file.exists():
         try:
             import re as _re

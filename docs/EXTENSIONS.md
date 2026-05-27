@@ -43,7 +43,7 @@ existing directory before any script or stylesheet URLs are injected:
 export HERMES_WEBUI_EXTENSION_DIR=/path/to/my-extension/static
 export HERMES_WEBUI_EXTENSION_SCRIPT_URLS=/extensions/app.js
 export HERMES_WEBUI_EXTENSION_STYLESHEET_URLS=/extensions/app.css
-./start.sh
+hermes-webui web
 ```
 
 Multiple URLs may be comma-separated:
@@ -206,7 +206,7 @@ Start WebUI with the extension enabled:
 HERMES_WEBUI_EXTENSION_DIR=~/.hermes/webui-extension \
 HERMES_WEBUI_EXTENSION_STYLESHEET_URLS=/extensions/app.css \
 HERMES_WEBUI_EXTENSION_SCRIPT_URLS=/extensions/app.js \
-./start.sh
+hermes-webui web
 ```
 
 Open the WebUI and confirm the badge appears.

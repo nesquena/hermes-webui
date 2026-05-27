@@ -51,6 +51,9 @@ class TestBlockedRootsCanonicalisation:
         assert Path('/var') in _workspace_blocked_roots()
         assert Path('/var').resolve() in _workspace_blocked_roots()
 
+    def test_nix_store_blocked(self):
+        assert _is_blocked_system_path(Path('/nix/store/example-workspace'))
+
 
 # ── /etc is rejected on both Linux and macOS ────────────────────────────────
 

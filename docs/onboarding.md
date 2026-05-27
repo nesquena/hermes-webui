@@ -55,7 +55,8 @@ mkdir -p ~/hermes-onboarding-test
 HERMES_HOME=~/hermes-onboarding-test/.hermes \
 HERMES_WEBUI_STATE_DIR=~/hermes-onboarding-test/webui \
 HERMES_WEBUI_PORT=8789 \
-python3 bootstrap.py
+python3 -m pip install -e .
+hermes-webui web
 ```
 
 Then open `http://127.0.0.1:8789`.

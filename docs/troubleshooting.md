@@ -30,7 +30,7 @@ The third command must succeed (the file must exist). If it fails, your symlink 
 ### Step 2 — confirm the WebUI is using the right Python
 
 ```bash
-cd ~/hermes-webui && ./start.sh 2>&1 | grep -iE 'agent|python|hermes_webui_python' | head -20
+cd ~/hermes-webui && hermes-webui web --no-browser 2>&1 | grep -iE 'agent|python|hermes_webui_python' | head -20
 ```
 
 The startup banner prints which Python and agent dir it resolved. If the agent dir is empty or the Python is the wrong one, set the override:
@@ -38,7 +38,7 @@ The startup banner prints which Python and agent dir it resolved. If the agent d
 ```bash
 export HERMES_WEBUI_AGENT_DIR=/absolute/path/to/hermes-agent
 export HERMES_WEBUI_PYTHON=/absolute/path/to/agent/venv/bin/python
-./start.sh
+hermes-webui web --no-browser
 ```
 
 ### Step 3 — install the agent in editable mode
@@ -54,7 +54,7 @@ Then restart the WebUI:
 
 ```bash
 cd ~/hermes-webui
-./start.sh
+hermes-webui web --no-browser
 ```
 
 ### Step 4 — verify by importing manually

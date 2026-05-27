@@ -304,6 +304,7 @@ def _workspace_blocked_roots() -> tuple[Path, ...]:
         '/lib',
         '/lib64',
         '/opt/homebrew',
+        '/nix/store',  # NixOS immutable system store; not a writable workspace root
         '/System',
         '/Library',
     )

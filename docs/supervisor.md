@@ -6,10 +6,10 @@ other services.
 
 ## TL;DR
 
-Pass ``--foreground`` to ``bootstrap.py`` (or ``bash start.sh``):
+Use the packaged foreground command:
 
 ```bash
-bash start.sh --foreground
+hermes-webui serve
 ```
 
 Or set ``HERMES_WEBUI_FOREGROUND=1`` in the environment. The Web UI will
@@ -18,21 +18,21 @@ explicit is safer.
 
 ## Why ``--foreground`` matters
 
-Without it, ``bootstrap.py`` does this:
+Without foreground mode, the legacy bootstrap path does this:
 
 1. Spawn ``server.py`` as a detached subprocess (``start_new_session=True``)
 2. Probe ``/health`` until the server is up
 3. Exit 0
 
-That works for an interactive shell run (``./start.sh`` returns to your
+That works for an interactive shell run (legacy ``./start.sh`` returns to your
 prompt with the server alive in the background). It is **broken** under any
 process supervisor: the supervisor sees its tracked PID exit, marks the job
-as completed, and respawns ``bootstrap.py``. The respawn fails to bind port
+as completed, and respawns the bootstrap. The respawn fails to bind port
 8787 (the orphaned server still has it), exits non-zero, supervisor
 respawns again — loop.
 
-In foreground mode, ``bootstrap.py`` does its setup work and then calls
-``os.execv`` to replace its own process with ``server.py``. The supervisor
+In foreground mode, the bootstrap does its setup work and then calls
+``os.execv`` to replace its own process with the server. The supervisor
 sees the long-lived server as the original child. ``KeepAlive=true`` /
 ``Restart=always`` work correctly.
 
@@ -50,9 +50,8 @@ sees the long-lived server as the original child. ``KeepAlive=true`` /
 
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>/Users/yourname/hermes-webui/start.sh</string>
-        <string>--foreground</string>
+        <string>/Users/yourname/.local/bin/hermes-webui</string>
+        <string>serve</string>
     </array>
 
     <key>WorkingDirectory</key>
@@ -111,7 +110,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=%h/hermes-webui
-ExecStart=/bin/bash %h/hermes-webui/start.sh --foreground
+ExecStart=%h/.local/bin/hermes-webui serve
 Restart=on-failure
 RestartSec=5
 
@@ -140,7 +139,7 @@ the journal), both of which auto-promote to foreground mode.
 
 ```ini
 [program:hermes-webui]
-command=/bin/bash /home/youruser/hermes-webui/start.sh --foreground
+command=/home/youruser/.local/bin/hermes-webui serve
 directory=/home/youruser/hermes-webui
 user=youruser
 autostart=true
@@ -186,9 +185,8 @@ not just real services. Typical noise values:
 - ``application.com.googlecode.iterm2`` — iTerm2
 - ``application.com.microsoft.VSCode`` — VSCode integrated terminal
 
-A bare existence check on this var would auto-promote interactive
-``./start.sh`` runs to foreground mode on every Mac dev machine, breaking
-the most common installation path. We narrow detection to launchd
+A bare existence check on this var would auto-promote interactive legacy
+script runs to foreground mode on every Mac dev machine. We narrow detection to launchd
 **Label-style** names (typically reverse-DNS like ``com.example.foo``).
 Real launchd plists always use this form. If you ever see
 ``XPC_SERVICE_NAME=0`` in your service environment, the auto-detect will

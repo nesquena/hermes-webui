@@ -71,7 +71,7 @@ mkdir -p ~/hermes-onboarding-test
 HERMES_HOME=~/hermes-onboarding-test/.hermes \
 HERMES_WEBUI_STATE_DIR=~/hermes-onboarding-test/webui \
 HERMES_WEBUI_PORT=8789 \
-python3 bootstrap.py
+hermes-webui web
 ```
 
 Open:
@@ -87,7 +87,7 @@ directory:
 ~/hermes-onboarding-test/webui/bootstrap-8789.log
 ```
 
-For daemon-style installs, `ctl.sh` writes the daemon log to the active
+For daemon-style installs, `hermes-webui start` writes the daemon log to the active
 `HERMES_HOME` by default:
 
 ```text
@@ -95,7 +95,7 @@ For daemon-style installs, `ctl.sh` writes the daemon log to the active
 ```
 
 When using the isolated trial environment, prefer the bootstrap command above
-unless the human specifically wants to validate `ctl.sh`.
+unless the human specifically wants to validate daemon control.
 
 ## Non-secret evidence commands
 
@@ -155,7 +155,7 @@ If the server does not start:
 
 - check the bootstrap log
 - check for a port conflict on `8789`
-- confirm Python can run `bootstrap.py`
+- confirm Python can run `hermes-webui web`
 - confirm `.env` is not overriding the isolated directories or port
 
 If onboarding reports `agent_unavailable`:
