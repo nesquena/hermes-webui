@@ -1820,7 +1820,6 @@ def scheduled_source_refresh_tick(*, limit: int = 25, now: str | None = None) ->
         model_route_hint="hint:summarize",
     )
     policy.pop("model_route", None)
-    policy.pop("model_route_resolution", None)
     return {
         "ok": True,
         "local_only": True,

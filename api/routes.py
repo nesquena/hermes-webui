@@ -4420,7 +4420,7 @@ def handle_post(handler, parsed) -> bool:
                 safe_payload["jobs"] = _safe_source_refresh_public_jobs(result.get("jobs", []), limit=limit)
                 policy = result.get("autonomy_policy")
                 if isinstance(policy, dict) and policy.get("action") == "capy.memory.refresh.scheduled":
-                    safe_payload["autonomy_policy"] = {
+                    safe_policy = {
                         key: value
                         for key, value in policy.items()
                         if key
@@ -4437,6 +4437,28 @@ def handle_post(handler, parsed) -> bool:
                             "local_only",
                         }
                     }
+                    route_resolution = policy.get("model_route_resolution")
+                    if isinstance(route_resolution, dict) and route_resolution.get("metadata_only") is True:
+                        from api.capy_policy import safe_model_route_field
+
+                        safe_route_resolution = {}
+                        for key in ("hint", "label", "resolved_provider", "resolved_model"):
+                            value = safe_model_route_field(route_resolution.get(key))
+                            if value:
+                                safe_route_resolution[key] = value
+                        resolution = str(route_resolution.get("resolution") or "").strip().lower()
+                        if resolution in {"configured", "default_fallback"}:
+                            safe_route_resolution["resolution"] = resolution
+                        fallback_reason = str(route_resolution.get("fallback_reason") or "").strip().lower()
+                        if fallback_reason in {"unsafe_config", "unknown_hint", "unconfigured_hint"}:
+                            safe_route_resolution["fallback_reason"] = fallback_reason
+                        if route_resolution.get("metadata_only") is True:
+                            safe_route_resolution["metadata_only"] = True
+                        if route_resolution.get("local_only") is True:
+                            safe_route_resolution["local_only"] = True
+                        if {"hint", "label", "resolved_provider", "resolved_model", "resolution", "metadata_only", "local_only"}.issubset(safe_route_resolution):
+                            safe_policy["model_route_resolution"] = safe_route_resolution
+                    safe_payload["autonomy_policy"] = safe_policy
             j(handler, safe_payload)
             return True
         except ValueError as exc:

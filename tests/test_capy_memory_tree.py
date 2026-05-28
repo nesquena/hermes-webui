@@ -736,7 +736,16 @@ def test_scheduled_source_refresh_tick_queues_due_sources_and_runs_metadata_only
     assert policy["prompt_preflight_status"] == "pass"
     assert policy["model_route_hint"] == "hint:summarize"
     assert "model_route" not in policy
-    assert "model_route_resolution" not in policy
+    assert policy["model_route_resolution"] == {
+        "hint": "hint:summarize",
+        "label": "Summarize",
+        "resolved_provider": "current Hermes provider",
+        "resolved_model": "configured summarize model",
+        "resolution": "default_fallback",
+        "fallback_reason": "unconfigured_hint",
+        "metadata_only": True,
+        "local_only": True,
+    }
     assert "secret_value_do_not_leak" not in serialized
     assert "api_key" not in serialized
     assert "opensesame" not in serialized
@@ -759,7 +768,24 @@ def test_capy_memory_scheduled_refresh_route_returns_bounded_policy_receipt(monk
             "queued": 0,
             "processed": 0,
             "jobs": [],
-            "autonomy_policy": {"action": "capy.memory.refresh.scheduled", "metadata_only": True},
+            "autonomy_policy": {
+                "action": "capy.memory.refresh.scheduled",
+                "metadata_only": True,
+                "model_route_hint": "hint:summarize",
+                "model_route": {"resolved_provider": "SECRET_VALUE_DO_NOT_LEAK", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+                "model_route_resolution": {
+                    "hint": "hint:summarize",
+                    "label": "Summarize",
+                    "resolved_provider": "current Hermes provider",
+                    "resolved_model": "configured summarize model",
+                    "resolution": "default_fallback",
+                    "fallback_reason": "unconfigured_hint",
+                    "metadata_only": True,
+                    "local_only": True,
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                    "renderer": "<script>bad()</script>",
+                },
+            },
             "renderer": "<script>bad()</script>",
             "api_key": "SECRET_VALUE_DO_NOT_LEAK",
         }
@@ -780,7 +806,21 @@ def test_capy_memory_scheduled_refresh_route_returns_bounded_policy_receipt(monk
         "queued": 0,
         "processed": 0,
         "jobs": [],
-        "autonomy_policy": {"action": "capy.memory.refresh.scheduled", "metadata_only": True},
+        "autonomy_policy": {
+            "action": "capy.memory.refresh.scheduled",
+            "metadata_only": True,
+            "model_route_hint": "hint:summarize",
+            "model_route_resolution": {
+                "hint": "hint:summarize",
+                "label": "Summarize",
+                "resolved_provider": "current Hermes provider",
+                "resolved_model": "configured summarize model",
+                "resolution": "default_fallback",
+                "fallback_reason": "unconfigured_hint",
+                "metadata_only": True,
+                "local_only": True,
+            },
+        },
     }
     assert "secret_value_do_not_leak" not in serialized
     assert "api_key" not in serialized
