@@ -403,3 +403,66 @@ def test_reconnect_uses_full_accumulator_when_live_tail_is_segmented():
     assert "_liveInflightAssistantMessages.length>1" in assistant_block.replace(" ", "")
     assert "_fullInflightAssistant" in assistant_block
     assert "lastAssistantText" in body[helper_pos:last_text_pos]
+
+
+def test_reconnect_seeds_segment_start_from_last_burst_anchor():
+    """On reattach, segmentStart must align with the last burst anchor's textEnd.
+
+    Without this, _doRender at segmentStart===0 uses the full visible text as
+    displayText, so the smd parser (after _smdReconnect clears assistantBody)
+    rewrites the entire accumulated text into the first live assistant segment.
+    The per-burst segments rendered by _projectInflightMessagesForActivityBursts
+    are left stale, Activity groups end up visually marooned among duplicate
+    text, and the user sees Activity cards pile up at the tail of the turn.
+    """
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    seg_start_pos = body.find("let segmentStart=(()=>{")
+    assert seg_start_pos != -1, (
+        "segmentStart must be initialized via a reconnect-aware IIFE that reads "
+        "INFLIGHT.activityBurstAnchors so the smd parser rewrites only the "
+        "tail-burst segment, not the full text."
+    )
+    seg_end_pos = body.find("})();", seg_start_pos)
+    assert seg_end_pos != -1, "segmentStart IIFE must close with })();"
+    seg_block = body[seg_start_pos:seg_end_pos]
+    assert "activityBurstAnchors" in seg_block
+    assert "reconnecting" in seg_block, "segmentStart should only shift when reconnecting"
+    assert "textEnd" in seg_block
+
+
+def test_ensure_assistant_row_reattaches_to_last_live_segment():
+    """ensureAssistantRow must pick the LAST live segment, not the first.
+
+    After session-switch reattach, the projected DOM holds one
+    [data-live-assistant="1"] per recorded burst anchor plus a tail.  New
+    tokens belong to the tail segment.  querySelector returns the first
+    match, which would funnel all post-reattach tokens into segment 1,
+    leaving the per-burst segments stale and Activity anchors visually
+    detached.
+    """
+    body = _function_body(MESSAGES_JS, "ensureAssistantRow")
+    assert "querySelectorAll('[data-live-assistant=\"1\"]')" in body, (
+        "must enumerate every live segment so the tail can be selected"
+    )
+    # Sanity: still has the fresh-segment guard so post-tool turns don't
+    # reuse the previous text segment that sits above the new tool card.
+    assert "if(!_freshSegment)" in body
+    # The selected segment must be the last entry, not the first.
+    assert "liveSegments[liveSegments.length-1]" in body
+
+
+def test_reconnect_without_tail_forces_fresh_segment_after_activity():
+    """If reconnect resumes at the last recorded boundary, no tail segment exists.
+
+    The next token should create a new segment after the previous Activity group
+    instead of reusing the last burst's text segment above that Activity.
+    """
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    fresh_pos = body.find("let _freshSegment=")
+    seg_pos = body.find("let segmentStart=(()=>{")
+    assert seg_pos != -1 and fresh_pos != -1
+    assert seg_pos < fresh_pos
+    fresh_line = body[fresh_pos:body.find(";", fresh_pos)]
+    assert "reconnecting" in fresh_line
+    assert "segmentStart>0" in fresh_line
+    assert "segmentStart>=String(assistantText||'').length" in fresh_line

@@ -711,8 +711,32 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _pendingGoalContinuation=null;
   let assistantRow=null;
   let assistantBody=null;
-  let segmentStart=0;      // char offset in assistantText where current segment begins
-  let _freshSegment=false; // true after a tool call — forces a new DOM segment
+  // On reconnect with recorded burst anchors, the rendered DOM has multiple
+  // live assistant segments — one per anchor plus a tail. New tokens belong to
+  // the TAIL segment only. Without aligning segmentStart to the last anchor's
+  // textEnd, _doRender treats segmentStart===0 as "full text" and the smd
+  // parser writes the entire accumulated text into the first live segment
+  // (after _smdReconnect clears it), bloating segment 1 and leaving the rest
+  // stale. Activity groups still anchor by burst id but appear surrounded by
+  // duplicated/orphaned text, which presents as "Activity piled after text".
+  let segmentStart=(()=>{
+    if(!reconnecting) return 0;
+    const inflight=INFLIGHT[activeSid];
+    if(!inflight) return 0;
+    const anchors=Array.isArray(inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[];
+    const textLen=String(assistantText||'').length;
+    let lastEnd=0;
+    for(const a of anchors){
+      const end=Number(a&&a.textEnd);
+      if(Number.isFinite(end)&&end>lastEnd&&end<=textLen) lastEnd=end;
+    }
+    return lastEnd;
+  })();
+  // If reconnect resumes exactly at the last recorded boundary, there is no
+  // projected tail segment yet. The next token must create a fresh segment
+  // after the last Activity group instead of rewriting the previous burst's
+  // text segment.
+  let _freshSegment=reconnecting&&segmentStart>0&&segmentStart>=String(assistantText||'').length; // true after a tool call — forces a new DOM segment
   // streaming-markdown state: incremental DOM-building parser per segment
   let _smdParser=null;     // current smd parser instance (null until first content)
   let _smdWrittenLen=0;    // how many chars of displayText have been fed to smd parser
@@ -899,7 +923,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // After a tool call _freshSegment=true, so we always create a new segment
       // below the tool card rather than re-attaching to the old one above it.
       if(!_freshSegment){
-        const existing=blocks.querySelector('[data-live-assistant="1"]');
+        // Pick the LAST live segment, not the first. After session-switch reattach
+        // the projected DOM has one [data-live-assistant="1"] per burst anchor plus
+        // a tail segment; new tokens belong to the tail. querySelector returns the
+        // first match, which would funnel all new tokens into segment 1 — leaving
+        // the per-burst segments stale and Activity groups visually marooned.
+        const liveSegments=blocks.querySelectorAll('[data-live-assistant="1"]');
+        const existing=liveSegments.length?liveSegments[liveSegments.length-1]:null;
         if(existing){
           assistantRow=existing;
           assistantBody=existing.querySelector('.msg-body');
@@ -1565,7 +1595,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // journal events after this EventSource has already rendered part of a run.
     return `&replay=1&after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}`;
   }
-
   let _lastRenderMs=0;
   function _scheduleRender(){
     if(_renderPending) return;
@@ -1636,7 +1665,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{existingLive.source.close();}catch(_){ }
     }
     LIVE_STREAMS[activeSid]={streamId,source};
-
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
     // the accumulators here so the re-sent tokens wouldn't double the prefix.

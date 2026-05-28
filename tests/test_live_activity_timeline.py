@@ -207,6 +207,51 @@ def test_inactive_interim_assistant_still_records_activity_boundary():
         assert "_resetAssistantSegment();" in branch
 
 
+def test_reattach_segment_start_aligns_with_last_burst_anchor():
+    """Simulate the reattach segmentStart initializer with multiple anchors.
+
+    The initializer must clamp to the actual assistantText length and ignore
+    stale anchors past the end of the text, otherwise displayText slicing in
+    _doRender would produce empty output for the tail segment.
+    """
+    assert NODE, "node not on PATH"
+    body = MESSAGES_JS.split("function attachLiveStream(", 1)[1]
+    seg_block_start = body.find("let segmentStart=(()=>{")
+    assert seg_block_start != -1, "expected reconnect-aware segmentStart IIFE"
+    seg_block_end = body.find("})();", seg_block_start) + len("})();")
+    initializer = body[seg_block_start:seg_block_end] + ";"
+    # Wrap as a callable with explicit reconnecting + INFLIGHT/activeSid stand-ins.
+    script = f"""
+const assert = require('assert');
+function computeStart(reconnecting, inflight, assistantText) {{
+  const INFLIGHT = {{ 'sid': inflight }};
+  const activeSid = 'sid';
+  {initializer}
+  return segmentStart;
+}}
+// No anchors -> 0
+assert.strictEqual(computeStart(true, {{activityBurstAnchors:[]}}, 'hello world'), 0);
+// Single anchor inside text length -> anchor textEnd
+assert.strictEqual(computeStart(true, {{activityBurstAnchors:[{{id:1,textEnd:5}}]}}, 'hello world'), 5);
+// Multiple anchors -> picks max textEnd within text length
+assert.strictEqual(computeStart(true, {{activityBurstAnchors:[
+  {{id:1,textEnd:5}}, {{id:2,textEnd:11}}, {{id:3,textEnd:7}}
+]}}, 'hello world'), 11);
+// Anchor textEnd past assistantText length -> ignored
+assert.strictEqual(computeStart(true, {{activityBurstAnchors:[
+  {{id:1,textEnd:5}}, {{id:2,textEnd:99}}
+]}}, 'hello world'), 5);
+// Not reconnecting -> always 0
+assert.strictEqual(computeStart(false, {{activityBurstAnchors:[
+  {{id:1,textEnd:5}}, {{id:2,textEnd:11}}
+]}}, 'hello world'), 0);
+// Missing inflight entry -> 0
+assert.strictEqual(computeStart(true, undefined, 'hello'), 0);
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
 def test_activity_status_rows_have_quiet_metadata_styling():
     assert ".agent-activity-status{" in STYLE_CSS
     assert "grid-template-columns:18px minmax(0,1fr) auto" in STYLE_CSS
