@@ -2134,6 +2134,38 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     return []
 
 
+def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] | None:
+    """Return reasoning efforts from Hermes Agent model metadata when known.
+
+    ``None`` means the metadata source is unavailable or has no answer, so the
+    caller should continue to compatibility fallbacks. A concrete list (including
+    ``[]``) is authoritative.
+    """
+    model = _strip_provider_hint_for_reasoning(model_id)
+    provider = str(provider_id or "").strip().lower()
+    if not model or not provider:
+        return None
+
+    try:
+        from agent.models_dev import get_model_capabilities
+    except Exception:
+        return None
+
+    try:
+        capabilities = get_model_capabilities(provider=provider, model=model)
+    except Exception:
+        return None
+    if capabilities is None:
+        return None
+
+    supports_reasoning = getattr(capabilities, "supports_reasoning", None)
+    if supports_reasoning is True:
+        return list(VALID_REASONING_EFFORTS)
+    if supports_reasoning is False:
+        return []
+    return None
+
+
 def resolve_model_reasoning_efforts(
     model_id: str | None = None,
     provider_id: str | None = None,
@@ -2156,51 +2188,42 @@ def resolve_model_reasoning_efforts(
     if provider in {"cursor-acp", "copilot-acp"}:
         return []
 
+    hinted_model = _strip_provider_hint_for_reasoning(model)
+
     try:
         from hermes_cli.models import (
             github_model_reasoning_efforts,
             lmstudio_model_reasoning_options,
         )
     except Exception:
-        return _heuristic_reasoning_efforts(model, provider)
+        if provider in {"copilot", "github-copilot"}:
+            return _heuristic_reasoning_efforts(hinted_model, provider)
+    else:
+        if provider in {"copilot", "github-copilot"}:
+            return github_model_reasoning_efforts(hinted_model)
 
-    hinted_model = _strip_provider_hint_for_reasoning(model)
-    if provider in {"copilot", "github-copilot"}:
-        return github_model_reasoning_efforts(hinted_model)
+        if provider == "openai-codex":
+            bare = hinted_model.rsplit("/", 1)[-1]
+            return github_model_reasoning_efforts(bare)
 
-    if provider == "openai-codex":
-        bare = hinted_model.rsplit("/", 1)[-1]
-        return github_model_reasoning_efforts(bare)
-
-    if provider == "lmstudio":
-        probe_base = resolved_base_url or _get_provider_base_url(provider)
-        opts = lmstudio_model_reasoning_options(model, probe_base)
-        normalized = [str(opt).strip().lower() for opt in opts if str(opt).strip()]
-        if not normalized or set(normalized).issubset({"off"}):
+        if provider == "lmstudio":
+            probe_base = resolved_base_url or _get_provider_base_url(provider)
+            opts = lmstudio_model_reasoning_options(hinted_model, probe_base)
+            normalized = [str(opt).strip().lower() for opt in opts if str(opt).strip()]
+            if not normalized or set(normalized).issubset({"off"}):
+                return []
+            level_opts = [opt for opt in normalized if opt in VALID_REASONING_EFFORTS]
+            if level_opts:
+                return list(dict.fromkeys(level_opts))
+            if set(normalized).issubset({"off", "on"}):
+                return []
             return []
-        level_opts = [opt for opt in normalized if opt in VALID_REASONING_EFFORTS]
-        if level_opts:
-            return list(dict.fromkeys(level_opts))
-        if set(normalized).issubset({"off", "on"}):
-            return []
-        return []
 
-    model_lower = model.lower()
-    prefixes = (
-        "deepseek/",
-        "anthropic/",
-        "openai/",
-        "x-ai/",
-        "google/gemini-2",
-        "google/gemma-4",
-        "qwen/qwen3",
-        "tencent/hy3-preview",
-        "xiaomi/",
-    )
-    if any(model_lower.startswith(prefix) for prefix in prefixes):
-        return list(VALID_REASONING_EFFORTS)
+    metadata_efforts = _models_dev_reasoning_efforts(hinted_model, provider)
+    if metadata_efforts is not None:
+        return metadata_efforts
 
-    return []
+    return _heuristic_reasoning_efforts(hinted_model, provider)
 
 
 def get_reasoning_status(
@@ -2221,10 +2244,23 @@ def get_reasoning_status(
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
     effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+
+    resolve_model = model_id
+    resolve_provider = provider_id
+    resolve_base_url = base_url
+    if not resolve_model:
+        model_cfg = config_data.get("model") or {}
+        if isinstance(model_cfg, dict):
+            resolve_model = str(model_cfg.get("default") or "").strip() or None
+            if not resolve_provider and model_cfg.get("provider"):
+                resolve_provider = str(model_cfg["provider"]).strip()
+            if not resolve_base_url and model_cfg.get("base_url"):
+                resolve_base_url = str(model_cfg["base_url"]).strip()
+
     supported_efforts = resolve_model_reasoning_efforts(
-        model_id,
-        provider_id=provider_id,
-        base_url=base_url,
+        resolve_model,
+        provider_id=resolve_provider,
+        base_url=resolve_base_url,
     )
     return {
         # Match CLI default (True if unset in config.yaml)

@@ -7,6 +7,12 @@
 
 - Browser chat can now opt into a default-off `HERMES_WEBUI_CHAT_BACKEND=gateway` bridge that routes new WebUI turns through a running Hermes Gateway API server while preserving the existing WebUI chat start/stream contract.
 
+## [v0.51.150] — 2026-05-28 — Release DV (stage-batch32 — single-PR reasoning-effort agent metadata)
+
+### Fixed
+
+- Reasoning-effort capability detection now consults Hermes Agent's `models.dev` metadata before falling back to WebUI-local provider/model prefix heuristics. xAI OAuth Grok models (e.g. `grok-4.3`) and other native/provider-specific catalogs that Hermes Agent already knows about now show the reasoning-effort chip without requiring a per-provider WebUI allowlist update. Existing exact-resolver paths (ACP unsupported, Copilot/GitHub effort subsets, OpenAI Codex, LM Studio live probing) keep their authoritative behavior — the new metadata lookup sits between those resolvers and the broad heuristic fallback. Metadata `supports_reasoning=False` is treated as authoritative so known non-reasoning variants stay hidden. Also: the no-query boot path of `/api/reasoning` now hydrates against the configured default model so the chip can populate before the front-end has session model context. (#3017)
+
 ## [v0.51.149] — 2026-05-28 — Release DU (stage-batch31 — hyphenated session ids + prefill role consistency)
 
 ### Fixed
