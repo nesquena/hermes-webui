@@ -616,6 +616,16 @@ function closeLiveStream(sessionId, streamId, source){
   if(source&&live.source!==source) return;
   try{live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
+  // closeLiveStream() is called during session-switch teardown for any session
+  // the user is no longer viewing. The stream is still active on the server,
+  // so mark the in-memory INFLIGHT entry for reattach — otherwise
+  // loadSession() returning to this session skips the reattach branch
+  // (`INFLIGHT.reattach` was only set by the storage-load path) and the SSE
+  // is never reopened. The user then sees no streamed tokens until the LLM
+  // finishes and a metadata refresh swaps in the final reply.
+  // If the stream is terminating cleanly, _clearOwnerInflightState() has
+  // already deleted INFLIGHT[sessionId], so this is a safe no-op.
+  if(INFLIGHT[sessionId]) INFLIGHT[sessionId].reattach=true;
 }
 
 function closeOtherLiveStreams(activeSid){
@@ -648,9 +658,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
 
-  let assistantText='';
-  let reasoningText='';
-  let liveReasoningText='';
+  // On reconnect, restore accumulated text from INFLIGHT so we don't lose
+  // progress made before the session switch. Without this the closure starts
+  // empty and tokens arriving on the new SSE connection append to nothing —
+  // the already-rendered content vanishes.
+  const _lastLiveAssistant = reconnecting
+    ? INFLIGHT[activeSid]?.messages?.findLast?.(m => m.role === 'assistant' && m._live)
+    : null;
+  let assistantText = _lastLiveAssistant ? (_lastLiveAssistant.content || '') : '';
+  let reasoningText = _lastLiveAssistant ? (_lastLiveAssistant.reasoning || '') : '';
+  let liveReasoningText = reasoningText;
   let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
   let _pendingGoalContinuation=null;
@@ -2136,6 +2153,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(_deferStreamErrorIfOffline()) return;
       if(_deferStreamErrorIfPageHidden()) return;
       _closeSource(source);
+      // If the user has switched to a different session, don't attempt to
+      // reconnect — the old stream's EventSource was closed intentionally
+      // during session switch and reconnecting would leak a background stream.
+      if(!_isSessionActivelyViewed(activeSid)) return;
+      if(_terminalStateReached || _streamFinalized){
+        return;
+      }
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;

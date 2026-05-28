@@ -116,9 +116,17 @@ def _dirty_suffix(path: Path, timeout=1) -> str:
     out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return ""
-    # diff-index exits 1 with no output for a dirty tree. Timeouts and real git
-    # failures include a diagnostic; skip the suffix so the base version remains.
-    return "-dirty" if not out else ""
+    # diff-index --quiet exits 1 with no stdout/stderr to *signal* a dirty tree
+    # (not an error). _run_git() substitutes a synthetic "git exited with
+    # status N" diagnostic when both streams are empty, which makes the naive
+    # `if not out` guard always false on dirty trees — silently dropping the
+    # suffix and defeating dev-build cache busting (static/foo.js?v=… stays
+    # identical to the last-committed version). Treat the synthetic shape as
+    # the dirty signal; real errors (timeouts, missing git) carry a different
+    # diagnostic and correctly suppress the suffix.
+    if not out or out.startswith('git exited with status '):
+        return "-dirty"
+    return ""
 
 
 def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | None:

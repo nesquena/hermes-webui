@@ -154,8 +154,14 @@ class TestReconnectAccumulatorPreservation:
         )
         assert m, "attachLiveStream prelude not found"
         prelude = m.group(0)
-        assert "let assistantText=''" in prelude or 'let assistantText = ""' in prelude, (
-            "assistantText must be initialised to '' at closure scope — "
+        # On initial connect, assistantText and reasoningText are initialised to ''
+        # at closure scope (the ternary defaults to '' when reconnecting is false
+        # or INFLIGHT has no _live assistant message). On reconnect, they restore
+        # from INFLIGHT so the already-rendered content survives the session switch.
+        assert ("let assistantText=''" in prelude
+                or 'let assistantText = _lastLiveAssistant' in prelude
+                or 'let assistantText = ""' in prelude), (
+            "assistantText must be initialised at closure scope — "
             "this is the only legitimate reset; _wireSSE must not re-reset"
         )
 
