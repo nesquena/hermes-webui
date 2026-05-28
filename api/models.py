@@ -2495,6 +2495,14 @@ def _prefer_fuller_snapshots_for_sidebar(sessions: list[dict]) -> list[dict]:
         if _sidebar_message_count(best_snapshot) <= best_visible_count:
             continue
 
+        newest_visible_ts = max(_session_sort_timestamp(session) for session in visible)
+        snapshot_ts = _session_sort_timestamp(best_snapshot)
+        # Keep the active continuation visible when it has newer activity than
+        # the archived snapshot. A fuller snapshot can still be older than a
+        # continuation that contains the latest turns after compression.
+        if newest_visible_ts > snapshot_ts:
+            continue
+
         snapshot_ids_to_show.add(str(best_snapshot.get('session_id')))
         continuation_ids_to_hide.update(
             str(session.get('session_id'))

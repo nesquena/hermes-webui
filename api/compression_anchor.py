@@ -68,6 +68,7 @@ def is_context_compression_marker(message):
         text.startswith("[context compaction")
         or text.startswith("context compaction")
         or text.startswith("[your active task list was preserved across context compression]")
+        or text.startswith("[session arc summary")
     )
 
 

@@ -423,8 +423,8 @@ def test_pre_compression_snapshot_hidden_from_active_sidebar_but_file_remains(mo
         parent_session_id="old_sid",
         updated_at=200.0,
     )
-    snapshot.save()
-    continuation.save()
+    snapshot.save(touch_updated_at=False)
+    continuation.save(touch_updated_at=False)
     monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
 
     rows = models.all_sessions()
@@ -452,16 +452,18 @@ def test_fuller_pre_compression_snapshot_replaces_shorter_visible_segment(monkey
         ],
         pre_compression_snapshot=True,
         updated_at=300.0,
+        last_message_at=300.0,
     )
     continuation = Session(
         session_id="short_child",
         title="Long Conversation",
         messages=[{"role": "user", "content": "first"}],
         parent_session_id="full_parent",
-        updated_at=400.0,
+        updated_at=250.0,
+        last_message_at=250.0,
     )
-    snapshot.save()
-    continuation.save()
+    snapshot.save(touch_updated_at=False)
+    continuation.save(touch_updated_at=False)
     monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
 
     rows = models.all_sessions()
@@ -469,6 +471,48 @@ def test_fuller_pre_compression_snapshot_replaces_shorter_visible_segment(monkey
     assert [row["session_id"] for row in rows] == ["full_parent"]
     assert rows[0]["message_count"] == 4
     assert rows[0]["pre_compression_snapshot"] is True
+
+
+def test_newer_continuation_beats_older_fuller_snapshot(monkeypatch):
+    """Do not hide a newer continuation behind an older fuller snapshot.
+
+    Compression snapshots can have a higher message count while still being
+    older than the continuation that contains the latest user-visible turns.
+    The sidebar should keep the newer continuation visible in that case.
+    """
+    snapshot = Session(
+        session_id="older_full_parent",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+            {"role": "user", "content": "third"},
+            {"role": "assistant", "content": "fourth"},
+        ],
+        pre_compression_snapshot=True,
+        updated_at=300.0,
+        last_message_at=300.0,
+    )
+    continuation = Session(
+        session_id="newer_short_child",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "latest task"},
+            {"role": "assistant", "content": "latest result"},
+        ],
+        parent_session_id="older_full_parent",
+        updated_at=450.0,
+        last_message_at=450.0,
+    )
+    snapshot.save(touch_updated_at=False)
+    continuation.save(touch_updated_at=False)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["newer_short_child"]
+    assert rows[0]["pre_compression_snapshot"] is False
+    assert rows[0]["message_count"] == 2
 
 
 def test_session_save_does_not_persist_metadata_message_count_hint():

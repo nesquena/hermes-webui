@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 from pathlib import Path
 
 
@@ -114,6 +115,25 @@ def test_webui_prefill_script_takes_precedence_over_static_file(tmp_path):
     assert result["messages"] == [{"role": "user", "content": "dynamic"}]
 
 
+def test_webui_prefill_script_error_falls_back_to_static_router_file(tmp_path):
+    from api.streaming import _load_webui_prefill_context
+
+    prefill = tmp_path / "prefill.json"
+    prefill.write_text(json.dumps([{"role": "system", "content": "Joplin router fallback"}]), encoding="utf-8")
+    script = tmp_path / "broken_recall.py"
+    script.write_text("import sys; print('api_key=redaction-test-placeholder', file=sys.stderr); raise SystemExit(2)\n", encoding="utf-8")
+
+    result = _load_webui_prefill_context({
+        "prefill_messages_file": str(prefill),
+        "webui_prefill_messages_script": [sys.executable, str(script)],
+    })
+
+    assert result["status"] == "loaded"
+    assert result["source"] == "file_fallback"
+    assert result["messages"] == [{"role": "system", "content": "Joplin router fallback"}]
+    assert "redaction-test-placeholder" not in result.get("script_error", "")
+
+
 def test_webui_prefill_script_timeout_returns_redacted_error(tmp_path):
     from api.streaming import _load_webui_prefill_context
 
@@ -147,6 +167,80 @@ def test_webui_prefill_script_rejects_oversized_stdout(tmp_path):
     assert "output exceeded" in result["error"]
 
 
+def test_webui_prefill_script_over_budget_uses_static_file_fallback(tmp_path):
+    from api.streaming import _load_webui_prefill_context, _public_prefill_context_status
+
+    prefill = tmp_path / "router.json"
+    prefill.write_text(json.dumps([{"role": "user", "content": "Compact router context"}]), encoding="utf-8")
+    script = tmp_path / "large_recall.py"
+    script.write_text("print('x' * 80)\n", encoding="utf-8")
+
+    result = _load_webui_prefill_context(
+        {
+            "webui_prefill_messages_script": [sys.executable, str(script)],
+            "prefill_messages_file": str(prefill),
+            "webui_prefill_context_max_chars": 40,
+        }
+    )
+
+    assert result["status"] == "loaded"
+    assert result["source"] == "file_budget_fallback"
+    assert result["messages"] == [{"role": "user", "content": "Compact router context"}]
+    assert result["compacted"] is True
+    assert result["original_source"] == "script"
+    assert result["original_char_count"] == 80
+    public = _public_prefill_context_status(result)
+    assert public["compacted"] is True
+    assert public["original_char_count"] == 80
+    assert "messages" not in public
+
+
+def test_webui_prefill_file_over_budget_compacts_without_leaking_body(tmp_path):
+    from api.streaming import _load_webui_prefill_context, _public_prefill_context_status
+
+    prefill = tmp_path / "huge.json"
+    prefill.write_text(json.dumps([{"role": "user", "content": "secret project note " * 20}]), encoding="utf-8")
+
+    result = _load_webui_prefill_context(
+        {
+            "prefill_messages_file": str(prefill),
+            "webui_prefill_context_max_chars": 50,
+        }
+    )
+
+    assert result["status"] == "loaded"
+    assert result["source"] == "budget_compacted"
+    assert result["message_count"] == 1
+    assert result["compacted"] is True
+    assert result["original_source"] == "file"
+    assert result["original_char_count"] > 50
+    compact_message = result["messages"][0]["content"]
+    assert "exceeded the WebUI prefill context budget" in compact_message
+    assert "secret project note" not in compact_message
+    public = _public_prefill_context_status(result)
+    assert public["source"] == "budget_compacted"
+    assert public["compacted"] is True
+    assert "messages" not in public
+
+
+def test_webui_prefill_context_budget_can_be_disabled(tmp_path):
+    from api.streaming import _load_webui_prefill_context
+
+    prefill = tmp_path / "huge.json"
+    prefill.write_text(json.dumps([{"role": "user", "content": "x" * 80}]), encoding="utf-8")
+
+    result = _load_webui_prefill_context(
+        {
+            "prefill_messages_file": str(prefill),
+            "webui_prefill_context_max_chars": 0,
+        }
+    )
+
+    assert result["source"] == "file"
+    assert result["messages"] == [{"role": "user", "content": "x" * 80}]
+    assert "compacted" not in result
+
+
 def test_public_prefill_status_strips_message_bodies():
     from api.streaming import _public_prefill_context_status
 
@@ -167,6 +261,56 @@ def test_public_prefill_status_strips_message_bodies():
         "message_count": 1,
     }
     assert "messages" not in public
+
+
+def test_webui_session_context_adds_gateway_like_metadata(monkeypatch, tmp_path):
+    from api.streaming import _prefill_messages_with_webui_context
+
+    gateway_state = tmp_path / "gateway_state.json"
+    gateway_state.write_text(
+        json.dumps(
+            {
+                "platforms": {
+                    "telegram": {"state": "connected"},
+                    "discord": {"state": "paused"},
+                    "api_server": {"state": "connected"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class FakeHome:
+        def __truediv__(self, name):
+            return gateway_state if name == "gateway_state.json" else tmp_path / name
+
+    fake_constants = types.SimpleNamespace(
+        get_hermes_home=lambda: FakeHome(),
+        display_hermes_home=lambda: "/tmp/hermes-test-home",
+    )
+    monkeypatch.setitem(sys.modules, "hermes_constants", fake_constants)
+
+    messages = _prefill_messages_with_webui_context(
+        {"messages": [{"role": "user", "content": "recall"}]},
+        {
+            "platforms": {
+                "telegram": {
+                    "enabled": True,
+                    "home_channel": {"name": "Home DM", "chat_id": "should-not-leak"},
+                }
+            }
+        },
+    )
+
+    assert messages[0] == {"role": "user", "content": "recall"}
+    context = messages[-1]
+    assert context["role"] == "user"
+    assert "## Current Session Context" in context["content"]
+    assert "**Source:** WebUI (browser session)" in context["content"]
+    assert "telegram: Connected" in context["content"]
+    assert "discord: Connected" not in context["content"]
+    assert "Home DM" in context["content"]
+    assert "should-not-leak" not in context["content"]
 
 
 def test_prefill_status_redactor_handles_secret_shaped_text():
