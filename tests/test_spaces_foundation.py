@@ -4114,6 +4114,25 @@ def test_recovery_module_quarantine_returns_metadata_only_policy_receipts(monkey
     assert result["progress_event"]["family"] == "tool"
     assert result["progress_event"]["run_id"] == "recovery.module.quarantine:recovery-modules"
     assert result["progress_event"]["space_id"] == "recovery-modules"
+    compaction = result["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-recovery-toggle"
+    assert compaction["command"] == "space.module.recovery.quarantine"
+    assert compaction["metadata_only"] is True
+    assert compaction["original_chars"] > 0
+    assert compaction["compacted_chars"] <= 700
+    assert compaction["redaction_status"] == "metadata_only"
+    assert compaction["rules_applied"]
+    text = compaction["text"].lower()
+    assert "action: space.module.recovery.quarantine" in text
+    assert "space_id: recovery-modules" in text
+    assert "target_kind: module" in text
+    assert "target_id: quarantine-policy-module" in text
+    assert "raw_prompt_stored: false" in text
+    assert "prompt_preflight_status: required" in text
+    assert "progress_run_id: recovery.module.quarantine:recovery-modules" in text
+    handles = compaction["retained_artifact_handles"]
+    assert any(handle.get("handle") == "space:recovery-modules" for handle in handles)
+    assert any(handle.get("handle") == "module:recovery-modules:quarantine-policy-module" for handle in handles)
     assert "secret_value_do_not_leak" not in serialized
     assert "renderer" not in serialized
     assert "<script" not in serialized

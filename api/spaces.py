@@ -10881,12 +10881,26 @@ def upsert_recovery_module(module: dict[str, Any]) -> dict[str, Any]:
     _atomic_write_json(module_path, stored)
     summary = _module_summary(stored)
     action = "space.module.recovery.quarantine"
-    summary["prompt_preflight"] = _recovery_required_prompt_preflight_receipt(action)
-    summary["progress_event"] = _record_space_recovery_progress_event(
+    prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
+    progress_event = _record_space_recovery_progress_event(
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
         action="module.quarantine",
     )
-    summary["autonomy_policy"] = _recovery_toggle_action_policy_receipt(action)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(action)
+    summary["prompt_preflight"] = prompt_preflight
+    summary["progress_event"] = progress_event
+    summary["autonomy_policy"] = autonomy_policy
+    summary["output_compaction"] = _recovery_toggle_output_compaction_receipt(
+        action=action,
+        space_id=_RECOVERY_MODULE_PROGRESS_SPACE_ID,
+        target_kind="module",
+        target_id=mid,
+        disabled=bool(summary.get("disabled")),
+        revision_event_id=event_id,
+        prompt_preflight=prompt_preflight,
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_event,
+    )
     return summary
 
 
