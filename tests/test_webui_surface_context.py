@@ -19,6 +19,9 @@ def test_webui_ephemeral_prompt_includes_browser_surface_context():
     assert "Profile: default" in prompt
     assert "Workspace: /tmp/example-workspace" in prompt
     assert "not the same live transcript as Telegram" in prompt
+    assert "Do not copy or dump this browser transcript" in prompt
+    assert "explicit captures" in prompt
+    assert "durable user preferences" in prompt
 
 
 def test_webui_ephemeral_prompt_skips_empty_surface_fields():

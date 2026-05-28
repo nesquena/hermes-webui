@@ -297,7 +297,7 @@ class TestReasoningConfigHelpers:
         # Snapshot-style assertion: if hermes_constants adds a level, this
         # test will fail fast so we know to update WebUI too.
         assert VALID_REASONING_EFFORTS == (
-            'minimal', 'low', 'medium', 'high', 'xhigh'
+            'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
         )
 
     def test_set_reasoning_effort_persists_to_config_yaml(self, tmp_path, monkeypatch):

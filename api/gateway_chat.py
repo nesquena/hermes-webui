@@ -223,6 +223,22 @@ def _run_gateway_chat_streaming(
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
         cfg = get_config()
+        try:
+            from api.streaming import (
+                _load_webui_prefill_context,
+                _prefill_messages_with_webui_context,
+                _public_prefill_context_status,
+            )
+
+            prefill_context = _load_webui_prefill_context(cfg)
+            prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
+            put_gateway_event("context_status", {
+                "session_id": session_id,
+                "prefill": _public_prefill_context_status(prefill_context),
+            })
+        except Exception:
+            logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
+            prefill_messages = []
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
         url = f"{base_url}/v1/chat/completions"
@@ -248,7 +264,7 @@ def _run_gateway_chat_streaming(
         body = {
             "model": model or "default",
             "stream": True,
-            "messages": [{"role": "user", "content": message_content}],
+            "messages": [*prefill_messages, {"role": "user", "content": message_content}],
         }
         if model_provider:
             body["provider"] = model_provider
