@@ -488,7 +488,7 @@ def _emit_bg_task_complete_events_coalesced(session_id: str, payload: dict) -> i
     therefore uses the latest payload from a burst.
     """
     from api import config as _cfg
-    _EMIT_COALESCE_WINDOW_SECS = getattr(_cfg, "_EMIT_COALESCE_WINDOW_SECS", 1.0)
+    coalesce_window = getattr(_cfg, "_EMIT_COALESCE_WINDOW_SECS", _EMIT_COALESCE_WINDOW_SECS)
     if not session_id:
         return 0
     should_emit_now = False
@@ -496,7 +496,7 @@ def _emit_bg_task_complete_events_coalesced(session_id: str, payload: dict) -> i
     with _EMIT_COALESCE_LOCK:
         last = _LAST_EMIT_TS.get(session_id)
         has_pending = session_id in _PENDING_EMIT_TIMERS
-        if last is None or (now - last) >= _EMIT_COALESCE_WINDOW_SECS:
+        if last is None or (now - last) >= coalesce_window:
             if not has_pending:
                 _LAST_EMIT_TS[session_id] = now
                 should_emit_now = True
@@ -519,7 +519,7 @@ def _emit_bg_task_complete_events_coalesced(session_id: str, payload: dict) -> i
                         exc_info=True,
                     )
             timer = threading.Timer(
-                _EMIT_COALESCE_WINDOW_SECS,
+                coalesce_window,
                 _flush_coalesced_bg_task_complete,
                 args=(session_id,),
             )
