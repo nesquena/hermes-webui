@@ -47,12 +47,13 @@ def test_reasoning_chip_html_starts_hidden():
     assert m, "composerReasoningWrap must start with style='display:none'"
 
 
-def test_applyReasoningChip_shows_wrap():
-    """_applyReasoningChip must set wrap display to empty string (visible)."""
+def test_ui_js_passes_model_context_to_reasoning_api():
     with open("static/ui.js") as f:
         src = f.read()
-    assert "wrap.style.display=''" in src or "wrap.style.display =''" in src, \
-        "_applyReasoningChip must set wrap.style.display='' to make chip visible"
+    assert "_reasoningEffortQuery" in src, (
+        "ui.js must pass the active session model/provider to /api/reasoning"
+    )
+    assert "api('/api/reasoning'+_reasoningEffortQuery())" in src
 
 
 def test_fetchReasoningChip_calls_apply():
@@ -74,3 +75,52 @@ def test_syncReasoningChip_called_on_session_load():
     # Should be called in the session render flow
     assert "syncReasoningChip()" in src, \
         "syncReasoningChip() must be called somewhere in ui.js"
+
+
+def test_syncReasoningChip_called_on_model_change():
+    """Model picker changes must refresh reasoning chip with or without a session."""
+    with open("static/boot.js") as f:
+        boot_src = f.read()
+    marker = "$('modelSelect').onchange=async()=>{"
+    start = boot_src.index(marker)
+    tail = boot_src[start:]
+    assert "syncReasoningChip()" in tail, \
+        "syncReasoningChip() must be called when modelSelect changes"
+    no_session = tail[tail.index("if(!S.session){"):tail.index("if(typeof _rememberPendingSessionModel")]
+    assert "syncReasoningChip()" in no_session, \
+        "syncReasoningChip() must also run for pre-session picker changes"
+    model_assign = tail.index("S.session.model=modelState.model")
+    sync_call = tail.index("syncReasoningChip()", model_assign)
+    assert model_assign < sync_call, \
+        "syncReasoningChip() must run after S.session.model is updated"
+
+
+def test_selectModelFromDropdown_defers_reasoning_sync_to_onchange():
+    """Custom model dropdown must not fetch reasoning before session state updates."""
+    with open("static/ui.js") as f:
+        src = f.read()
+    match = re.search(
+        r"async function selectModelFromDropdown\(value(?:,\s*preferredProviderId)?\)\{(.*?)\n\}",
+        src,
+        re.DOTALL,
+    )
+    assert match, "selectModelFromDropdown must exist"
+    body = match.group(1)
+    assert "fetchReasoningChip()" not in body, \
+        "selectModelFromDropdown must not call fetchReasoningChip before onchange"
+    assert "sel.onchange" in body, \
+        "selectModelFromDropdown must still trigger modelSelect.onchange"
+    assert "_ensureModelOptionInDropdown" in body, \
+        "selectModelFromDropdown must resolve provider-specific options"
+    assert "preferredProviderId" in body, \
+        "selectModelFromDropdown must accept an explicit provider id"
+
+
+def test_model_dropdown_passes_provider_to_select():
+    """Composer model rows must pass provider context into selectModelFromDropdown."""
+    with open("static/ui.js") as f:
+        src = f.read()
+    assert re.search(
+        r"selectModelFromDropdown\(m\.value,\s*m\.providerId",
+        src,
+    ), "model dropdown rows must pass providerId to selectModelFromDropdown"

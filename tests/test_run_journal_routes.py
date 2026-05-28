@@ -40,7 +40,7 @@ def test_replay_emits_event_ids_and_stale_restart_diagnostic():
 def test_session_payload_exposes_runtime_journal_for_stale_streams():
     assert "original_stream_id = getattr(s, \"active_stream_id\", None)" in ROUTES_SRC
     assert '"runtime_journal"' in ROUTES_SRC
-    assert 'terminal_state = "stale-from-restart"' in ROUTES_SRC
+    assert 'terminal_state = "lost-worker-bookkeeping"' in ROUTES_SRC
 
 
 def test_status_payload_marks_non_terminal_dead_journal_as_stale():
@@ -60,7 +60,7 @@ def test_status_payload_marks_non_terminal_dead_journal_as_stale():
     )
 
     assert payload["terminal"] is False
-    assert payload["terminal_state"] == "stale-from-restart"
+    assert payload["terminal_state"] == "lost-worker-bookkeeping"
     assert payload["last_event_id"] == "run_1:3"
 
 

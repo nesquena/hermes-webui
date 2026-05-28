@@ -512,6 +512,105 @@ def test_api_session_reload_drops_stale_cached_user_tail_after_saved_assistant(m
     assert handler.response_json["session"]["message_count"] == 2
 
 
+def test_metadata_fast_path_uses_summary_without_full_merge_for_restamped_replays(monkeypatch, tmp_path):
+    """Metadata-only /api/session must not full-read and merge transcripts.
+
+    It still must not let a restamped replay row make sidebar polling think the
+    transcript is newer than the loaded sidecar conversation.
+    """
+    import api.routes as routes
+
+    sid = "webui_reconcile_metadata_replay"
+    _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        [
+            {"role": "user", "content": "old user", "timestamp": 1000.0},
+            {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+        ],
+    )
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {"role": "user", "content": "old user", "timestamp": 1002.0},
+        ],
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_messages",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata-only loads must not full-read state.db messages")
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "merge_session_messages_append_only",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata-only loads must not merge full transcripts")
+        ),
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    assert session["messages"] == []
+    assert session["message_count"] == 2
+    assert session["last_message_at"] == 1001.0
+
+
+def test_metadata_fast_path_uses_state_db_summary_for_external_growth(monkeypatch, tmp_path):
+    """Metadata-only polling can detect real external growth without a full merge."""
+    import api.routes as routes
+
+    sid = "webui_reconcile_metadata_summary_growth"
+    _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        [
+            {"role": "user", "content": "old user", "timestamp": 1000.0},
+            {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+        ],
+    )
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {"role": "user", "content": "old user", "timestamp": 1000.0},
+            {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+            {"role": "user", "content": "external user", "timestamp": 1002.0},
+            {"role": "assistant", "content": "external assistant", "timestamp": 1003.0},
+        ],
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_messages",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata-only loads must not full-read state.db messages")
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "merge_session_messages_append_only",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("metadata-only loads must not merge full transcripts")
+        ),
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    assert session["messages"] == []
+    assert session["message_count"] == 4
+    assert session["last_message_at"] == 1003.0
+
+
 def test_state_db_reconciliation_preserves_tool_metadata(monkeypatch, tmp_path):
     import api.routes as routes
 

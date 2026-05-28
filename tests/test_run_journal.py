@@ -112,12 +112,16 @@ def test_stale_interrupted_event_reports_non_terminal_journal(tmp_path, monkeypa
 
     monkeypatch.setattr("api.run_journal._default_session_dir", lambda: tmp_path)
     event = stale_interrupted_event("session_1", "run_1")
+    assert event is not None
 
     assert event["event"] == "apperror"
     assert event["seq"] == 2
-    assert event["terminal_state"] == "stale-from-restart"
+    assert event["terminal_state"] == "lost-worker-bookkeeping"
     assert event["payload"]["type"] == "interrupted"
     assert "last journaled event" in event["payload"]["hint"]
+    assert "process restarted" not in event["payload"]["message"]
+    assert "lost the live worker" not in event["payload"]["message"]
+    assert "live worker stopped" in event["payload"]["message"]
 
 
 def test_stale_interrupted_event_skips_terminal_journal(tmp_path, monkeypatch):

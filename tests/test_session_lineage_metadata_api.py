@@ -271,6 +271,41 @@ def test_cross_surface_child_session_metadata_marks_orphan_top_level_candidate(_
         conn.close()
 
 
+def test_state_db_webui_source_overrides_stale_cli_json_metadata(_isolate):
+    """State-db WebUI mirrors should clear stale CLI source fields in sidebar rows."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        session = Session(
+            session_id="lineage_api_stale_cli_source",
+            title="WebUI Chatnachrichten verschwinden nach Neustart #9",
+            messages=[{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}],
+            updated_at=t0,
+            is_cli_session=True,
+            source_tag="cli",
+            raw_source="cli",
+            session_source="cli",
+            source_label="CLI",
+        )
+        session.save(touch_updated_at=False)
+        _insert_state_row(
+            conn,
+            "lineage_api_stale_cli_source",
+            source="webui",
+            started_at=t0,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions()}["lineage_api_stale_cli_source"]
+
+        assert row["source_tag"] == "webui"
+        assert row["raw_source"] == "webui"
+        assert row["session_source"] == "webui"
+        assert row["source_label"] == "WebUI"
+        assert row["is_cli_session"] is False
+    finally:
+        conn.close()
+
+
 def test_generic_webui_title_gets_read_only_state_db_display_title(_isolate):
     """Sidebar rows can display the fresher state.db title without mutating JSON."""
     conn = _ensure_state_db(_isolate)

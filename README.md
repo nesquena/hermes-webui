@@ -121,6 +121,73 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 
 `ctl.sh start` runs the bootstrap in foreground/no-browser mode behind the daemon wrapper, writes logs to `~/.hermes/webui.log`, and respects `.env` plus inline overrides such as `HERMES_WEBUI_HOST=0.0.0.0 ./ctl.sh start`.
 
+### Optional session recall prefill
+
+WebUI can attach ephemeral prefill messages to new browser-originated
+agent turns. This is useful when a deployment already has a local recall or
+router script for Joplin, Obsidian, Notion, llm-wiki, or another third-party
+notes source and wants browser chat to know where durable context lives.
+
+Prefer a compact router-style prefill (for example, "Joplin has the durable
+project context; use the available notes/search tools before answering
+detail-dependent questions") instead of dumping the full note corpus into every
+new browser session. The prefill should point the agent toward retrieval; the
+notes/search tools should provide the specific facts on demand.
+
+Static JSON remains supported through `prefill_messages_file` or
+`HERMES_PREFILL_MESSAGES_FILE`. For dynamic recall, opt in explicitly with a
+WebUI-specific script hook:
+
+```yaml
+webui_prefill_messages_script:
+  - python3
+  - /path/to/notes_recall.py
+webui_prefill_messages_script_timeout: 5
+```
+
+or:
+
+```bash
+HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT="python3 /path/to/notes_recall.py" \
+HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT_TIMEOUT=5 \
+./ctl.sh restart
+```
+
+The script may print either an OpenAI-style JSON message list, a JSON object with
+a `messages` list, or plain text; plain text is wrapped as one `user` prefill
+message so dynamic recall text becomes ordinary context instead of an extra
+system instruction. If the hook must provide system-level guidance, emit JSON
+messages with an explicit `role: "system"` entry instead. Script output is capped
+at 256 KiB before parsing. The browser only receives a compact status event
+(`source`, `label`, message count, and redacted errors), never the prefill
+message bodies.
+
+### Optional Gateway-backed browser chat
+
+By default, browser chat runs through WebUI's in-process legacy runtime. Advanced
+self-hosted deployments can opt into routing new browser turns through a running
+Hermes Gateway API server while preserving the existing WebUI `/api/chat/start`
+and `/api/chat/stream` browser contract:
+
+```bash
+HERMES_WEBUI_CHAT_BACKEND=gateway \
+HERMES_WEBUI_GATEWAY_BASE_URL=http://127.0.0.1:8642 \
+HERMES_WEBUI_GATEWAY_API_KEY=... \
+./ctl.sh restart
+```
+
+`HERMES_WEBUI_CHAT_BACKEND` is intentionally strict: only `gateway`,
+`api_server`, or `api-server` enable the bridge. Generic truthy values such as
+`1` or `true` are ignored so existing deployments do not change execution
+ownership accidentally. If `HERMES_WEBUI_GATEWAY_API_KEY` is omitted, WebUI falls
+back to `API_SERVER_KEY` when present.
+
+The bridge is best used by operators who already run Hermes Gateway/API Server
+locally and want browser-originated chat to use the same runtime/tool path as
+messaging surfaces. Attachments, cancellation, approvals, and clarify prompts
+still follow WebUI's current compatibility path and may not match every messaging
+surface until the runtime-adapter migration is complete.
+
 The bootstrap will:
 
 1. Detect Hermes Agent and, if missing, attempt the official installer (`curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`).
@@ -241,9 +308,9 @@ For the deep dive on each of these, see [`docs/docker.md`](docs/docker.md).
 
 | Thing | How it finds it |
 |---|---|
-| Hermes agent dir | `HERMES_WEBUI_AGENT_DIR` env, then `~/.hermes/hermes-agent`, then sibling `../hermes-agent` |
+| Hermes agent dir | `HERMES_WEBUI_AGENT_DIR` env, then `$HERMES_HOME/hermes-agent` (Windows default `%LOCALAPPDATA%\hermes\hermes-agent`, POSIX default `~/.hermes/hermes-agent`), then sibling `../hermes-agent` |
 | Python executable | Agent venv first, then `.venv` in this repo, then system `python3` |
-| State directory | `HERMES_WEBUI_STATE_DIR` env, then `~/.hermes/webui` |
+| State directory | `HERMES_WEBUI_STATE_DIR` env, then `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) |
 | Default workspace | `HERMES_WEBUI_DEFAULT_WORKSPACE` env, then `~/workspace`, then state dir |
 | Port | `HERMES_WEBUI_PORT` env or first argument, default `8787` |
 
@@ -275,15 +342,16 @@ Full list of environment variables:
 | `HERMES_WEBUI_PYTHON` | auto-discovered | Python executable |
 | `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback) |
 | `HERMES_WEBUI_PORT` | `8787` | Port |
-| `HERMES_WEBUI_STATE_DIR` | `~/.hermes/webui` | Where sessions and state are stored |
+| `HERMES_WEBUI_STATE_DIR` | `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) | Where sessions and state are stored |
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
+| `HERMES_WEBUI_CSP_CONNECT_EXTRA` | *(unset)* | Optional space-separated `http(s)://` or `ws(s)://` origins to append to the report-only CSP `connect-src` directive for reverse-proxy or tunnel deployments |
 | `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
 | `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` | *(unset)* | Optional comma-separated same-origin stylesheet URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
-| `HERMES_HOME` | `~/.hermes` | Base directory for Hermes state (affects all paths) |
-| `HERMES_CONFIG_PATH` | `~/.hermes/config.yaml` | Path to Hermes config file |
+| `HERMES_HOME` | Windows: `%LOCALAPPDATA%\hermes`; POSIX: `~/.hermes` | Base directory for Hermes state (affects all paths) |
+| `HERMES_CONFIG_PATH` | `$HERMES_HOME/config.yaml` | Path to Hermes config file |
 
 ---
 
@@ -440,6 +508,7 @@ Production data and real cron jobs are never touched. Current snapshot:
 - Directory tree with expand/collapse (single-click toggles, double-click navigates)
 - Breadcrumb navigation with clickable path segments
 - Preview text, code, Markdown (rendered), and images inline
+- Chat links using `workspace://path/to/file` open files in the right-side preview pane
 - Edit, create, delete, and rename files; create folders
 - Binary file download (auto-detected from server)
 - File preview auto-closes on directory navigation (with unsaved-edit guard)
@@ -467,6 +536,8 @@ Production data and real cron jobs are never touched. Current snapshot:
 ### Authentication and security
 - Optional password auth -- off by default, zero friction for localhost
 - Enable via `HERMES_WEBUI_PASSWORD` env var or Settings panel
+- Optional passkeys/WebAuthn -- register from Settings -> System after signing in with a password; the login page only shows passkey sign-in after at least one passkey exists
+- After registering at least one passkey, Settings -> System can remove the password and keep passkey-only sign-in enabled. Password auth remains the bootstrap/recovery path until you choose to go passwordless; passkeys are same-origin and stored locally in the WebUI state directory
 - Signed HMAC HTTP-only cookie with 24h TTL
 - Minimal dark-themed login page at `/login`
 - Security headers on all responses (X-Content-Type-Options, X-Frame-Options, Referrer-Policy)

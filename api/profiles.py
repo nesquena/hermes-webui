@@ -150,6 +150,10 @@ def _resolve_base_hermes_home() -> Path:
         # If HERMES_HOME points to a profiles/ subdir, walk up two levels to the base
         return _unwrap_profile_home_to_base(p)
 
+    if os.name == 'nt':
+        local_app_data = os.getenv('LOCALAPPDATA', '').strip()
+        if local_app_data:
+            return Path(local_app_data) / 'hermes'
     return Path.home() / '.hermes'
 
 _DEFAULT_HERMES_HOME = _resolve_base_hermes_home()

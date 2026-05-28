@@ -1,4 +1,5 @@
 """Regression tests for preserving live streams across session switches."""
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -99,3 +100,74 @@ def test_load_session_reattach_path_uses_attach_live_stream_for_running_sessions
     assert reattach_pos != -1
     assert active_pos < reattach_pos
     assert "{reconnecting:true}" in body[reattach_pos : reattach_pos + 200]
+
+
+def test_close_live_stream_marks_inflight_for_reattach_on_return():
+    """When closeLiveStream() tears down a still-active SSE transport (e.g. the
+    user switched to another session), the corresponding INFLIGHT entry must be
+    flagged so loadSession() reopens the SSE on return.
+
+    Without this flag the in-memory INFLIGHT entry stays as it was (no
+    `reattach:true`, which is only set on the storage-load path), so
+    loadSession()'s reattach branch is skipped — the SSE is never reopened and
+    the user sees no streamed tokens until the LLM finishes and a metadata
+    refresh swaps in the final reply.
+    """
+    body = _function_body(MESSAGES_JS, "closeLiveStream")
+    assert "INFLIGHT" in body, (
+        "closeLiveStream() must touch INFLIGHT so loadSession() reattaches the "
+        "SSE when the user switches back to a still-streaming session"
+    )
+    assert re.search(r"INFLIGHT\[\w+\]\s*&&\s*\(?INFLIGHT\[\w+\]\.reattach\s*=\s*true", body) \
+           or re.search(r"if\s*\(\s*INFLIGHT\[\w+\]\s*\)\s*INFLIGHT\[\w+\]\.reattach\s*=\s*true", body), (
+        "closeLiveStream() must set INFLIGHT[sessionId].reattach = true "
+        "(guarded by an existence check) so loadSession()'s reattach branch fires"
+    )
+
+
+def test_close_other_live_streams_triggers_reattach_for_backgrounded_sessions():
+    """closeOtherLiveStreams() during session switch must mark every closed
+    background session for reattach. Otherwise switching back to a session whose
+    stream was closed during the switch leaves the SSE permanently disconnected.
+    """
+    helper_body = _function_body(MESSAGES_JS, "closeOtherLiveStreams")
+    close_body = _function_body(MESSAGES_JS, "closeLiveStream")
+    # closeOtherLiveStreams delegates per-session teardown to closeLiveStream,
+    # so the reattach flag must be set inside closeLiveStream itself for the
+    # chain to work — this guards the indirection.
+    assert "closeLiveStream(sid)" in helper_body.replace(" ", ""), (
+        "closeOtherLiveStreams() must delegate teardown to closeLiveStream()"
+    )
+    assert "reattach" in close_body, (
+        "closeLiveStream() must set the reattach flag so closeOtherLiveStreams() "
+        "propagates the reattach intent to every backgrounded session"
+    )
+
+
+def test_load_session_reattaches_when_inflight_is_in_memory_and_marked_for_reattach():
+    """The session-switch return path must hit attachLiveStream() even when
+    INFLIGHT[sid] is already in memory (i.e. wasn't loaded from storage).
+
+    Before the fix, only the storage-load path set `reattach:true` on INFLIGHT,
+    so a switch-back through an in-memory INFLIGHT entry skipped the reattach
+    branch. Once closeLiveStream() also sets reattach=true, the existing
+    `INFLIGHT[sid].reattach && activeStreamId` gate is enough — this test
+    pins the gate's shape so future refactors don't drop the flag check.
+    """
+    body = _function_body(SESSIONS_JS, "loadSession")
+    inflight_idx = body.find("if(INFLIGHT[sid]){")
+    assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
+    inflight_block = body[inflight_idx : inflight_idx + 2400]
+    assert "INFLIGHT[sid].reattach" in inflight_block, (
+        "loadSession()'s INFLIGHT branch must gate the SSE reattach on the "
+        "reattach flag so closeLiveStream()'s marking flows through"
+    )
+    reattach_gate = re.search(
+        r"if\(INFLIGHT\[sid\]\.reattach\s*&&\s*activeStreamId.*?attachLiveStream\(sid, activeStreamId",
+        inflight_block,
+        re.DOTALL,
+    )
+    assert reattach_gate, (
+        "loadSession() must reattach via attachLiveStream() when "
+        "INFLIGHT[sid].reattach && activeStreamId"
+    )

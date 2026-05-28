@@ -164,6 +164,15 @@ class TestProviderRemoveInvalidatesDropdowns:
             "response (covers the dropdown + badge surfaces from #1539)."
         )
 
+    def test_dropdown_flush_reuses_shared_model_ready_promise(self):
+        src = _read_static("panels.js")
+        body = _extract_function_body(src, "function _refreshModelDropdownsAfterProviderChange(")
+        ensure_pos = body.index("typeof window._ensureModelDropdownReady")
+        reset_pos = body.index("window._modelDropdownReady=null", ensure_pos)
+        call_pos = body.index("window._ensureModelDropdownReady()", reset_pos)
+
+        assert ensure_pos < reset_pos < call_pos
+
     def test_dropdown_flush_is_resilient_to_missing_modules(self):
         """If commands.js or ui.js failed to load, the providers panel must
         still update — the dropdown flush is best-effort (#1539)."""

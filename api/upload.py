@@ -81,6 +81,16 @@ def _upload_destination(session_id: str, safe_name: str) -> Path:
     dest = (dest_dir / safe_name).resolve()
     if not dest.is_relative_to(dest_dir):
         raise ValueError('Invalid upload destination')
+    if dest.exists():
+        stem = dest.stem
+        suffix = dest.suffix
+        for idx in range(1, 1000):
+            candidate = (dest_dir / f'{stem}-{idx}{suffix}').resolve()
+            if not candidate.is_relative_to(dest_dir):
+                raise ValueError('Invalid upload destination')
+            if not candidate.exists():
+                return candidate
+        raise ValueError('Too many uploads with the same filename')
     return dest
 
 

@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 
 import api.models as models
-from api.models import Session, _write_session_index
+from api.models import Session, _write_session_index, prune_session_from_index
 
 
 @pytest.fixture(autouse=True)
@@ -83,6 +83,45 @@ def test_compact_exposes_last_message_at_from_message_timestamp():
     assert compact["last_message_at"] == 200.0
 
 
+def test_session_load_allows_hyphenated_safe_ids_but_rejects_traversal():
+    sid = "api-182894de593468b6"
+    s = _make_session(sid, "API session", updated_at=100)
+    s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    assert Session.load(sid) is not None
+    assert Session.load_metadata_only(sid) is not None
+    assert Session.load("bad/../id") is None
+    assert Session.load_metadata_only("bad.id") is None
+
+
+def test_full_index_rebuild_includes_hyphenated_sessions():
+    sid = "reachy-voice-20260513-1131-d5542adf"
+    s = _make_session(sid, "Reachy voice", updated_at=100)
+    s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _write_session_index(updates=None)
+
+    ids = [entry["session_id"] for entry in _read_index(models.SESSION_INDEX_FILE)]
+    assert sid in ids
+
+
+def test_prune_session_from_index_removes_requested_row_only():
+    index_file = models.SESSION_INDEX_FILE
+    s_a = _make_session("sess_a", "A", updated_at=100)
+    s_b = _make_session("sess_b", "B", updated_at=200)
+    s_a.save()
+    s_b.save()
+
+    prune_session_from_index("sess_a")
+
+    index = _read_index(index_file)
+    ids = [entry["session_id"] for entry in index]
+    assert ids == ["sess_b"]
+    assert index_file.exists()
+    assert s_a.path.exists()
+    assert s_b.path.exists()
+
+
 def test_all_sessions_backfills_last_message_at_for_legacy_index_rows():
     index_file = models.SESSION_INDEX_FILE
     s = Session(
@@ -123,8 +162,8 @@ def test_all_sessions_backfills_last_message_at_for_legacy_index_rows():
     assert persisted[0].get("last_message_at") == 100.0
 
 
-def test_all_sessions_prune_reuses_in_memory_id_snapshot(monkeypatch):
-    """Index pruning should not reacquire the session lock for every row."""
+def test_all_sessions_prune_batches_persisted_id_snapshot(monkeypatch):
+    """Index pruning should not probe each backing file through the helper."""
     index_file = models.SESSION_INDEX_FILE
     entries = [
         {
@@ -152,22 +191,22 @@ def test_all_sessions_prune_reuses_in_memory_id_snapshot(monkeypatch):
             "archived": False,
         },
     ]
+    for entry in entries:
+        (models.SESSION_DIR / f"{entry['session_id']}.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
     _write_index_file(index_file, entries)
 
-    seen = []
+    def _assert_not_called(session_id, in_memory_ids=None):
+        raise AssertionError("all_sessions should batch persisted ids before pruning")
 
-    def _assert_snapshot_used(session_id, in_memory_ids=None):
-        assert in_memory_ids is not None, "all_sessions should snapshot SESSIONS once before pruning"
-        seen.append(session_id)
-        return True
-
-    monkeypatch.setattr(models, "_index_entry_exists", _assert_snapshot_used)
+    monkeypatch.setattr(models, "_index_entry_exists", _assert_not_called)
     monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
 
     rows = models.all_sessions()
 
     assert [row["session_id"] for row in rows] == ["sess_a", "sess_b"]
-    assert seen == ["sess_a", "sess_b"]
 
 
 # ── 6. test_incremental_patch_correctness ─────────────────────────────────

@@ -29,3 +29,29 @@ def test_session_list_refresh_does_not_close_open_conversation_actions():
     assert "if(_renamingSid) return;" in body
     assert "if(_sessionActionMenu) return;" in body
     assert body.index("if(_sessionActionMenu) return;") < body.index("closeSessionActionMenu();")
+
+
+def test_archive_action_repaints_sidebar_before_full_refresh():
+    """Archive should hide the row from cached sidebar state before /api/sessions returns."""
+    body = _function_block(SESSIONS_JS, "_openSessionActionMenu")
+
+    api_call = "const response=await api('/api/session/archive'"
+    optimistic = "_optimisticallyArchiveSessionInList(session.session_id,!session.archived);"
+    full_refresh = "void renderSessionList();"
+
+    assert optimistic in body
+    assert body.index(api_call) < body.index(optimistic) < body.index(full_refresh)
+
+
+def test_delete_action_repaints_sidebar_before_loading_remaining_sessions():
+    """Delete should remove the row locally before loading replacement session data."""
+    body = _function_block(SESSIONS_JS, "deleteSession")
+
+    api_call = "response=await api('/api/session/delete'"
+    optimistic = "_optimisticallyRemoveSessionFromList(sid);"
+    remaining_fetch = "const remaining=await api('/api/sessions');"
+    full_refresh = "void renderSessionList();"
+
+    assert optimistic in body
+    assert body.index(api_call) < body.index(optimistic) < body.index(full_refresh)
+    assert body.index(optimistic) < body.index(remaining_fetch)

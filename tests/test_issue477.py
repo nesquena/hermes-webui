@@ -1,26 +1,30 @@
-"""Tests for fix #477: KaTeX font-src CSP fix."""
+"""Tests for KaTeX font CSP handling.
+
+KaTeX is vendored locally, so the CSP should not need to loosen font-src for a
+third-party CDN.
+"""
 import pathlib
 
 REPO = pathlib.Path(__file__).parent.parent
 HELPERS_PY = (REPO / "api" / "helpers.py").read_text(encoding="utf-8")
+INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
+UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 
 
-def test_font_src_allows_jsdelivr():
-    """font-src must include cdn.jsdelivr.net for KaTeX fonts."""
-    assert "font-src 'self' data: https://cdn.jsdelivr.net" in HELPERS_PY, (
-        "api/helpers.py CSP must allow cdn.jsdelivr.net in font-src "
-        "so KaTeX math rendering fonts load without console errors."
-    )
+def _font_src() -> str:
+    return HELPERS_PY.split("font-src", 1)[1].split(";", 1)[0]
 
 
-def test_font_src_still_allows_self_and_data():
-    """font-src must still allow self and data: (used by other font assets)."""
-    assert "'self'" in HELPERS_PY.split("font-src")[1].split(";")[0]
-    assert "data:" in HELPERS_PY.split("font-src")[1].split(";")[0]
+def test_font_src_keeps_self_and_data_without_cdn_font_exception():
+    """font-src should stay tight now that KaTeX fonts are local."""
+    font_src = _font_src()
+    assert "'self'" in font_src
+    assert "data:" in font_src
+    assert "https://cdn.jsdelivr.net" not in font_src
 
 
-def test_script_src_already_allows_jsdelivr():
-    """script-src already allows cdn.jsdelivr.net — font-src should too."""
-    assert "https://cdn.jsdelivr.net" in HELPERS_PY.split("font-src")[0], (
-        "script-src should already allow cdn.jsdelivr.net (KaTeX JS)"
-    )
+def test_katex_assets_are_loaded_from_static_vendor_paths():
+    assert "static/vendor/katex/0.16.22/katex.min.css" in INDEX_HTML
+    assert "static/vendor/katex/0.16.22/katex.min.js" in UI_JS
+    assert "https://cdn.jsdelivr.net/npm/katex@0.16.22" not in INDEX_HTML
+    assert "https://cdn.jsdelivr.net/npm/katex@0.16.22" not in UI_JS

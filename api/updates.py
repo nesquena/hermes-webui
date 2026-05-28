@@ -29,7 +29,7 @@ try:
 except ImportError:
     _AGENT_DIR = None
 
-_update_cache = {'webui': None, 'agent': None, 'checked_at': 0}
+_update_cache = {'webui': None, 'agent': None, 'checked_at': 0, 'include_agent': True}
 _SUMMARY_CACHE_MAX = 16
 _summary_cache: OrderedDict = OrderedDict()
 _cache_lock = threading.Lock()
@@ -116,9 +116,17 @@ def _dirty_suffix(path: Path, timeout=1) -> str:
     out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return ""
-    # diff-index exits 1 with no output for a dirty tree. Timeouts and real git
-    # failures include a diagnostic; skip the suffix so the base version remains.
-    return "-dirty" if not out else ""
+    # diff-index --quiet exits 1 with no stdout/stderr to *signal* a dirty tree
+    # (not an error). _run_git() substitutes a synthetic "git exited with
+    # status N" diagnostic when both streams are empty, which makes the naive
+    # `if not out` guard always false on dirty trees — silently dropping the
+    # suffix and defeating dev-build cache busting (static/foo.js?v=… stays
+    # identical to the last-committed version). Treat the synthetic shape as
+    # the dirty signal; real errors (timeouts, missing git) carry a different
+    # diagnostic and correctly suppress the suffix.
+    if not out or out.startswith('git exited with status '):
+        return "-dirty"
+    return ""
 
 
 def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | None:
@@ -351,6 +359,21 @@ def _release_gap(tags, current, latest):
     return 1
 
 
+def _head_is_past_latest_tag(path, current_tag):
+    """Return True when HEAD has moved past the latest reachable release tag.
+
+    `git describe --tags --always` returns the bare tag name (e.g. ``v2026.5.16``)
+    when HEAD is exactly on the tag, and a ``v2026.5.16-608-g1d22b9c2`` suffix
+    when HEAD has moved 608 commits past it. Used by both the update check and
+    the update apply path so they agree on which ref to advance to — see #2653
+    (check side) and #2846 (apply side).
+    """
+    if not current_tag:
+        return False
+    full_desc, ok = _run_git(['describe', '--tags', '--always'], path)
+    return bool(ok and full_desc and full_desc != current_tag)
+
+
 def _select_apply_compare_ref(path):
     """Return the same remote ref family that the update check reports.
 
@@ -358,10 +381,31 @@ def _select_apply_compare_ref(path):
     an update must therefore advance to the latest release tag too; otherwise a
     checkout on a local/fork tracking branch can report release updates, pull a
     different branch that is already current, restart, and still remain behind.
+
+    When HEAD is past the latest tag (the agent repo's day-to-day state between
+    tagged releases), the check side falls through to the branch comparison via
+    `_check_repo_release` returning None. The apply side must mirror that
+    decision — otherwise we run `git pull --ff-only <latest-tag>` against a
+    checkout that's already past the tag, no-op, restart, and the banner
+    re-appears with the same N commits available. See #2846.
     """
     tags = _release_tags(path)
     if tags:
-        return tags[0]
+        latest_tag = tags[0]
+        current_tag = _current_release_tag(path)
+        behind = _release_gap(tags, current_tag, latest_tag)
+        # Mirror the check side exactly: only fall through when behind == 0
+        # AND HEAD has moved past its nearest tag (case A: bench between
+        # tagged releases). Otherwise the tag is correct — including the
+        # case where HEAD is on an older release tag with commits on top
+        # AND a newer tag exists (case D), where `behind > 0` means the
+        # user is genuinely behind the latest release and should advance
+        # to it. Pre-#2855 the apply path only consulted `latest_tag`
+        # without the `behind`/`current_tag` predicate, so case D fell
+        # through to `origin/<branch>` and the pull landed past the
+        # advertised tag. See #2846 + Opus pre-release review for #2855.
+        if not (behind == 0 and _head_is_past_latest_tag(path, current_tag)):
+            return latest_tag
 
     upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
     if ok and upstream:
@@ -384,14 +428,11 @@ def _check_repo_release(path, name):
     # If behind == 0 but HEAD has moved past the tag (e.g. the agent repo
     # keeps committing to master between tagged releases), the release check
     # would report "Up to date" even though hundreds of commits are missing.
-    # Detect this by comparing the short describe output (which includes the
-    # -N-gSHA suffix when HEAD is past a tag) against the bare tag name.
-    # When HEAD is ahead of the latest tag, fall through to _check_repo_branch
-    # so the real commit count is reported instead.  See #2653.
-    if behind == 0:
-        full_desc, ok = _run_git(['describe', '--tags', '--always'], path)
-        if ok and full_desc and full_desc != current_tag:
-            return None
+    # Fall through to _check_repo_branch so the real commit count is reported
+    # instead. The same predicate is used by _select_apply_compare_ref so the
+    # check and apply sides cannot drift again. See #2653 (check), #2846 (apply).
+    if behind == 0 and _head_is_past_latest_tag(path, current_tag):
+        return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
     remote_url = _normalize_remote_url(remote_url)
@@ -521,11 +562,21 @@ def _check_repo(path, name):
     return _check_repo_branch(path, name, fetch=False)
 
 
-def check_for_updates(force=False):
+def _ignored_agent_update_info() -> dict:
+    """Return a stable update-check payload for intentionally ignored Agent updates."""
+    return {'name': 'agent', 'behind': 0, 'ignored': True}
+
+
+def check_for_updates(force=False, *, include_agent=True):
     """Return cached update status for webui and agent repos."""
     global _check_in_progress
+    include_agent = bool(include_agent)
     with _cache_lock:
-        if not force and time.time() - _update_cache['checked_at'] < CACHE_TTL:
+        if (
+            not force
+            and _update_cache.get('include_agent') == include_agent
+            and time.time() - _update_cache['checked_at'] < CACHE_TTL
+        ):
             return dict(_update_cache)
         if _check_in_progress:
             return dict(_update_cache)  # another thread is already checking
@@ -534,12 +585,13 @@ def check_for_updates(force=False):
     try:
         # Run checks outside the lock (network I/O)
         webui_info = _check_repo(REPO_ROOT, 'webui')
-        agent_info = _check_repo(_AGENT_DIR, 'agent')
+        agent_info = _check_repo(_AGENT_DIR, 'agent') if include_agent else _ignored_agent_update_info()
 
         with _cache_lock:
             _update_cache['webui'] = webui_info
             _update_cache['agent'] = agent_info
             _update_cache['checked_at'] = time.time()
+            _update_cache['include_agent'] = include_agent
             return dict(_update_cache)
     finally:
         _check_in_progress = False

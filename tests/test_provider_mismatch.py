@@ -522,6 +522,31 @@ def test_non_openrouter_slash_model_provider_context_stays_unqualified():
     assert runtime_model == "anthropic/claude-sonnet-4.6"
 
 
+def test_cursor_acp_slash_model_always_gets_provider_hint():
+    """ACP subprocess models with '/' must not fall through to config default."""
+    import api.config as config
+
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "openai-codex",
+        "default": "gpt-5.5",
+    }
+    try:
+        runtime_model = config.model_with_provider_context(
+            "cursor/composer-2.5",
+            "cursor-acp",
+        )
+        model, provider, base_url = config.resolve_model_provider(runtime_model)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert runtime_model == "@cursor-acp:cursor/composer-2.5"
+    assert model == "cursor/composer-2.5"
+    assert provider == "cursor-acp"
+    assert base_url is None
+
+
 def test_api_session_new_persists_model_provider_context():
     """POST /api/session/new returns compact session model_provider metadata."""
     created, status = _post(
@@ -1111,7 +1136,9 @@ class TestModelSwitchToast:
         # Find the onchange block
         idx = src.find("modelSelect').onchange")
         assert idx != -1, "modelSelect.onchange not found in boot.js"
-        block = src[idx:idx + 1100]
+        end = src.find("$('msg').addEventListener", idx)
+        assert end != -1, "modelSelect.onchange block terminator not found in boot.js"
+        block = src[idx:end]
         assert "model_scope_toast" in block, (
             "modelSelect.onchange must show that the selected model applies to this conversation"
         )
@@ -1171,13 +1198,13 @@ class TestFrontendModelProviderState:
         assert "_modelStateForSelect" in src
         assert "model_provider:modelState.model_provider||null" in src
 
-    def test_new_session_lets_profile_config_choose_default_model_provider(self):
+    def test_new_session_carries_visible_picker_model_into_create_request(self):
         src = _read("static/sessions.js")
         start = src.index("async function newSession(")
         body = src[start:src.index("const data=await api('/api/session/new'", start)]
         assert "profile:S.activeProfile||'default'" in body
-        assert "model:newModelState.model" not in body
-        assert "model_provider:newModelState.model_provider||null" not in body
+        assert "reqBody.model=newModelState.model" in body
+        assert "reqBody.model_provider=newModelState.model_provider||null" in body
 
     def test_ui_has_json_model_state_storage(self):
         src = _read("static/ui.js")

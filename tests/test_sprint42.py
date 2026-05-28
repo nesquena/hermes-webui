@@ -55,13 +55,18 @@ class TestSessionDBInjection(unittest.TestCase):
         )
 
     def test_sessiondb_init_in_try_except(self):
-        """SessionDB() init must be wrapped in try/except for non-fatal failure handling."""
-        # Check that the try/except pattern surrounding SessionDB() is present
-        pattern = r"try:\s*\n\s*from hermes_state import SessionDB\s*\n\s*_session_db\s*=\s*SessionDB\(\)"
+        """SessionDB init must be wrapped in try/except for non-fatal failure handling."""
+        # Check that the try/except pattern surrounding SessionDB(db_path=...) is present.
+        pattern = (
+            r"try:\s*\n"
+            r"\s*from hermes_state import SessionDB\s*\n"
+            r'\s*_state_db_path\s*=\s*\(Path\(_profile_home\)\s*/\s*"state\.db"\)\s*if\s*_profile_home\s*else\s*None\s*\n'
+            r"\s*_session_db\s*=\s*SessionDB\(db_path=_state_db_path\)"
+        )
         self.assertRegex(
             STREAMING_PY,
             pattern,
-            "SessionDB() init must be inside a try block for non-fatal error handling (PR #356)",
+            "SessionDB(db_path=...) init must be inside a try block for non-fatal error handling",
         )
 
     def test_sessiondb_failure_logs_warning(self):
@@ -389,7 +394,8 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         init_kwargs = captured["init_kwargs"]
         self.assertIsNotNone(init_kwargs["interim_assistant_callback"])
         self.assertTrue(callable(init_kwargs["interim_assistant_callback"]))
-        self.assertIn("WebUI progress contract", captured["agent"].ephemeral_system_prompt)
+        self.assertIn("WebUI progress guidance", captured["agent"].ephemeral_system_prompt)
+        self.assertIn("Match the normal Hermes messaging style", captured["agent"].ephemeral_system_prompt)
         self.assertIn("user-visible progress updates", captured["agent"].ephemeral_system_prompt)
 
         interim_events = []
@@ -679,9 +685,11 @@ def test_streaming_persists_reasoning_in_session():
     assert "_reasoning_text = ''" in src, \
         "_reasoning_text variable not initialised in streaming.py"
 
-    # on_reasoning must accumulate into _reasoning_text
-    assert '_reasoning_text += str(text)' in src, \
-        "on_reasoning callback does not accumulate into _reasoning_text"
+    # on_reasoning must accumulate non-echo reasoning into _reasoning_text
+    assert '_reasoning_text += reasoning_delta' in src, \
+        "on_reasoning callback does not accumulate accepted reasoning deltas into _reasoning_text"
+    assert '_is_visible_output_echo(reasoning_delta)' in src, \
+        "on_reasoning callback should suppress reasoning deltas that only echo visible streamed output"
 
     # Persistence block must exist before raw_session is built
     assert "Persist reasoning trace in the session so it survives reload" in src, \

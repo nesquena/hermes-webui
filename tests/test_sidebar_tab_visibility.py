@@ -99,8 +99,8 @@ def test_i18n_coverage():
     """Label and description keys must exist in all locales with matching counts."""
     label_count = I18N_JS.count("settings_label_tab_visibility")
     desc_count = I18N_JS.count("settings_desc_tab_visibility")
-    assert label_count >= 11, f"Expected ≥11 locales, found {label_count}"
-    assert desc_count >= 11, f"Expected ≥11 locales, found {desc_count}"
+    assert label_count >= 12, f"Expected ≥12 locales, found {label_count}"
+    assert desc_count >= 12, f"Expected ≥12 locales, found {desc_count}"
     assert label_count == desc_count, \
         f"Label ({label_count}) and desc ({desc_count}) counts must match"
 
