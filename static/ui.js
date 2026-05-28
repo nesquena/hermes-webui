@@ -4057,12 +4057,10 @@ let _ttsCurrentUtterance=null;
 let _playingEdgeAudio=null;
 
 function speakMessage(btn){
-  // If already speaking this message via Edge TTS, stop
-  if(btn&&btn.dataset.speaking==='1'&&(localStorage.getItem('hermes-tts-engine')||'browser')==='edge'){
+  if(btn&&btn.dataset.speaking==='1'){
     stopTTS();
     return;
   }
-  // Stop any current speech
   stopTTS();
 
   const row=btn?btn.closest('[data-raw-text]'):null;
