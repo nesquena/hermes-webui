@@ -3582,10 +3582,14 @@ def test_space_tool_adapter_supports_source_repair_layout_metadata_only(monkeypa
     assert repaired["progress_event"]["family"] == "tool"
     assert repaired["progress_event"]["run_id"] == "repair:source-repair-layout-lab"
     assert repaired["progress_event"]["space_id"] == created["space_id"]
+    assert repaired["prompt_preflight"]["boundary"] == "creator_commit"
+    assert repaired["prompt_preflight"]["status"] == "pass"
+    assert repaired["prompt_preflight"]["metadata_only"] is True
+    assert repaired["prompt_preflight"]["raw_prompt_stored"] is False
     assert repaired["autonomy_policy"]["action"] == "space.spaces.repairlayout"
     assert repaired["autonomy_policy"]["approval_required"] is True
     assert repaired["autonomy_policy"]["approval_gates"] == ["creator_commit"]
-    assert repaired["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert repaired["autonomy_policy"]["prompt_preflight_status"] == "pass"
     assert repaired["autonomy_policy"]["model_route_hint"] == "hint:fast"
     assert repaired["autonomy_policy"]["metadata_only"] is True
     assert repaired["autonomy_policy"]["local_only"] is True
@@ -8266,7 +8270,7 @@ def test_space_tool_adapter_meta_layout_repair_rearrange_output_compaction_recei
                 "prompt": "raw prompt/body-like text must not leak",
             },
             "repair:layout-action-compaction-lab",
-            "required",
+            "pass",
             "hint:fast",
             "widget_count: 1",
         ),

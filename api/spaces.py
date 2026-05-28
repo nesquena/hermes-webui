@@ -1962,13 +1962,16 @@ def _space_tool_action_output_compaction_receipt(
 
 
 
-def _space_layout_action_policy_receipt(action: str) -> dict[str, Any]:
+def _space_layout_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
+    prompt_preflight_status = "required"
+    if isinstance(preflight_receipt, dict):
+        prompt_preflight_status = str(preflight_receipt.get("status") or "required")
     return action_policy_receipt(
         action,
         approval_gates=["creator_commit"],
-        prompt_preflight_status="required",
+        prompt_preflight_status=prompt_preflight_status,
         model_route_hint="hint:fast",
     )
 
@@ -6213,10 +6216,14 @@ def repair_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
     """Apply saved source-style layout metadata to widgets safely."""
     space_id = validate_space_id(_space_tool_space_id(payload))
     space = read_space(space_id)
-    layout = space.get("layout") if isinstance(space.get("layout"), dict) else {}
+    layout_raw = space.get("layout")
+    layout: dict[str, Any] = dict(layout_raw) if isinstance(layout_raw, dict) else {}
+    prompt_preflight = _space_layout_prompt_preflight_receipt(layout)
     widget_ids = [validate_widget_id(item) for item in (layout.get("widget_ids") or []) if item]
-    positions = layout.get("widget_positions") if isinstance(layout.get("widget_positions"), dict) else {}
-    sizes = layout.get("widget_sizes") if isinstance(layout.get("widget_sizes"), dict) else {}
+    positions_raw = layout.get("widget_positions")
+    positions: dict[str, Any] = dict(positions_raw) if isinstance(positions_raw, dict) else {}
+    sizes_raw = layout.get("widget_sizes")
+    sizes: dict[str, Any] = dict(sizes_raw) if isinstance(sizes_raw, dict) else {}
     minimized_ids = set(
         validate_widget_id(item) for item in (layout.get("minimized_widget_ids") or []) if item
     )
@@ -6257,6 +6264,7 @@ def repair_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
         "widgets": [widget for widget in list_widgets(saved["space_id"]) if widget["id"] in set(repaired_ids)],
         "widget_count": len(repaired_ids),
         "space": read_space_detail(saved["space_id"]),
+        "prompt_preflight": prompt_preflight,
         "progress_event": progress_event,
     }
 
@@ -7133,7 +7141,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name == "space.spaces.repairlayout":
         _space_tool_reject_ambient_current_selectors(data)
         result = repair_space_layout_from_tool(data)
-        autonomy_policy = _space_layout_action_policy_receipt(name)
+        preflight_receipt = result.get("prompt_preflight") if isinstance(result.get("prompt_preflight"), dict) else None
+        autonomy_policy = _space_layout_action_policy_receipt(name, preflight_receipt)
         return {
             "ok": True,
             "action": name,
