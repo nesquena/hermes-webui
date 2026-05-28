@@ -340,7 +340,7 @@ def _messages_from_prefill_script_output(text: str) -> list[dict]:
     messages = _valid_prefill_messages(payload)
     if messages:
         return messages
-    return [{"role": "system", "content": stripped}]
+    return [{"role": "user", "content": stripped}]
 
 
 def _load_prefill_messages_script(config_data: dict) -> dict:

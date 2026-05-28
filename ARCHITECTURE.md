@@ -123,7 +123,7 @@ Environment variables controlling behavior:
     HERMES_WEBUI_PASSWORD          Optional: enable password auth (off by default)
     HERMES_WEBUI_SKIP_ONBOARDING   Optional: bypass the first-run onboarding wizard
     HERMES_PREFILL_MESSAGES_FILE   Optional JSON message list for browser-turn prefill context
-    HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT Optional command that prints JSON messages or text prefill context
+    HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT Optional command that prints JSON messages or plain-text user prefill context
     HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT_TIMEOUT Optional script timeout in seconds (default 5, max 30)
     HERMES_HOME                    Base directory for Hermes state (~/.hermes by default)
 

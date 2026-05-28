@@ -70,7 +70,7 @@ def test_webui_prefill_script_loads_json_messages(tmp_path):
     assert result["messages"] == [{"role": "system", "content": "Joplin has durable context; use notes/search tools for details."}]
 
 
-def test_webui_prefill_script_wraps_plain_text_for_any_notes_source(tmp_path):
+def test_webui_prefill_script_wraps_plain_text_as_user_context(tmp_path):
     from api.streaming import _load_webui_prefill_context
 
     script = tmp_path / "obsidian_recall.py"
@@ -80,7 +80,7 @@ def test_webui_prefill_script_wraps_plain_text_for_any_notes_source(tmp_path):
 
     assert result["status"] == "loaded"
     assert result["source"] == "script"
-    assert result["messages"] == [{"role": "system", "content": "Obsidian project note context"}]
+    assert result["messages"] == [{"role": "user", "content": "Obsidian project note context"}]
 
 
 def test_webui_prefill_script_errors_are_redacted(tmp_path):
@@ -111,7 +111,7 @@ def test_webui_prefill_script_takes_precedence_over_static_file(tmp_path):
     })
 
     assert result["source"] == "script"
-    assert result["messages"] == [{"role": "system", "content": "dynamic"}]
+    assert result["messages"] == [{"role": "user", "content": "dynamic"}]
 
 
 def test_webui_prefill_script_timeout_returns_redacted_error(tmp_path):
