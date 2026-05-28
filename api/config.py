@@ -4805,11 +4805,14 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
             "fallback, refreshing catalog out-of-band",
             _LIVE_REBUILD_BUDGET_SECONDS,
         )
-        if disk_groups is not None:
-            return copy.deepcopy(disk_groups)
-        fallback = _load_models_cache_from_disk()
-        if fallback is not None:
-            return copy.deepcopy(fallback)
+        # Note: ``disk_groups``, if non-None, was already consumed by the
+        # cold-path early-return at the "Cold path: disk cache hit" branch
+        # above (line ~4608). Any execution that reaches HERE necessarily
+        # took the live-rebuild branch, which means ``disk_groups is None``
+        # at this point — so we don't re-check it. Per Copilot review on
+        # PR #2971: the previous ``if disk_groups is not None`` branch
+        # here was dead code. Fall back directly to the static minimal
+        # catalog (no second disk read).
         return copy.deepcopy(_minimal_static_models_catalog())
 
 

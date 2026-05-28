@@ -15,11 +15,11 @@ The drain thread:
        intent to ``cli._format_process_notification`` and
        ``gateway.run._format_gateway_process_notification`` so the agent sees
        the same payload regardless of host,
-    4. emits a ``bg_task_complete`` SSE event (the canonical event name; a legacy
-       ``process_complete`` alias is retained for one release cycle and will be
-       removed by PR (b)) on the active stream(s) for that
-       session (DEMOTED to pure live-view — an open tab streams the turn
-       live), records a server-side marker in ``PENDING_BG_TASK_COMPLETIONS``,
+    4. emits a canonical ``bg_task_complete`` SSE event (plus a temporary
+       ``process_complete`` alias for the migration window) on the active
+       stream(s) for that session (DEMOTED to pure live-view — an open tab
+       streams the turn live), records a server-side marker in
+       ``PENDING_BG_TASK_COMPLETIONS``,
        and — Option Z PIVOT — starts the agent wakeup turn **directly
        server-side** when the session is idle (``_start_server_side_wakeup_turn``
        → ``routes.start_session_turn``). This needs NO browser round-trip, so
@@ -101,14 +101,11 @@ class SessionChannel:
       - ``subscribe`` / ``unsubscribe`` are refcount-style: zero subscribers
         does NOT immediately collect the channel; the reaper waits a 60s
         grace so a quick navigation away/back doesn't churn the registry.
-      - The reaper collects the channel only when subscribers are empty.
-        Two collection conditions, both gated on zero subscribers: (a) the
-        grace-period sweep (``last_subscriber_drop_at`` older than
-        ``SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS``), and (b) the idle-TTL
-        zombie cap (``created_at`` older than
-        ``SESSION_CHANNEL_IDLE_TTL_SECS``). A channel with even one live
-        subscriber is never reaped regardless of TTL — see
-        ``reaper_should_collect`` for the canonical logic.
+      - The reaper collects the channel when subscribers stay empty past the
+        grace period, OR when subscribers are empty AND ``created_at`` is
+        older than SESSION_CHANNEL_IDLE_TTL_SECS (zombie cap — TTL-based
+        collection only applies when there are no subscribers; a live tab
+        keeps the channel forever).
     """
 
     def __init__(self, session_id: str):
@@ -156,7 +153,9 @@ class SessionChannel:
                 # detection will eventually tear the connection down and the
                 # browser will reconnect, replaying the live stream from
                 # whatever fires next. process_complete is intrinsically
-                # idempotent (frontend dedupes by process_id).
+                # idempotent (frontend dedupes by ``(session_id, event_id)``
+                # using a small ring-buffer in static/messages.js — see the
+                # bg_task_complete consumer-side dedupe introduced in PR #2971).
                 logger.debug("SessionChannel emit: subscriber buffer full, dropping")
             except Exception:
                 logger.debug("SessionChannel emit failed", exc_info=True)
@@ -165,14 +164,11 @@ class SessionChannel:
     def reaper_should_collect(self, now: float) -> bool:
         """True when the reaper should remove this channel.
 
-        TTL-based collection only applies when there are no subscribers —
-        sessions with active subscribers are never reaped regardless of TTL.
-        Two collection conditions (per Option X spec), both gated on empty
-        subscribers:
+        Two collection conditions (per Option X spec):
           1. Subscribers empty AND last_subscriber_drop_at is older than
              SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS (normal teardown).
-          2. Subscribers empty AND created_at older than
-             SESSION_CHANNEL_IDLE_TTL_SECS (idle-channel sweep).
+          2. created_at older than SESSION_CHANNEL_IDLE_TTL_SECS AND
+             subscribers empty (zombie cap — survived too long).
         """
         from api import config as _cfg
 
@@ -397,12 +393,23 @@ def _emit_to_session_streams(session_id: str, event: str, data: dict) -> int:
     from api import config as _cfg
 
     emitted = 0
+    # Snapshot ACTIVE_RUNS under ACTIVE_RUNS_LOCK so owner_sid lookups below
+    # see a consistent view — reading ACTIVE_RUNS without the lock can race
+    # with register/unregister paths and produce a transient owner-unknown
+    # verdict, causing in-turn deliveries to be dropped. Per Copilot review
+    # on PR #2971. Taken before STREAMS_LOCK to avoid nested-lock ordering
+    # concerns (the two locks are otherwise independent).
+    if hasattr(_cfg, "ACTIVE_RUNS") and hasattr(_cfg, "ACTIVE_RUNS_LOCK"):
+        with _cfg.ACTIVE_RUNS_LOCK:
+            active_runs_snapshot: dict = dict(_cfg.ACTIVE_RUNS)
+    elif hasattr(_cfg, "ACTIVE_RUNS"):
+        active_runs_snapshot = dict(_cfg.ACTIVE_RUNS)
+    else:
+        active_runs_snapshot = {}
     with _cfg.STREAMS_LOCK:
         items = list(_cfg.STREAMS.items())
-    with _cfg.ACTIVE_RUNS_LOCK:
-        active_runs = dict(_cfg.ACTIVE_RUNS or {})
     for stream_id, channel in items:
-        meta = active_runs.get(stream_id)
+        meta = active_runs_snapshot.get(stream_id)
         owner_sid = (meta or {}).get("session_id") if isinstance(meta, dict) else None
         # Copilot review #3: only emit on the STREAMS loop when the stream's
         # owning session is KNOWN and matches. Previously, when no ACTIVE_RUNS
@@ -487,8 +494,6 @@ def _emit_bg_task_complete_events_coalesced(session_id: str, payload: dict) -> i
     replace the pending payload and reset the quiet timer. The deferred flush
     therefore uses the latest payload from a burst.
     """
-    from api import config as _cfg
-    coalesce_window = getattr(_cfg, "_EMIT_COALESCE_WINDOW_SECS", _EMIT_COALESCE_WINDOW_SECS)
     if not session_id:
         return 0
     should_emit_now = False
@@ -496,7 +501,7 @@ def _emit_bg_task_complete_events_coalesced(session_id: str, payload: dict) -> i
     with _EMIT_COALESCE_LOCK:
         last = _LAST_EMIT_TS.get(session_id)
         has_pending = session_id in _PENDING_EMIT_TIMERS
-        if last is None or (now - last) >= coalesce_window:
+        if last is None or (now - last) >= _EMIT_COALESCE_WINDOW_SECS:
             if not has_pending:
                 _LAST_EMIT_TS[session_id] = now
                 should_emit_now = True
@@ -519,7 +524,7 @@ def _emit_bg_task_complete_events_coalesced(session_id: str, payload: dict) -> i
                         exc_info=True,
                     )
             timer = threading.Timer(
-                coalesce_window,
+                _EMIT_COALESCE_WINDOW_SECS,
                 _flush_coalesced_bg_task_complete,
                 args=(session_id,),
             )
@@ -680,36 +685,35 @@ def _resolve_wakeup_target(
     return owner
 
 
-def _resolve_session_key(evt: dict, process_id: str, proc_session) -> str:
-    """Resolve the session_key from the event payload or the process registry."""
-    session_key = str(evt.get("session_key") or "")
-    if not session_key and process_id:
-        try:
-            if proc_session is not None and getattr(proc_session, "session_key", ""):
-                session_key = str(proc_session.session_key)
-        except Exception:
-            logger.debug(
-                "session_key recovery from process registry failed for %r",
-                process_id,
-                exc_info=True,
-            )
-    return session_key
-
-
 def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
 
     process_id = str(evt.get("session_id") or "")
     session_key = str(evt.get("session_key") or "")
-    
-    try:
-        from tools.process_registry import process_registry as _pr
-        _ps = _pr.get(process_id) if process_id else None
-    except Exception:
-        _ps = None
-        
-    session_key = _resolve_session_key(evt, process_id, _ps)
+    # Root-cause fix (t_0f447014): the notify_on_complete completion event
+    # enqueued by ProcessRegistry._move_to_finished() carries NO "session_key"
+    # field — only the watch_match enqueue includes one. Without it the old
+    # `evt.get("session_key") or process_id` fell back to the process id
+    # ("proc_xxxx"), which is never a PROCESS_SESSION_INDEX key (only
+    # webui_session_id -> webui_session_id is registered at chat-start), so
+    # every wakeup was silently dropped here and the frontend never POSTed an
+    # ack. Recover the spawn-time session_key from the process registry's
+    # ProcessSession: the terminal tool captured it synchronously at spawn
+    # (while the turn's env was active), so it survives the turn-end env
+    # restore and is the WebUI session_id for WebUI-spawned processes.
+    if not session_key and process_id:
+        try:
+            from tools.process_registry import process_registry as _pr
+            _ps = _pr.get(process_id)
+            if _ps is not None and getattr(_ps, "session_key", ""):
+                session_key = str(_ps.session_key)
+        except Exception:
+            logger.debug(
+                "session_key recovery from process registry failed for %r",
+                process_id,
+                exc_info=True,
+            )
     if not session_key:
         session_key = process_id
     with _cfg.PROCESS_SESSION_INDEX_LOCK:
@@ -730,10 +734,15 @@ def _process_one(evt: dict) -> None:
     # markers below) to the TRUE owner instead of waking the wrong session.
     # Pure pass-through when no env-immune owner is available (today's core,
     # cron/CLI procs, pre-Option-1 spawns) — never suppresses a valid wakeup.
+    try:
+        from tools.process_registry import process_registry as _pr_xs
+        _ps_xs = _pr_xs.get(process_id) if process_id else None
+    except Exception:
+        _ps_xs = None
     session_id = _resolve_wakeup_target(
         process_id=process_id,
         session_key_resolved_sid=session_id,
-        proc_session=_ps,
+        proc_session=_ps_xs,
     )
     # ── Idempotency vs the REAL merged upstream #2279 (shared dedupe key) ──
     # The real merged #2279 next-turn drain
@@ -1067,14 +1076,9 @@ def _drain_loop() -> None:
     while not _DRAIN_STOP.is_set():
         try:
             evt = process_registry.completion_queue.get(timeout=1.0)
-        except queue.Empty:
-            # No event within timeout — re-check stop flag and continue.
-            continue
         except Exception:
-            logger.exception(
-                "bg_task_complete drain: unexpected error draining completion_queue; breaking"
-            )
-            break
+            # queue.Empty or transient — re-check stop flag and continue.
+            continue
         if not isinstance(evt, dict):
             continue
         try:
@@ -1109,26 +1113,8 @@ def unregister_process_session(session_key: str) -> None:
 
 
 def start_drain_thread() -> bool:
-    """Start the background drain thread idempotently. Returns True on first start.
-
-    Performs an up-front dependency check: if ``tools.process_registry`` is not
-    importable or ``completion_queue`` is missing/None, the drain cannot
-    function — return False so callers know the wakeup path is disabled
-    rather than silently starting a thread that will immediately exit.
-    """
+    """Start the background drain thread idempotently. Returns True on first start."""
     global _DRAIN_THREAD
-    try:
-        from tools.process_registry import process_registry
-    except ImportError:
-        logger.warning(
-            "bg_task_complete drain: tools.process_registry missing; drain disabled"
-        )
-        return False
-    if getattr(process_registry, "completion_queue", None) is None:
-        logger.warning(
-            "bg_task_complete drain: completion_queue is None; drain disabled"
-        )
-        return False
     if _DRAIN_THREAD is not None and _DRAIN_THREAD.is_alive():
         return False
     _DRAIN_STOP.clear()

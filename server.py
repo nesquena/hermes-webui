@@ -558,12 +558,12 @@ def main() -> None:
             from api.background_process import stop_drain_thread
             stop_drain_thread()
         except Exception:
-            logger.debug("Failed to stop bg_task_complete drain thread during shutdown")
+            logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
         try:
             from api.background_process import stop_session_channel_reaper
             stop_session_channel_reaper()
         except Exception:
-            logger.debug("Failed to stop SessionChannel reaper during shutdown")
+            logger.debug("Failed to stop SessionChannel reaper during shutdown", exc_info=True)
 
 if __name__ == '__main__':
     main()
