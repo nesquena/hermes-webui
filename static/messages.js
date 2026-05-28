@@ -1594,6 +1594,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       liveReasoningText='';
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid) return;
+        const parsed=_parseStreamState();
+        if(String((parsed&&parsed.displayText)||'').trim()||assistantRow){
+          ensureAssistantRow(true);
+          _flushPendingSegmentRender({force:true});
+          if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
+        }
         _resetAssistantSegment();
         return;
       }

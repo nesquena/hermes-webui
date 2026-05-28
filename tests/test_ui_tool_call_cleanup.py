@@ -331,6 +331,14 @@ class TestToolCallGroupingStatic:
         assert interim_match and "_flushPendingSegmentRender({force:true})" in interim_match.group(1), (
             "Visible interim assistant progress must be synchronously rendered before the segment reset."
         )
+        already_streamed_branch = interim_match.group(1).split("if(alreadyStreamed){", 1)[1].split("assistantText +=", 1)[0]
+        assert "closeCurrentLiveActivityGroup()" in already_streamed_branch, (
+            "An already-streamed interim event is still a visible-progress boundary; "
+            "it must split the current Activity burst without appending duplicate text."
+        )
+        assert "_flushPendingSegmentRender({force:true})" in already_streamed_branch, (
+            "Already-streamed progress boundaries must flush token-rendered text before splitting Activity."
+        )
         timer_fn = _function_body(UI_JS, "_updateActiveActivityElapsedTimer")
         assert "data-live-activity-current" in timer_fn, (
             "Elapsed timers should clear once an Activity group is no longer current."

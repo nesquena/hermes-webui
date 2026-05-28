@@ -698,6 +698,7 @@ async function loadSession(sid){
   }
 
   if(INFLIGHT[sid]){
+    _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
     const inflightMessages=INFLIGHT[sid].messages||[];
     S.messages=[];
     S.toolCalls=[];
@@ -1400,6 +1401,35 @@ function _dropCurrentTurnAssistantMessages(messages){
   }
   if(start<0) return list;
   return list.filter((msg,idx)=>idx<=start||!(msg&&msg.role==='assistant'));
+}
+
+function _ensureInflightLiveAssistantMessage(inflight){
+  if(!inflight) return false;
+  const text=String(inflight.lastAssistantText||'').trim();
+  const reasoning=String(inflight.lastReasoningText||'').trim();
+  if(!text&&!reasoning) return false;
+  if(!Array.isArray(inflight.messages)) inflight.messages=[];
+  let live=null;
+  for(let i=inflight.messages.length-1;i>=0;i--){
+    const msg=inflight.messages[i];
+    if(msg&&msg.role==='assistant'&&msg._live){live=msg;break;}
+  }
+  if(live){
+    const liveText=_messageComparableText(live);
+    if(text&&(!liveText||text.startsWith(liveText)||text.length>liveText.length)){
+      live.content=text;
+    }
+    if(reasoning&&!live.reasoning) live.reasoning=reasoning;
+    return true;
+  }
+  inflight.messages.push({
+    role:'assistant',
+    content:text,
+    reasoning:reasoning||undefined,
+    _live:true,
+    _ts:Date.now()/1000,
+  });
+  return true;
 }
 
 function _prepareRunningLiveTail(baseMessages,inflightMessages){

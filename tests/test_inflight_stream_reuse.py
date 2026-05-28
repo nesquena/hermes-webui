@@ -235,16 +235,57 @@ assert.strictEqual(merged[merged.length - 1].content, 'First progress.\\n\\nSeco
     assert result.returncode == 0, result.stderr
 
 
+def test_running_reattach_rebuilds_live_assistant_from_last_text_before_activity():
+    """A fast session switch can happen after INFLIGHT.lastAssistantText was
+    updated but before the live assistant message/DOM snapshot caught up.
+
+    Reattach must rebuild the structured `_live` assistant before restoring
+    Activity, otherwise the UI can show only the Activity group until another
+    switch or token causes the text segment to reappear.
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+let base = [{{role:'user', content:'go'}}];
+let inflightState = {{
+  lastAssistantText:'Recovered progress text.',
+  lastReasoningText:'',
+  messages:[{{role:'user', content:'go'}}],
+}};
+assert.strictEqual(_ensureInflightLiveAssistantMessage(inflightState), true);
+assert.strictEqual(inflightState.messages.length, 2);
+assert.strictEqual(inflightState.messages[1]._live, true);
+assert.strictEqual(inflightState.messages[1].content, 'Recovered progress text.');
+assert.strictEqual(_prepareRunningLiveTail(base, inflightState.messages), true);
+base = _dropCurrentTurnAssistantMessages(base);
+const merged = _mergeInflightTailMessages(base, inflightState.messages);
+assert.strictEqual(merged.filter(m => m.role === 'assistant').length, 1);
+assert.strictEqual(merged[merged.length - 1]._live, true);
+assert.strictEqual(merged[merged.length - 1].content, 'Recovered progress text.');
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
 def test_load_session_rebuilds_live_tail_before_dropping_stale_dom_snapshot():
     body = _function_body(SESSIONS_JS, "loadSession")
+    ensure_pos = body.find("_ensureInflightLiveAssistantMessage(INFLIGHT[sid]);")
+    inflight_pos = body.find("const inflightMessages=INFLIGHT[sid].messages||[];")
     prepare_pos = body.find("const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);")
     drop_dom_pos = body.find("delete INFLIGHT[sid].liveTurnHtml;")
     drop_assistant_pos = body.find("S.messages=_dropCurrentTurnAssistantMessages(S.messages);")
     merge_pos = body.find("S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);")
     restore_pos = body.find("restoreLiveTurnHtmlForSession(sid)")
+    assert ensure_pos != -1 and inflight_pos != -1
     assert prepare_pos != -1 and drop_dom_pos != -1
     assert drop_assistant_pos != -1 and merge_pos != -1 and restore_pos != -1
-    assert prepare_pos < drop_dom_pos < drop_assistant_pos < merge_pos < restore_pos
+    assert ensure_pos < inflight_pos < prepare_pos < drop_dom_pos < drop_assistant_pos < merge_pos < restore_pos
 
 
 def test_load_session_advances_replay_cursor_when_loaded_transcript_has_current_turn_output():
