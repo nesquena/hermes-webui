@@ -154,10 +154,13 @@ HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT_TIMEOUT=5 \
 ```
 
 The script may print either an OpenAI-style JSON message list, a JSON object with
-a `messages` list, or plain text; plain text is wrapped as one `system` prefill
-message. Script output is capped at 256 KiB before parsing. The browser only
-receives a compact status event (`source`, `label`, message count, and redacted
-errors), never the prefill message bodies.
+a `messages` list, or plain text; plain text is wrapped as one `user` prefill
+message so dynamic recall text becomes ordinary context instead of an extra
+system instruction. If the hook must provide system-level guidance, emit JSON
+messages with an explicit `role: "system"` entry instead. Script output is capped
+at 256 KiB before parsing. The browser only receives a compact status event
+(`source`, `label`, message count, and redacted errors), never the prefill
+message bodies.
 
 The bootstrap will:
 

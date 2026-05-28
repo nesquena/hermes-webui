@@ -3922,9 +3922,10 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .detail-form-row label.detail-form-check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);cursor:pointer;font-weight:400;}
 .detail-form-row label.detail-form-check input{accent-color:var(--accent,var(--link));}
 .detail-form-error{font-size:12px;color:var(--error,#e05);padding:8px 10px;border:1px solid color-mix(in srgb,var(--error,#e05) 35%,transparent);background:color-mix(in srgb,var(--error,#e05) 8%,transparent);border-radius:8px;line-height:1.5;}
-.panel-head-btn.primary{background:var(--accent,var(--link));color:#fff;border:none;}
-.panel-head-btn.primary:hover{background:var(--accent-hover,var(--accent,var(--link)));color:#fff;}
-.panel-head-btn.primary svg{color:#fff;}
+:root.dark{--panel-head-primary-fg:var(--bg);}
+.panel-head-btn.primary{background:var(--accent,var(--link));color:var(--panel-head-primary-fg,#fff);border:none;}
+.panel-head-btn.primary:hover{background:var(--accent-hover,var(--accent,var(--link)));color:var(--panel-head-primary-fg,#fff);}
+.panel-head-btn.primary svg{color:var(--panel-head-primary-fg,#fff);}
 /* Skill-picker inside in-main forms reuses the sidebar styles but needs light tweaks */
 .detail-form-row .skill-picker-wrap{position:relative;}
 .detail-form-row .skill-picker-tags{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;}
@@ -4038,6 +4039,14 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .wiki-status-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:11px;color:var(--muted);border-top:1px solid var(--border);padding-top:10px;}
 .wiki-status-footer a{color:var(--accent);text-decoration:none;font-weight:600;white-space:nowrap;}
 .wiki-status-footer a:hover{text-decoration:underline;}
+.skill-usage-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;}
+.skill-usage-sub{font-size:11px;color:var(--muted);margin-top:-4px;}
+.skill-usage-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:12px;}
+.skill-usage-grid div{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);min-width:0;}
+.skill-usage-grid span{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;}
+.skill-usage-grid strong{font-size:13px;color:var(--text);font-weight:650;overflow-wrap:anywhere;}
+.skill-usage-table .insights-table-head,
+.skill-usage-table .insights-table-row{grid-template-columns:minmax(90px,1.5fr) 60px 60px 58px 52px;gap:8px;align-items:center;}
 .insights-card-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;}
 .insights-table{width:100%;font-size:12px;}
 .insights-table-head{display:grid;grid-template-columns:1fr 80px;padding:4px 0;border-bottom:1px solid var(--border);font-weight:600;color:var(--muted);font-size:11px;}
@@ -4525,4 +4534,9 @@ main.main.showing-logs > #mainLogs{display:flex;}
   direction:ltr;
   text-align:left;
   unicode-bidi:isolate;
+}
+
+/* Cap composer width on very wide displays so the chip-cluster gap stays bounded */
+@media (min-width:1600px) {
+  .composer-box{max-width:1600px;margin:0 auto;}
 }

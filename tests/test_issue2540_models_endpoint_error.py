@@ -112,6 +112,32 @@ def test_named_custom_provider_models_endpoint_5xx_preserves_status(monkeypatch,
     assert error["code"] == 502
     assert "returned 502" in error["message"]
 
+def test_named_custom_provider_models_endpoint_network_error_uses_short_timeout(monkeypatch, tmp_path):
+    observed_timeouts = []
+
+    def fake_urlopen(req, timeout=10):
+        # Only record timeouts for the broken-proxy custom endpoint — unrelated
+        # background probes (Copilot token fetch, OpenRouter free-tier discovery, etc.)
+        # also call urlopen during get_available_models() and would otherwise pollute
+        # the assertion. The contract we're pinning: the broken-proxy /v1/models call
+        # uses CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS, not the urllib default 10.
+        full_url = getattr(req, "full_url", "")
+        if "broken.example" in str(full_url):
+            observed_timeouts.append(timeout)
+        raise urllib.error.URLError("timed out")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    with _ConfigState():
+        _configure_named_custom_provider(tmp_path, monkeypatch)
+        data = config.get_available_models()
+
+    group = _groups_by_provider(data)["custom:broken-proxy"]
+    assert group["models"] == []
+    assert group["models_endpoint_error"]["kind"] == "network"
+    assert observed_timeouts == [config.CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS]
+    assert max(observed_timeouts) <= 5.0
+
 
 def test_frontend_model_picker_renders_provider_endpoint_hint():
     ui = open("static/ui.js", encoding="utf-8").read()

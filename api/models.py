@@ -54,6 +54,29 @@ _INDEX_WRITE_LOCK = threading.RLock()
 _SESSION_INDEX_REBUILD_LOCK = threading.Lock()
 _SESSION_INDEX_REBUILD_THREAD = None
 
+# Path-safety contract for session IDs.  Accept alphanumerics, underscore, and
+# hyphen so API/gateway-issued ids (``api-*``, ``reachy-voice-*``) round-trip
+# through filesystem load/save/delete/worktree paths without traversal risk.
+# Dots and slashes are rejected so the id can never name a parent directory
+# or hide an unexpected extension.
+_SAFE_SID_CHARS = frozenset(
+    '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-'
+)
+
+
+def is_safe_session_id(sid) -> bool:
+    """Return True iff ``sid`` is a non-empty path-safe session id.
+
+    Centralizes the validation previously duplicated across
+    ``Session.load``, ``Session.load_metadata_only``,
+    ``_repair_stale_pending``, ``/api/session/worktree/remove``, and
+    ``/api/session/delete`` so every call site agrees on what characters
+    are allowed.  See #3023.
+    """
+    if not sid or not isinstance(sid, str):
+        return False
+    return all(c in _SAFE_SID_CHARS for c in sid)
+
 
 def _cleanup_stale_tmp_files() -> None:
     """Best-effort removal of stale ``*.tmp.*`` files from SESSION_DIR.
@@ -690,8 +713,10 @@ class Session:
 
     @classmethod
     def load(cls, sid):
-        # Validate session ID format to prevent path traversal
-        if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
+        # Validate session ID format to prevent path traversal.  API/gateway
+        # session ids may contain hyphens (for example ``api-*`` and
+        # ``reachy-voice-*``); allow those but still reject dots/slashes.
+        if not is_safe_session_id(sid):
             return None
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
@@ -718,7 +743,9 @@ class Session:
         top-level "messages" field and synthesize a small metadata-only object.
         Falls back to load() for legacy or unexpected file layouts.
         """
-        if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
+        # Same path-safety contract as load(): hyphens are valid session ids,
+        # path separators and traversal dots are not.
+        if not is_safe_session_id(sid):
             return None
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
@@ -1867,7 +1894,7 @@ def _repair_stale_pending(session) -> bool:
         _age = float('inf')
 
     sid = session.session_id
-    if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
+    if not is_safe_session_id(sid):
         return False
 
     try:
@@ -2195,6 +2222,70 @@ def _has_live_sidebar_state(session: dict) -> bool:
     )
 
 
+def _is_intentionally_background_sidebar_session(session: dict) -> bool:
+    sid = str(session.get('session_id') or '')
+    source = session.get('source_tag') or session.get('source')
+    return source == 'cron' or sid.startswith('cron_')
+
+
+def _preserve_messageful_sidebar_discoverability(
+    candidates: list[dict],
+    visible: list[dict],
+) -> list[dict]:
+    """Keep at least one messageful row per non-background conversation visible.
+
+    The normal sidebar filters intentionally hide empty drafts, cron/background
+    rows, and duplicate pre-compression snapshots. They must not make the only
+    messageful representative of a conversation disappear. If every visible row
+    for a lineage was filtered out, rescue the best hidden messageful row and
+    mark it so callers can surface or audit the degraded state.
+    """
+    sessions_by_id = {
+        str(session.get('session_id')): session
+        for session in candidates
+        if session.get('session_id')
+    }
+    covered_roots = {
+        _sidebar_lineage_root_id(session, sessions_by_id)
+        for session in visible
+        if _sidebar_message_count(session) > 0
+    }
+    visible_ids = {
+        str(session.get('session_id'))
+        for session in visible
+        if session.get('session_id')
+    }
+    rescue_by_root: dict[str, dict] = {}
+    for session in candidates:
+        sid = str(session.get('session_id') or '')
+        if not sid or sid in visible_ids:
+            continue
+        if _sidebar_message_count(session) <= 0:
+            continue
+        if _is_intentionally_background_sidebar_session(session):
+            continue
+        root = _sidebar_lineage_root_id(session, sessions_by_id)
+        if root in covered_roots:
+            continue
+        current = rescue_by_root.get(root)
+        if current is None or (
+            _sidebar_message_count(session), _session_sort_timestamp(session)
+        ) > (
+            _sidebar_message_count(current), _session_sort_timestamp(current)
+        ):
+            rescued = dict(session)
+            rescued['discoverability_warning'] = 'rescued_messageful_hidden_session'
+            rescue_by_root[root] = rescued
+    if not rescue_by_root:
+        return visible
+    rescued_rows = sorted(
+        rescue_by_root.values(),
+        key=lambda session: (session.get('pinned', False), _session_sort_timestamp(session)),
+        reverse=True,
+    )
+    return visible + rescued_rows
+
+
 def _prefer_fuller_snapshots_for_sidebar(sessions: list[dict]) -> list[dict]:
     """Expose a hidden snapshot when it is the fuller transcript for a lineage.
 
@@ -2295,7 +2386,18 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
         if sid in metadata:
             entry = dict(metadata[sid])
             state_db_title = entry.pop('_state_db_title', None)
+            state_db_source = entry.pop('_state_db_source', None)
+            state_db_source_tag = entry.pop('_state_db_source_tag', None)
+            state_db_raw_source = entry.pop('_state_db_raw_source', None)
+            state_db_session_source = entry.pop('_state_db_session_source', None)
+            state_db_source_label = entry.pop('_state_db_source_label', None)
             session.update(entry)
+            if state_db_source == 'webui':
+                session['source_tag'] = state_db_source_tag
+                session['raw_source'] = state_db_raw_source
+                session['session_source'] = state_db_session_source
+                session['source_label'] = state_db_source_label
+                session['is_cli_session'] = False
             title = session.get('title')
             if (
                 state_db_title
@@ -2401,7 +2503,8 @@ def all_sessions(diag=None):
                 and not s.get('worktree_path')
             )]
             result = _prefer_fuller_snapshots_for_sidebar(result)
-            result = [s for s in result if not _hide_from_default_sidebar(s)]
+            visible_result = [s for s in result if not _hide_from_default_sidebar(s)]
+            result = _preserve_messageful_sidebar_discoverability(result, visible_result)
             _strip_sidebar_internal_flags(result)
             # Backfill: sessions created before Sprint 22 have no profile tag.
             # Attribute them to 'default' so the client profile filter works correctly.
@@ -2439,7 +2542,8 @@ def all_sessions(diag=None):
         and not getattr(s, 'worktree_path', None)
     )]
     result = _prefer_fuller_snapshots_for_sidebar(result)
-    result = [s for s in result if not _hide_from_default_sidebar(s)]
+    visible_result = [s for s in result if not _hide_from_default_sidebar(s)]
+    result = _preserve_messageful_sidebar_discoverability(result, visible_result)
     _strip_sidebar_internal_flags(result)
     for s in result:
         if not s.get('profile'):

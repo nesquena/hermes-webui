@@ -107,3 +107,20 @@ def test_messaging_session_metadata_load_preserves_cli_metadata_lookup(monkeypat
 
     assert looked_up == ["messaging_sidecar"]
     assert response["session"]["source_label"] == "Telegram"
+
+
+def test_messaging_session_metadata_matches_full_display_merge(monkeypatch):
+    import api.routes as routes
+    from api.models import Session
+    sidecar = [{"role": "user", "content": "hi", "timestamp": 1000}, {"role": "assistant", "content": "ok", "timestamp": 1001}]
+    cli = sidecar + [{"role": "assistant", "content": "ok", "timestamp": 1001.7}]
+    session = Session(session_id="telegram_resume", title="Telegram", messages=sidecar, session_source="messaging", raw_source="telegram")
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: session)
+    monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda _session: None)
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid: {"session_id": sid, "session_source": "messaging", "raw_source": "telegram"})
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: cli)
+    monkeypatch.setattr(routes, "redact_session_data", lambda payload: payload)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    full = routes.handle_get(object(), urlparse("/api/session?session_id=telegram_resume&messages=1&resolve_model=0"))["session"]
+    meta = routes.handle_get(object(), urlparse("/api/session?session_id=telegram_resume&messages=0&resolve_model=0"))["session"]
+    assert (meta["message_count"], meta["last_message_at"]) == (full["message_count"], full["last_message_at"])

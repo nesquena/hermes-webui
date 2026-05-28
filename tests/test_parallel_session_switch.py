@@ -9,6 +9,7 @@ Four optimizations to reduce session-switch latency:
 """
 
 import pathlib
+import re
 import threading
 import time
 from unittest.mock import patch, MagicMock
@@ -487,10 +488,20 @@ class TestSessionSwitchCancellation:
 
     def test_loading_older_reset_on_session_switch(self):
         """loadSession must reset _loadingOlder when switching sessions."""
-        # Find the reset block in loadSession
-        marker = "_messagesTruncated = false;\n    _oldestIdx = 0;\n    _loadingOlder = false;"
-        idx = SESSIONS_JS.find(marker)
-        assert idx >= 0, (
+        # Locate the on-switch reset block — it lives in the `if (currentSid !== sid || forceReload)`
+        # arm of loadSession. Match by the surrounding state-resets rather than by a fragile
+        # multi-line substring, so unrelated code (like the closeOtherLiveStreams teardown
+        # that was inserted between _oldestIdx and _loadingOlder) doesn't break the test.
+        switch_arm = re.search(
+            r"if \(currentSid !== sid \|\| forceReload\) \{(.*?)\n  \}",
+            SESSIONS_JS,
+            re.DOTALL,
+        )
+        assert switch_arm, "loadSession's session-switch reset arm not found"
+        block = switch_arm.group(1)
+        assert "_messagesTruncated = false;" in block
+        assert "_oldestIdx = 0;" in block
+        assert "_loadingOlder = false;" in block, (
             "loadSession must reset _loadingOlder=false on session switch "
             "to prevent a stale _loadOlderMessages lock from blocking the "
             "new session's scroll-to-top loading."
@@ -517,13 +528,20 @@ class TestSessionSwitchCancellation:
 
     def test_messages_truncated_reset_on_switch(self):
         """loadSession must reset _messagesTruncated on session switch."""
-        marker = "_messagesTruncated = false;\n    _oldestIdx = 0;\n    _loadingOlder = false;"
-        idx = SESSIONS_JS.find(marker)
-        assert idx >= 0, (
+        switch_arm = re.search(
+            r"if \(currentSid !== sid \|\| forceReload\) \{(.*?)\n  \}",
+            SESSIONS_JS,
+            re.DOTALL,
+        )
+        assert switch_arm, "loadSession's session-switch reset arm not found"
+        block = switch_arm.group(1)
+        assert "_messagesTruncated = false;" in block, (
             "_messagesTruncated must be reset to false on session switch "
             "to prevent the scroll-to-top handler from trying to load "
             "older messages from the previous session."
         )
+        assert "_oldestIdx = 0;" in block
+        assert "_loadingOlder = false;" in block
 
     def test_oldest_idx_reset_prevents_wrong_cursor(self):
         """_oldestIdx=0 after switch prevents passing stale cursor to API."""

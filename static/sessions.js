@@ -589,6 +589,13 @@ async function loadSession(sid){
     S.toolCalls = [];
     _messagesTruncated = false;
     _oldestIdx = 0;
+    // Close live SSE streams from the session we're leaving. The error
+    // handler checks _isSessionActivelyViewed() and won't auto-reconnect
+    // for a backgrounded session, preventing leaked connections that would
+    // pump token events into an orphaned closure, freezing the main thread.
+    if (currentSid && currentSid !== sid && typeof closeOtherLiveStreams === 'function') {
+      closeOtherLiveStreams(sid);
+    }
     _loadingOlder = false;
     const _msgInner = $('msgInner');
     if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';

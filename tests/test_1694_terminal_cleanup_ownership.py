@@ -99,14 +99,28 @@ def test_stream_end_without_done_restores_settled_session_before_closing():
     never replaces the pane with the persisted transcript when done is missing.
     """
     body = _event_body("stream_end")
-    restore_idx = body.find("_restoreSettledSession()")
-    close_idx = body.rfind("source.close()")
+    restore_idx = body.find("_restoreSettledSession(source)")
+    close_idx = body.rfind("_closeSource(source)")
     finalized_idx = body.find("_streamFinalized=true")
     assert restore_idx != -1, "stream_end handler must restore settled session when done is absent"
-    assert close_idx != -1, "stream_end handler must still close the EventSource"
+    assert close_idx != -1, "stream_end handler must still close the owning EventSource"
     assert restore_idx < close_idx, "restore must be attempted before closing the stream"
     assert finalized_idx != -1, "stream_end terminal path must suppress trailing rAF/render work"
 
+
+def test_settled_restore_and_error_close_only_the_event_source_owner():
+    """Late stale-source async cleanup must not close a newer reconnect source."""
+    restore_body = _function_body("_restoreSettledSession")
+    error_body = _function_body("_handleStreamError")
+    event_body = _event_body("error")
+    assert "async function _restoreSettledSession(source)" in MESSAGES_JS
+    assert "function _handleStreamError(source)" in MESSAGES_JS
+    assert "_closeSource(source);" in restore_body
+    assert "_closeSource(source);" in error_body
+    assert "_restoreSettledSession(source)" in event_body
+    assert "_handleStreamError(source)" in event_body
+    assert "_restoreSettledSession())" not in event_body
+    assert "_handleStreamError();" not in event_body
 
 def test_done_handler_is_idempotent_for_replay_or_duplicate_done_events():
     """Duplicate/replayed done events must not replay completion sound or duplicate render."""
