@@ -7693,29 +7693,37 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return response
     if name in {"space.data.list", "space.current.data.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
+        items = list_shared_data_slots(space_id)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="shared-slot.list")
         return {
             "ok": True,
             "action": name,
             "space_id": space_id,
-            "items": list_shared_data_slots(space_id),
+            "progress_event": progress_event,
+            "items": items,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=0,
+                progress_event=progress_event,
             ),
         }
     if name in {"space.data.get", "space.current.data.get"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         data_key = validate_data_key(data.get("key"))
+        item = read_shared_data_slot(space_id, data_key)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="shared-slot.get")
         return {
             "ok": True,
             "action": name,
             "space_id": space_id,
-            "item": read_shared_data_slot(space_id, data_key),
+            "progress_event": progress_event,
+            "item": item,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=0,
+                progress_event=progress_event,
             ),
         }
     if name in {"space.data.delete", "space.current.data.delete"}:
@@ -12134,6 +12142,8 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "save-meta",
         "save-layout",
         "shared-slot.set",
+        "shared-slot.list",
+        "shared-slot.get",
         "shared-slot.delete",
         "space.create",
         "space.delete",

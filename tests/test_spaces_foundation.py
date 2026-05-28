@@ -11287,6 +11287,135 @@ def test_space_data_read_list_tools_return_metadata_only_output_compaction_recei
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_space_data_read_list_tools_record_metadata_only_progress_events(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    log_path = tmp_path / "capy-progress-events.jsonl"
+    from api.capy_progress import progress_status
+
+    created = spaces.create_space({"space_id": "shared-data-read-progress", "name": "Shared Data Read Progress"})
+    written = spaces.set_shared_data_slot(
+        created["space_id"],
+        "research-summary",
+        {
+            "title": "Safe shared data",
+            "renderer": "<script>bad()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+        {"source_widget": "research-summary", "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK"},
+    )
+
+    listed = spaces.run_space_tool(
+        "space.data.list",
+        {
+            "space_id": created["space_id"],
+            "renderer": "<script>listBad()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    read = spaces.run_space_tool(
+        "space.data.get",
+        {
+            "space_id": created["space_id"],
+            "key": "research-summary",
+            "source": "raw slot body should not render",
+            "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    status = progress_status(space_id=created["space_id"])
+
+    serialized = json.dumps({"listed": listed, "read": read, "status": status}, sort_keys=True).lower()
+    stored = log_path.read_text(encoding="utf-8").lower()
+
+    assert listed["items"] == [written["item"]]
+    assert read["item"] == written["item"]
+    assert listed["progress_event"]["event_type"] == "tool.completed"
+    assert listed["progress_event"]["family"] == "tool"
+    assert listed["progress_event"]["stored"] is True
+    assert listed["progress_event"]["space_id"] == created["space_id"]
+    assert listed["progress_event"]["redaction_status"] == "metadata_only"
+    assert listed["progress_event"]["run_id"] == "shared-slot.list:shared-data-read-progress"
+    assert read["progress_event"]["event_type"] == "tool.completed"
+    assert read["progress_event"]["family"] == "tool"
+    assert read["progress_event"]["stored"] is True
+    assert read["progress_event"]["space_id"] == created["space_id"]
+    assert read["progress_event"]["redaction_status"] == "metadata_only"
+    assert read["progress_event"]["run_id"] == "shared-slot.get:shared-data-read-progress"
+    assert "progress_run_id: shared-slot.list:shared-data-read-progress" in listed["output_compaction"]["text"]
+    assert "progress_run_id: shared-slot.get:shared-data-read-progress" in read["output_compaction"]["text"]
+    assert status["recent_event_count"] == 2
+    assert status["recent_family_counts"] == {"tool": 2}
+    assert status["recent_event_types"] == ["tool.completed"]
+    assert status["recent_events"][0]["run_id"] == "shared-slot.get:shared-data-read-progress"
+    assert status["recent_events"][1]["run_id"] == "shared-slot.list:shared-data-read-progress"
+    assert "safe shared data" in serialized
+    assert "raw slot body should not render" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in stored
+    assert "source" not in stored
+    assert "api_key" not in stored
+    assert "secret_value_do_not_leak" not in stored
+
+
+def test_space_data_get_tool_does_not_record_completed_progress_for_missing_slot(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    log_path = tmp_path / "capy-progress-events.jsonl"
+    from api.capy_progress import progress_status
+
+    created = spaces.create_space({"space_id": "shared-data-missing-slot", "name": "Shared Data Missing Slot"})
+
+    with pytest.raises(FileNotFoundError):
+        spaces.run_space_tool(
+            "space.data.get",
+            {
+                "space_id": created["space_id"],
+                "key": "missing-summary",
+                "renderer": "<script>missingBad()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+
+    status = progress_status(space_id=created["space_id"])
+    stored = log_path.read_text(encoding="utf-8").lower() if log_path.exists() else ""
+
+    assert status["recent_event_count"] == 0
+    assert "tool.completed" not in stored
+    assert "shared-slot.get:shared-data-missing-slot" not in stored
+    assert "renderer" not in stored
+    assert "api_key" not in stored
+    assert "secret_value_do_not_leak" not in stored
+
+
+def test_space_data_list_tool_does_not_record_completed_progress_for_missing_space(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    log_path = tmp_path / "capy-progress-events.jsonl"
+    from api.capy_progress import progress_status
+
+    with pytest.raises(FileNotFoundError):
+        spaces.run_space_tool(
+            "space.data.list",
+            {
+                "space_id": "missing-shared-data-space",
+                "renderer": "<script>listMissingBad()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+
+    status = progress_status(space_id="missing-shared-data-space")
+    stored = log_path.read_text(encoding="utf-8").lower() if log_path.exists() else ""
+
+    assert status["recent_event_count"] == 0
+    assert "tool.completed" not in stored
+    assert "shared-slot.list:missing-shared-data-space" not in stored
+    assert "renderer" not in stored
+    assert "api_key" not in stored
+    assert "secret_value_do_not_leak" not in stored
+
+
 def test_space_tool_adapter_shared_data_slots_are_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "shared-data-lab", "name": "Shared Data Lab"})
