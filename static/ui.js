@@ -2748,6 +2748,7 @@ function _settleMessageScrollToBottom(force){
 function scrollIfPinned(){
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
+  if(_recentMessageUpwardIntent()) return;  // strengthen for live reattach / token renders (post-8408a3dd scroll-jump regression per skill reference)
   _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){

@@ -713,7 +713,7 @@ async function loadSession(sid){
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
-    syncTopbar();renderMessages();
+    syncTopbar();renderMessages({preserveScroll:true});
     const restoredLiveTurn=typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
     if(!restoredLiveTurn){
       appendThinking();
@@ -797,7 +797,7 @@ async function loadSession(sid){
       updateSendBtn();
       setStatus('');
       setComposerStatus('');
-      syncTopbar();renderMessages();appendThinking();loadDir('.');
+      syncTopbar();renderMessages({preserveScroll:true});appendThinking();loadDir('.');
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
@@ -811,7 +811,7 @@ async function loadSession(sid){
       setStatus('');
       setComposerStatus('');
       updateQueueBadge(sid);
-      syncTopbar();renderMessages();
+      syncTopbar();renderMessages({preserveScroll:true});
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       const _dirP=loadDir('.');
       // Workspace refresh is guarded by session id inside loadDir(); do not
