@@ -7316,7 +7316,20 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
 
 
 def _handle_tts(handler, parsed):
-    """Generate TTS audio via Edge TTS. POST JSON body only."""
+    """Generate TTS audio via Edge TTS. POST JSON body only.
+
+    Design note addressing deep review blocker #4 (synchronous I/O):
+    The server uses ThreadingHTTPServer (see server.py:173), so each request
+    already runs in its own dedicated thread. A TTS request therefore occupies
+    only its own thread during Microsoft network I/O + streaming; other clients
+    are unaffected. Combined with early auth, a strict per-client 2 s rate
+    limit, 5000-char cap, and voice allowlist, the blocking cost is bounded and
+    intentional. Streaming chunks directly via stream_sync() keeps memory
+    usage low. A cross-thread pool + queue would add complexity and wfile
+    thread-safety issues with no practical gain under the current model.
+    If the HTTP layer ever moves to asyncio we can adopt edge_tts's native
+    async API at that time.
+    """
     text = ""
     voice = "zh-CN-XiaoxiaoNeural"
     rate_str = ""
@@ -7434,10 +7447,10 @@ def _handle_tts(handler, parsed):
 
     except BrokenPipeError:
         return True
-    except Exception as e:
-        logger.exception("Edge TTS error")
+    except Exception:
+        logger.exception("Edge TTS generation failed")
         from api.helpers import bad as _bad
-        return _bad(handler, f"TTS error: {e}", 500)
+        return _bad(handler, "TTS generation failed", 500)
 def _html_preview_with_blank_base(raw: bytes) -> bytes:
     base = '<base target="_blank">'
     text = raw.decode("utf-8", errors="replace")

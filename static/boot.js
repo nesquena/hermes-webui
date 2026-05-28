@@ -1,25 +1,7 @@
-// Absolute earliest possible suppression for the strict CI test harness.
-// Must be before any other code so that errors during script evaluation or early IIFE are caught.
+// Early boot initialization that must run before any other code.
+// These run during script evaluation to handle server-stopped state
+// and cross-tab shutdown broadcasts as early as possible.
 (function(){
-  const _origOnError = window.onerror;
-  const _origOnRejection = window.onunhandledrejection;
-
-  window.onerror = function(message, source, lineno, colno, error) {
-    try { console.warn('[hermes] suppressed global error', error || message); } catch(_) {}
-    return true; // prevents default browser error handling
-  };
-  window.onunhandledrejection = function(e) {
-    try { console.warn('[hermes] suppressed unhandled rejection', e.reason); } catch(_) {}
-    e.preventDefault?.();
-    return true;
-  };
-
-  // Also try modern addEventListener (in capture phase)
-  try {
-    window.addEventListener('error', function(e){ try{ console.warn('[hermes] suppressed error', e.error || e.message); e.preventDefault?.(); }catch(_){} }, true);
-    window.addEventListener('unhandledrejection', function(e){ try{ console.warn('[hermes] suppressed rejection', e.reason); e.preventDefault?.(); }catch(_){} }, true);
-  } catch(_) {}
-
   // Clear stale stop-server flag on successful page load (server is reachable)
   localStorage.removeItem('hermes-webui-server-stopped');
   // Listen for shutdown broadcast from other tabs
@@ -872,7 +854,10 @@ window._micPendingSend=window._micPendingSend||false;
           URL.revokeObjectURL(url);
           if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
         };
-        audio.play().catch(()=>{if(_voiceModeActive) setTimeout(()=>_startListening(),1000);});
+        audio.play().catch(e => {
+          _ttsSpeaking=false;
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        });
       })
       .catch(() => {
         _ttsSpeaking=false;
