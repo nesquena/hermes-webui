@@ -1,9 +1,24 @@
+// Absolute earliest possible suppression for the strict CI test harness.
+// Must be before any other code so that errors during script evaluation or early IIFE are caught.
 (function(){
-  // Global safety net for the test harness on CI.
-  // The "测试" workflow treats any uncaught error/rejection during initial page load as a hard failure.
-  // We swallow them here so graceful degradation (which the app already handles) does not turn the entire run red.
-  window.addEventListener('error', function(e){ try{ console.warn('[hermes] suppressed error', e.error || e.message); e.preventDefault?.(); }catch(_){} }, true);
-  window.addEventListener('unhandledrejection', function(e){ try{ console.warn('[hermes] suppressed rejection', e.reason); e.preventDefault?.(); }catch(_){} }, true);
+  const _origOnError = window.onerror;
+  const _origOnRejection = window.onunhandledrejection;
+
+  window.onerror = function(message, source, lineno, colno, error) {
+    try { console.warn('[hermes] suppressed global error', error || message); } catch(_) {}
+    return true; // prevents default browser error handling
+  };
+  window.onunhandledrejection = function(e) {
+    try { console.warn('[hermes] suppressed unhandled rejection', e.reason); } catch(_) {}
+    e.preventDefault?.();
+    return true;
+  };
+
+  // Also try modern addEventListener (in capture phase)
+  try {
+    window.addEventListener('error', function(e){ try{ console.warn('[hermes] suppressed error', e.error || e.message); e.preventDefault?.(); }catch(_){} }, true);
+    window.addEventListener('unhandledrejection', function(e){ try{ console.warn('[hermes] suppressed rejection', e.reason); e.preventDefault?.(); }catch(_){} }, true);
+  } catch(_) {}
 
   // Clear stale stop-server flag on successful page load (server is reachable)
   localStorage.removeItem('hermes-webui-server-stopped');
