@@ -7881,9 +7881,7 @@ function finalizeThinkingCard(){
     // when the user has not manually expanded this turn's activity group, or
     // has manually collapsed it. Otherwise the panel snaps shut whenever new
     // activity arrives, even mid-read.
-    const shouldKeepOpen = (_liveActivityUserExpanded === true)
-      || (window._activityFeedExpandedDefault === true && _liveActivityUserExpanded !== false);
-    if(!shouldKeepOpen){
+    if(_liveActivityUserExpanded !== true && !(window._activityFeedExpandedDefault === true && _liveActivityUserExpanded !== false)){
       group.classList.add('tool-call-group-collapsed');
       const summary=group.querySelector('.tool-call-group-summary');
       if(summary) summary.setAttribute('aria-expanded','false');
