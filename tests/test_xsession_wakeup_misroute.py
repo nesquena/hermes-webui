@@ -71,6 +71,7 @@ def test_concurrent_turns_capture_their_own_session_under_env_race():
 
     streaming = importlib.import_module("api.streaming")
     pytest.importorskip("tools.approval", reason="hermes-agent not installed")
+    pytest.importorskip("gateway.session_context")
     from tools.approval import get_current_session_key
     from gateway import session_context as sc
 

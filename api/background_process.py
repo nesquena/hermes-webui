@@ -487,6 +487,8 @@ def _emit_bg_task_complete_events_coalesced(session_id: str, payload: dict) -> i
     replace the pending payload and reset the quiet timer. The deferred flush
     therefore uses the latest payload from a burst.
     """
+    from api import config as _cfg
+    _EMIT_COALESCE_WINDOW_SECS = getattr(_cfg, "_EMIT_COALESCE_WINDOW_SECS", 1.0)
     if not session_id:
         return 0
     should_emit_now = False
@@ -678,35 +680,36 @@ def _resolve_wakeup_target(
     return owner
 
 
-def _process_one(evt: dict) -> None:
-    """Route a single completion_queue event to the matching WebUI session."""
-    from api import config as _cfg
-
-    process_id = str(evt.get("session_id") or "")
+def _resolve_session_key(evt: dict, process_id: str, proc_session) -> str:
+    """Resolve the session_key from the event payload or the process registry."""
     session_key = str(evt.get("session_key") or "")
-    # Root-cause fix (t_0f447014): the notify_on_complete completion event
-    # enqueued by ProcessRegistry._move_to_finished() carries NO "session_key"
-    # field — only the watch_match enqueue includes one. Without it the old
-    # `evt.get("session_key") or process_id` fell back to the process id
-    # ("proc_xxxx"), which is never a PROCESS_SESSION_INDEX key (only
-    # webui_session_id -> webui_session_id is registered at chat-start), so
-    # every wakeup was silently dropped here and the frontend never POSTed an
-    # ack. Recover the spawn-time session_key from the process registry's
-    # ProcessSession: the terminal tool captured it synchronously at spawn
-    # (while the turn's env was active), so it survives the turn-end env
-    # restore and is the WebUI session_id for WebUI-spawned processes.
     if not session_key and process_id:
         try:
-            from tools.process_registry import process_registry as _pr
-            _ps = _pr.get(process_id)
-            if _ps is not None and getattr(_ps, "session_key", ""):
-                session_key = str(_ps.session_key)
+            if proc_session is not None and getattr(proc_session, "session_key", ""):
+                session_key = str(proc_session.session_key)
         except Exception:
             logger.debug(
                 "session_key recovery from process registry failed for %r",
                 process_id,
                 exc_info=True,
             )
+    return session_key
+
+
+def _process_one(evt: dict) -> None:
+    """Route a single completion_queue event to the matching WebUI session."""
+    from api import config as _cfg
+
+    process_id = str(evt.get("session_id") or "")
+    session_key = str(evt.get("session_key") or "")
+    
+    try:
+        from tools.process_registry import process_registry as _pr
+        _ps = _pr.get(process_id) if process_id else None
+    except Exception:
+        _ps = None
+        
+    session_key = _resolve_session_key(evt, process_id, _ps)
     if not session_key:
         session_key = process_id
     with _cfg.PROCESS_SESSION_INDEX_LOCK:
@@ -727,15 +730,10 @@ def _process_one(evt: dict) -> None:
     # markers below) to the TRUE owner instead of waking the wrong session.
     # Pure pass-through when no env-immune owner is available (today's core,
     # cron/CLI procs, pre-Option-1 spawns) — never suppresses a valid wakeup.
-    try:
-        from tools.process_registry import process_registry as _pr_xs
-        _ps_xs = _pr_xs.get(process_id) if process_id else None
-    except Exception:
-        _ps_xs = None
     session_id = _resolve_wakeup_target(
         process_id=process_id,
         session_key_resolved_sid=session_id,
-        proc_session=_ps_xs,
+        proc_session=_ps,
     )
     # ── Idempotency vs the REAL merged upstream #2279 (shared dedupe key) ──
     # The real merged #2279 next-turn drain

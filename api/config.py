@@ -4758,7 +4758,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
         def _rebuild_worker():
             try:
                 box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
-            except BaseException as exc:  # noqa: BLE001 — propagated to caller
+            except Exception as exc:  # noqa: BLE001 — propagated to caller
                 box["error"] = exc
             finally:
                 build_done.set()
