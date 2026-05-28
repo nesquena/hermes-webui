@@ -88,6 +88,12 @@ def test_concurrent_turns_capture_their_own_session_under_env_race():
     # other turn stamps the global slot").
     b_stamped_env = threading.Event()
 
+    # Snapshot the prior env so we can restore it in the finally below — the
+    # worker threads mutate the process-global ``HERMES_SESSION_KEY`` and we
+    # don't want that leaking into later tests in the same xdist worker.
+    _prev_env_session_key: str | None = os.environ.get("HERMES_SESSION_KEY")
+    _had_env_session_key = "HERMES_SESSION_KEY" in os.environ
+
     def turn(my_sid: str, label: str) -> None:
         # streaming.py turn-start still writes the process-global env as a
         # fallback for non-contextvar consumers; the fix is that session-key
@@ -106,29 +112,37 @@ def test_concurrent_turns_capture_their_own_session_under_env_race():
 
     ta = threading.Thread(target=turn, args=(SESS_A, "A"))
     tb = threading.Thread(target=turn, args=(SESS_B, "B"))
-    ta.start()
-    tb.start()
-    ta.join(timeout=10)
-    tb.join(timeout=10)
+    try:
+        ta.start()
+        tb.start()
+        ta.join(timeout=10)
+        tb.join(timeout=10)
 
-    # Assert the worker threads actually terminated. If a thread deadlocks the
-    # join() above returns silently — surface that as a clear test failure
-    # instead of letting downstream asserts mask the hang or leak threads into
-    # the rest of the run.
-    assert not ta.is_alive(), "worker thread A did not terminate within join timeout"
-    assert not tb.is_alive(), "worker thread B did not terminate within join timeout"
+        # Assert the worker threads actually terminated. If a thread deadlocks the
+        # join() above returns silently — surface that as a clear test failure
+        # instead of letting downstream asserts mask the hang or leak threads into
+        # the rest of the run.
+        assert not ta.is_alive(), "worker thread A did not terminate within join timeout"
+        assert not tb.is_alive(), "worker thread B did not terminate within join timeout"
 
-    # Contextvar must be restored after the turn context exits (no thread-pool
-    # residue → no new race for a reused worker).
-    assert sc._SESSION_KEY.get() is sc._UNSET
+        # Contextvar must be restored after the turn context exits (no thread-pool
+        # residue → no new race for a reused worker).
+        assert sc._SESSION_KEY.get() is sc._UNSET
 
-    assert captured.get("A") == SESS_A, (
-        f"MISROUTE: session A captured {captured.get('A')!r}, expected "
-        f"{SESS_A!r} — per-turn identity still races on process-global env"
-    )
-    assert captured.get("B") == SESS_B, (
-        f"MISROUTE: session B captured {captured.get('B')!r}, expected {SESS_B!r}"
-    )
+        assert captured.get("A") == SESS_A, (
+            f"MISROUTE: session A captured {captured.get('A')!r}, expected "
+            f"{SESS_A!r} — per-turn identity still races on process-global env"
+        )
+        assert captured.get("B") == SESS_B, (
+            f"MISROUTE: session B captured {captured.get('B')!r}, expected {SESS_B!r}"
+        )
+    finally:
+        # Restore the original env so this test stays isolated from any later
+        # test that reads HERMES_SESSION_KEY in the same worker process.
+        if not _had_env_session_key:
+            os.environ.pop("HERMES_SESSION_KEY", None)
+        elif _prev_env_session_key is not None:
+            os.environ["HERMES_SESSION_KEY"] = _prev_env_session_key
 
 
 def test_turn_identity_binder_restores_previous_value():

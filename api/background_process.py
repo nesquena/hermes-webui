@@ -101,10 +101,14 @@ class SessionChannel:
       - ``subscribe`` / ``unsubscribe`` are refcount-style: zero subscribers
         does NOT immediately collect the channel; the reaper waits a 60s
         grace so a quick navigation away/back doesn't churn the registry.
-      - The reaper collects the channel when subscribers stay empty past the
-        grace period, OR when ``created_at`` is older than
-        SESSION_CHANNEL_IDLE_TTL_SECS regardless of subscriber count (zombie
-        cap).
+      - The reaper collects the channel only when subscribers are empty.
+        Two collection conditions, both gated on zero subscribers: (a) the
+        grace-period sweep (``last_subscriber_drop_at`` older than
+        ``SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS``), and (b) the idle-TTL
+        zombie cap (``created_at`` older than
+        ``SESSION_CHANNEL_IDLE_TTL_SECS``). A channel with even one live
+        subscriber is never reaped regardless of TTL — see
+        ``reaper_should_collect`` for the canonical logic.
     """
 
     def __init__(self, session_id: str):
