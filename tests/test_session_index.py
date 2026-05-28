@@ -83,6 +83,28 @@ def test_compact_exposes_last_message_at_from_message_timestamp():
     assert compact["last_message_at"] == 200.0
 
 
+def test_session_load_allows_hyphenated_safe_ids_but_rejects_traversal():
+    sid = "api-182894de593468b6"
+    s = _make_session(sid, "API session", updated_at=100)
+    s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    assert Session.load(sid) is not None
+    assert Session.load_metadata_only(sid) is not None
+    assert Session.load("bad/../id") is None
+    assert Session.load_metadata_only("bad.id") is None
+
+
+def test_full_index_rebuild_includes_hyphenated_sessions():
+    sid = "reachy-voice-20260513-1131-d5542adf"
+    s = _make_session(sid, "Reachy voice", updated_at=100)
+    s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _write_session_index(updates=None)
+
+    ids = [entry["session_id"] for entry in _read_index(models.SESSION_INDEX_FILE)]
+    assert sid in ids
+
+
 def test_prune_session_from_index_removes_requested_row_only():
     index_file = models.SESSION_INDEX_FILE
     s_a = _make_session("sess_a", "A", updated_at=100)

@@ -7,6 +7,13 @@
 
 - Plain-text `webui_prefill_messages_script` output is now wrapped as a `user` prefill message instead of an extra `system` message, keeping dynamic recall context provider-safe while preserving explicit JSON message roles.
 
+## [v0.51.149] — 2026-05-28 — Release DU (stage-batch31 — hyphenated session ids + prefill role consistency)
+
+### Fixed
+
+- Session IDs containing hyphens (e.g. API-issued `api-*` and gateway-issued `reachy-voice-*`) are now accepted by every filesystem-touching session validator: `Session.load`, `Session.load_metadata_only`, `_repair_stale_pending`, `/api/session/delete`, and `/api/session/worktree/remove`. Previously the load path accepted hyphens but the delete and worktree-remove routes rejected them with HTTP 400, producing a confusing "visible in sidebar but undeletable" UX. Refactors the duplicated character-class check into a shared `api.models.is_safe_session_id` helper with regression coverage at every call site. (#3023, #3024)
+- Plain-text `webui_prefill_messages_script` output is now wrapped as a `user` prefill message instead of a `system` message, so dynamic recall context from notes/Obsidian/Joplin scripts becomes ordinary turn context rather than an extra system instruction. The JSON message-list escape hatch is unchanged: scripts that emit explicit `[{"role": "system", "content": "..."}]` still produce a system message. Avoids provider-specific multi-system-message footguns (Anthropic concatenation, OpenAI Responses-API divergence). (#3009)
+
 ## [v0.51.148] — 2026-05-28 — Release DT (stage-batch30 — single-PR Insights skill-usage reader)
 
 ### Added
