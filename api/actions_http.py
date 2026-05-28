@@ -34,6 +34,13 @@ def _resolve_emit_event() -> Callable[[str, dict], None]:
     emits events.
     """
     try:
+        # publish_session_event intentionally does not yet exist on this
+        # PR's branch -- it lands in the session.nudge follow-up. Grepping
+        # for the symbol on master today will only return this import; the
+        # ImportError fallback below resolves to a no-op for every request
+        # until then, which matches the v1 surface where no builtin emits
+        # SSE events. Function-level docstring above documents the same
+        # behavior at the API level.
         from api.session_events import publish_session_event  # type: ignore[attr-defined]
     except ImportError:
         return lambda _name, _payload: None

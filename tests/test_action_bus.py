@@ -200,6 +200,38 @@ class TestEchoTest(unittest.TestCase):
         register_builtins(reg)
         self.assertEqual(reg.known_actions(), ["echo.test"])
 
+    def test_register_builtins_default_registry_is_idempotent(self):
+        """Repeated calls against default_registry must not raise.
+
+        The route hook in api/routes.py calls register_builtins on every
+        request. The first call registers; later calls must be no-ops
+        rather than raising ValueError on duplicate names. Adding new
+        builtins in follow-up PRs must not change this contract --
+        whatever set _register_all_builtins() installs is what the
+        registry must end up with after exactly one observable
+        registration pass.
+        """
+        from api.actions import default_registry, register_builtins
+
+        # Force a clean registration pass for this test by resetting the
+        # module-level flag. The default_registry is process-global so
+        # we cannot easily isolate state otherwise; this matches what a
+        # fresh process startup would observe.
+        import api.actions as actions_pkg
+        with actions_pkg._BUILTINS_LOCK:
+            actions_pkg._BUILTINS_REGISTERED = False
+            default_registry._actions.clear()
+
+        register_builtins(default_registry)
+        after_first = sorted(default_registry.known_actions())
+
+        # Must not raise on the second call.
+        register_builtins(default_registry)
+        after_second = sorted(default_registry.known_actions())
+
+        self.assertEqual(after_first, after_second)
+        self.assertIn("echo.test", after_second)
+
 
 # ── HTTP adapter handle_actions_post ───────────────────────────────────
 

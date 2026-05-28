@@ -5023,16 +5023,13 @@ def handle_post(handler, parsed) -> bool:
         from api.actions import register_builtins, default_registry
         from api.actions_http import handle_actions_post
 
-        # Register v1 builtins exactly once against the module-level
-        # default_registry. ValueError on re-register is swallowed because
-        # the registry is process-global and idempotent registration is
-        # the right behavior for repeated POST requests in the same
-        # process. Per-test isolation uses an injected registry instead.
-        if "echo.test" not in default_registry.known_actions():
-            try:
-                register_builtins(default_registry)
-            except ValueError:
-                pass
+        # Idempotent on the default_registry singleton (see
+        # register_builtins docstring). First request in the process
+        # pays for registration; later calls return immediately under
+        # the module-level lock. Tracking the call rather than any
+        # individual action name means new builtins added in follow-up
+        # PRs are picked up automatically.
+        register_builtins(default_registry)
 
         body_dict, status = handle_actions_post(handler, body)
         return j(handler, body_dict, status=status)
