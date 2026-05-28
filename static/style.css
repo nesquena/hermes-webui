@@ -4540,3 +4540,5 @@ main.main.showing-logs > #mainLogs{display:flex;}
 @media (min-width:1600px) {
   .composer-box{max-width:1600px;margin:0 auto;}
 }
+
+#composerMobileCtxBadge { display: none !important; }
