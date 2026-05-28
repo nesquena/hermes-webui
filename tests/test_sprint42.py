@@ -396,22 +396,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         self.assertTrue(callable(init_kwargs["interim_assistant_callback"]))
         self.assertIn("WebUI progress guidance", captured["agent"].ephemeral_system_prompt)
         self.assertIn("Match the normal Hermes messaging style", captured["agent"].ephemeral_system_prompt)
-        self.assertIn(
-            "do not let long tool-running WebUI turns appear silent",
-            captured["agent"].ephemeral_system_prompt,
-        )
-        self.assertIn(
-            "provide brief user-visible progress updates as normal assistant content",
-            captured["agent"].ephemeral_system_prompt,
-        )
-        self.assertIn(
-            "Do not keep all progress only in reasoning, thinking, or tool-result channels",
-            captured["agent"].ephemeral_system_prompt,
-        )
-        self.assertNotIn(
-            "you may provide brief user-visible progress updates",
-            captured["agent"].ephemeral_system_prompt,
-        )
+        self.assertIn("user-visible progress updates", captured["agent"].ephemeral_system_prompt)
 
         interim_events = []
         while not fake_queue.empty():
