@@ -166,6 +166,8 @@ def test_agent_health_payload_unknown_when_gateway_is_not_configured(monkeypatch
 def test_agent_health_route_is_registered_with_tri_state_payload_shape():
     assert 'parsed.path == "/api/health/agent"' in ROUTES_PY
     assert "build_agent_health_payload()" in ROUTES_PY
+    assert "gateway_chat_config_status()" in ROUTES_PY
+    assert 'payload["gateway_chat"]' in ROUTES_PY
     src = (REPO_ROOT / "api" / "agent_health.py").read_text(encoding="utf-8")
     assert '"alive"' in src
     assert '"checked_at"' in src

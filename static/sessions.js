@@ -455,6 +455,8 @@ async function newSession(flash, options={}){
   _newSessionInFlight=(async()=>{
     updateQueueBadge();
     S.toolCalls=[];
+    _messagesTruncated=false;
+    _oldestIdx=0;
     clearLiveToolCards();
     // One-shot profile-switch workspace: applied to the first new session after a profile
     // switch, then cleared.  Use a dedicated flag so S._profileDefaultWorkspace (the
@@ -3285,7 +3287,9 @@ function renderSessionListFromCache(){
   // in _profiles_match, and a strict-equality client filter would reject those
   // rows incorrectly. So we trust the wire data and skip the redundant client
   // filter entirely.
-  const profileFiltered=sourceFiltered;
+  const profileFiltered=sourceFiltered.filter(s=>
+    !s.default_hidden||(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)
+  );
   // Filter by active project. NO_PROJECT_FILTER sentinel asks for sessions
   // with no project_id; otherwise filter to the matching project_id, or
   // pass through when no filter is active.

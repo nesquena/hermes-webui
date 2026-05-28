@@ -1067,7 +1067,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_streamingKatexTimer) return;
     _streamingKatexTimer=setTimeout(()=>{
       _streamingKatexTimer=null;
-      if(assistantBody&&typeof renderKatexBlocks==='function') renderKatexBlocks(assistantBody);
+      if(assistantBody&&typeof renderKatexBlocks==='function') renderKatexBlocks(assistantBody,{streaming:true});
     },150);
   }
   // Helper: feed new displayText delta to the smd parser.
@@ -2107,11 +2107,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isRateLimit=d.type==='rate_limit';
           const isQuotaExhausted=d.type==='quota_exhausted';
           const isAuthMismatch=d.type==='auth_mismatch';
+          const isGatewayAuthError=d.type==='gateway_auth_error';
           const isModelNotFound=d.type==='model_not_found';
           const isCancelled=d.type==='cancelled';
           const isInterrupted=d.type==='interrupted';
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
-          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
+          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
           const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
@@ -2155,7 +2156,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // If the user has switched to a different session, don't attempt to
       // reconnect — the old stream's EventSource was closed intentionally
       // during session switch and reconnecting would leak a background stream.
-      if(!_isSessionActivelyViewed(activeSid)) return;
+      if(!_isSessionCurrentPane(activeSid)) return;
       if(_terminalStateReached || _streamFinalized){
         return;
       }
@@ -3147,7 +3148,8 @@ function startClarifyPolling(sid) {
   });
 
   _clarifyEventSource.onerror = function() {
-    stopClarifyPolling();
+    if (_clarifyEventSource) { try { _clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
+    if (_clarifyHealthTimer) { clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null; }
     _startClarifyFallbackPoll(sid);
   };
 
@@ -3177,6 +3179,7 @@ function startClarifyPolling(sid) {
 }
 
 function _startClarifyFallbackPoll(sid) {
+  _clarifyPollingSessionId = sid || null;
   _clarifyFallbackTimer = setInterval(async () => {
     if (!S.session || S.session.session_id !== sid) {
       stopClarifyPolling(); _hideClarifyCardIfOwner(sid, true, 'session'); return;

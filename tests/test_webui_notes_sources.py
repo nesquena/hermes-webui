@@ -41,23 +41,29 @@ def test_notes_sources_redacts_tool_descriptions_and_omits_plain_file_tools():
     assert "[REDACTED]" in source["tools"][0]["description"]
 
 
-def test_notes_sources_shows_configured_note_servers_without_tool_inventory():
+def test_notes_sources_shows_configured_third_party_note_servers_without_tool_inventory():
     from api.routes import _notes_sources_from_mcp_inventory
 
     servers = {
         "joplin": {"name": "joplin", "enabled": True, "active": False, "status": "configured"},
+        "obsidian": {"name": "obsidian", "enabled": True, "active": False, "status": "configured"},
+        "notion": {"name": "notion", "enabled": True, "active": False, "status": "configured"},
+        "llm-wiki": {"name": "llm-wiki", "enabled": True, "active": False, "status": "configured"},
         "filesystem": {"name": "filesystem", "enabled": True, "active": True, "status": "healthy"},
     }
 
     sources = _notes_sources_from_mcp_inventory(servers, [])
 
-    assert [source["name"] for source in sources] == ["joplin"]
-    assert sources[0]["label"] == "Joplin"
-    assert sources[0]["tool_count"] == 3
-    assert [tool["name"] for tool in sources[0]["tools"]] == ["search_notes", "list_notes", "get_note"]
-    assert all(tool.get("inferred") is True for tool in sources[0]["tools"])
-    assert sources[0]["tool_source"] == "configured_hint"
-    assert sources[0]["status"] == "configured"
+    assert [source["name"] for source in sources] == ["joplin", "llm-wiki", "notion", "obsidian"]
+    by_name = {source["name"]: source for source in sources}
+    assert by_name["joplin"]["label"] == "Joplin"
+    assert [tool["name"] for tool in by_name["joplin"]["tools"]] == ["search_notes", "list_notes", "get_note"]
+    assert [tool["name"] for tool in by_name["obsidian"]["tools"]] == ["search_notes", "read_note"]
+    assert [tool["name"] for tool in by_name["notion"]["tools"]] == ["search_pages", "get_page"]
+    assert [tool["name"] for tool in by_name["llm-wiki"]["tools"]] == ["query_knowledge_base", "read_page"]
+    assert all(source["tool_source"] == "configured_hint" for source in sources)
+    assert all(tool.get("inferred") is True for source in sources for tool in source["tools"])
+    assert all(source["status"] == "configured" for source in sources)
 
 
 def test_external_notes_sources_drawer_is_default_off(monkeypatch):
@@ -198,6 +204,71 @@ def test_joplin_recent_ai_notes_uses_configured_prefill_script(monkeypatch, tmp_
     assert all(note["source"] == "joplin" for note in notes)
     assert all(note["used_by"] == "ai_prefill" for note in notes)
     assert all(note["used_reason"] == "automatic_recall" for note in notes)
+
+
+def test_joplin_recent_ai_notes_prefers_webui_prefill_script_hook(monkeypatch, tmp_path):
+    from api import routes
+
+    legacy_script = tmp_path / "legacy_context.py"
+    legacy_script.write_text('CURRENT_CONTEXT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n', encoding="utf-8")
+    webui_script = tmp_path / "webui_context.py"
+    webui_script.write_text(
+        'CURRENT_CONTEXT_ID = "5ba9ab822c344115939205ca4e8eaec0"\n'
+        'OPEN_ISSUES_ID = "623aeb6e55cb4aa39a0541f2ac09aa36"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(routes, "get_config", lambda: {
+        "prefill_messages_script": str(legacy_script),
+        "webui_prefill_messages_script": ["python3", str(webui_script)],
+    })
+
+    def fake_get(path, params=None):
+        note_id = path.rsplit("/", 1)[-1]
+        assert note_id != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        titles = {
+            "5ba9ab822c344115939205ca4e8eaec0": "Current Context",
+            "623aeb6e55cb4aa39a0541f2ac09aa36": "Open Issues",
+        }
+        return {"id": note_id, "title": titles[note_id], "updated_time": 123, "parent_id": "folder"}
+
+    monkeypatch.setattr(routes, "_joplin_api_get", fake_get)
+
+    notes = routes._joplin_recent_ai_notes(limit=2)
+
+    assert [note["title"] for note in notes] == ["Current Context", "Open Issues"]
+
+
+def test_joplin_recent_ai_notes_mirrors_webui_prefill_env_hook(monkeypatch, tmp_path):
+    from api import routes
+
+    legacy_script = tmp_path / "legacy_context.py"
+    legacy_script.write_text('CURRENT_CONTEXT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"\n', encoding="utf-8")
+    env_script = tmp_path / "env context.py"
+    env_script.write_text('CURRENT_CONTEXT_ID = "5ba9ab822c344115939205ca4e8eaec0"\n', encoding="utf-8")
+    monkeypatch.setattr(routes, "get_config", lambda: {"prefill_messages_script": str(legacy_script)})
+    monkeypatch.setenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", f'python3 "{env_script}"')
+
+    def fake_get(path, params=None):
+        note_id = path.rsplit("/", 1)[-1]
+        assert note_id != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        return {"id": note_id, "title": "Current Context", "updated_time": 123, "parent_id": "folder"}
+
+    monkeypatch.setattr(routes, "_joplin_api_get", fake_get)
+
+    notes = routes._joplin_recent_ai_notes(limit=1)
+
+    assert [note["title"] for note in notes] == ["Current Context"]
+
+
+def test_prefill_script_path_keeps_plain_existing_paths_with_spaces(tmp_path):
+    from api import routes
+
+    script = tmp_path / "context scripts" / "recall.py"
+    script.parent.mkdir()
+    script.write_text('CURRENT_CONTEXT_ID = "5ba9ab822c344115939205ca4e8eaec0"\n', encoding="utf-8")
+
+    assert routes._script_path_from_config_value(str(script)) == script
+
 
 
 def test_external_notes_ui_uses_minimal_lucide_icons_for_ai_recent_notes():

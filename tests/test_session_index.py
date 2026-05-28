@@ -83,6 +83,31 @@ def test_compact_exposes_last_message_at_from_message_timestamp():
     assert compact["last_message_at"] == 200.0
 
 
+def test_compact_ignores_empty_partial_activity_for_last_message_at():
+    s = Session(
+        session_id="sess_partial_tail",
+        title="Partial tail",
+        updated_at=300.0,
+        messages=[
+            {"role": "user", "content": "today question", "timestamp": 200.0},
+            {"role": "assistant", "content": "today answer", "timestamp": 201.0},
+            {
+                "role": "assistant",
+                "content": "",
+                "_partial": True,
+                "timestamp": 100.0,
+                "reasoning": "old cancelled thinking",
+                "_partial_tool_calls": [{"name": "terminal", "done": True}],
+            },
+        ],
+    )
+
+    compact = s.compact()
+
+    assert compact["updated_at"] == 300.0
+    assert compact["last_message_at"] == 201.0
+
+
 def test_session_load_allows_hyphenated_safe_ids_but_rejects_traversal():
     sid = "api-182894de593468b6"
     s = _make_session(sid, "API session", updated_at=100)
