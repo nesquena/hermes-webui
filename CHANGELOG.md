@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `runner-local` can now use an explicit `HERMES_WEBUI_RUNNER_BASE_URL` HTTP client instead of always returning the bounded not-configured path. The default remains legacy-direct, `runner-local` without a URL still returns a safe 501, and the WebUI process only creates a client boundary rather than owning runner streams, cancellation flags, approval/clarify queues, cached agents, or active-run registries. Adds a minimal in-memory runner backend skeleton for contract tests and future supervised backend work.
+
 ## [v0.51.152] — 2026-05-28 — Release DX (stage-batch34 — single-PR optional gateway-backed browser chat)
 
 ### Added

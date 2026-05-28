@@ -188,6 +188,26 @@ messaging surfaces. Attachments, cancellation, approvals, and clarify prompts
 still follow WebUI's current compatibility path and may not match every messaging
 surface until the runtime-adapter migration is complete.
 
+### Optional runner-local backend client
+
+`HERMES_WEBUI_RUNTIME_ADAPTER=runner-local` remains default-off and experimental.
+With no runner URL configured it intentionally returns a bounded `501` instead of
+silently falling back to the legacy in-process runtime. Operators testing the
+runtime-adapter migration can now point the runner-local seam at an explicitly
+supervised HTTP backend:
+
+```bash
+HERMES_WEBUI_RUNTIME_ADAPTER=runner-local \
+HERMES_WEBUI_RUNNER_BASE_URL=http://127.0.0.1:8788 \
+./ctl.sh restart
+```
+
+The WebUI process only creates an HTTP client for this boundary; it does not own
+runner streams, cancellation flags, approval/clarify queues, cached agents, or
+active-run registries. Successful `/api/chat/start` responses remain limited to
+the existing browser-compatible field whitelist while runner-internal `run_id`,
+`status`, and `active_controls` stay behind the adapter.
+
 The bootstrap will:
 
 1. Detect Hermes Agent and, if missing, attempt the official installer (`curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`).
