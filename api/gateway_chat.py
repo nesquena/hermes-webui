@@ -177,7 +177,7 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to append gateway event %s for stream %s", event, stream_id, exc_info=True)
         try:
-            q.put_nowait((event, data))
+            q.put_nowait((event, data, event_id))
         except Exception:
             logger.debug("Failed to put gateway event to queue")
 

@@ -117,3 +117,55 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["headers"]["X-hermes-session-id"] == s.session_id
     assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
     assert '"stream": true' in captured["body"]
+
+
+def test_gateway_chat_worker_queues_journal_event_ids(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+
+    s = new_session()
+    stream_id = "stream-gateway-event-id"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hi"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    stream = create_stream_channel()
+    subscriber = stream.subscribe()
+    STREAMS[stream_id] = stream
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hi",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    items = []
+    while not subscriber.empty():
+        items.append(subscriber.get_nowait())
+
+    assert items, "gateway worker should publish live SSE queue items"
+    assert all(len(item) >= 3 for item in items), items
+    assert items[0][0] == "token"
+    assert items[0][2] == f"{stream_id}:1"
+    assert any(item[0] == "stream_end" and item[2] for item in items)

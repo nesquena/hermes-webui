@@ -161,7 +161,7 @@ def test_load_session_reattaches_when_inflight_is_in_memory_and_marked_for_reatt
     body = _function_body(SESSIONS_JS, "loadSession")
     inflight_idx = body.find("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = body[inflight_idx : inflight_idx + 2400]
+    inflight_block = body[inflight_idx : inflight_idx + 3200]
     assert "INFLIGHT[sid].reattach" in inflight_block, (
         "loadSession()'s INFLIGHT branch must gate the SSE reattach on the "
         "reattach flag so closeLiveStream()'s marking flows through"
@@ -360,6 +360,30 @@ def test_load_session_rebuilds_live_tail_before_dropping_stale_dom_snapshot():
     assert prepare_pos != -1 and drop_dom_pos != -1
     assert drop_assistant_pos != -1 and merge_pos != -1 and restore_pos != -1
     assert ensure_pos < inflight_pos < prepare_pos < drop_dom_pos < drop_assistant_pos < merge_pos < restore_pos
+
+
+def test_load_session_prefers_structured_inflight_state_over_live_turn_snapshot():
+    """Structured INFLIGHT state is authoritative during reattach.
+
+    The memory-only liveTurnHtml snapshot can be stale across session switches.
+    If loadSession restores that DOM after renderMessages() rebuilt the
+    per-burst live tail, old snapshots can alternately erase progress text and
+    leave Activity groups piled at the bottom of the turn.
+    """
+    body = _function_body(SESSIONS_JS, "loadSession")
+    structured_pos = body.find("const hasStructuredLiveState=!!(INFLIGHT[sid]&&(")
+    restore_pos = body.find("restoreLiveTurnHtmlForSession(sid)")
+    fallback_pos = body.find("if(!restoredLiveTurn){", restore_pos)
+    assert structured_pos != -1, "loadSession must compute structured live-state presence"
+    assert restore_pos != -1, "loadSession must still retain DOM snapshot fallback"
+    assert fallback_pos != -1
+    assert structured_pos < restore_pos < fallback_pos
+    guard_block = body[structured_pos:fallback_pos]
+    assert "lastAssistantText" in guard_block
+    assert "lastReasoningText" in guard_block
+    assert "activityBurstAnchors" in guard_block
+    assert "toolCalls" in guard_block
+    assert "!hasStructuredLiveState&&" in guard_block.replace(" ", "")
 
 
 def test_load_session_does_not_advance_replay_cursor_from_session_journal_summary():

@@ -728,7 +728,13 @@ async function loadSession(sid){
     S.activeStreamId=activeStreamId;
     syncTopbar();renderMessages();
     if(typeof ensureRunActivityForCurrentTurn==='function') ensureRunActivityForCurrentTurn();
-    const restoredLiveTurn=typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
+    const hasStructuredLiveState=!!(INFLIGHT[sid]&&(
+      String(INFLIGHT[sid].lastAssistantText||'').trim()||
+      String(INFLIGHT[sid].lastReasoningText||'').trim()||
+      (Array.isArray(INFLIGHT[sid].activityBurstAnchors)&&INFLIGHT[sid].activityBurstAnchors.length)||
+      (Array.isArray(INFLIGHT[sid].toolCalls)&&INFLIGHT[sid].toolCalls.length)
+    ));
+    const restoredLiveTurn=!hasStructuredLiveState&&typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
     if(!restoredLiveTurn){
       appendThinking();
       clearLiveToolCards();
