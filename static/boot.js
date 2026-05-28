@@ -1851,7 +1851,7 @@ function applyBotName(){
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
 })().catch(e=>{
-  console.error('[hermes] boot failed', e);
+  console.warn('[hermes] boot failed', e);
   try{S._bootReady=true;}catch(_){}
   try{syncTopbar();}catch(_){}
   try{syncWorkspacePanelState();}catch(_){}
