@@ -806,6 +806,28 @@ def _model_provider_template_action_policy_receipt(preflight_receipt: dict[str, 
     )
 
 
+def _interactive_template_prompt_preflight_receipt(template: str) -> dict[str, Any]:
+    from api.capy_policy import prompt_preflight
+
+    template_label = "music" if template == "music" else "game"
+    return prompt_preflight(
+        f"Install {template_label} interactive template with generated widget execution disabled until sandbox approval.",
+        boundary="interactive_template_install",
+    )
+
+
+def _interactive_template_action_policy_receipt(template: str, preflight_receipt: dict[str, Any]) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    template_label = "music" if template == "music" else "game"
+    return action_policy_receipt(
+        f"space.template.install.{template_label}",
+        approval_gates=["creator_commit", "generated_widget_execution"],
+        prompt_preflight_status=str(preflight_receipt.get("status") or "required"),
+        model_route_hint="hint:reasoning",
+    )
+
+
 def _template_reset_prompt_preflight_receipt() -> dict[str, Any]:
     from api.capy_policy import prompt_preflight
 
@@ -10495,6 +10517,10 @@ def install_template(template: str, *, space_id: str | None = None, record_progr
         preflight_receipt = _model_provider_template_prompt_preflight_receipt()
         result["prompt_preflight"] = preflight_receipt
         result["autonomy_policy"] = _model_provider_template_action_policy_receipt(preflight_receipt)
+    elif response_template in {"game", "music"}:
+        preflight_receipt = _interactive_template_prompt_preflight_receipt(response_template)
+        result["prompt_preflight"] = preflight_receipt
+        result["autonomy_policy"] = _interactive_template_action_policy_receipt(response_template, preflight_receipt)
     return result
 
 

@@ -2077,6 +2077,9 @@ global.fetch = async function(path, opts = {}) {
       return response({
         template: 'game',
         space: { space_id: 'game-sandbox', name: 'Game Sandbox', description: 'Safe snake/canvas starter', widget_count: 3, revision_event_id: 'rev-game' },
+        prompt_preflight: { available: true, action: 'capy.prompt_preflight', boundary: 'interactive_template_install', status: 'pass', severity: 'none', categories: [], metadata_only: true, raw_prompt_stored: false, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        autonomy_policy: { available: true, action: 'space.template.install.game', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit', 'generated_widget_execution'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        progress_event: { event_id: 'evt-template-install-game', event_type: 'tool.completed', family: 'tool', run_id: 'template.install:game-sandbox', redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
         installed_widgets: [
           { id: 'game-canvas', kind: 'canvas-game', title: 'Snake game sandbox', layout: { x: 0, y: 0, w: 16, h: 10, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
           { id: 'game-controls', kind: 'status', title: 'Game controls', layout: { x: 16, y: 0, w: 8, h: 5, minimized: false }, source: 'SECRET_SOURCE' },
@@ -2088,6 +2091,9 @@ global.fetch = async function(path, opts = {}) {
       return response({
         template: 'music',
         space: { space_id: 'music-sequencer', name: 'Music Sequencer', description: 'Safe WebAudio sequencer starter', widget_count: 4, revision_event_id: 'rev-music' },
+        prompt_preflight: { available: true, action: 'capy.prompt_preflight', boundary: 'interactive_template_install', status: 'pass', severity: 'none', categories: [], metadata_only: true, raw_prompt_stored: false, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        autonomy_policy: { available: true, action: 'space.template.install.music', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit', 'generated_widget_execution'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        progress_event: { event_id: 'evt-template-install-music', event_type: 'tool.completed', family: 'tool', run_id: 'template.install:music-sequencer', redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
         installed_widgets: [
           { id: 'music-sequencer-grid', kind: 'step-sequencer', title: 'Step sequencer', layout: { x: 0, y: 0, w: 14, h: 8, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
           { id: 'music-synth-controls', kind: 'audio-controls', title: 'Synth controls', layout: { x: 14, y: 0, w: 10, h: 4, minimized: false }, source: 'SECRET_SOURCE' },
@@ -5626,6 +5632,14 @@ def test_spaces_ui_install_game_sandbox_posts_template_and_shows_safe_open_manag
     assert "Open game sandbox" in out["rootHtml"]
     assert "Manage game widgets" in out["rootHtml"]
     assert "Run snake smoke" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Boundary: interactive_template_install" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Action: space.template.install.game" in out["rootHtml"]
+    assert "Gates: Creator commit approval, Generated widget execution approval" in out["rootHtml"]
+    assert "Model route hint: hint:reasoning" in out["rootHtml"]
+    assert "Template install progress" in out["rootHtml"]
+    assert "template.install:game-sandbox" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="game-sandbox"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="game-sandbox"' in out["rootHtml"]
     assert 'data-capy-action="runDemoSmoke" data-demo="demo_snake_iterative_repair"' in out["rootHtml"]
@@ -5649,6 +5663,14 @@ def test_spaces_ui_install_music_sequencer_posts_template_and_shows_safe_open_ma
     assert "Open music sequencer" in out["rootHtml"]
     assert "Manage music widgets" in out["rootHtml"]
     assert "Run music smoke" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Boundary: interactive_template_install" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Action: space.template.install.music" in out["rootHtml"]
+    assert "Gates: Creator commit approval, Generated widget execution approval" in out["rootHtml"]
+    assert "Model route hint: hint:reasoning" in out["rootHtml"]
+    assert "Template install progress" in out["rootHtml"]
+    assert "template.install:music-sequencer" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="music-sequencer"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="music-sequencer"' in out["rootHtml"]
     assert 'data-capy-action="runDemoSmoke" data-demo="demo_step_sequencer_piano_roll"' in out["rootHtml"]
