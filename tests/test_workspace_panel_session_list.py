@@ -252,10 +252,11 @@ class TestProjectDotPlacement:
         padding-right selector. Touch devices (iPad, phone) see hover:none so
         they skip the @media (hover:hover) block below. Mouse devices see
         hover:hover and get the padding-right on hover.
-        streaming/unread/focus-within/menu-open expand to 40px for all devices."""
+        streaming/unread/needs-attention/focus-within/menu-open expand to 40px for all devices."""
         # Touch-safe combined rule (no :hover in this one)
         sel = (
             ".session-item.streaming,.session-item.unread,"
+            ".session-item.needs-attention,"
             ".session-item:focus-within,"
             ".session-item.menu-open"
         )
