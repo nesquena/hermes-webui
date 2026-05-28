@@ -291,12 +291,28 @@ class TestEchoTest(unittest.TestCase):
         registration pass.
         """
         from api.actions import default_registry, register_builtins
-
-        # Force a clean registration pass for this test by resetting the
-        # module-level flag. The default_registry is process-global so
-        # we cannot easily isolate state otherwise; this matches what a
-        # fresh process startup would observe.
         import api.actions as actions_pkg
+
+        # The default_registry is process-global; this test has to mutate
+        # both the registration flag and the registry's action map to
+        # observe a fresh registration pass. Snapshot the pre-test state
+        # and register an addCleanup() that restores it so the test stays
+        # order-independent: any later test in the same process sees the
+        # exact registry state it would have seen if this test had never
+        # run.
+        saved_registered = actions_pkg._BUILTINS_REGISTERED
+        saved_actions = dict(default_registry._actions)
+
+        def _restore_default_registry_state() -> None:
+            with actions_pkg._BUILTINS_LOCK:
+                actions_pkg._BUILTINS_REGISTERED = saved_registered
+                default_registry._actions.clear()
+                default_registry._actions.update(saved_actions)
+
+        self.addCleanup(_restore_default_registry_state)
+
+        # Force a clean registration pass for this test. Mirrors what a
+        # fresh process startup would observe.
         with actions_pkg._BUILTINS_LOCK:
             actions_pkg._BUILTINS_REGISTERED = False
             default_registry._actions.clear()
