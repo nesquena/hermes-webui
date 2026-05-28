@@ -6792,10 +6792,11 @@ def handle_post(handler, parsed) -> bool:
         task = str(body.get("task") or "").strip()
         provider = str(body.get("provider") or "auto").strip()
         model = str(body.get("model") or "").strip()
+        advanced = body.get("advanced") if isinstance(body, dict) else None
         if scope == "auxiliary":
             from api.config import set_auxiliary_model
             try:
-                return j(handler, set_auxiliary_model(task, provider, model))
+                return j(handler, set_auxiliary_model(task, provider, model, advanced=advanced))
             except Exception as exc:
                 return bad(handler, str(exc), status=400)
         if scope == "main":
