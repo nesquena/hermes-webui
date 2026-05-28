@@ -51,3 +51,6 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
   and compression-lineage session IDs to one canonical visible chat target.
 - [`turn-journal.md`](turn-journal.md) — Crash-safe WebUI turn journal for
   recovering interrupted chat submissions.
+- [`webui-pending-intent-controls.md`](webui-pending-intent-controls.md) —
+  proposed product contract for Queue, Interrupt, and Steer inputs submitted
+  while an agent run is active.
