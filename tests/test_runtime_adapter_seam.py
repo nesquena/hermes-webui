@@ -573,6 +573,7 @@ def test_rfc_defines_slice4f_supervised_local_runner_client_gate():
     rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
 
     assert "#### Slice 4f: Supervised local runner client backend gate" in rfc
+    assert "Status as of 2026-05-28: client transport shipped behind `HERMES_WEBUI_RUNNER_BASE_URL`" in rfc
     assert "replace the bounded 501 path under the existing\nfeature flag" in rfc
     assert "durable runner-owned run id plus session-to-run lookup" in rfc
     assert "cancel as the first required live control" in rfc
@@ -582,6 +583,22 @@ def test_rfc_defines_slice4f_supervised_local_runner_client_gate():
     assert "Successful chat-start responses remain limited\n   to the legacy-compatible field whitelist" in rfc
     assert "Unsupported runner controls return safe\n   `unsupported`, `not-active`, or `conflict` results" in rfc
     assert "no permanent WebUI-owned active-run discovery cache" in rfc
+
+def test_runtime_runner_client_factory_stays_bounded_until_endpoint_configured(monkeypatch):
+    routes = importlib.import_module("api.routes")
+
+    monkeypatch.delenv("HERMES_WEBUI_RUNNER_BASE_URL", raising=False)
+    try:
+        routes._runtime_runner_client_factory()
+    except NotImplementedError as exc:
+        assert "runner-local chat backend is not configured" in str(exc)
+    else:
+        raise AssertionError("runner-local must stay not-configured without an explicit runner endpoint")
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNNER_BASE_URL", "http://runner.local")
+    client = routes._runtime_runner_client_factory()
+    assert client.base_url == "http://runner.local"
+
 
 def test_runner_runtime_adapter_passes_explicit_start_payload_without_env_mutation(monkeypatch):
     runtime = importlib.import_module("api.runtime_adapter")

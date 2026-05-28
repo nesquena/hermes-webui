@@ -956,6 +956,12 @@ Non-goals for Slice 4e:
 
 #### Slice 4f: Supervised local runner client backend gate
 
+Status as of 2026-05-28: client transport shipped behind `HERMES_WEBUI_RUNNER_BASE_URL`.
+`runner-local` still remains default-off and returns the bounded not-configured
+path unless that endpoint is explicitly configured. When configured, WebUI uses a
+JSON HTTP client boundary for start / observe / status / controls rather than
+adding main-process runner-owned maps.
+
 After the route-selection harness ships, the next reviewable step is not to make
 `runner-local` the default. It is to define the first concrete supervised/local
 runner client backend that can replace the bounded 501 path under the existing

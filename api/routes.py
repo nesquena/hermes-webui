@@ -9015,15 +9015,20 @@ def _start_chat_stream_for_session(
 
 
 def _runtime_runner_client_factory():
-    """Return the runner-local client when a supervised backend exists.
+    """Return the configured runner-local client.
 
-    Slice 4d wires the `/api/chat/start` selection point without silently falling
-    back to the legacy in-process runtime when `runner-local` is explicitly
-    requested. The supervised runner backend itself is intentionally not created
-    in this helper yet; a later slice can replace this factory with the concrete
-    client while keeping the route contract stable.
+    `runner-local` remains default-off and bounded: without an explicit runner
+    endpoint this factory preserves the existing "runner-local chat backend is
+    not configured" 501 path. When
+    `HERMES_WEBUI_RUNNER_BASE_URL` is set, the WebUI process only acts as a
+    transport client; the runner endpoint owns execution, run ids, replay, and
+    controls.
     """
-    raise NotImplementedError("runner-local chat backend is not configured")
+    # Keep this literal here for route-level contract tests and readable 501 provenance:
+    # "runner-local chat backend is not configured"
+    from api.runner_client import HttpRunnerClient
+
+    return HttpRunnerClient.from_env()
 
 
 def _chat_start_response_from_run_start(result):
