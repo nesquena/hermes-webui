@@ -4397,7 +4397,11 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/capy-memory/source/refresh/scheduled":
         try:
-            from api.capy_memory import _safe_source_refresh_public_jobs, scheduled_source_refresh_tick
+            from api.capy_memory import (
+                _safe_source_refresh_public_jobs,
+                _safe_source_refresh_public_output_compaction,
+                scheduled_source_refresh_tick,
+            )
 
             try:
                 limit = int(body.get("limit", 25))
@@ -4459,6 +4463,9 @@ def handle_post(handler, parsed) -> bool:
                         if {"hint", "label", "resolved_provider", "resolved_model", "resolution", "metadata_only", "local_only"}.issubset(safe_route_resolution):
                             safe_policy["model_route_resolution"] = safe_route_resolution
                     safe_payload["autonomy_policy"] = safe_policy
+                output_compaction = _safe_source_refresh_public_output_compaction(result.get("output_compaction"))
+                if output_compaction:
+                    safe_payload["output_compaction"] = output_compaction
             j(handler, safe_payload)
             return True
         except ValueError as exc:
@@ -4469,7 +4476,7 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/capy-memory/source/refresh":
         try:
-            from api.capy_memory import _safe_public_id, run_source_refresh_jobs
+            from api.capy_memory import _safe_public_id, _source_refresh_output_compaction_receipt, run_source_refresh_jobs
 
             target_source_id = _safe_public_id(body.get("source_id"), fallback="") if body.get("source_id") is not None else ""
             if body.get("source_id") is not None and not target_source_id:
@@ -4538,7 +4545,20 @@ def handle_post(handler, parsed) -> bool:
                 prompt_preflight_status=route_preflight_status,
                 model_route_hint="hint:summarize",
             )
-            response_payload = {"ok": True, "processed": processed, "jobs": safe_jobs, "autonomy_policy": policy}
+            command = "capy.memory.refresh_one" if target_source_id else "capy.memory.refresh"
+            response_payload = {
+                "ok": True,
+                "processed": processed,
+                "jobs": safe_jobs,
+                "autonomy_policy": policy,
+                "output_compaction": _source_refresh_output_compaction_receipt(
+                    command=command,
+                    processed=processed,
+                    jobs=safe_jobs,
+                    policy=policy,
+                    target_source_id=target_source_id or None,
+                ),
+            }
             if target_source_id:
                 response_payload["target_source_id"] = target_source_id
             j(handler, response_payload)

@@ -309,6 +309,7 @@
       (queueRows ? '<ul>'+queueRows+'</ul>' : '') +
       (jobRows ? '<ul>'+jobRows+'</ul>' : '') +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
+      renderCompactionEvidence(result && (result.output_compaction || result.compaction)) +
       '</div>';
   }
 
@@ -829,6 +830,39 @@
     const unsafeEvidenceText = function(value){
       return /(^\/)|\/Users\/|\/home\/|\/root\/|\/private\/|\/var\/|\/tmp\/|\/etc\/|~\/|[A-Za-z]:\\|:\/\/|file:\/|api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|(?:^|[_\-\s<>.:/])(?:html|script|source|data|body|code)(?:$|[_\-\s<>.:/])|sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|gh[ousr]_[A-Za-z0-9]{10,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{10,}|SG\.[A-Za-z0-9_-]{10,}/i.test(String(value || ''));
     };
+    const unsafeReceiptToken = function(value){
+      return /api[_-]?(key|auth)|apiauth|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{10,}|gh[ousr]_[A-Za-z0-9]{10,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|hf_[A-Za-z0-9]{10,}|SG\.[A-Za-z0-9_-]{10,}/i.test(String(value || ''));
+    };
+    const safeReceiptToken = function(value, pattern, fallback){
+      const text = safeDisplayMetadataText(value || '', fallback || '');
+      if (!text || text === '[REDACTED]' || unsafeReceiptToken(text)) return '';
+      return pattern.test(text) ? text : '';
+    };
+    const safeReceiptCountFromText = function(name){
+      const text = typeof data.text === 'string' ? data.text : '';
+      const match = text.match(new RegExp('(?:^|\\n)' + name + ':\\s*([0-9]{1,8})(?:\\n|$)'));
+      return match ? safeNonNegativeCount(match[1]) : 0;
+    };
+    const tool = safeReceiptToken(data.tool, /^[a-z0-9_.:-]{1,80}$/i, '');
+    const command = safeReceiptToken(data.command, /^[a-z0-9_.:-]{1,160}$/i, '');
+    const processed = safeNonNegativeCount(data.processed) || safeReceiptCountFromText('processed');
+    const jobsCount = safeNonNegativeCount(data.jobs) || safeReceiptCountFromText('jobs');
+    const queued = safeNonNegativeCount(data.queued) || safeReceiptCountFromText('queued');
+    const queueJobs = safeNonNegativeCount(data.queue_jobs) || safeReceiptCountFromText('queue_jobs');
+    const exitStatus = Object.prototype.hasOwnProperty.call(data, 'exit_status') ? safeNonNegativeCount(data.exit_status) : null;
+    const redactedCount = safeNonNegativeCount(data.redacted_count);
+    const compactedLabel = data.compacted === true ? 'yes' : 'no';
+    const commandRows = [];
+    if (tool) commandRows.push('<div class="capy-spaces-muted">'+escapeHtml(tool)+'</div>');
+    if (command) commandRows.push('<div class="capy-spaces-muted">Command: '+escapeHtml(command)+'</div>');
+    const countParts = [];
+    if (queued) countParts.push('Queued: '+String(queued));
+    if (queueJobs) countParts.push('Queue jobs: '+String(queueJobs));
+    if (processed) countParts.push('Processed: '+String(processed));
+    if (jobsCount) countParts.push('Jobs: '+String(jobsCount));
+    if (exitStatus !== null) countParts.push('Exit: '+String(exitStatus));
+    if (countParts.length) commandRows.push('<div class="capy-spaces-muted">'+escapeHtml(countParts.join(' · '))+'</div>');
+    commandRows.push('<div class="capy-spaces-muted">Redaction: '+escapeHtml(redaction)+' · Redacted: '+String(redactedCount)+' · Compacted: '+escapeHtml(compactedLabel)+'</div>');
     const artifactRows = artifacts.slice(0, 8).map(function(item){
       const entry = item && typeof item === 'object' && !Array.isArray(item) ? item : {};
       const kind = safeDisplayMetadataText(entry.kind || '', '');
@@ -850,9 +884,10 @@
       if (!/^[a-z0-9_.:-]{1,40}$/i.test(citationId) || !/^[a-z0-9_.:-]{1,40}$/i.test(sourceType)) return '';
       return '<div class="capy-spaces-muted">'+escapeHtml(citationId+' · '+sourceType+' · '+title)+'</div>';
     }).filter(Boolean);
-    if (!originalChars && !compactedChars && !safeRules.length && redaction === 'none' && !artifactRows.length && !citationRows.length) return '';
+    if (!originalChars && !compactedChars && !safeRules.length && redaction === 'none' && commandRows.length <= 1 && !artifactRows.length && !citationRows.length) return '';
     return '<div class="capy-spaces-card capy-spaces-compaction-evidence"><h4>Compaction evidence</h4>' +
       '<div class="capy-spaces-muted">Original output: '+originalChars+' chars · Compacted output: '+compactedChars+' chars · Redaction: '+escapeHtml(redaction)+'</div>' +
+      commandRows.join('') +
       '<div class="capy-spaces-muted">Rules: '+escapeHtml(safeRules.length ? safeRules.join(', ') : 'none')+'</div>' +
       (artifactRows.length ? '<div class="capy-spaces-muted">Artifacts: '+artifactRows.length+'</div>'+artifactRows.join('') : '') +
       (citationRows.length ? '<div class="capy-spaces-muted">Citations: '+citationRows.length+'</div>'+citationRows.join('') : '') +

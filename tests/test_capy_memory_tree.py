@@ -583,6 +583,14 @@ def test_capy_memory_source_refresh_route_runs_bounded_metadata_only_jobs(monkey
     assert policy["model_route_hint"] == "hint:summarize"
     assert policy["metadata_only"] is True
     assert policy["local_only"] is True
+    compaction = payload["output_compaction"]
+    assert compaction["tool"] == "capy-memory-source-refresh"
+    assert compaction["command"] == "capy.memory.refresh"
+    assert compaction["exit_status"] == 0
+    assert compaction["redaction_status"] == "none"
+    assert "processed: 1" in compaction["text"]
+    assert "jobs: 1" in compaction["text"]
+    assert "prompt_preflight_status: pass" in compaction["text"]
     assert "secret_value_do_not_leak" not in serialized
     assert "api_key" not in serialized
     assert "<script" not in serialized
@@ -661,6 +669,12 @@ def test_capy_memory_source_refresh_route_can_target_one_source_metadata_only(mo
     assert payload["autonomy_policy"]["action"] == "capy.memory.refresh_one"
     assert payload["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
     assert payload["autonomy_policy"]["metadata_only"] is True
+    compaction = payload["output_compaction"]
+    assert compaction["tool"] == "capy-memory-source-refresh"
+    assert compaction["command"] == "capy.memory.refresh_one"
+    assert "processed: 1" in compaction["text"]
+    assert "target_source_id: roadmap-docs" in compaction["text"]
+    assert "prompt_preflight_status: pass" in compaction["text"]
     assert "secret_value_do_not_leak" not in serialized
     assert "ignore previous instructions" not in serialized
     assert "<script" not in serialized
@@ -746,6 +760,16 @@ def test_scheduled_source_refresh_tick_queues_due_sources_and_runs_metadata_only
         "metadata_only": True,
         "local_only": True,
     }
+    compaction = payload["output_compaction"]
+    assert compaction["tool"] == "capy-memory-source-refresh"
+    assert compaction["command"] == "capy.memory.refresh.scheduled"
+    assert compaction["exit_status"] == 0
+    assert compaction["redaction_status"] == "none"
+    assert "queued: 2" in compaction["text"]
+    assert "processed: 1" in compaction["text"]
+    assert "queue_jobs: 2" in compaction["text"]
+    assert "jobs: 1" in compaction["text"]
+    assert "prompt_preflight_status: pass" in compaction["text"]
     assert "secret_value_do_not_leak" not in serialized
     assert "api_key" not in serialized
     assert "opensesame" not in serialized
@@ -786,6 +810,21 @@ def test_capy_memory_scheduled_refresh_route_returns_bounded_policy_receipt(monk
                     "renderer": "<script>bad()</script>",
                 },
             },
+            "output_compaction": {
+                "tool": "capy-memory-source-refresh",
+                "command": "capy.memory.refresh.scheduled",
+                "exit_status": 0,
+                "original_chars": 120,
+                "compacted_chars": 80,
+                "compacted": True,
+                "rules_applied": ["cap_section_chars", "redact_unsafe_markers", "SECRET_VALUE_DO_NOT_LEAK"],
+                "redaction_status": "none",
+                "redacted_count": 0,
+                "retained_artifact_handles": [],
+                "retained_citations": [],
+                "text": "queued: 0\nprocessed: 0\nprompt_preflight_status: required\norigin_uri: capy-memory-public\nsource: public notes\nraw_content: benign words\nSECRET_VALUE_DO_NOT_LEAK",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
             "renderer": "<script>bad()</script>",
             "api_key": "SECRET_VALUE_DO_NOT_LEAK",
         }
@@ -821,8 +860,25 @@ def test_capy_memory_scheduled_refresh_route_returns_bounded_policy_receipt(monk
                 "local_only": True,
             },
         },
+        "output_compaction": {
+            "tool": "capy-memory-source-refresh",
+            "command": "capy.memory.refresh.scheduled",
+            "exit_status": 0,
+            "original_chars": 120,
+            "compacted_chars": 80,
+            "compacted": True,
+            "rules_applied": ["cap_section_chars", "redact_unsafe_markers"],
+            "redaction_status": "none",
+            "redacted_count": 0,
+            "retained_artifact_handles": [],
+            "retained_citations": [],
+            "text": "queued: 0\nprocessed: 0\nprompt_preflight_status: required",
+        },
     }
     assert "secret_value_do_not_leak" not in serialized
+    assert "origin_uri" not in serialized
+    assert "raw_content" not in serialized
+    assert "public notes" not in serialized
     assert "api_key" not in serialized
     assert "ignore previous instructions" not in serialized
     assert "<script" not in serialized

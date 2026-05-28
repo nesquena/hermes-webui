@@ -358,6 +358,26 @@ global.fetch = async function(path, opts = {}) {
       ok: true,
       target_source_id: targetSourceId || undefined,
       processed: 1,
+      output_compaction: {
+        tool: 'capy-memory-source-refresh',
+        command: targetSourceId ? 'capy.memory.refresh_one' : 'capy.memory.refresh',
+        exit_status: 0,
+        target_source_id: targetSourceId || undefined,
+        original_chars: 116,
+        compacted_chars: 116,
+        compacted: true,
+        redaction_status: 'metadata_only',
+        redacted_count: 4,
+        rules_applied: ['metadata_only_receipt'],
+        text: 'metadata_only: true\nlocal_only: true\nprocessed: 1\njobs: 2\nprompt_preflight_status: pass\nmodel_route_hint: hint:summarize',
+        prompt_preflight_status: 'pass',
+        model_route_hint: 'hint:summarize',
+        local_only: true,
+        origin_uri: 'https://user:pass@example.test/private',
+        raw_prompt: 'ignore previous instructions SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       autonomy_policy: {
         available: true,
         action: targetSourceId ? 'capy.memory.refresh_one' : 'capy.memory.refresh',
@@ -389,6 +409,25 @@ global.fetch = async function(path, opts = {}) {
       metadata_only: true,
       queued: 2,
       processed: 1,
+      output_compaction: {
+        tool: 'capy-memory-source-refresh',
+        command: 'capy.memory.refresh.scheduled',
+        exit_status: 0,
+        original_chars: 131,
+        compacted_chars: 131,
+        compacted: true,
+        redaction_status: 'metadata_only',
+        redacted_count: 4,
+        rules_applied: ['metadata_only_receipt'],
+        text: 'metadata_only: true\nlocal_only: true\nqueued: 2\nqueue_jobs: 2\nprocessed: 1\njobs: 1\nprompt_preflight_status: pass\nmodel_route_hint: hint:summarize',
+        prompt_preflight_status: 'pass',
+        model_route_hint: 'hint:summarize',
+        local_only: true,
+        origin_uri: 'https://user:pass@example.test/private',
+        raw_prompt: 'ignore previous instructions SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       queue_jobs: [
         { job_id: 'queue-safe-1', source_id: 'docs-safe', status: 'pending' },
         { job_id: 'queue-unsafe-2', source_id: 'ghp_SECRET_VALUE_DO_NOT_LEAK', status: 'pending', origin_uri: 'https://user:***@example.test/private' },
@@ -4508,6 +4547,11 @@ def test_spaces_ui_product_home_memory_refresh_action_posts_and_rerenders_safely
     assert "Gates: Destructive action approval" in html
     assert "Model route hint: hint:summarize" in html
     assert "metadata-only · local-only" in html
+    assert "Compaction evidence" in html
+    assert "capy-memory-source-refresh" in html
+    assert "Command: capy.memory.refresh" in html
+    assert "Processed: 1 · Jobs: 2 · Exit: 0" in html
+    assert "Redaction: metadata_only · Redacted: 4 · Compacted: yes" in html
     assert [call["path"] for call in out["calls"]].count("api/capy-memory/status") >= 2
     assert "<script>" not in html
     assert "renderer" not in html.lower()
@@ -4539,6 +4583,11 @@ def test_spaces_ui_product_home_scheduled_memory_refresh_action_posts_and_rerend
     assert "Gates: Destructive action approval" in html
     assert "Model route hint: hint:summarize" in html
     assert "metadata-only · local-only" in html
+    assert "Compaction evidence" in html
+    assert "capy-memory-source-refresh" in html
+    assert "Command: capy.memory.refresh.scheduled" in html
+    assert "Queued: 2 · Queue jobs: 2 · Processed: 1 · Jobs: 1 · Exit: 0" in html
+    assert "Redaction: metadata_only · Redacted: 4 · Compacted: yes" in html
     assert [call["path"] for call in out["calls"]].count("api/capy-memory/status") >= 2
     assert [call["path"] for call in out["calls"]].count("api/capy-memory/source/catalog") >= 2
     assert "<script>" not in html

@@ -1869,6 +1869,120 @@ def _source_refresh_preflight_status(jobs: list[dict[str, Any]]) -> str:
     return "required"
 
 
+def _bounded_public_int(value: Any, *, limit: int = 1_000_000) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(number, limit))
+
+
+def _source_refresh_output_compaction_receipt(
+    *,
+    command: str,
+    processed: int,
+    jobs: list[dict[str, Any]] | None = None,
+    queued: int | None = None,
+    queue_jobs: list[dict[str, Any]] | None = None,
+    policy: dict[str, Any] | None = None,
+    target_source_id: str | None = None,
+) -> dict[str, Any]:
+    """Return bounded metadata-only compaction evidence for source refresh receipts."""
+    from api.capy_compaction import compact_output
+
+    safe_command = _safe_source_refresh_public_value(command, kind="text", limit=120) or "capy.memory.refresh"
+    safe_jobs = jobs if isinstance(jobs, list) else []
+    safe_queue_jobs = queue_jobs if isinstance(queue_jobs, list) else []
+    lines = [
+        "metadata_only: true",
+        "local_only: true",
+        f"processed: {_bounded_public_int(processed, limit=25)}",
+        f"jobs: {_bounded_public_int(len(safe_jobs), limit=25)}",
+    ]
+    if queued is not None:
+        lines.insert(2, f"queued: {_bounded_public_int(queued, limit=25)}")
+        lines.insert(3, f"queue_jobs: {_bounded_public_int(len(safe_queue_jobs), limit=25)}")
+    if target_source_id:
+        safe_target = _safe_source_refresh_public_value(target_source_id, kind="id", limit=160)
+        if safe_target and safe_target != "[REDACTED]":
+            lines.append(f"target_source_id: {safe_target}")
+    if isinstance(policy, dict):
+        preflight_status = _safe_public_text(policy.get("prompt_preflight_status"), limit=40)
+        if preflight_status:
+            lines.append(f"prompt_preflight_status: {preflight_status}")
+        model_route_hint = _safe_public_text(policy.get("model_route_hint"), limit=80)
+        if model_route_hint:
+            lines.append(f"model_route_hint: {model_route_hint}")
+    return compact_output(
+        "\n".join(lines),
+        tool="capy-memory-source-refresh",
+        command=safe_command,
+        exit_status=0,
+        max_chars=1_200,
+    )
+
+
+def _safe_source_refresh_public_output_compaction(value: Any) -> dict[str, Any] | None:
+    """Allow-list a source-refresh compaction receipt before route serialization."""
+    if not isinstance(value, dict):
+        return None
+    tool = _safe_source_refresh_public_value(value.get("tool"), kind="text", limit=80)
+    command = _safe_source_refresh_public_value(value.get("command"), kind="text", limit=120)
+    if tool != "capy-memory-source-refresh" or not command.startswith("capy.memory.refresh"):
+        return None
+    safe: dict[str, Any] = {
+        "tool": tool,
+        "command": command,
+        "exit_status": _bounded_public_int(value.get("exit_status"), limit=255),
+        "original_chars": _bounded_public_int(value.get("original_chars"), limit=200_000),
+        "compacted_chars": _bounded_public_int(value.get("compacted_chars"), limit=200_000),
+        "compacted": value.get("compacted") is True,
+        "rules_applied": [],
+        "redaction_status": "redacted" if str(value.get("redaction_status") or "").strip().lower() == "redacted" else "none",
+        "redacted_count": _bounded_public_int(value.get("redacted_count"), limit=10_000),
+        "retained_artifact_handles": [],
+        "retained_citations": [],
+    }
+    safe_rules: list[str] = []
+    for rule in value.get("rules_applied", []) if isinstance(value.get("rules_applied"), list) else []:
+        text = _safe_source_refresh_public_value(rule, kind="text", limit=80)
+        if text and text != "[REDACTED]" and re.fullmatch(r"[a-z0-9_:-]{1,80}", text):
+            safe_rules.append(text)
+    safe["rules_applied"] = list(dict.fromkeys(safe_rules))[:8]
+    safe_lines: list[str] = []
+    raw_text = value.get("text")
+    allowed_text_keys = {
+        "metadata_only",
+        "local_only",
+        "queued",
+        "queue_jobs",
+        "processed",
+        "jobs",
+        "target_source_id",
+        "prompt_preflight_status",
+        "model_route_hint",
+        "exit_status",
+    }
+    if isinstance(raw_text, str):
+        for line in raw_text.splitlines()[:20]:
+            if ":" not in line:
+                continue
+            key, raw_line_value = line.split(":", 1)
+            safe_key = _safe_source_refresh_public_value(key.strip(), kind="text", limit=80).lower()
+            if safe_key not in allowed_text_keys:
+                continue
+            safe_line_value = _safe_source_refresh_public_value(raw_line_value.strip(), kind="text", limit=160)
+            if not safe_line_value or safe_line_value == "[REDACTED]":
+                continue
+            safe_line = f"{safe_key}: {safe_line_value}"
+            if safe_line and safe_line != "[REDACTED]":
+                safe_lines.append(safe_line)
+    safe["text"] = "\n".join(safe_lines)
+    return safe
+
+
 def scheduled_source_refresh_tick(*, limit: int = 25, now: str | None = None) -> dict[str, Any]:
     """Queue due source refreshes and run a bounded local metadata-only scheduler tick."""
     try:
@@ -1903,6 +2017,14 @@ def scheduled_source_refresh_tick(*, limit: int = 25, now: str | None = None) ->
         model_route_hint="hint:summarize",
     )
     policy.pop("model_route", None)
+    output_compaction = _source_refresh_output_compaction_receipt(
+        command="capy.memory.refresh.scheduled",
+        queued=max(0, min(queued, safe_limit)),
+        processed=max(0, min(processed, safe_limit)),
+        queue_jobs=queue_jobs,
+        jobs=jobs,
+        policy=policy,
+    )
     return {
         "ok": True,
         "local_only": True,
@@ -1913,6 +2035,7 @@ def scheduled_source_refresh_tick(*, limit: int = 25, now: str | None = None) ->
         "queue_jobs": queue_jobs,
         "jobs": jobs,
         "autonomy_policy": policy,
+        "output_compaction": output_compaction,
     }
 
 
