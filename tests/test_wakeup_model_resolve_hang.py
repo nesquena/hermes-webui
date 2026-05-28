@@ -174,7 +174,11 @@ def test_chat_start_survives_slow_provider_probe(monkeypatch):
 
     def _slow_rebuild(_builder):
         started["n"] += 1
-        time.sleep(3.0)  # >> budget — models the hung Copilot HTTPS call
+        # >> budget — models the hung Copilot HTTPS call. 0.8s is 2× the
+        # monkeypatched 0.4s budget, which is the smallest gap that still
+        # robustly proves the contract while keeping suite wall-clock low
+        # (was 3.0s; suite-latency cleanup per Copilot review).
+        time.sleep(0.8)
         return {
             "active_provider": "anthropic",
             "default_model": "anthropic/claude-sonnet-4",

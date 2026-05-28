@@ -681,6 +681,17 @@ def _process_one(evt: dict) -> None:
     """Route a single completion_queue event to the matching WebUI session."""
     from api import config as _cfg
 
+    # Hoist the process-registry import once per event: it was imported in
+    # three separate blocks below (session_key recovery, env-immune owner
+    # cross-check, upstream is_completion_consumed dedupe) on every completion
+    # event, paying repeated import-system overhead. Single local rebind keeps
+    # the ImportError fallback contract (process_registry may be missing in
+    # cut-down vendoring) while collapsing to one lookup per call.
+    try:
+        from tools.process_registry import process_registry as _process_registry
+    except Exception:
+        _process_registry = None
+
     process_id = str(evt.get("session_id") or "")
     session_key = str(evt.get("session_key") or "")
     # Root-cause fix (t_0f447014): the notify_on_complete completion event
@@ -696,10 +707,10 @@ def _process_one(evt: dict) -> None:
     # restore and is the WebUI session_id for WebUI-spawned processes.
     if not session_key and process_id:
         try:
-            from tools.process_registry import process_registry as _pr
-            _ps = _pr.get(process_id)
-            if _ps is not None and getattr(_ps, "session_key", ""):
-                session_key = str(_ps.session_key)
+            if _process_registry is not None:
+                _ps = _process_registry.get(process_id)
+                if _ps is not None and getattr(_ps, "session_key", ""):
+                    session_key = str(_ps.session_key)
         except Exception:
             logger.debug(
                 "session_key recovery from process registry failed for %r",
@@ -731,8 +742,7 @@ def _process_one(evt: dict) -> None:
     # Pure pass-through when no env-immune owner is available (today's core,
     # cron/CLI procs, pre-Option-1 spawns) — never suppresses a valid wakeup.
     try:
-        from tools.process_registry import process_registry as _pr_xs
-        _ps_xs = _pr_xs.get(process_id) if process_id else None
+        _ps_xs = _process_registry.get(process_id) if (_process_registry is not None and process_id) else None
     except Exception:
         _ps_xs = None
     session_id = _resolve_wakeup_target(
@@ -753,8 +763,7 @@ def _process_one(evt: dict) -> None:
     # upstream key (verified against origin/master streaming.py).
     if process_id:
         try:
-            from tools.process_registry import process_registry as _pr
-            if _pr.is_completion_consumed(process_id):
+            if _process_registry is not None and _process_registry.is_completion_consumed(process_id):
                 return
         except Exception:
             logger.debug(
