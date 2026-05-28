@@ -774,6 +774,18 @@ const LOCALES = {
     insights_model_share: 'Share',
     insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',
+    insights_skill_usage_title: 'Skill Usage',
+    insights_skill_usage_sub: 'Tool invocation frequency',
+    insights_skill_usage_total: 'Total invocations',
+    insights_skill_usage_skills_used: 'Skills used',
+    insights_skill_usage_no_data: 'No skill usage data yet',
+    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',
+    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Skill',
+    insights_skill_usage_col_uses: 'Uses',
+    insights_skill_usage_col_views: 'Views',
+    insights_skill_usage_col_share: 'Usage %',
+    insights_skill_usage_col_patches: 'Patches',
     workspace_desc: 'Add and switch workspaces for your sessions.',
     session_meta_messages: (n) => `${n} msg${n === 1 ? '' : 's'}`,
     session_meta_children: (n) => `${n} child${n === 1 ? '' : 'ren'}`,
@@ -2049,6 +2061,18 @@ const LOCALES = {
     insights_model_share: 'Quota',
     insights_no_usage_data: 'Nessun dato di utilizzo',
     insights_footer: 'Dati mostrati dagli ultimi {days} giorni',
+    insights_skill_usage_title: 'Utilizzo Skill',
+    insights_skill_usage_sub: 'Frequenza di invocazione strumenti',
+    insights_skill_usage_total: 'Invocazioni totali',
+    insights_skill_usage_skills_used: 'Skill usate',
+    insights_skill_usage_no_data: 'Nessun dato di utilizzo skill ancora',
+    insights_skill_usage_no_data_hint: 'Le skill appariranno qui dopo essere state usate nelle conversazioni.',
+    insights_skill_usage_footer: 'Conteggi da ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Abilità',
+    insights_skill_usage_col_uses: 'Usi',
+    insights_skill_usage_col_views: 'Visualizzazioni',
+    insights_skill_usage_col_share: 'Utilizzo %',
+    insights_skill_usage_col_patches: 'Patch',
     workspace_desc: 'Aggiungi e cambia workspace per le tue sessioni.',
     session_meta_messages: (n) => `${n} msg`,
     session_meta_children: (n) => `${n} figli${n === 1 ? 'o' : ''}`,
@@ -3326,6 +3350,18 @@ const LOCALES = {
     insights_model_share: 'シェア',
     insights_no_usage_data: '使用データはまだありません',
     insights_footer: '直近 {days} 日間のデータを表示',
+    insights_skill_usage_title: 'スキル使用状況',
+    insights_skill_usage_sub: 'ツール呼び出し頻度',
+    insights_skill_usage_total: '総呼び出し数',
+    insights_skill_usage_skills_used: '使用スキル数',
+    insights_skill_usage_no_data: 'スキル使用データがまだありません',
+    insights_skill_usage_no_data_hint: '会話でスキルを使用すると、ここに表示されます。',
+    insights_skill_usage_footer: 'データ元: ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'スキル',
+    insights_skill_usage_col_uses: '使用回数',
+    insights_skill_usage_col_views: '閲覧数',
+    insights_skill_usage_col_share: '使用率',
+    insights_skill_usage_col_patches: 'パッチ',
     workspace_desc: 'セッション用のワークスペースを追加・切り替えします。',
     session_meta_messages: (n) => `${n} 件`,
     session_meta_children: (n) => `${n} 子`,
@@ -5032,6 +5068,18 @@ const LOCALES = {
     insights_model_share: 'Share',
     insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
+    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
+    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
+    insights_skill_usage_total: 'Total invocations',  // TODO: translate
+    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
+    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
+    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
+    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
+    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
+    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
+    insights_skill_usage_col_views: 'Views',  // TODO: translate
+    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
+    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
     insights_models: 'Models',  // TODO: translate
@@ -6230,6 +6278,18 @@ const LOCALES = {
     insights_model_share: 'Share',
     insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
+    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
+    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
+    insights_skill_usage_total: 'Total invocations',  // TODO: translate
+    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
+    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
+    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
+    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
+    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
+    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
+    insights_skill_usage_col_views: 'Views',  // TODO: translate
+    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
+    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
     insights_models: 'Models',  // TODO: translate
@@ -7443,6 +7503,18 @@ const LOCALES = {
     insights_model_share: 'Share',
     insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
+    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
+    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
+    insights_skill_usage_total: 'Total invocations',  // TODO: translate
+    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
+    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
+    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
+    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
+    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
+    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
+    insights_skill_usage_col_views: 'Views',  // TODO: translate
+    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
+    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
     insights_models: 'Models',  // TODO: translate
@@ -8649,6 +8721,18 @@ const LOCALES = {
     insights_model_share: '占比',
     insights_no_usage_data: '暂无使用数据',
     insights_footer: '显示最近 {days} 天的数据',
+    insights_skill_usage_title: '技能使用统计',
+    insights_skill_usage_sub: '工具调用频次',
+    insights_skill_usage_total: '总调用次数',
+    insights_skill_usage_skills_used: '已使用技能',
+    insights_skill_usage_no_data: '暂无技能使用数据',
+    insights_skill_usage_no_data_hint: '在对话中使用技能后，数据将在此显示。',
+    insights_skill_usage_footer: '数据来源于 ~/.hermes/skills/',
+    insights_skill_usage_col_skill: '技能',
+    insights_skill_usage_col_uses: '使用次数',
+    insights_skill_usage_col_views: '查看次数',
+    insights_skill_usage_col_share: '使用占比',
+    insights_skill_usage_col_patches: '补丁',
     insights_input_tokens: '输入',
     insights_messages: '消息',
     insights_models: '模型',
@@ -9936,6 +10020,18 @@ const LOCALES = {
     insights_model_share: 'Share',
     insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
+    insights_skill_usage_title: '技能使用統計',
+    insights_skill_usage_sub: '工具調用頻次',
+    insights_skill_usage_total: '總調用次數',
+    insights_skill_usage_skills_used: '已使用技能',
+    insights_skill_usage_no_data: '暫無技能使用數據',
+    insights_skill_usage_no_data_hint: '在會話中使用技能後，數據將在此顯示。',
+    insights_skill_usage_footer: '數據來源於 ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
+    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
+    insights_skill_usage_col_views: 'Views',  // TODO: translate
+    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
+    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
     insights_models: 'Models',  // TODO: translate
@@ -11024,6 +11120,18 @@ const LOCALES = {
     insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
     insights_cost: 'Estimated Cost',  // TODO: translate
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
+    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
+    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
+    insights_skill_usage_total: 'Total invocations',  // TODO: translate
+    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
+    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
+    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
+    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
+    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
+    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
+    insights_skill_usage_col_views: 'Views',  // TODO: translate
+    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
+    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
     insights_models: 'Models',  // TODO: translate
@@ -12289,6 +12397,18 @@ const LOCALES = {
     insights_model_share: '비율',
     insights_no_usage_data: '아직 사용 데이터가 없습니다',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
+    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
+    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
+    insights_skill_usage_total: 'Total invocations',  // TODO: translate
+    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
+    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
+    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
+    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
+    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
+    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
+    insights_skill_usage_col_views: 'Views',  // TODO: translate
+    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
+    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
     insights_models: 'Models',  // TODO: translate
@@ -12947,6 +13067,18 @@ const LOCALES = {
     insights_model_share: 'Partager',
     insights_no_usage_data: 'Aucune donnée d\'utilisation pour l\'instant',
     insights_footer: 'Affichage des données des {days} derniers jours',
+    insights_skill_usage_title: 'Utilisation des Skills',
+    insights_skill_usage_sub: 'Fréquence d\'invocation des outils',
+    insights_skill_usage_total: 'Invocations totales',
+    insights_skill_usage_skills_used: 'Skills utilisés',
+    insights_skill_usage_no_data: 'Aucune donnée d\'utilisation des skills pour le moment',
+    insights_skill_usage_no_data_hint: 'Les skills apparaîtront ici une fois utilisés dans les conversations.',
+    insights_skill_usage_footer: 'Comptages depuis ~/.hermes/skills/',
+    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
+    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
+    insights_skill_usage_col_views: 'Views',  // TODO: translate
+    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
+    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
     workspace_desc: 'Ajoutez et changez d\'espace de travail pour vos sessions.',
     session_lineage_segment_untitled: 'Segment sans titre',
     session_lineage_segment_open: 'Segment de lignée ouverte',
@@ -14766,6 +14898,18 @@ const LOCALES = {
     insights_model_share: 'Paylaşmak',
     insights_no_usage_data: 'Henüz kullanım verisi yok',
     insights_footer: 'Son {days} günün verileri gösteriliyor',
+    insights_skill_usage_title: 'Skill Usage',  // TODO: translate
+    insights_skill_usage_sub: 'Tool invocation frequency',  // TODO: translate
+    insights_skill_usage_total: 'Total invocations',  // TODO: translate
+    insights_skill_usage_skills_used: 'Skills used',  // TODO: translate
+    insights_skill_usage_no_data: 'No skill usage data yet',  // TODO: translate
+    insights_skill_usage_no_data_hint: 'Skills will appear here once used in conversations.',  // TODO: translate
+    insights_skill_usage_footer: 'Counts from ~/.hermes/skills/',  // TODO: translate
+    insights_skill_usage_col_skill: 'Skill',  // TODO: translate
+    insights_skill_usage_col_uses: 'Uses',  // TODO: translate
+    insights_skill_usage_col_views: 'Views',  // TODO: translate
+    insights_skill_usage_col_share: 'Usage %',  // TODO: translate
+    insights_skill_usage_col_patches: 'Patches',  // TODO: translate
     insights_input_tokens: 'Giriş',
     insights_messages: 'Mesajlar',
     insights_models: 'Modeller',

@@ -4,7 +4,34 @@
 ## [Unreleased]
 
 ### Added
+
 - Browser chat can now opt into a default-off `HERMES_WEBUI_CHAT_BACKEND=gateway` bridge that routes new WebUI turns through a running Hermes Gateway API server while preserving the existing WebUI chat start/stream contract.
+
+## [v0.51.148] — 2026-05-28 — Release DT (stage-batch30 — single-PR Insights skill-usage reader)
+
+### Added
+
+- Insights page now shows a Skill Usage card after the LLM Wiki card, displaying per-skill cumulative invocation counts (uses / views / patches / share-%) from the agent-owned `.usage.json`. WebUI reads only; the agent (`tools/skills_tool.py`, `tools/skill_manager_tool.py`) is the single writer with `fcntl` locking, so there is no double-counting or write race. Empty-state shows when no skills have been used yet. Includes i18n keys for the 12 new strings across all supported locales. (#3008)
+
+## [v0.51.147] — 2026-05-28 — Release DS (stage-batch29 — single-PR streaming ownership-cleanup follow-up)
+
+### Fixed
+
+- Settled stream cleanup helpers (`_restoreSettledSession`, `_handleStreamError`, `_deferStreamErrorIfPageHidden`, `_reattachOrRestoreAfterDeferredStreamError`) now thread the owning `EventSource` instance through every async deferred path, so a late error or settle callback from an older source can no longer tear down a newer reconnect source. Completes the ownership-aware cleanup pattern introduced by `closeLiveStream(sessionId, streamId, source)`. (#2930, #3010)
+
+## [v0.51.146] — 2026-05-28 — Release DR (stage-batch28 — 6-PR low-risk safety+contrast batch)
+
+### Fixed
+
+- Dark-mode panel header save buttons now use a theme-aware foreground token, keeping workspace and other detail-pane check icons visible on the default gold accent. (#2998, #3022)
+- Custom provider `/v1/models` discovery now uses a short per-endpoint timeout and gracefully skips slow or unreachable providers, reducing cold `/api/models` cache rebuild latency. (#3024, #3025)
+- Messaging (Telegram-resumed) sessions: the `?messages=0` metadata fast path now routes through the same display merge as the full-message path, so `message_count` and `last_message_at` match the rendered transcript and stop triggering refresh-loops that reset scroll and close open dropdowns. (#3003)
+- WebUI sessions mirrored into `state.db` for long-history retention now stay in the WebUI sidebar tab instead of being misclassified as CLI rows. Adds regression coverage for both directions of the WebUI vs CLI source-tab invariant. (#3027)
+- Sidebar projection now keeps at least one messageful representative visible per non-background conversation when normal filters would otherwise hide every row, rescuing discoverability for sessions with stale snapshot/lineage metadata. Rescued rows are marked `discoverability_warning: rescued_messageful_hidden_session` for auditability; intentional background/cron sessions stay hidden. (#3028)
+
+### Added
+
+- New read-only `api.session_discoverability` audit module cross-checks JSON sidecars, `_index.json`, `state.db`, and the live sidebar response to classify messageful sessions without a visible representative, stale WebUI-as-CLI source flags, missing sidecars, and lineage segments without a visible tip. Diagnostic surface only; does not repair, restart, or mutate any state. (#3029)
 
 ## [v0.51.145] — 2026-05-26 — Release DQ (stage-batch27 — sidebar running-state preservation)
 

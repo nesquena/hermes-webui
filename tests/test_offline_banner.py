@@ -69,25 +69,25 @@ def test_sse_network_error_defers_to_offline_banner_instead_of_inline_error():
     assert "t('offline_stream_waiting')" in MESSAGES_JS
     assert "if(_deferStreamErrorIfOffline()) return;" in MESSAGES_JS
     error_handler = MESSAGES_JS.split("source.addEventListener('error',async e=>{", 1)[1].split("source.addEventListener('cancel'", 1)[0]
-    assert error_handler.find("_deferStreamErrorIfOffline()") < error_handler.rfind("_handleStreamError()")
+    assert error_handler.find("_deferStreamErrorIfOffline()") < error_handler.rfind("_handleStreamError(source)")
 
 
 def test_sse_error_defers_while_page_hidden_until_tab_returns():
-    assert "function _deferStreamErrorIfPageHidden()" in MESSAGES_JS
+    assert "function _deferStreamErrorIfPageHidden(source)" in MESSAGES_JS
     assert "document.visibilityState==='hidden'" in MESSAGES_JS
     assert "document.wasDiscarded===true" in MESSAGES_JS
     assert "Connection paused. Reconnecting when this tab returns…" in MESSAGES_JS
     assert "document.addEventListener('visibilitychange',resume)" in MESSAGES_JS
     assert "window.addEventListener('pageshow',resume)" in MESSAGES_JS
     error_handler = MESSAGES_JS.split("source.addEventListener('error',async e=>{", 1)[1].split("source.addEventListener('cancel'", 1)[0]
-    assert "if(_deferStreamErrorIfPageHidden()) return;" in error_handler
-    assert error_handler.find("_deferStreamErrorIfPageHidden()") < error_handler.rfind("_handleStreamError()")
+    assert "if(_deferStreamErrorIfPageHidden(source)) return;" in error_handler
+    assert error_handler.find("_deferStreamErrorIfPageHidden(source)") < error_handler.rfind("_handleStreamError(source)")
 
 
 def test_deferred_hidden_stream_error_reattaches_or_restores_before_inline_error():
-    recovery_block = MESSAGES_JS.split("function _reattachOrRestoreAfterDeferredStreamError(){", 1)[1].split("function _deferStreamErrorIfPageHidden()", 1)[0]
+    recovery_block = MESSAGES_JS.split("function _reattachOrRestoreAfterDeferredStreamError(source){", 1)[1].split("function _deferStreamErrorIfPageHidden(source)", 1)[0]
     assert "api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`)" in recovery_block
     assert "if(st.active)" in recovery_block
     assert "_wireSSE(new EventSource" in recovery_block
-    assert "if(await _restoreSettledSession()) return;" in recovery_block
-    assert recovery_block.find("if(await _restoreSettledSession()) return;") < recovery_block.rfind("_handleStreamError()")
+    assert "if(await _restoreSettledSession(source)) return;" in recovery_block
+    assert recovery_block.find("if(await _restoreSettledSession(source)) return;") < recovery_block.rfind("_handleStreamError(source)")

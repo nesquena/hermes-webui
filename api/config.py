@@ -70,6 +70,12 @@ PROJECTS_FILE = STATE_DIR / "projects.json"
 
 logger = logging.getLogger(__name__)
 
+# Keep custom provider /v1/models probes below the frontend's generic request
+# timeout even when one upstream is slow or unreachable. The models cache rebuild
+# path probes configured custom endpoints serially, so each provider needs a
+# short hard cap and graceful degradation.
+CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS = 5.0
+
 
 def _env_mb_bytes(name: str, default_mb: int) -> int:
     """Parse an optional megabyte environment variable into bytes.
@@ -3653,7 +3659,7 @@ def get_available_models() -> dict:
                 req.add_header("User-Agent", "OpenAI/Python 1.0")
                 for k, v in headers.items():
                     req.add_header(k, v)
-                with urllib.request.urlopen(req, timeout=10) as response:  # nosec B310
+                with urllib.request.urlopen(req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as response:  # nosec B310
                     data = json.loads(response.read().decode("utf-8"))
                 return _extract_model_entries_from_payload(data, provider), None
             except urllib.error.HTTPError as exc:
