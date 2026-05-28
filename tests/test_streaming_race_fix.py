@@ -176,8 +176,8 @@ class TestReconnectAccumulatorPreservation:
         It calls renderMessages() which settles the DOM. Any pending rAF must be
         cancelled before that renderMessages call — same as done/apperror/cancel."""
         src = read('static/messages.js')
-        m = re.search(r'function _handleStreamError\(\)\{.*?\n  \}', src, re.DOTALL)
-        assert m, "_handleStreamError not found"
+        m = re.search(r'function _handleStreamError\(source\)\{.*?\n  \}', src, re.DOTALL)
+        assert m, "_handleStreamError(source) not found"
         fn = m.group(0)
         assert '_streamFinalized=true' in fn or '_streamFinalized = true' in fn, (
             "_handleStreamError must set _streamFinalized=true (Opus Q1 fix)"
@@ -190,8 +190,8 @@ class TestReconnectAccumulatorPreservation:
         """Deferred hidden-tab recovery must not reattach an old stream after
         the user has switched to a different session in the same tab."""
         src = read('static/messages.js')
-        m = re.search(r'function _reattachOrRestoreAfterDeferredStreamError\(\)\{.*?\n  \}', src, re.DOTALL)
-        assert m, "_reattachOrRestoreAfterDeferredStreamError not found"
+        m = re.search(r'function _reattachOrRestoreAfterDeferredStreamError\(source\)\{.*?\n  \}', src, re.DOTALL)
+        assert m, "_reattachOrRestoreAfterDeferredStreamError(source) not found"
         fn = m.group(0)
         assert 'S.session&&S.session.session_id' in fn
         assert '!==activeSid' in fn

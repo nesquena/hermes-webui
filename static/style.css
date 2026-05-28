@@ -4039,6 +4039,14 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .wiki-status-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:11px;color:var(--muted);border-top:1px solid var(--border);padding-top:10px;}
 .wiki-status-footer a{color:var(--accent);text-decoration:none;font-weight:600;white-space:nowrap;}
 .wiki-status-footer a:hover{text-decoration:underline;}
+.skill-usage-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;}
+.skill-usage-sub{font-size:11px;color:var(--muted);margin-top:-4px;}
+.skill-usage-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:12px;}
+.skill-usage-grid div{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);min-width:0;}
+.skill-usage-grid span{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;}
+.skill-usage-grid strong{font-size:13px;color:var(--text);font-weight:650;overflow-wrap:anywhere;}
+.skill-usage-table .insights-table-head,
+.skill-usage-table .insights-table-row{grid-template-columns:minmax(90px,1.5fr) 60px 60px 58px 52px;gap:8px;align-items:center;}
 .insights-card-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;}
 .insights-table{width:100%;font-size:12px;}
 .insights-table-head{display:grid;grid-template-columns:1fr 80px;padding:4px 0;border-bottom:1px solid var(--border);font-weight:600;color:var(--muted);font-size:11px;}
