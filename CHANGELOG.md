@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Realtime Todos panel: the panel now mirrors the agent's `todo` tool state live via a dedicated `todo_state` SSE event instead of only repainting once per settled turn, with cold-load hydration on session open and INFLIGHT recovery across reload/reconnect (#3065). New `docs/rfcs/todo-state-contract.md` documents the wire format, the cold-load vs INFLIGHT reconciliation rule, the `ts` recency floor, and how it layers on the run-journal / partial-output recovery machinery.
+
+### Fixed
+
+- Todos panel no longer renders a historical task list when a context compression/rebuild strips the timestamp off the latest `todo` tool message. `derive_todo_state` now floors the cold-load `ts` to the max prior message timestamp so the latest-by-position snapshot cannot lose the recency comparison to a stale INFLIGHT snapshot, and the frontend treats a timestampless cold-load as the authoritative settled view (#3065).
+
 ## [v0.51.204] — 2026-06-01 — Release FX (stage-batch17 — project/session operations honor the session's own profile)
 
 ### Fixed
