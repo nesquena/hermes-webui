@@ -7912,14 +7912,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     }:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
+        events = list_space_repair_events(space_id, data.get("limit", 20))
         response = {
             "ok": True,
             "action": name,
             "space_id": space_id,
-            "events": list_space_repair_events(space_id, data.get("limit", 20)),
+            "events": events,
         }
         if is_current:
             response["active_space_id"] = space_id
+        response["output_compaction"] = _space_repair_events_output_compaction(
+            action=name,
+            space_id=space_id,
+            events=events,
+            active_space_id=response.get("active_space_id"),
+        )
         return response
     if name in {
         "space.recovery.disable",
@@ -12264,6 +12271,61 @@ def _space_repair_output_compaction(
             }
         ],
     )
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
+def _space_repair_events_output_compaction(
+    *,
+    action: str,
+    space_id: str,
+    events: list[dict[str, Any]],
+    active_space_id: str | None = None,
+) -> dict[str, Any]:
+    """Build metadata-only compaction evidence for whole-Space repair event lists."""
+    from api.capy_compaction import compact_output
+
+    safe_action = _context_value(action, 120) or "space.recovery.space_repair_events"
+    safe_space_id = _context_value(space_id, 120) or "unknown-space"
+    safe_active_space_id = _context_value(active_space_id, 120) if active_space_id is not None else None
+    safe_events = events if isinstance(events, list) else []
+    lines = [
+        "Capy Spaces recovery repair events list metadata-only receipt",
+        "metadata_only: true",
+        "raw_prompt_stored: false",
+        f"space_action: {safe_action}",
+        f"space_id: {safe_space_id}",
+        f"event_count: {len(safe_events)}",
+    ]
+    if safe_active_space_id:
+        lines.append(f"active_space_id: {safe_active_space_id}")
+    for index, event in enumerate(safe_events[:20], start=1):
+        if not isinstance(event, dict):
+            continue
+        raw_event_id = _context_value(event.get("event_id"), 120)
+        safe_event_id = raw_event_id if _event_id_is_safe(raw_event_id) else "[REDACTED]"
+        safe_event_name = _space_repair_text_summary(event.get("event_name"), 120) or "unknown"
+        safe_status = _space_repair_text_summary(event.get("status") or "queued", 80) or "unknown"
+        lines.append(
+            f"event_{index}: id={safe_event_id} name={safe_event_name} status={safe_status}"
+        )
+
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-recovery-repair",
+        command=safe_action,
+        exit_status=0,
+        max_chars=850,
+        artifact_handles=[
+            {
+                "kind": "space",
+                "handle": f"space:{safe_space_id}",
+                "label": f"space:{safe_space_id}",
+            }
+        ],
+    )
+    receipt["metadata_only"] = True
     if receipt.get("redaction_status") == "none":
         receipt["redaction_status"] = "metadata_only"
     return receipt

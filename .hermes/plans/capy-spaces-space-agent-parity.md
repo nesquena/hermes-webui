@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): compact repair event list receipts`
+  - Added RED/GREEN backend coverage proving whole-Space repair-event list tool responses include metadata-only `output_compaction` evidence beside the safe event list.
+  - The receipt is reconstructed only from allow-listed action, Space id, event count, event ids/names/statuses, and optional active-Space id while omitting raw repair prompts, payloads, renderer/source/API-auth fields, scripts, bearer strings, and secret-looking fixture values.
+
 - `feat(spaces): record shared data read progress`
   - Added RED/GREEN backend coverage proving shared data slot list/get tool responses emit metadata-only `tool.completed` progress events with safe `shared-slot.list:<space_id>` / `shared-slot.get:<space_id>` run ids.
   - Threaded those progress receipts into existing metadata-only output-compaction evidence while omitting raw slot request payloads, renderer/source/API-auth fields, scripts, bearer strings, and secret-looking fixture values from responses and progress logs.

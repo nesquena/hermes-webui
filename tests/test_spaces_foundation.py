@@ -15304,6 +15304,57 @@ def test_space_tool_adapter_queues_whole_space_repair_metadata_only(monkeypatch,
     assert "raw prompt" not in serialized
 
 
+def test_space_repair_events_tool_response_includes_metadata_only_output_compaction(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "repair-events-list-compaction", "name": "Repair Events List"})
+
+    queued = spaces.run_space_tool(
+        "space.recovery.repair_space",
+        {
+            "space_id": created["space_id"],
+            "prompt": "Repair the safe metadata-only workspace summary.",
+            "payload": {
+                "action": "repair-space",
+                "scope": "space-shell",
+                "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='x'</script>",
+                "source": "raw prompt body should never be listed",
+                "prompt": "raw prompt body should never be listed",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "authorization": "bearer placeholder",
+                "nested": {"source": "renderer", "safe_note": "layout repair"},
+            },
+            "session_id": "session SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    listed = spaces.run_space_tool(
+        "space.recovery.space_repair_events",
+        {"space_id": created["space_id"], "limit": 5},
+    )
+    serialized = json.dumps(listed, sort_keys=True).lower()
+
+    assert listed["ok"] is True
+    assert listed["action"] == "space.recovery.space_repair_events"
+    assert listed["space_id"] == created["space_id"]
+    assert listed["events"][0]["event_id"] == queued["event_id"]
+    assert "output_compaction" in listed
+    compaction = listed["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-recovery-repair"
+    assert compaction["command"] == "space.recovery.space_repair_events"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert "space_action: space.recovery.space_repair_events" in compaction["text"]
+    assert "event_count: 1" in compaction["text"]
+    assert queued["event_id"] in compaction["text"]
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "bearer placeholder" not in serialized
+    assert "<script" not in serialized
+    assert "raw prompt body" not in serialized
+
+
 def test_space_tool_adapter_non_current_rollback_aliases_reject_ambient_current_selectors_before_side_effects(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
