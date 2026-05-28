@@ -5400,7 +5400,13 @@ function appendLiveCompressionCard(state){
     // the replaced card as a running compression (#2973).
     node.removeAttribute('data-compression-started-at');
     node.removeAttribute('data-compression-message');
-    _clearCompressionElapsedTimer();
+    // Only clear the global timer when the *active* session has no running
+    // compression.  An SSE completion for a background session must not
+    // kill the timer that's driving the current session's display.
+    const _activeCompState = _compressionStateForCurrentSession();
+    if (!_activeCompState || !_activeCompState.automatic || _activeCompState.phase !== 'running') {
+      _clearCompressionElapsedTimer();
+    }
   }
   const existing=inner.querySelector('[data-live-compression-card="1"]');
   if(existing) existing.replaceWith(node);

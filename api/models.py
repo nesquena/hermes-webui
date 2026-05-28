@@ -2391,6 +2391,9 @@ def ensure_cron_project() -> str:
                 continue
             row_profile = p.get('profile')
             if row_profile == active:
+                if not p.get('system'):
+                    p['system'] = True
+                    save_projects(projects)
                 return p['project_id']
             if _is_root_profile(row_profile or 'default') and _is_root_profile(active):
                 return p['project_id']
@@ -2398,6 +2401,7 @@ def ensure_cron_project() -> str:
         for p in projects:
             if p.get('name') == CRON_PROJECT_NAME and not p.get('profile'):
                 p['profile'] = active
+                p['system'] = True
                 save_projects(projects)
                 return p['project_id']
         # Otherwise create a new one tagged with the active profile.
@@ -2407,6 +2411,7 @@ def ensure_cron_project() -> str:
             'name': CRON_PROJECT_NAME,
             'color': '#6366f1',
             'profile': active,
+            'system': True,
             'created_at': time.time(),
         })
         save_projects(projects)
