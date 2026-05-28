@@ -481,20 +481,9 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     if(!on){ _finalText=''; _prefix=''; }
   }
 
-  function _updateMicBadge(){
-    btn.classList.toggle('raw-audio-mode', _rawAudioMode);
+  function _updateMicTooltip(){
     if(!window._micActive){
       _setButtonTooltipAndKey(btn, _rawAudioMode ? 'voice_send_raw' : 'voice_dictate');
-    }
-    // Add/remove badge span (can't use ::after — conflicts with .has-tooltip::after)
-    let badge = btn.querySelector('.mic-raw-badge');
-    if(_rawAudioMode && !badge){
-      badge = document.createElement('span');
-      badge.className = 'mic-raw-badge';
-      badge.textContent = 'RAW';
-      btn.appendChild(badge);
-    } else if(!_rawAudioMode && badge){
-      badge.remove();
     }
   }
 
@@ -689,10 +678,10 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     rawAudioCheckbox.addEventListener('change', function(){
       _rawAudioMode = this.checked;
       localStorage.setItem('hermes-raw-audio-mode', _rawAudioMode ? 'true' : 'false');
-      _updateMicBadge();
+      _updateMicTooltip();
     });
   }
-  _updateMicBadge();
+  _updateMicTooltip();
 })();
 window._micActive=window._micActive||false;
 window._micPendingSend=window._micPendingSend||false;

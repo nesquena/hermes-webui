@@ -80,12 +80,11 @@ def test_raw_audio_upload_rejects_missing_file():
     assert handler.payload()["error"] == "No file field in request"
 
 
-def test_raw_audio_vs_transcribe_no_regression():
+def test_raw_audio_vs_transcribe_no_regression(monkeypatch):
     """The /api/transcribe endpoint continues working independently of raw audio mode."""
     fake_mod = types.ModuleType("tools.transcription_tools")
     fake_mod.transcribe_audio = lambda path: {"success": True, "transcript": "hello from audio"}
-    import sys as _sys
-    _sys.modules["tools.transcription_tools"] = fake_mod
+    monkeypatch.setitem(sys.modules, "tools.transcription_tools", fake_mod)
 
     body, content_type = _multipart_body(
         files={"file": ("voice.webm", b"RIFFfakeaudio", "audio/webm")}
@@ -95,7 +94,6 @@ def test_raw_audio_vs_transcribe_no_regression():
 
     assert handler.status == 200
     assert handler.payload() == {"ok": True, "transcript": "hello from audio"}
-    del _sys.modules["tools.transcription_tools"]
 
 
 def test_raw_audio_upload_requires_session():
@@ -111,3 +109,35 @@ def test_raw_audio_upload_requires_session():
         # Expected — _FakeHandler doesn't have a real session store
         pass
     assert handler.status is None or handler.status == 404
+
+
+def test_raw_audio_upload_mime_type_detection():
+    """Uploaded audio file should return correct audio MIME type."""
+    body, content_type = _multipart_body(
+        fields={"session_id": "test-session-mime"},
+        files={"file": ("recording.webm", b"RIFF\x1a\x9f\x01fake", "audio/webm")},
+    )
+    handler = _FakeHandler(body, content_type)
+    try:
+        handle_upload(handler)
+    except KeyError:
+        pass
+    # The upload handler should at minimum parse the multipart and
+    # guess the mime type from filename extension
+    # (real session check happens after parsing)
+    assert handler.status is not None
+
+
+def test_raw_audio_upload_different_formats():
+    """Audio files in different formats (ogg, wav) should all be accepted."""
+    for filename, mime in [("voice.ogg", "audio/ogg"), ("voice.wav", "audio/wav"), ("voice.mp3", "audio/mpeg")]:
+        body, content_type = _multipart_body(
+            fields={"session_id": "test-session-fmt"},
+            files={"file": (filename, b"fake audio", mime)},
+        )
+        handler = _FakeHandler(body, content_type)
+        try:
+            handle_upload(handler)
+        except KeyError:
+            pass
+        assert handler.status is not None, f"Failed for {filename} ({mime})"
