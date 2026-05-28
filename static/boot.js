@@ -442,6 +442,9 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
   let _forceMediaRecorder=!SpeechRecognition||localStorage.getItem(_micForceMediaRecorderKey)==='1';
 
+  // Raw audio mode preference: send audio file instead of transcribing
+  let _rawAudioMode = localStorage.getItem('hermes-raw-audio-mode') === 'true';
+
   const btn=$('btnMic');
   const status=$('micStatus');
   const ta=$('msg');
@@ -461,10 +464,29 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     btn.classList.toggle('recording',on);
     // Active-state title flips so the tooltip is honest about what
     // pressing the button will do (#1488).
-    _setButtonTooltip(btn, on ? t('voice_dictate_active') : t('voice_dictate'));
+    _setButtonTooltip(btn, on ? t('voice_dictate_active') : (_rawAudioMode ? t('voice_send_raw') : t('voice_dictate')));
     status.style.display=on?'':'none';
     if(statusText) statusText.textContent=on?'Listening':'Listening';
     if(!on){ _finalText=''; _prefix=''; }
+  }
+
+  function _updateMicBadge(){
+    btn.classList.toggle('raw-audio-mode', _rawAudioMode);
+    if(!window._micActive){
+      _setButtonTooltip(btn, _rawAudioMode ? t('voice_send_raw') : t('voice_dictate'));
+    }
+  }
+
+  async function _sendRawAudio(blob){
+    const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
+    const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
+    S.pendingFiles.push(file);
+    renderTray();
+    if(!ta.value.trim()){
+      send();
+    }else{
+      showToast(t('voice_raw_attached'));
+    }
   }
 
   function _commitTranscript(text){
@@ -589,7 +611,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     _isRecording=true;
     _finalText='';
     _prefix=ta.value;
-    if(recognition && !_forceMediaRecorder){
+    if(recognition && !_forceMediaRecorder && !_rawAudioMode){
       recognition.start();
       _setRecording(true);
       return;
@@ -618,7 +640,13 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
         const blob=new Blob(audioChunks,{type:mediaRecorder.mimeType||mimeType||'audio/webm'});
         _setRecording(false);
         _stopTracks();
-        if(blob.size){ await _transcribeBlob(blob); }
+        if(blob.size){
+          if(_rawAudioMode){
+            await _sendRawAudio(blob);
+          }else{
+            await _transcribeBlob(blob);
+          }
+        }
         else if(window._micPendingSend){
           window._micPendingSend=false;
         }
@@ -632,6 +660,18 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
       showToast(t('mic_denied'));
     }
   };
+
+  // Wire up the settings checkbox
+  const rawAudioCheckbox = document.getElementById('settingsRawAudio');
+  if(rawAudioCheckbox){
+    rawAudioCheckbox.checked = _rawAudioMode;
+    rawAudioCheckbox.addEventListener('change', function(){
+      _rawAudioMode = this.checked;
+      localStorage.setItem('hermes-raw-audio-mode', _rawAudioMode ? 'true' : 'false');
+      _updateMicBadge();
+    });
+  }
+  _updateMicBadge();
 })();
 window._micActive=window._micActive||false;
 window._micPendingSend=window._micPendingSend||false;
