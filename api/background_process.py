@@ -393,12 +393,8 @@ def _emit_to_session_streams(session_id: str, event: str, data: dict) -> int:
     from api import config as _cfg
 
     emitted = 0
-    # Snapshot ACTIVE_RUNS under ACTIVE_RUNS_LOCK so owner_sid lookups below
-    # see a consistent view — reading ACTIVE_RUNS without the lock can race
-    # with register/unregister paths and produce a transient owner-unknown
-    # verdict, causing in-turn deliveries to be dropped. Per Copilot review
-    # on PR #2971. Taken before STREAMS_LOCK to avoid nested-lock ordering
-    # concerns (the two locks are otherwise independent).
+    # Snapshot ACTIVE_RUNS under its lock before STREAMS_LOCK so owner_sid
+    # lookups are consistent without nesting the two independent locks.
     if hasattr(_cfg, "ACTIVE_RUNS") and hasattr(_cfg, "ACTIVE_RUNS_LOCK"):
         with _cfg.ACTIVE_RUNS_LOCK:
             active_runs_snapshot: dict = dict(_cfg.ACTIVE_RUNS)
@@ -411,23 +407,8 @@ def _emit_to_session_streams(session_id: str, event: str, data: dict) -> int:
     for stream_id, channel in items:
         meta = active_runs_snapshot.get(stream_id)
         owner_sid = (meta or {}).get("session_id") if isinstance(meta, dict) else None
-        # Copilot review #3: only emit on the STREAMS loop when the stream's
-        # owning session is KNOWN and matches. Previously, when no ACTIVE_RUNS
-        # row matched (owner unknown), the code fell through and broadcast the
-        # event to that stream anyway, relying on every frontend consumer to
-        # filter by `data.session_id`. That is a fragile cross-session leak
-        # surface: any consumer that omits the session_id check would render
-        # another session's event. The Playwright repro for the open-tab
-        # live-view defect proved the per-session SessionChannel
-        # (SESSION_CHANNELS, emitted unconditionally below) — now backed by the
-        # on-subscribe `server_turn_started` recovery in
-        # `_handle_session_sse_stream` — is the SOLE authoritative cross-turn
-        # live-view carrier post Option X/Z; this STREAMS loop is in-turn
-        # defense-in-depth only and is never the path that delivers a
-        # between-turns or server-initiated wakeup. So skip non-matching AND
-        # owner-unknown streams here (rely solely on SESSION_CHANNELS for
-        # cross-turn delivery) — removing the leak surface with no live-view
-        # regression (verified by the repro).
+        # Copilot review #3: skip non-matching and owner-unknown STREAMS
+        # channels. Cross-turn delivery is handled by SESSION_CHANNELS below.
         if owner_sid != session_id:
             continue
         try:
