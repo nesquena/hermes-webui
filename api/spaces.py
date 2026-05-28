@@ -6675,6 +6675,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.browser.typeref",
     }:
         return _browser_surface_tool_receipt(name, data)
+    if name in {
+        "space.development.terminal",
+        "development.terminal",
+        "space.development.shell",
+        "development.shell",
+    }:
+        return _development_tool_receipt(name, data)
     if name in {"space.current.context", "space.context", "space.current.prompt_context"}:
         current_id = _space_tool_current_id(data)
         context_status = _space_demo_context_status()
@@ -11743,6 +11750,132 @@ def queue_widget_event(
     return response
 
 
+def _development_tool_requested_action(action: str) -> str:
+    safe_action = str(action or "").strip().lower()
+    if safe_action in {"space.development.terminal", "development.terminal", "space.development.shell", "development.shell"}:
+        return "terminal"
+    return "development"
+
+
+def _development_tool_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    safe_action = _context_value(action, 120) or "space.development.action"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "development_tool",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["shared_confirmation_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _development_tool_action_policy_receipt(action: str) -> dict[str, Any]:
+    from api.capy_policy import action_policy_receipt
+
+    return action_policy_receipt(
+        action,
+        approval_gates=["destructive_external_action"],
+        prompt_preflight_status="required",
+        model_route_hint="hint:code",
+    )
+
+
+def _development_tool_output_compaction_receipt(
+    *,
+    action: str,
+    space_id: str,
+    requested_action: str,
+    prompt_preflight: dict[str, Any],
+    autonomy_policy: dict[str, Any],
+    progress_event: dict[str, Any],
+) -> dict[str, Any]:
+    """Build metadata-only compaction evidence for receipt-only development tools.
+
+    Development tools are high-risk terminal/file/code-edit style boundaries. This
+    receipt intentionally records only fixed policy/progress metadata and never
+    copies raw command text, prompt text, source/html/script fields, or auth data.
+    """
+    from api.capy_compaction import compact_output
+
+    safe_action = _context_value(action, 120) or "space.development.action"
+    safe_space_id = _context_value(space_id, 120) or "unknown-space"
+    safe_requested = "terminal" if requested_action == "terminal" else "development"
+    preflight_status = _payload_text_summary(prompt_preflight.get("status") or "required", 40) or "required"
+    model_route_hint = _payload_text_summary(autonomy_policy.get("model_route_hint") or "hint:code", 80) or "hint:code"
+    progress_run_id = _payload_text_summary(progress_event.get("run_id") or f"development.{safe_requested}:{safe_space_id}", 160) or f"development.{safe_requested}:{safe_space_id}"
+    lines = [
+        "Capy Spaces development tool metadata-only receipt",
+        f"development_action: {safe_action}",
+        f"space_id: {safe_space_id}",
+        f"requested_action: {safe_requested}",
+        "metadata_only: true",
+        "executed: false",
+        "approval_required: true",
+        "command_stored: false",
+        "raw_request_stored: false",
+        "filesystem_write_enabled: false",
+        f"prompt_preflight_status: {preflight_status}",
+        f"model_route_hint: {model_route_hint}",
+        f"progress_run_id: {progress_run_id}",
+    ]
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-development",
+        command=safe_action,
+        exit_status=None,
+        max_chars=700,
+        artifact_handles=[
+            {
+                "kind": "space",
+                "handle": f"space:{safe_space_id}",
+                "label": "Development boundary metadata",
+            }
+        ],
+    )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
+def _development_tool_receipt(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    space_id = validate_space_id(_space_tool_current_id(payload))
+    requested_action = _development_tool_requested_action(action)
+    prompt_preflight = _development_tool_required_prompt_preflight_receipt(action)
+    autonomy_policy = _development_tool_action_policy_receipt(action)
+    progress_event = _record_space_tool_progress_event(space_id, run_prefix=f"development.{requested_action}")
+    development_surface = {
+        "mode": "metadata-only",
+        "requested_action": requested_action,
+        "executed": False,
+        "approval_required": True,
+        "command_stored": False,
+        "raw_request_stored": False,
+        "filesystem_write_enabled": False,
+    }
+    return {
+        "ok": True,
+        "action": action,
+        "active_space_id": space_id,
+        "development_surface": development_surface,
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "output_compaction": _development_tool_output_compaction_receipt(
+            action=action,
+            space_id=space_id,
+            requested_action=requested_action,
+            prompt_preflight=prompt_preflight,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+        ),
+    }
+
+
 def _space_tool_progress_fallback_space_id(space_id: str) -> str:
     """Return a safe public Space id for fallback progress receipts."""
     sid = str(space_id or "").strip()
@@ -11767,6 +11900,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
     if safe_prefix not in {
         "camera.stream.add",
         "browser.open",
+        "development.terminal",
         "browser.snapshot",
         "browser.back",
         "browser.forward",

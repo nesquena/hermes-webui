@@ -41,6 +41,7 @@ def test_policy_status_defaults_to_supervised_metadata_only(monkeypatch):
                 "shared_data_slot",
                 "browser_surface",
                 "browser_navigation",
+                "development_tool",
                 "interactive_template_install",
                 "local_service_template",
                 "model_provider_template",
