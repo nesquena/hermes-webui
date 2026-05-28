@@ -35,6 +35,7 @@ _REFRESH_ALLOWED_CONTENT_TYPES = (
     "text/markdown",
     "text/x-markdown",
     "application/json",
+    "application/feed+json",
     "application/rss+xml",
     "application/atom+xml",
     "application/xml",
@@ -888,11 +889,32 @@ def _bounded_refresh_summary(text: Any, *, limit: int = 1_200) -> str:
     return _safe_text(" ".join(safe_parts), limit=limit)
 
 
+def _json_payload_is_feed(payload: dict[str, Any]) -> bool:
+    version = _safe_public_text(payload.get("version"), limit=120).lower()
+    return version in {
+        "https://jsonfeed.org/version/1",
+        "https://jsonfeed.org/version/1.1",
+        "jsonfeed.org/version/1",
+        "jsonfeed.org/version/1.1",
+    }
+
+
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("refresh failed")
     title = _safe_public_text(payload.get("title") or payload.get("name") or payload.get("display_name"), limit=200)
     summary = _bounded_refresh_summary(payload.get("summary") or payload.get("description") or payload.get("abstract"))
+    items = payload.get("items")
+    if _json_payload_is_feed(payload) and isinstance(items, list):
+        for item in items[:5]:
+            if not isinstance(item, dict):
+                continue
+            item_summary = _bounded_refresh_summary(item.get("summary") or item.get("description") or item.get("abstract"))
+            if not item_summary:
+                continue
+            title = _safe_public_text(item.get("title") or title, limit=200) or title
+            summary = item_summary
+            break
     if not summary:
         raise ValueError("refresh failed")
     return {
@@ -1010,7 +1032,7 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         safe_origin_uri,
         headers={
             "User-Agent": "Capy-Memory-Refresh/1.0",
-            "Accept": "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8",
+            "Accept": "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8",
         },
     )
     with _refresh_open(request, timeout=_REFRESH_FETCH_TIMEOUT_SECONDS) as response:
@@ -1024,7 +1046,7 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if len(raw) > _MAX_REFRESH_FETCH_BYTES:
             raw = raw[:_MAX_REFRESH_FETCH_BYTES]
         text = raw.decode(_refresh_charset(response.headers), errors="replace")
-    if content_type == "application/json":
+    if content_type in {"application/json", "application/feed+json"}:
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
