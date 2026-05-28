@@ -1985,7 +1985,9 @@ def _hide_from_default_sidebar(session: dict) -> bool:
     sid = str(session.get('session_id') or '')
     source = session.get('source_tag') or session.get('source')
     if source == 'cron' or sid.startswith('cron_'):
-        return True
+        # Allow cron sessions through when they have a project_id so the
+        # frontend's "Cron Jobs" project chip can display them (#3019).
+        return not bool(session.get('project_id'))
     if bool(session.get('pre_compression_snapshot')):
         return not bool(session.get('_show_pre_compression_snapshot'))
     return False
