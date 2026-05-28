@@ -6713,7 +6713,9 @@ function renderMessages(options){
       }
     });
     const derived=[];
-    const liveToolMetadata=Array.isArray(S.toolCalls)?S.toolCalls:[];
+    const liveToolMetadata=Array.isArray(S._settledLiveToolMetadata)
+      ? S._settledLiveToolMetadata
+      : (Array.isArray(S.toolCalls)?S.toolCalls:[]);
     const liveMetadataByTid=new Map();
     liveToolMetadata.forEach((tc,idx)=>{
       if(!tc||typeof tc!=='object') return;
@@ -6785,6 +6787,7 @@ function renderMessages(options){
       }
     });
     if(derived.length) S.toolCalls=derived;
+    if(S._settledLiveToolMetadata) S._settledLiveToolMetadata=null;
   }
   if(!S.busy){
     inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"])').forEach(el=>el.remove());
@@ -6804,7 +6807,7 @@ function renderMessages(options){
       }
       let anchorRow=assistantSegments.get(aIdx)||null;
       if(!anchorRow&&assistantIdxs.length){
-        if(aIdx<assistantIdxs[0]) return assistantSegments.get(assistantIdxs[0]);
+        if(aIdx<assistantIdxs[0]) return null;
         const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
         anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
       }

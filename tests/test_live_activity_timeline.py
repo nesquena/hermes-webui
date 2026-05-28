@@ -98,8 +98,10 @@ def test_done_handler_preserves_live_tool_burst_metadata_for_settled_render():
 
 
 def test_message_tool_metadata_path_keeps_live_burst_metadata_available():
-    assert "hasMessageToolMetadata?[]" not in MESSAGES_JS
+    assert "S._settledLiveToolMetadata=S.toolCalls.map" in MESSAGES_JS
+    assert "S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map" in MESSAGES_JS
     render_fn = UI_JS.split("const derived=[];", 1)[1].split("if(derived.length) S.toolCalls=derived;", 1)[0]
+    assert "S._settledLiveToolMetadata" in render_fn
     assert "liveToolMetadata" in render_fn
     assert "copyLiveToolMetadata" in render_fn
     assert "activityBurstId" in render_fn
@@ -128,7 +130,7 @@ assert.strictEqual(merged[0].started_at, 123);
 def test_settled_activity_render_treats_burst_zero_as_unanchored_activity():
     render_fn = UI_JS.split("if(!S.busy){", 1)[1].split("// Render per-turn duration", 1)[0]
     assert "String(burstId)!=='0'" in render_fn
-    assert "return assistantSegments.get(assistantIdxs[0]);" in render_fn
+    assert "if(aIdx<assistantIdxs[0]) return null;" in render_fn
     assert "String(tc.activityBurstId)!=='0'" in render_fn
 
 

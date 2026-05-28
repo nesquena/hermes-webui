@@ -2000,7 +2000,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
             S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
           } else {
-            S.toolCalls=S.toolCalls.map(tc=>({...tc,done:true}));
+            if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
+            S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
           }
           if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
           if(typeof _copyActivityDisclosureState==='function'&&lastAsst){
@@ -2404,7 +2405,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(!hasMessageToolMetadata&&session.tool_calls&&session.tool_calls.length){
           S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(session.tool_calls||[]);
         }else{
-          S.toolCalls=S.toolCalls.map(tc=>({...tc,done:true}));
+          if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
+          S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
         }
         if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages({preserveScroll:true});
