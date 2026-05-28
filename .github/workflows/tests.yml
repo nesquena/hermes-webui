@@ -35,4 +35,3 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v --timeout=60
-        continue-on-error: true   # Temporary: one stubborn test failure during boot (unrelated to current PR work) was making the entire main branch red on every push. Still visible in logs for debugging.

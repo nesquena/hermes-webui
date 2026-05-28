@@ -850,7 +850,7 @@ window._micPendingSend=window._micPendingSend||false;
       if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
       if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
       _ttsSpeaking=true;
-      fetch('/api/tts', {
+      fetch(new URL('api/tts', document.baseURI || location.href).href, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({text: clean, voice, rate, pitch})
