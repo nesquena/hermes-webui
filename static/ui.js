@@ -7013,7 +7013,8 @@ function _activityLiveProgressLabel(group){
   if(!group||group.getAttribute('data-live-tool-call-group')!=='1') return '';
   const idleAge=_activityLastObservedAge(group);
   if(idleAge!==null&&idleAge>=90) return `No recent activity for ${_formatActiveElapsedTimer(idleAge)}`;
-  const latest=_activityLatestToolName(group);
+  const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
+  const latest=running?String(running.textContent||'').trim():_activityLatestToolName(group);
   const waiting=group.querySelector('.agent-activity-status-waiting .agent-activity-status-label');
   if(latest) return _activityProgressLabelForToolName(latest);
   if(waiting&&waiting.textContent&&String(waiting.textContent).toLowerCase().includes('model')) return 'Reviewing prompt and context';
