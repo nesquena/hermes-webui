@@ -102,9 +102,11 @@ def test_session_search_has_accessible_clear_button():
 
 def test_session_search_clear_button_styles_do_not_shift_input_width():
     css = STYLE_CSS.read_text(encoding="utf-8")
+    assert ".sidebar-search{position:relative;padding:8px 12px;flex-shrink:0;}" in css
     assert ".session-search-field{position:relative;display:flex;align-items:center;width:100%;}" in css
     assert ".session-search input{padding-right:34px;}" in css
-    assert ".sidebar-search-icon{position:absolute;left:10px;top:50%;transform:translateY(-50%);" in css
+    assert ".sidebar-search-icon{position:absolute;left:22px;top:50%;transform:translateY(-50%);" in css
+    assert ".session-search .sidebar-search-icon{left:10px;}" in css
     assert ".session-search .session-search-clear{position:absolute;" in css
     assert "right:6px;top:50%;transform:translateY(-50%)" in css
     assert "z-index:1" in css
