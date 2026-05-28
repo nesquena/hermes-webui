@@ -845,6 +845,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const existing=inflight.activityBurstAnchors.find(a=>Number(a&&a.id)===_currentActivityBurstId);
     if(existing) existing.textEnd=textEnd;
     else inflight.activityBurstAnchors.push({id:_currentActivityBurstId,textEnd});
+    // Keep the current text segment's DOM attribute in sync with the post-increment
+    // burst id so that subsequent tool events (which use _currentActivityBurstId)
+    // find the correct anchor via [data-activity-burst-id].  Without this the
+    // segment keeps the pre-increment id (N) while tools get id N+1, causing
+    // appendLiveToolCard to miss the anchor and Activity groups to pile up after
+    // all text instead of interleaving correctly.
+    if(assistantRow) assistantRow.setAttribute('data-activity-burst-id',String(_currentActivityBurstId));
     _throttledPersist();
   }
   function ensureAssistantRow(force=false){

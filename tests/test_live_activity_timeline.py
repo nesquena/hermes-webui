@@ -77,6 +77,22 @@ def test_done_handler_preserves_live_tool_burst_metadata_for_settled_render():
     assert "S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(session.tool_calls||[]);" in MESSAGES_JS
 
 
+def test_record_activity_boundary_updates_segment_burst_id_to_post_increment():
+    """recordActivityBoundary must re-stamp the current assistantRow DOM element with
+    the post-increment burst id so that subsequent tool events (which read the same
+    _currentActivityBurstId) find the matching [data-activity-burst-id] anchor.
+
+    Without this update the segment keeps id=N while tools get id=N+1, causing
+    appendLiveToolCard to miss the anchor and Activity groups to pile up after all
+    text instead of interleaving with their source segments.
+    """
+    boundary_fn = MESSAGES_JS.split("function recordActivityBoundary()", 1)[1].split("function ensureAssistantRow", 1)[0]
+    # Must update the DOM attribute after incrementing the counter
+    assert "assistantRow.setAttribute('data-activity-burst-id',String(_currentActivityBurstId))" in boundary_fn
+    # The update must be guarded so it only fires when assistantRow exists
+    assert "if(assistantRow) assistantRow.setAttribute" in boundary_fn
+
+
 def test_activity_status_rows_have_quiet_metadata_styling():
     assert ".agent-activity-status{" in STYLE_CSS
     assert "grid-template-columns:18px minmax(0,1fr) auto" in STYLE_CSS
