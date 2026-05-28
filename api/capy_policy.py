@@ -62,6 +62,7 @@ _PROTECTED_BOUNDARIES = [
     "local_service_template",
     "model_provider_template",
     "template_reset",
+    "recovery_action",
 ]
 
 _MODEL_HINT_ORDER = [
