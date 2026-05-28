@@ -58,7 +58,7 @@ _UNSAFE_VALUE_RE = re.compile(
 
 _UNSAFE_PUBLIC_VALUE_RE = re.compile(
     r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
-    r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|"
+    r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
     r"renderer|rendercode|generated[_ -]?code|raw\s+prompt|ignore\s+previous\s+instructions|"
     r"credential|password|secret(?!ary)|token(?!ization)|authorization|cookie|"
     r"(?:^|[._/\s])on(?:click|load|error|submit|change|mouseover|focus|blur)(?:$|[._/\s])|"
@@ -69,7 +69,7 @@ _UNSAFE_PUBLIC_VALUE_RE = re.compile(
 
 _MANIFEST_PUBLIC_VALUE_RE = re.compile(
     r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
-    r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|"
+    r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
     r"renderer|rendercode|generated[_ -]?code|raw\s+prompt|ignore\s+previous\s+instructions|"
     r"credential|password|secret(?!ary)|token(?!ization)|authorization|"
     r"(?:^|[._/\s])on(?:click|load|error|submit|change|mouseover|focus|blur)(?:$|[._/\s])|"
@@ -82,7 +82,7 @@ _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._:-]+")
 
 _REFRESH_BLOCKED_VALUE_RE = re.compile(
     r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
-    r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|"
+    r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
     r"renderer|rendercode|generated[_ -]?code|raw\s+prompt|raw\s+fetched\s+body|"
     r"ignore\s+previous\s+instructions|credential|password|secret(?!ary)|token(?!ization)|"
     r"authorization|cookie|"
@@ -899,11 +899,70 @@ def _json_payload_is_feed(payload: dict[str, Any]) -> bool:
     }
 
 
+def _json_payload_is_github_issue_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not path[2]
+        or not path[3]
+        or lowered[4] not in {"issues", "pulls"}
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+    ):
+        return False
+    path_number = int(path[5])
+    payload_number = _safe_nonnegative_int(payload.get("number"))
+    raw_labels = payload.get("labels")
+    if isinstance(raw_labels, list):
+        for item in raw_labels:
+            raw_label = item.get("name") if isinstance(item, dict) else item
+            if isinstance(raw_label, _PUBLIC_SCALAR_TYPES) and _REFRESH_BLOCKED_VALUE_RE.search(str(raw_label)):
+                return False
+    return bool(_safe_public_text(payload.get("title"), limit=200) and payload_number and payload_number == path_number)
+
+
+def _github_issue_refresh_summary(payload: dict[str, Any], *, origin_uri: str) -> str:
+    number = _safe_nonnegative_int(payload.get("number"))
+    title = _safe_public_text(payload.get("title"), limit=200)
+    state = _safe_public_text(payload.get("state"), limit=40).lower()
+    updated = _safe_public_text(payload.get("updated_at"), limit=80)
+    labels: list[str] = []
+    raw_labels = payload.get("labels")
+    if isinstance(raw_labels, list):
+        for item in raw_labels[:8]:
+            label = _safe_public_text(item.get("name") if isinstance(item, dict) else item, limit=60)
+            if label and not _REFRESH_BLOCKED_VALUE_RE.search(label):
+                labels.append(label)
+            if len(labels) >= 5:
+                break
+    try:
+        path_parts = urlsplit(origin_uri).path.split("/")
+    except ValueError:
+        path_parts = []
+    kind = "pull request" if len(path_parts) >= 5 and path_parts[4].lower() == "pulls" else "issue"
+    parts = [f"GitHub {kind} #{number}: {title}"]
+    if state:
+        parts.append(f"state: {state}")
+    if labels:
+        parts.append(f"labels: {', '.join(labels)}")
+    if updated:
+        parts.append(f"updated: {updated}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("refresh failed")
     title = _safe_public_text(payload.get("title") or payload.get("name") or payload.get("display_name"), limit=200)
-    summary = _bounded_refresh_summary(payload.get("summary") or payload.get("description") or payload.get("abstract"))
+    summary = ""
     items = payload.get("items")
     if _json_payload_is_feed(payload) and isinstance(items, list):
         for item in items[:5]:
@@ -915,6 +974,8 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             title = _safe_public_text(item.get("title") or title, limit=200) or title
             summary = item_summary
             break
+    elif _json_payload_is_github_issue_metadata(origin_uri, payload):
+        summary = _github_issue_refresh_summary(payload, origin_uri=origin_uri)
     if not summary:
         raise ValueError("refresh failed")
     return {

@@ -9,7 +9,7 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-27 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-28 CDT on branch `feat/capy-spaces-foundation`.
 
 Current latest known completed code slice: the OpenHuman-inspired Capy Memory Tree / compaction / source freshness / policy / progress MVP surfaces are implemented as metadata-only foundations, with recent expansion through source-style widget definition/blueprint preview/source/render output-compaction receipts, source-style widget patch/delete/bulk-delete/toggle output-compaction receipts, source-style widget upsert output-compaction receipts, whole-Space recovery toggle output-compaction receipts, source-style/current widget read/list/see output-compaction receipts, source-style current-space viewport/reposition prompt-preflight/action-policy/progress/output-compaction receipts, logical storage path-helper policy/progress/output-compaction receipts, source-style logical app URL helper output-compaction receipts, shared data slot set/delete output-compaction receipts, Space checkpoint action-policy/progress/output-compaction receipts, source-style Space open/reload navigation prompt-preflight/action-policy/progress/output-compaction receipts, direct `/api/spaces/update` active-instruction prompt-preflight with optional action-policy/progress receipts, widget reload/refresh required-preflight/action-policy receipts, receipt-only Browser Surface, approved camera-stream output-compaction evidence, Big Bang template reset output-compaction evidence, generic `widget.patch` tool-route output-compaction receipts, widget detail runtime-contract compaction evidence, queued widget-event prompt-preflight/compaction evidence in the event inbox, source-style Space create/duplicate/delete output-compaction evidence, source-style Space metadata/layout/repair/rearrange output-compaction evidence, trusted session recovery repair-safe output-compaction evidence, and a product-home scheduled Memory refresh action that runs the bounded source-refresh scheduler tick with metadata-only queued/processed receipts. This plan now points upcoming sprints at the remaining advisory-context, compaction, source-fetcher/cron breadth, model-route invocation, action-policy expansion, and progress-producer gaps rather than the already-completed first slices. Use `git log -1 --oneline` for the exact commit hash.
 
@@ -37,6 +37,10 @@ Roadmap priority for upcoming autonomous sprints:
 Product implication: future Space Agent parity should be judged not only by demo widgets, but by whether Capy can remember, cite, compact, refresh, and safely apply local context while preserving metadata-only safety and rollback.
 
 Recent completed slices:
+
+- `feat(capy-memory): ingest GitHub issue refresh metadata`
+  - Added RED/GREEN backend coverage proving the safe source-refresh fetcher can ingest GitHub issue/PR API JSON as metadata-only Memory Tree records when `api.github.com` is explicitly allow-listed.
+  - The GitHub record is reconstructed only from allow-listed issue/PR number, title, state, labels, and update timestamp while raw issue bodies, HTML bodies, query tokens, API-key fields, script markers, prompt-injection text, and secret-looking fixture values remain absent from persisted vault Markdown, search results, and job receipts.
 
 - `feat(spaces): preflight layout repair receipts`
   - Added RED/GREEN backend coverage proving `space.spaces.repairLayout` now returns a metadata-only prompt-preflight receipt beside its action-policy, structured repair progress, and output-compaction evidence.
