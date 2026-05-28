@@ -3104,6 +3104,43 @@ def _nearest_assistant_msg_idx(messages, msg_idx: int) -> int:
     return -1
 
 
+def _assistant_message_has_visible_content(msg) -> bool:
+    if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+        return False
+    content = msg.get('content', '')
+    if isinstance(content, str):
+        return bool(content.strip())
+    if not isinstance(content, list):
+        return False
+    for part in content:
+        if isinstance(part, str) and part.strip():
+            return True
+        if not isinstance(part, dict):
+            continue
+        if part.get('type') in {'text', 'input_text', 'output_text'}:
+            if str(part.get('text') or part.get('content') or '').strip():
+                return True
+    return False
+
+
+def _nearest_visible_assistant_msg_idx(messages, msg_idx: int) -> int:
+    """Find the closest preceding assistant message with visible progress text."""
+    for idx in range(msg_idx - 1, -1, -1):
+        msg = messages[idx]
+        if _assistant_message_has_visible_content(msg):
+            return idx
+    return -1
+
+
+def _assistant_tool_anchor_msg_idx(messages, msg_idx: int) -> int:
+    """Anchor empty assistant tool-call messages to the prior visible assistant."""
+    msg = messages[msg_idx] if isinstance(messages, list) and 0 <= msg_idx < len(messages) else None
+    if _assistant_message_has_visible_content(msg):
+        return msg_idx
+    visible_idx = _nearest_visible_assistant_msg_idx(messages, msg_idx)
+    return visible_idx if visible_idx >= 0 else msg_idx
+
+
 def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
     """Build persisted tool-call summaries from final messages plus live progress fallback."""
     tool_calls = []
@@ -3125,7 +3162,7 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                         if tid:
                             pending_names[tid] = part.get('name', '')
                             pending_args[tid] = part.get('input', {})
-                            pending_asst_idx[tid] = msg_idx
+                            pending_asst_idx[tid] = _assistant_tool_anchor_msg_idx(messages, msg_idx)
             for tc in m.get('tool_calls', []):
                 if not isinstance(tc, dict):
                     continue
@@ -3139,7 +3176,7 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
                 if tid and name:
                     pending_names[tid] = name
                     pending_args[tid] = args
-                    pending_asst_idx[tid] = msg_idx
+                    pending_asst_idx[tid] = _assistant_tool_anchor_msg_idx(messages, msg_idx)
         elif role == 'tool':
             tid = m.get('tool_call_id') or m.get('tool_use_id', '')
             raw = m.get('content', '')
@@ -3165,11 +3202,14 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
             if seq_idx >= len(live):
                 break
             live_tc = live[seq_idx]
+            anchor_idx = _nearest_visible_assistant_msg_idx(messages, seq.get('msg_idx', -1))
+            if anchor_idx < 0:
+                anchor_idx = _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1))
             tool_calls.append({
                 'name': live_tc.get('name', 'tool'),
                 'snippet': _tool_result_snippet(seq.get('raw', '')),
                 'tid': live_tc.get('tid', '') or '',
-                'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
+                'assistant_msg_idx': anchor_idx,
                 'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
             })
 
@@ -3704,24 +3744,17 @@ def _run_agent_streaming(
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and event not in ('cancel', 'error'):
             return
+        event_id = None
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
-                # Stage-364: propagate journal event_id via a side-channel dict
-                # (STREAM_LAST_EVENT_ID) instead of changing the queue tuple
-                # shape — keeping the 2-tuple shape preserves backward
-                # compatibility for tests and any non-SSE queue consumer. The
-                # SSE handler reads this dict at emit time to populate `id:`
-                # on every live frame, which lets the frontend's cursor
-                # advance during live streaming and prevents replay from
-                # double-rendering tokens after a mid-stream error→reconnect.
                 event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
                 if event_id:
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
                 logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
         try:
-            q.put_nowait((event, data))
+            q.put_nowait((event, data, event_id))
         except Exception:
             logger.debug("Failed to put event to queue")
 

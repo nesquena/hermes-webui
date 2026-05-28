@@ -6,10 +6,11 @@ def test_stream_channel_exposes_buffer_and_subscriber_counts():
     channel = create_stream_channel()
     channel.put_nowait(("token", {"text": "offline"}))
 
-    assert channel.diagnostic_snapshot() == {
-        "subscriber_count": 0,
-        "offline_buffered_events": 1,
-    }
+    snapshot = channel.diagnostic_snapshot()
+    assert snapshot["subscriber_count"] == 0
+    assert snapshot["offline_buffered_events"] == 1
+    assert snapshot["offline_buffered_event_ids"] == []
+    assert snapshot["last_event_id"] is None
 
     subscriber = channel.subscribe()
     try:

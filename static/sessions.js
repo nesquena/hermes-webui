@@ -690,12 +690,18 @@ async function loadSession(sid){
         uploaded:Array.isArray(stored.uploaded)?stored.uploaded:[],
         toolCalls:Array.isArray(stored.toolCalls)?stored.toolCalls:[],
         reattach:true,
+        lastAssistantText:String(stored.lastAssistantText||''),
+        lastReasoningText:String(stored.lastReasoningText||''),
+        lastRunJournalSeq:Number(stored.lastRunJournalSeq||0)||0,
+        currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
+        activityBurstAnchors:Array.isArray(stored.activityBurstAnchors)?stored.activityBurstAnchors:[],
       };
     }
   }
 
   if(INFLIGHT[sid]){
-    const inflightMessages=INFLIGHT[sid].messages||[];
+    _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
+    const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
     S.messages=[];
     S.toolCalls=[];
     try {
@@ -703,9 +709,16 @@ async function loadSession(sid){
     } catch(e) {
       S.messages=inflightMessages;
     }
+    const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);
+    if(liveTailPrepared&&INFLIGHT[sid]){
+      delete INFLIGHT[sid].liveTurnHtml;
+    }
+    if(liveTailPrepared){
+      S.messages=_dropCurrentTurnAssistantMessages(S.messages);
+    }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
-    if(_mergePendingSessionMessage(S.session,S.messages)){
+    if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
     }
     S.busy=true;
@@ -714,7 +727,14 @@ async function loadSession(sid){
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
     syncTopbar();renderMessages();
-    const restoredLiveTurn=typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
+    if(typeof ensureRunActivityForCurrentTurn==='function') ensureRunActivityForCurrentTurn();
+    const hasStructuredLiveState=!!(INFLIGHT[sid]&&(
+      String(INFLIGHT[sid].lastAssistantText||'').trim()||
+      String(INFLIGHT[sid].lastReasoningText||'').trim()||
+      (Array.isArray(INFLIGHT[sid].activityBurstAnchors)&&INFLIGHT[sid].activityBurstAnchors.length)||
+      (Array.isArray(INFLIGHT[sid].toolCalls)&&INFLIGHT[sid].toolCalls.length)
+    ));
+    const restoredLiveTurn=!hasStructuredLiveState&&typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
     if(!restoredLiveTurn){
       appendThinking();
       clearLiveToolCards();
@@ -1316,6 +1336,9 @@ async function _ensureMessagesLoaded(sid) {
   } else {
     S.toolCalls = [];
   }
+  if(S.session&&S.session.session_id===sid&&data.session.runtime_journal){
+    S.session.runtime_journal=data.session.runtime_journal;
+  }
   clearLiveToolCards();
   S.messages = msgs;
   if(S.session&&S.session.session_id===sid){
@@ -1351,6 +1374,144 @@ function _sameTranscriptMessage(a,b){
   return false;
 }
 
+function _currentTurnAssistantText(messages){
+  const list=Array.isArray(messages)?messages:[];
+  let start=-1;
+  for(let i=list.length-1;i>=0;i--){
+    if(list[i]&&list[i].role==='user'){start=i;break;}
+  }
+  const parts=[];
+  for(let i=start+1;i<list.length;i++){
+    const msg=list[i];
+    if(!msg||msg.role!=='assistant'||msg._live) continue;
+    const text=_messageComparableText(msg);
+    if(text) parts.push(text);
+  }
+  return parts.join('\n\n').trim();
+}
+
+function _compactTranscriptText(text){
+  return String(text||'').replace(/\s+/g,' ').trim();
+}
+
+function _dropCurrentTurnAssistantMessages(messages){
+  const list=Array.isArray(messages)?messages:[];
+  let start=-1;
+  for(let i=list.length-1;i>=0;i--){
+    if(list[i]&&list[i].role==='user'){start=i;break;}
+  }
+  if(start<0) return list;
+  return list.filter((msg,idx)=>idx<=start||!(msg&&msg.role==='assistant'));
+}
+
+function _ensureInflightLiveAssistantMessage(inflight){
+  if(!inflight) return false;
+  const text=String(inflight.lastAssistantText||'').trim();
+  const reasoning=String(inflight.lastReasoningText||'').trim();
+  if(!text&&!reasoning) return false;
+  if(!Array.isArray(inflight.messages)) inflight.messages=[];
+  let live=null;
+  for(let i=inflight.messages.length-1;i>=0;i--){
+    const msg=inflight.messages[i];
+    if(msg&&msg.role==='assistant'&&msg._live){live=msg;break;}
+  }
+  if(live){
+    const liveText=_messageComparableText(live);
+    if(text&&(!liveText||text.startsWith(liveText)||text.length>liveText.length)){
+      live.content=text;
+    }
+    if(reasoning&&!live.reasoning) live.reasoning=reasoning;
+    return true;
+  }
+  inflight.messages.push({
+    role:'assistant',
+    content:text,
+    reasoning:reasoning||undefined,
+    _live:true,
+    _ts:Date.now()/1000,
+  });
+  return true;
+}
+
+function _projectInflightMessagesForActivityBursts(inflight){
+  const messages=Array.isArray(inflight&&inflight.messages)?inflight.messages:[];
+  const anchors=Array.isArray(inflight&&inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[];
+  if(!anchors.length) return messages;
+  let liveIdx=-1;
+  for(let i=messages.length-1;i>=0;i--){
+    const msg=messages[i];
+    if(msg&&msg.role==='assistant'&&msg._live){liveIdx=i;break;}
+  }
+  if(liveIdx<0) return messages;
+  const live=messages[liveIdx];
+  const text=_messageComparableText(live);
+  if(!text) return messages;
+  const cleanAnchors=anchors
+    .map(a=>({id:Number(a&&a.id),textEnd:Number(a&&a.textEnd)}))
+    .filter(a=>Number.isFinite(a.id)&&Number.isFinite(a.textEnd)&&a.textEnd>0)
+    .sort((a,b)=>a.textEnd-b.textEnd||a.id-b.id);
+  if(!cleanAnchors.length) return messages;
+  const aliasBurstIds=new Map();
+  let lastVisibleBurstId=null;
+  let lastVisibleTextEnd=0;
+  const visibleAnchors=[];
+  for(const anchor of cleanAnchors){
+    const end=Math.min(text.length,anchor.textEnd);
+    if(end<=lastVisibleTextEnd){
+      if(lastVisibleBurstId!==null) aliasBurstIds.set(anchor.id,lastVisibleBurstId);
+      continue;
+    }
+    visibleAnchors.push(anchor);
+    lastVisibleBurstId=anchor.id;
+    lastVisibleTextEnd=end;
+  }
+  if(aliasBurstIds.size&&Array.isArray(inflight.toolCalls)){
+    inflight.toolCalls.forEach(tc=>{
+      if(!tc||tc.activityBurstId===undefined||tc.activityBurstId===null) return;
+      const current=Number(tc.activityBurstId);
+      if(aliasBurstIds.has(current)) tc.activityBurstId=aliasBurstIds.get(current);
+    });
+  }
+  if(!visibleAnchors.length) return messages;
+  const projected=[];
+  let prev=0;
+  for(const anchor of visibleAnchors){
+    const end=Math.max(prev,Math.min(text.length,anchor.textEnd));
+    const part=text.slice(prev,end).trim();
+    if(part) projected.push({...live,content:part,_activityBurstId:anchor.id});
+    prev=end;
+  }
+  const tail=text.slice(prev).trim();
+  if(tail) projected.push({...live,content:tail,_activityBurstId:Number(inflight.currentActivityBurstId||0)||0});
+  if(!projected.length) return messages;
+  return [...messages.slice(0,liveIdx),...projected,...messages.slice(liveIdx+1)];
+}
+
+function _prepareRunningLiveTail(baseMessages,inflightMessages){
+  const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
+  const liveMessages=inflight.filter(m=>m&&m.role==='assistant'&&m._live);
+  if(liveMessages.length>1) return liveMessages.some(m=>!!_messageComparableText(m));
+  const live=liveMessages[0]||null;
+  if(!live) return false;
+  const liveText=_messageComparableText(live);
+  const persistedText=_currentTurnAssistantText(baseMessages);
+  if(persistedText){
+    const compactPersisted=_compactTranscriptText(persistedText);
+    const compactLive=_compactTranscriptText(liveText);
+    if(!liveText || persistedText.startsWith(liveText)){
+      live.content=persistedText;
+    }else if(liveText.startsWith(persistedText)){
+      const extra=liveText.slice(persistedText.length).trim();
+      if(extra&&compactPersisted.includes(_compactTranscriptText(extra))){
+        live.content=persistedText;
+      }
+    }else if(compactPersisted===compactLive){
+      live.content=persistedText;
+    }
+  }
+  return !!_messageComparableText(live);
+}
+
 function _mergeInflightTailMessages(baseMessages, inflightMessages){
   const base=Array.isArray(baseMessages)?baseMessages:[];
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
@@ -1364,8 +1525,10 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
   const tail=inflight.slice(start).filter(m=>m&&m.role);
   const merged=[...base];
   for(const msg of tail){
-    const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,msg));
-    if(!duplicate) merged.push(msg);
+    let candidate=msg;
+    if(!candidate) continue;
+    const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
+    if(!duplicate) merged.push(candidate);
   }
   return merged;
 }

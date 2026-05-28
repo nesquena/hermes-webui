@@ -1,4 +1,4 @@
-"""Regression test for stage-364 Opus-caught SHOULD-FIX (side-channel approach):
+"""Regression test for live SSE event ids:
 
 When the live SSE stream errors mid-stream and the frontend falls back to
 journal replay, live frames must carry an `id:` field so the frontend's
@@ -7,19 +7,15 @@ arrives with `after_seq=0` and the server replays every journaled event from
 seq 1, double-rendering tokens against the live-phase `assistantText`
 accumulator.
 
-Implementation (stage-364 — side-channel approach to avoid breaking the
-queue tuple contract used by 4 existing tests):
+Implementation:
 
-  - api/config.py adds `STREAM_LAST_EVENT_ID: dict = {}` module-level dict.
   - api/streaming.py `put()` captures `journaled["event_id"]` from
-    `RunJournalWriter.append_sse_event()` return and writes it to
-    `STREAM_LAST_EVENT_ID[stream_id]`.
-  - api/routes.py `_handle_sse_stream` reads `STREAM_LAST_EVENT_ID[stream_id]`
-    at SSE emit time and uses `_sse_with_id` when set.
-  - api/streaming.py finally-block cleanup pops STREAM_LAST_EVENT_ID.
-
-The queue tuple shape is preserved as (event, data), so existing tests like
-test_cancel_puts_sentinel_in_queue still work.
+    `RunJournalWriter.append_sse_event()`.
+  - The queue item carries that event id with the event payload, so replay
+    cursors track the event that was actually emitted rather than a side-channel
+    "latest" value that can mis-stamp buffered backlog events.
+  - api/routes.py `_handle_sse_stream` unpacks the per-item id and uses
+    `_sse_with_id` when set.
 """
 
 from pathlib import Path
@@ -30,16 +26,13 @@ ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
 
 
-def test_stream_last_event_id_dict_exists_in_config():
-    """`STREAM_LAST_EVENT_ID` must be declared as a module-level dict in
-    api/config.py alongside the other STREAM_* registries."""
-    assert "STREAM_LAST_EVENT_ID: dict = {}" in CONFIG_PY, (
-        "STREAM_LAST_EVENT_ID dict missing from api/config.py — needed as "
-        "the side-channel that lets SSE consumers emit `id:` on live frames"
-    )
+def test_stream_channel_tracks_per_item_event_ids():
+    assert "subscribe_with_snapshot" in CONFIG_PY
+    assert "_event_id_from_item" in CONFIG_PY
+    assert "_last_event_id" in CONFIG_PY
 
 
-def test_put_writes_event_id_to_side_channel_dict():
+def test_put_writes_event_id_into_queue_item():
     """The `put()` helper must capture the event_id from the journal and
     write it to STREAM_LAST_EVENT_ID[stream_id]."""
     put_def_idx = STREAMING_PY.find("def put(event, data):")
@@ -48,34 +41,25 @@ def test_put_writes_event_id_to_side_channel_dict():
     assert "journaled = run_journal.append_sse_event(event, data)" in put_body, (
         "put() must capture append_sse_event return value"
     )
-    assert "STREAM_LAST_EVENT_ID[stream_id]" in put_body, (
-        "put() must write event_id to STREAM_LAST_EVENT_ID[stream_id] — "
-        "this is the side-channel the SSE consumer reads at emit time"
+    assert "q.put_nowait((event, data, event_id))" in put_body, (
+        "put() must queue event_id with its own SSE event so buffered backlog "
+        "frames cannot inherit a later event's id"
     )
 
 
-def test_queue_tuple_shape_preserved_as_two_tuple():
-    """The queue still uses 2-tuples (event, data) so existing consumers
-    that unpack `event, data = q.get()` are not broken."""
+def test_queue_tuple_shape_is_three_tuple_for_journaled_events():
+    """Journaled live events must carry their own event id in the queue item."""
     put_def_idx = STREAMING_PY.find("def put(event, data):")
     put_body = STREAMING_PY[put_def_idx:put_def_idx + 2500]
-    assert "q.put_nowait((event, data))" in put_body, (
-        "Queue tuple shape must remain (event, data) — changing to 3-tuple "
-        "breaks 4 existing tests in test_cancel_interrupt, test_sprint42, "
-        "test_sprint51, test_issue1857_usage_overwrite"
-    )
+    assert "q.put_nowait((event, data, event_id))" in put_body
 
 
-def test_sse_handler_reads_event_id_from_side_channel():
-    """The SSE consumer in _handle_sse_stream must read STREAM_LAST_EVENT_ID
-    and pass it to _sse_with_id when present."""
+def test_sse_handler_reads_event_id_from_queue_item():
+    """The SSE consumer must use the event id attached to the queue item."""
     handler_idx = ROUTES_PY.find("def _handle_sse_stream(handler, parsed):")
     assert handler_idx != -1, "_handle_sse_stream not found"
     handler_body = ROUTES_PY[handler_idx:handler_idx + 4000]
-    assert "STREAM_LAST_EVENT_ID.get(stream_id)" in handler_body, (
-        "_handle_sse_stream must read STREAM_LAST_EVENT_ID[stream_id] to "
-        "get the event_id for emit"
-    )
+    assert "_stream_queue_item_parts(item)" in handler_body
     assert "_sse_with_id(handler, event, data, event_id)" in handler_body, (
         "_handle_sse_stream must call _sse_with_id when event_id is set"
     )
@@ -95,7 +79,5 @@ def test_cleanup_pops_stream_last_event_id():
 
 
 def test_imports_present():
-    """STREAM_LAST_EVENT_ID must be imported in both streaming.py (writer)
-    and routes.py (reader)."""
+    """STREAM_LAST_EVENT_ID remains available for cleanup/backcompat."""
     assert "STREAM_LAST_EVENT_ID," in STREAMING_PY, "streaming.py must import"
-    assert "STREAM_LAST_EVENT_ID," in ROUTES_PY, "routes.py must import"

@@ -457,9 +457,9 @@ async function send(){
       }
     });
     optimisticMessages=[...S.messages];
-    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[],currentActivityBurstId:0,activityBurstAnchors:[]};
     if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
+      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[],currentActivityBurstId:0,activityBurstAnchors:[]});
     }
     _runOptionalPreStartUiStep('renderSessionListFromCache.initial', ()=>{
       if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
@@ -625,7 +625,22 @@ function closeLiveStream(sessionId, streamId, source){
   // finishes and a metadata refresh swaps in the final reply.
   // If the stream is terminating cleanly, _clearOwnerInflightState() has
   // already deleted INFLIGHT[sessionId], so this is a safe no-op.
-  if(INFLIGHT[sessionId]) INFLIGHT[sessionId].reattach=true;
+  if(INFLIGHT[sessionId]){
+    INFLIGHT[sessionId].reattach=true;
+    if(typeof saveInflightState==='function'){
+      saveInflightState(sessionId,{
+        streamId:live.streamId||streamId||null,
+        messages:INFLIGHT[sessionId].messages||[],
+        uploaded:INFLIGHT[sessionId].uploaded||[],
+        toolCalls:INFLIGHT[sessionId].toolCalls||[],
+        lastAssistantText:INFLIGHT[sessionId].lastAssistantText||'',
+        lastReasoningText:INFLIGHT[sessionId].lastReasoningText||'',
+        lastRunJournalSeq:INFLIGHT[sessionId].lastRunJournalSeq||0,
+        currentActivityBurstId:INFLIGHT[sessionId].currentActivityBurstId||0,
+        activityBurstAnchors:Array.isArray(INFLIGHT[sessionId].activityBurstAnchors)?INFLIGHT[sessionId].activityBurstAnchors:[],
+      });
+    }
+  }
 }
 
 function closeOtherLiveStreams(activeSid){
@@ -646,6 +661,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded];
     if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
   }
+  if(!Array.isArray(INFLIGHT[activeSid].activityBurstAnchors)) INFLIGHT[activeSid].activityBurstAnchors=[];
+  if(INFLIGHT[activeSid].currentActivityBurstId===undefined) INFLIGHT[activeSid].currentActivityBurstId=0;
   const existingLive=LIVE_STREAMS[activeSid];
   if(
     existingLive&&existingLive.streamId===streamId&&existingLive.source&&
@@ -662,19 +679,64 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // progress made before the session switch. Without this the closure starts
   // empty and tokens arriving on the new SSE connection append to nothing —
   // the already-rendered content vanishes.
-  const _lastLiveAssistant = reconnecting
-    ? INFLIGHT[activeSid]?.messages?.findLast?.(m => m.role === 'assistant' && m._live)
+  const _liveInflightAssistantMessages = reconnecting
+    ? ((INFLIGHT[activeSid]&&Array.isArray(INFLIGHT[activeSid].messages))
+      ? INFLIGHT[activeSid].messages.filter(m=>m&&m.role==='assistant'&&m._live)
+      : [])
+    : [];
+  const _liveInflightAssistant = _liveInflightAssistantMessages.length===1
+    ? _liveInflightAssistantMessages[0]
     : null;
-  let assistantText = _lastLiveAssistant ? (_lastLiveAssistant.content || '') : '';
-  let reasoningText = _lastLiveAssistant ? (_lastLiveAssistant.reasoning || '') : '';
-  let liveReasoningText = reasoningText;
+  const _fullInflightAssistant = (INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastAssistantText) || '';
+  const _joinedInflightSegments = _liveInflightAssistantMessages.length>1
+    ? _liveInflightAssistantMessages.map(m=>m&&m.content?String(m.content).trim():'').filter(Boolean).join('\n\n')
+    : '';
+  const _lastLiveAssistant = reconnecting
+    ? (_liveInflightAssistantMessages.length>1
+      ? (_fullInflightAssistant || _joinedInflightSegments)
+      : (_liveInflightAssistant
+        ? (_liveInflightAssistant.content || '')
+        : _fullInflightAssistant))
+    : '';
+  const _lastLiveReasoning = reconnecting
+    ? (_liveInflightAssistant&&_liveInflightAssistant.reasoning)
+      || (INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastReasoningText)
+      || ''
+    : '';
+  let assistantText=_lastLiveAssistant;
+  let reasoningText=_lastLiveReasoning;
+  let liveReasoningText=_lastLiveReasoning;
   let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
   let _pendingGoalContinuation=null;
   let assistantRow=null;
   let assistantBody=null;
-  let segmentStart=0;      // char offset in assistantText where current segment begins
-  let _freshSegment=false; // true after a tool call — forces a new DOM segment
+  // On reconnect with recorded burst anchors, the rendered DOM has multiple
+  // live assistant segments — one per anchor plus a tail. New tokens belong to
+  // the TAIL segment only. Without aligning segmentStart to the last anchor's
+  // textEnd, _doRender treats segmentStart===0 as "full text" and the smd
+  // parser writes the entire accumulated text into the first live segment
+  // (after _smdReconnect clears it), bloating segment 1 and leaving the rest
+  // stale. Activity groups still anchor by burst id but appear surrounded by
+  // duplicated/orphaned text, which presents as "Activity piled after text".
+  let segmentStart=(()=>{
+    if(!reconnecting) return 0;
+    const inflight=INFLIGHT[activeSid];
+    if(!inflight) return 0;
+    const anchors=Array.isArray(inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[];
+    const textLen=String(assistantText||'').length;
+    let lastEnd=0;
+    for(const a of anchors){
+      const end=Number(a&&a.textEnd);
+      if(Number.isFinite(end)&&end>lastEnd&&end<=textLen) lastEnd=end;
+    }
+    return lastEnd;
+  })();
+  // If reconnect resumes exactly at the last recorded boundary, there is no
+  // projected tail segment yet. The next token must create a fresh segment
+  // after the last Activity group instead of rewriting the previous burst's
+  // text segment.
+  let _freshSegment=reconnecting&&segmentStart>0&&segmentStart>=String(assistantText||'').length; // true after a tool call — forces a new DOM segment
   // streaming-markdown state: incremental DOM-building parser per segment
   let _smdParser=null;     // current smd parser instance (null until first content)
   let _smdWrittenLen=0;    // how many chars of displayText have been fed to smd parser
@@ -748,6 +810,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       messages:inflight.messages||[],
       uploaded:inflight.uploaded||[...uploaded],
       toolCalls:inflight.toolCalls||[],
+      lastAssistantText:inflight.lastAssistantText||'',
+      lastReasoningText:inflight.lastReasoningText||'',
+      lastRunJournalSeq:inflight.lastRunJournalSeq||0,
+      currentActivityBurstId:inflight.currentActivityBurstId||0,
+      activityBurstAnchors:Array.isArray(inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[],
     });
   }
   function snapshotLiveTurn(){
@@ -784,6 +851,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function syncInflightAssistantMessage(){
     const inflight=INFLIGHT[activeSid];
     if(!inflight) return;
+    inflight.lastAssistantText=assistantText;
+    inflight.lastReasoningText=reasoningText;
     if(!Array.isArray(inflight.messages)) inflight.messages=[];
     let assistantIdx=-1;
     for(let i=inflight.messages.length-1;i>=0;i--){
@@ -801,6 +870,39 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     inflight.messages.push({role:'assistant',content:assistantText,reasoning:reasoningText||undefined,_live:true,_ts:ts});
     _throttledPersist();
   }
+  function recordActivityBoundary(){
+    const inflight=INFLIGHT[activeSid];
+    if(!inflight) return;
+    if(!Array.isArray(inflight.activityBurstAnchors)) inflight.activityBurstAnchors=[];
+    const textEnd=String(assistantText||'').length;
+    const lastTextEnd=inflight.activityBurstAnchors.reduce((max,a)=>{
+      const n=Number(a&&a.textEnd);
+      return Number.isFinite(n)?Math.max(max,n):max;
+    },0);
+    if(textEnd<=lastTextEnd){
+      // A replayed or duplicate interim boundary with no new visible text must
+      // not create a fresh burst.  Tools after it still belong to the previous
+      // visible segment; otherwise they get a burst id with no DOM/text anchor
+      // and Activity cards pile up at the end of the turn after reattach.
+      inflight.currentActivityBurstId=_currentActivityBurstId;
+      if(assistantRow) assistantRow.setAttribute('data-activity-burst-id',String(_currentActivityBurstId));
+      _throttledPersist();
+      return;
+    }
+    _currentActivityBurstId+=1;
+    inflight.currentActivityBurstId=_currentActivityBurstId;
+    const existing=inflight.activityBurstAnchors.find(a=>Number(a&&a.id)===_currentActivityBurstId);
+    if(existing) existing.textEnd=textEnd;
+    else inflight.activityBurstAnchors.push({id:_currentActivityBurstId,textEnd});
+    // Keep the current text segment's DOM attribute in sync with the post-increment
+    // burst id so that subsequent tool events (which use _currentActivityBurstId)
+    // find the correct anchor via [data-activity-burst-id].  Without this the
+    // segment keeps the pre-increment id (N) while tools get id N+1, causing
+    // appendLiveToolCard to miss the anchor and Activity groups to pile up after
+    // all text instead of interleaving correctly.
+    if(assistantRow) assistantRow.setAttribute('data-activity-burst-id',String(_currentActivityBurstId));
+    _throttledPersist();
+  }
   function ensureAssistantRow(force=false){
     if(!_isActiveSession()) return;
     if(assistantRow&&!assistantRow.isConnected){assistantRow=null;assistantBody=null;}
@@ -815,12 +917,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     const blocks=(typeof _assistantTurnBlocks==='function')?_assistantTurnBlocks(turn):null;
     if(!blocks) return;
+    if(typeof ensureRunActivityGroup==='function') ensureRunActivityGroup(blocks,{live:true,collapsed:true});
     if(!assistantRow){
       // Only reuse an existing segment on the very first creation (e.g. reconnect).
       // After a tool call _freshSegment=true, so we always create a new segment
       // below the tool card rather than re-attaching to the old one above it.
       if(!_freshSegment){
-        const existing=blocks.querySelector('[data-live-assistant="1"]');
+        // Pick the LAST live segment, not the first. After session-switch reattach
+        // the projected DOM has one [data-live-assistant="1"] per burst anchor plus
+        // a tail segment; new tokens belong to the tail. querySelector returns the
+        // first match, which would funnel all new tokens into segment 1 — leaving
+        // the per-burst segments stale and Activity groups visually marooned.
+        const liveSegments=blocks.querySelectorAll('[data-live-assistant="1"]');
+        const existing=liveSegments.length?liveSegments[liveSegments.length-1]:null;
         if(existing){
           assistantRow=existing;
           assistantBody=existing.querySelector('.msg-body');
@@ -837,6 +946,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     assistantRow=document.createElement('div');
     assistantRow.className='assistant-segment';
     assistantRow.setAttribute('data-live-assistant','1');
+    assistantRow.setAttribute('data-activity-burst-id',String(_currentActivityBurstId));
     assistantBody=document.createElement('div');assistantBody.className='msg-body';
     assistantRow.appendChild(assistantBody);
     blocks.appendChild(assistantRow);
@@ -862,7 +972,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
           if(st.active){
             setComposerStatus('Reconnected');
-            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
+            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
           }
         }
@@ -918,13 +1028,45 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamFadeReduceMotionMql=null;
   let _streamFadeReduceMotion=false;
   let _streamFadeReduceMotionOnChange=null;
-  let _lastRunJournalSeq=0;
+  let _currentActivityBurstId=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentActivityBurstId)||0)||0;
+  let _lastRunJournalSeq=reconnecting
+    ? Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalSeq)||0)
+    : 0;
   const _STREAM_FADE_MS=200;
   const _STREAM_FADE_MAX_MS=350;
   const _STREAM_FADE_STAGGER_MS=16;
   const _STREAM_FADE_DONE_MAX_MS=320;
   const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
   const _streamFadeEnabledForStream=window._fadeTextEffect===true;
+
+  function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
+    const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
+    const byTid=new Map();
+    liveCalls.forEach((tc,idx)=>{
+      if(!tc||typeof tc!=='object') return;
+      const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+      if(tid&&!byTid.has(tid)) byTid.set(tid,{tc,idx});
+    });
+    const used=new Set();
+    return (rawCalls||[]).map((raw,idx)=>{
+      const next={...(raw||{}),done:true};
+      const tid=next.tid||next.id||next.tool_call_id||next.call_id||'';
+      let matchEntry=tid?byTid.get(tid):null;
+      if(!matchEntry){
+        const name=next.name||((next.function||{}).name)||'';
+        const matchIdx=liveCalls.findIndex((tc,i)=>tc&&!used.has(i)&&(!name||tc.name===name));
+        if(matchIdx>=0) matchEntry={tc:liveCalls[matchIdx],idx:matchIdx};
+      }
+      if(matchEntry){
+        used.add(matchEntry.idx);
+        const live=matchEntry.tc||{};
+        for(const key of ['activityBurstId','duration','started_at']){
+          if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
+        }
+      }
+      return next;
+    });
+  }
 
   // rAF-throttled rendering: buffer tokens, render at most once per frame
   let _renderPending=false;
@@ -1430,12 +1572,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdEndParser();
     _resetStreamFadeState();
   }
-  function _rememberRunJournalCursor(e){
+  function _runJournalSeqFromEvent(e){
     const raw=String(e&&e.lastEventId||'').trim();
-    if(!raw) return;
+    if(!raw) return 0;
     const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
     const seq=Number.parseInt(tail,10);
-    if(Number.isFinite(seq)&&seq>_lastRunJournalSeq) _lastRunJournalSeq=seq;
+    return Number.isFinite(seq)?seq:0;
+  }
+  function _rememberRunJournalCursor(e){
+    const seq=_runJournalSeqFromEvent(e);
+    if(Number.isFinite(seq)&&seq>_lastRunJournalSeq){
+      _lastRunJournalSeq=seq;
+      if(INFLIGHT[activeSid]) INFLIGHT[activeSid].lastRunJournalSeq=_lastRunJournalSeq;
+    }
   }
   function _runJournalReplayAfterSeq(){
     return Math.max(0,_lastRunJournalSeq||0);
@@ -1446,7 +1595,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // journal events after this EventSource has already rendered part of a run.
     return `&replay=1&after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}`;
   }
-
   let _lastRenderMs=0;
   function _scheduleRender(){
     if(_renderPending) return;
@@ -1517,7 +1665,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{existingLive.source.close();}catch(_){ }
     }
     LIVE_STREAMS[activeSid]={streamId,source};
-
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
     // the accumulators here so the re-sent tokens wouldn't double the prefix.
@@ -1556,14 +1703,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       reasoningText='';
       liveReasoningText='';
       if(alreadyStreamed){
-        if(!S.session||S.session.session_id!==activeSid) return;
+        if(!S.session||S.session.session_id!==activeSid){
+          recordActivityBoundary();
+          _resetAssistantSegment();
+          return;
+        }
+        const parsed=_parseStreamState();
+        if(String((parsed&&parsed.displayText)||'').trim()||assistantRow){
+          ensureAssistantRow(true);
+          _flushPendingSegmentRender({force:true});
+          if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
+          recordActivityBoundary();
+        }
         _resetAssistantSegment();
         return;
       }
       assistantText += assistantText ? `\n\n${visible}` : visible;
       visibleInterimSnippets.push(visible);
       syncInflightAssistantMessage();
-      if(!S.session||S.session.session_id!==activeSid) return;
+      if(!S.session||S.session.session_id!==activeSid){
+        recordActivityBoundary();
+        _resetAssistantSegment();
+        return;
+      }
       if(window._showThinking!==false){
         if(typeof updateThinking==='function') updateThinking(_liveThinkingText());
         else appendThinking(_liveThinkingText());
@@ -1571,6 +1733,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       ensureAssistantRow(true);
       _flushPendingSegmentRender({force:true});
       if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
+      recordActivityBoundary();
       _resetAssistantSegment();
       _scheduleRender();
     });
@@ -1596,7 +1759,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('tool',e=>{
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
-      const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`};
+      const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`, activityBurstId:_currentActivityBurstId, started_at:Date.now()/1000};
       const inflight = INFLIGHT[activeSid] || (INFLIGHT[activeSid] = {
         messages:[...S.messages],
         uploaded:[],
@@ -1644,7 +1807,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }
       if(!tc){
-        tc={name:d.name||'tool', preview:d.preview||'', args:d.args||{}, snippet:'', done:true};
+        tc={name:d.name||'tool', preview:d.preview||'', args:d.args||{}, snippet:'', done:true, activityBurstId:_currentActivityBurstId};
         inflight.toolCalls.push(tc);
       }
       tc.preview=d.preview||tc.preview||'';
@@ -1882,8 +2045,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return hasTc||hasPartialTc||hasTu;
           });
           if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
-            S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
+            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
           } else {
+            if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
           }
           if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
@@ -2168,7 +2332,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st.active){
               setComposerStatus('Reconnected');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
             if(st.replay_available){
@@ -2286,9 +2450,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           return hasTc||hasPartialTc||hasTu;
         });
         if(!hasMessageToolMetadata&&session.tool_calls&&session.tool_calls.length){
-          S.toolCalls=(session.tool_calls||[]).map(tc=>({...tc,done:true}));
+          S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(session.tool_calls||[]);
         }else{
-          S.toolCalls=[];
+          if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
+          S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
         }
         if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages({preserveScroll:true});
@@ -2354,7 +2519,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }catch(_){}
     }
-    const replayParams=replayOnly?_runJournalReplayParams():'';
+    const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 

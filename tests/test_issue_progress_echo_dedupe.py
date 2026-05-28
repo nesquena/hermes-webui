@@ -8,6 +8,12 @@ from unittest import mock
 _MISSING = object()
 
 
+def _event_parts(item):
+    if isinstance(item, tuple) and len(item) >= 2:
+        return item[0], item[1]
+    return "message", item
+
+
 def test_visible_progress_token_reasoning_and_interim_are_deduped(cleanup_test_sessions):
     """Progress text can arrive through three Hermes callbacks; WebUI must show it once.
 
@@ -168,7 +174,7 @@ def test_visible_progress_token_reasoning_and_interim_are_deduped(cleanup_test_s
             else:
                 sys.modules[k] = cast(types.ModuleType, prev)
 
-    events = list(fake_queue.queue)
+    events = [_event_parts(item) for item in list(fake_queue.queue)]
     assert [(event, payload) for event, payload in events if event == "token"] == [
         ("token", {"text": progress})
     ]

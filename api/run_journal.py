@@ -199,12 +199,15 @@ def read_run_events(
     run_id: str,
     *,
     after_seq: int | None = None,
+    max_seq: int | None = None,
     session_dir: Path | None = None,
 ) -> dict:
     path = _run_path(session_id, run_id, session_dir=session_dir)
     events, malformed = _read_jsonl(path)
     if after_seq is not None:
         events = [event for event in events if int(event.get("seq") or 0) > int(after_seq)]
+    if max_seq is not None:
+        events = [event for event in events if int(event.get("seq") or 0) <= int(max_seq)]
     return {
         "session_id": str(session_id),
         "run_id": str(run_id),

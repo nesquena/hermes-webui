@@ -428,7 +428,7 @@ def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
     # INFLIGHT branch must call appendLiveToolCard
     inflight_idx = src.find("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+1600]
+    inflight_block = src[inflight_idx:inflight_idx+2600]
     assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
     assert "clearLiveToolCards" in inflight_block,         "loadSession INFLIGHT branch must clear old live cards before restoring"
 
@@ -618,7 +618,7 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
     src = (REPO_ROOT / "static/sessions.js").read_text()
     inflight_idx = src.find("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+1600]
+    inflight_block = src[inflight_idx:inflight_idx+2600]
     busy_pos = inflight_block.find("S.busy=true;")
     render_pos = inflight_block.find("renderMessages();")
     assert busy_pos >= 0, "loadSession INFLIGHT branch must set S.busy=true"
@@ -697,7 +697,7 @@ def test_loadSession_inflight_sets_active_stream_before_replaying_live_tool_card
     src = (REPO_ROOT / "static/sessions.js").read_text()
     inflight_idx = src.find("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+1600]
+    inflight_block = src[inflight_idx:inflight_idx+2600]
     active_pos = inflight_block.find("S.activeStreamId=activeStreamId;")
     replay_pos = inflight_block.find("appendLiveToolCard(tc);")
     attach_pos = inflight_block.find("attachLiveStream(sid, activeStreamId")
@@ -765,9 +765,12 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
     # On initial connect it defaults to ''; on reconnect it restores from
     # INFLIGHT so the already-rendered content survives the session switch.
     assert ("let reasoningText=''" in src
-            or "let reasoningText = _lastLiveAssistant" in src), \
+            or "let reasoningText = _lastLiveAssistant" in src
+            or "let reasoningText=_lastLiveReasoning" in src), \
         "messages.js must track streamed reasoning text separately from assistant text"
-    assert ("let liveReasoningText=''" in src or "let liveReasoningText = reasoningText" in src), \
+    assert ("let liveReasoningText=''" in src
+            or "let liveReasoningText = reasoningText" in src
+            or "let liveReasoningText=_lastLiveReasoning" in src), \
         "messages.js must track the currently active reasoning segment separately from cumulative reasoning"
     assert "source.addEventListener('reasoning'" in src or 'source.addEventListener("reasoning"' in src, \
         "messages.js must listen for live reasoning SSE events"

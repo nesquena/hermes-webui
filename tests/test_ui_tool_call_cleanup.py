@@ -219,11 +219,13 @@ class TestToolCallGroupingStatic:
         sync_fn = _function_body(UI_JS, "_syncToolCallGroupSummary")
         progress_fn = _function_body(UI_JS, "_activityProgressLabelForToolName")
         live_progress_fn = _function_body(UI_JS, "_activityLiveProgressLabel")
-        assert "_activityLiveProgressLabel" in sync_fn, (
-            "Live compact Activity rows should expose a readable transient progress label."
+        assert "_activityLiveProgressLabel" not in sync_fn, (
+            "Per-segment Activity rows should not show a group-level live timer/progress label; "
+            "only the top Run Activity owns the running timer."
         )
-        assert "durationEl.textContent" in sync_fn and "filter(Boolean).join(' · ')" in sync_fn, (
-            "Progress should share the existing non-persistent summary/duration slot, not become transcript text."
+        assert "durationEl.textContent='';" in sync_fn and "durationEl.style.display='none';" in sync_fn, (
+            "Per-segment Activity rows should keep the summary duration slot empty; "
+            "individual tool durations belong on tool cards."
         )
         for label in ("Searching workspace", "Reading files", "Updating files", "Running command"):
             assert label in progress_fn
@@ -331,9 +333,18 @@ class TestToolCallGroupingStatic:
         assert interim_match and "_flushPendingSegmentRender({force:true})" in interim_match.group(1), (
             "Visible interim assistant progress must be synchronously rendered before the segment reset."
         )
+        already_streamed_branch = interim_match.group(1).split("if(alreadyStreamed){", 1)[1].split("assistantText +=", 1)[0]
+        assert "closeCurrentLiveActivityGroup()" in already_streamed_branch, (
+            "An already-streamed interim event is still a visible-progress boundary; "
+            "it must split the current Activity burst without appending duplicate text."
+        )
+        assert "_flushPendingSegmentRender({force:true})" in already_streamed_branch, (
+            "Already-streamed progress boundaries must flush token-rendered text before splitting Activity."
+        )
         timer_fn = _function_body(UI_JS, "_updateActiveActivityElapsedTimer")
-        assert "data-live-activity-current" in timer_fn, (
-            "Elapsed timers should clear once an Activity group is no longer current."
+        assert "_isActivityTimerGroup(group)" in timer_fn, (
+            "Elapsed timers should now be owned by the run-level Activity timer group, "
+            "not by each per-segment tool Activity burst."
         )
         tool_start_segment = MESSAGES_JS.split("source.addEventListener('tool',e=>{", 1)[1].split("source.addEventListener('tool_complete'", 1)[0]
         assert "_resetAssistantSegment();" in tool_start_segment, (

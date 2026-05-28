@@ -186,7 +186,7 @@ def test_stream_completion_overwrites_session_usage_with_latest_turn(cleanup_tes
         and payload["usage"]["estimated_cost"] == 0.067
         and payload["usage"]["cache_read_tokens"] == 9000
         and payload["usage"]["cache_write_tokens"] == 1000
-        for event, payload in list(fake_queue.queue)
+        for event, payload, *_ in list(fake_queue.queue)
     )
     assert saved_snapshots[-1]["input_tokens"] == 123
     assert saved_snapshots[-1]["output_tokens"] == 45

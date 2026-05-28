@@ -33,6 +33,41 @@ def test_extract_tool_calls_from_openai_message_linkage():
     assert result[0]["snippet"] == "file.txt"
 
 
+def test_extract_tool_calls_from_empty_assistant_reuses_previous_visible_anchor():
+    messages = [
+        {"role": "user", "content": "inspect code"},
+        {"role": "assistant", "content": "Checking the frontend reattach path."},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-1",
+                "function": {"name": "read_file", "arguments": '{"path":"static/ui.js"}'},
+            }],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": '{"content":"function renderMessages() {}"}',
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-2",
+                "function": {"name": "terminal", "arguments": '{"command":"rg attachLiveStream"}'},
+            }],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call-2",
+            "content": '{"output":"static/messages.js"}',
+        },
+    ]
+    result = _extract_tool_calls_from_messages(messages)
+    assert [tc["assistant_msg_idx"] for tc in result] == [1, 1]
+
+
 def test_tool_result_snippet_allows_frontend_show_more_threshold_but_stays_bounded():
     """Persisted snippets should be long enough for frontend Show more but capped."""
     medium_output = "m" * 1200

@@ -3,6 +3,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- WebUI progress guidance now restores a firm visible interim-progress contract for long tool-running chat turns, and session-switch reattach now backfills active stream gaps from the run journal with per-event SSE ids so visible live progress stays stable after switching away and back. (#3014, #2924)
+- Live Stream Activity now keeps the same progress-text/tool-burst structure after a run settles: the top Run Activity owns the whole-turn timer, while per-segment tool Activity cards stay bound to the progress text that produced them instead of collapsing back into one late `Activity: N tools` block.
+- Live Stream reattach now resumes multi-segment process text from the full assistant accumulator instead of the latest visible segment, preventing older progress text anchors from disappearing after repeated session switches.
+- Live Stream now records interim progress boundaries even when a session is being switched away, so tools emitted during that inactive-pane window still reattach to the progress text that produced them.
+
 ## [v0.51.152] — 2026-05-28 — Release DX (stage-batch34 — single-PR optional gateway-backed browser chat)
 
 ### Added

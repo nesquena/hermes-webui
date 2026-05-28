@@ -177,6 +177,32 @@ class TestInterimAssistantHandlerFlush:
             "_resetAssistantSegment in the interim_assistant handler"
         )
 
+    def test_already_streamed_interim_handler_flushes_before_reset(self):
+        """already_streamed interim events are still visible-progress boundaries.
+
+        The visible text already arrived through token events, so the client
+        must not append it again. It must still flush any pending token render
+        before resetting the segment; otherwise a fast tool boundary can orphan
+        the text until a later render or session switch.
+        """
+        src = read("static/messages.js")
+        fn = _extract_handler(src, "interim_assistant")
+        branch_start = fn.index("if(alreadyStreamed)")
+        branch = fn[branch_start : fn.index("assistantText +=", branch_start)]
+        assert "ensureAssistantRow(true)" in branch, (
+            "already_streamed interim boundaries must materialize the current "
+            "token segment before reset"
+        )
+        assert "_flushPendingSegmentRender({force:true})" in branch, (
+            "already_streamed interim boundaries must flush pending token DOM "
+            "before reset"
+        )
+        flush_pos = branch.index("_flushPendingSegmentRender({force:true})")
+        reset_pos = branch.index("_resetAssistantSegment()")
+        assert flush_pos < reset_pos, (
+            "already_streamed interim flush must happen before segment reset"
+        )
+
     def test_interim_handler_creates_visible_segment_before_forced_flush(self):
         src = read("static/messages.js")
         fn = _extract_handler(src, "interim_assistant")

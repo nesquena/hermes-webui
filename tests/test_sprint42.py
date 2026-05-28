@@ -405,13 +405,13 @@ class TestRuntimeRouteInjection(unittest.TestCase):
             except queue.Empty:
                 break
         self.assertTrue(
-            any(event == "interim_assistant" for event, _ in interim_events),
+            any(event == "interim_assistant" for event, *_ in interim_events),
             "interim_assistant callback should emit interim_assistant SSE events",
         )
         self.assertTrue(
             any(
                 event == "interim_assistant" and event_data.get("text") == "Inspecting repo structure."
-                for event, event_data in interim_events
+                for event, event_data, *_ in interim_events
             ),
             "interim_assistant event should carry the assistant commentary text"
         )

@@ -2394,6 +2394,9 @@ function _clearCompressionElapsedTimer(){if(_compressionElapsedTimer){clearInter
 let _activityElapsedTimer=null;
 let _activityElapsedTimerGroup=null;
 function _activityNowSeconds(){return Date.now()/1000;}
+function _isActivityTimerGroup(group){
+  return !!(group&&group.getAttribute('data-run-activity-group')==='1');
+}
 function _activityElapsedStartedAt(group){
   if(!group)return null;
   const raw=(group.dataset&&group.dataset.turnStartedAt!==undefined&&group.dataset.turnStartedAt!=='')
@@ -2408,7 +2411,10 @@ function _activityElapsedLabel(group){
   return _formatActiveElapsedTimer(_activityNowSeconds()-started);
 }
 function _activityMarkObserved(group, ts){
-  if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
+  if(!group||(
+    group.getAttribute('data-live-tool-call-group')!=='1'&&
+    group.getAttribute('data-run-activity-group')!=='1'
+  ))return;
   const stamp=Number(ts||_activityNowSeconds());
   if(Number.isFinite(stamp)&&stamp>0) group.setAttribute('data-last-activity-at',String(stamp));
 }
@@ -2444,7 +2450,7 @@ function _appendActivityEvent(group, event){
   return row;
 }
 function _ensureLiveActivityBaseline(group){
-  if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
+  if(!group||group.getAttribute('data-run-activity-group')!=='1')return;
   const started=_activityElapsedStartedAt(group)||_activityNowSeconds();
   if(!group.getAttribute('data-turn-started-at')) group.setAttribute('data-turn-started-at',String(started));
   if(!group.getAttribute('data-last-activity-at')) group.setAttribute('data-last-activity-at',String(started));
@@ -2453,13 +2459,13 @@ function _ensureLiveActivityBaseline(group){
   if(modelLabel)_appendActivityEvent(group,{id:'run-model',kind:'model',label:`Model: ${modelLabel}`,detail:S.activeProfile&&S.activeProfile!=='default'?`Profile: ${S.activeProfile}`:'',status:'done',ts:started});
 }
 function _setActivityElapsedStartedAt(group){
-  if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
+  if(!_isActivityTimerGroup(group))return;
   const started=_activityElapsedStartedAt(group);
   if(started)group.setAttribute('data-turn-started-at',String(started));
 }
 function _updateActiveActivityElapsedTimer(){
   const group=_activityElapsedTimerGroup;
-  if(!group||!group.isConnected||group.getAttribute('data-live-tool-call-group')!=='1'||group.getAttribute('data-live-activity-current')!=='1'){
+  if(!group||!group.isConnected||!_isActivityTimerGroup(group)){
     _clearActivityElapsedTimer();
     return;
   }
@@ -2471,14 +2477,14 @@ function _updateActiveActivityElapsedTimer(){
     group.removeAttribute('data-active-turn-elapsed');
   }
   if(durationEl){
-    const activeText=label?`Working for ${label}`:'';
-    const progressText=_activityLiveProgressLabel(group);
-    durationEl.textContent=[progressText, activeText].filter(Boolean).join(' · ');
+    const settledText=_formatTurnDuration(group.dataset.turnDuration);
+    const activeText=(!settledText&&label)?`Working for ${label}`:'';
+    durationEl.textContent=settledText?`Done in ${settledText}`:activeText;
     durationEl.style.display=durationEl.textContent?'':'none';
   }
 }
 function _startActivityElapsedTimer(group){
-  if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
+  if(!_isActivityTimerGroup(group))return;
   _setActivityElapsedStartedAt(group);
   if(_activityElapsedTimerGroup&&_activityElapsedTimerGroup!==group)_clearActivityElapsedTimer();
   _activityElapsedTimerGroup=group;
@@ -4375,6 +4381,11 @@ function _compactInflightState(state){
     messages,
     uploaded:Array.isArray(state.uploaded)?state.uploaded.slice(-20):[],
     toolCalls,
+    lastAssistantText:state.lastAssistantText||'',
+    lastReasoningText:state.lastReasoningText||'',
+    lastRunJournalSeq:state.lastRunJournalSeq||0,
+    currentActivityBurstId:state.currentActivityBurstId||0,
+    activityBurstAnchors:Array.isArray(state.activityBurstAnchors)?state.activityBurstAnchors.slice(-50):[],
   }, limits.stringChars);
 }
 function _writeInflightStateMap(all){
@@ -4490,8 +4501,9 @@ function restoreLiveTurnHtmlForSession(sid){
   _mergeRestoredLiveAssistantSegment(restored, existing);
   if(existing) existing.replaceWith(restored);
   else inner.appendChild(restored);
-  const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
-  if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
+  if(typeof normalizeLiveActivityGroupPlacement==='function') normalizeLiveActivityGroupPlacement(restored);
+  const runGroup=restored.querySelector('.tool-call-group[data-run-activity-group="1"]');
+  if(runGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(runGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
   requestAnimationFrame(()=>postProcessRenderedMessages(restored));
   return true;
@@ -5440,7 +5452,12 @@ function ensureActivityGroup(inner, opts){
   if(!inner) return null;
   const live=!!opts.live;
   const activityKey=opts.activityKey||(live?_activityKeyForLiveTurn():null);
-  const selector=live?'.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]':'.tool-call-group[data-agent-activity-group="1"]';
+  const burstId=opts.burstId!==undefined&&opts.burstId!==null?String(opts.burstId):'';
+  const selector=live
+    ? (burstId
+      ? `.tool-call-group[data-live-tool-call-group="1"][data-activity-burst-id="${CSS.escape(burstId)}"]`
+      : '.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]')
+    : '.tool-call-group[data-agent-activity-group="1"]';
   let group=inner.querySelector(selector);
   if(!group){
     group=document.createElement('div');
@@ -5461,6 +5478,7 @@ function ensureActivityGroup(inner, opts){
       group.setAttribute('data-live-tool-call-group','1');
       group.setAttribute('data-live-activity-current','1');
     }
+    if(burstId) group.setAttribute('data-activity-burst-id',burstId);
     group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="_toggleActivityGroup(this)"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-duration"></span></button><div class="tool-call-group-body"></div>`;
     const anchor=opts.anchor||null;
     if(anchor&&anchor.parentElement===inner) anchor.insertAdjacentElement('afterend', group);
@@ -5468,13 +5486,58 @@ function ensureActivityGroup(inner, opts){
   }else if(activityKey&&!group.getAttribute('data-activity-disclosure-key')){
     group.setAttribute('data-activity-disclosure-key',activityKey);
   }
-  if(live){
-    _setActivityElapsedStartedAt(group);
-    _ensureLiveActivityBaseline(group);
+  if(burstId&&!group.getAttribute('data-activity-burst-id')) group.setAttribute('data-activity-burst-id',burstId);
+  const anchor=opts.anchor||null;
+  if(anchor&&anchor.parentElement===inner&&group.parentElement===inner&&group.previousElementSibling!==anchor){
+    anchor.insertAdjacentElement('afterend',group);
   }
   _syncToolCallGroupSummary(group);
-  if(live) _startActivityElapsedTimer(group);
   return group;
+}
+function normalizeLiveActivityGroupPlacement(turn){
+  const blocks=_assistantTurnBlocks(turn);
+  if(!blocks) return;
+  const groups=Array.from(blocks.querySelectorAll('.tool-call-group[data-live-tool-call-group="1"][data-activity-burst-id]'));
+  groups.sort((a,b)=>{
+    const av=Number(a.getAttribute('data-activity-burst-id'));
+    const bv=Number(b.getAttribute('data-activity-burst-id'));
+    if(Number.isFinite(av)&&Number.isFinite(bv)&&av!==bv) return av-bv;
+    return 0;
+  });
+  for(const group of groups){
+    const burstId=group.getAttribute('data-activity-burst-id')||'';
+    if(!burstId) continue;
+    const anchor=blocks.querySelector(`[data-live-assistant="1"][data-activity-burst-id="${CSS.escape(burstId)}"]`);
+    if(anchor&&group.previousElementSibling!==anchor) anchor.insertAdjacentElement('afterend',group);
+  }
+}
+function ensureRunActivityGroup(inner, opts){
+  opts=opts||{};
+  if(!inner) return null;
+  let group=inner.querySelector('.tool-call-group[data-run-activity-group="1"]');
+  if(!group){
+    group=document.createElement('div');
+    const collapsed=opts.collapsed!==false;
+    group.className='tool-call-group agent-activity-group run-activity-group'+(collapsed?' tool-call-group-collapsed':'');
+    group.setAttribute('data-tool-call-group','1');
+    group.setAttribute('data-agent-activity-group','1');
+    group.setAttribute('data-run-activity-group','1');
+    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="_toggleActivityGroup(this)"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-duration"></span></button><div class="tool-call-group-body"></div>`;
+    if(inner.firstChild) inner.insertBefore(group, inner.firstChild);
+    else inner.appendChild(group);
+  }
+  if(opts.turnDuration!==undefined&&opts.turnDuration!==null) group.setAttribute('data-turn-duration',String(opts.turnDuration));
+  if(opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
+  _setActivityElapsedStartedAt(group);
+  _ensureLiveActivityBaseline(group);
+  _syncToolCallGroupSummary(group);
+  if(opts.live!==false) _startActivityElapsedTimer(group);
+  return group;
+}
+function ensureRunActivityForCurrentTurn(){
+  const turn=$('liveAssistantTurn');
+  const blocks=_assistantTurnBlocks(turn);
+  return ensureRunActivityGroup(blocks,{live:true,collapsed:true});
 }
 function closeCurrentLiveActivityGroup(){
   const turn=$('liveAssistantTurn');
@@ -6153,6 +6216,31 @@ function _cliToolCardHasDiffSnippet(resultSnippet, patchSnippet){
   return !!patchSnippet || _cliLooksLikePatchDiff(resultSnippet);
 }
 
+function _assistantMessageHasVisibleContent(m){
+  if(!m||m.role!=='assistant') return false;
+  const content=m.content;
+  if(typeof content==='string') return !!content.trim();
+  if(!Array.isArray(content)) return false;
+  return content.some(part=>{
+    if(typeof part==='string') return !!part.trim();
+    if(!part||typeof part!=='object') return false;
+    if(part.type==='text'||part.type==='input_text'||part.type==='output_text'){
+      return !!String(part.text||part.content||'').trim();
+    }
+    return false;
+  });
+}
+
+function _assistantToolAnchorIdxForMessage(messages, rawIdx){
+  const list=Array.isArray(messages)?messages:[];
+  const current=list[rawIdx];
+  if(_assistantMessageHasVisibleContent(current)) return rawIdx;
+  for(let idx=rawIdx-1;idx>=0;idx--){
+    if(_assistantMessageHasVisibleContent(list[idx])) return idx;
+  }
+  return rawIdx;
+}
+
 function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
@@ -6508,6 +6596,9 @@ function renderMessages(options){
       if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
       seg.setAttribute('data-live-assistant','1');
     }
+    if(m._activityBurstId!==undefined&&m._activityBurstId!==null){
+      seg.setAttribute('data-activity-burst-id',String(m._activityBurstId));
+    }
     if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
     if(thinkingText&&window._showThinking!==false){
       if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
@@ -6647,7 +6738,33 @@ function renderMessages(options){
       }
     });
     const derived=[];
+    const liveToolMetadata=Array.isArray(S._settledLiveToolMetadata)
+      ? S._settledLiveToolMetadata
+      : (Array.isArray(S.toolCalls)?S.toolCalls:[]);
+    const liveMetadataByTid=new Map();
+    liveToolMetadata.forEach((tc,idx)=>{
+      if(!tc||typeof tc!=='object') return;
+      const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+      if(tid&&!liveMetadataByTid.has(tid)) liveMetadataByTid.set(tid,{tc,idx});
+    });
+    const usedLiveToolMetadata=new Set();
+    const copyLiveToolMetadata=(next,name,tid)=>{
+      let matchEntry=tid?liveMetadataByTid.get(tid):null;
+      if(!matchEntry){
+        const matchIdx=liveToolMetadata.findIndex((tc,i)=>tc&&!usedLiveToolMetadata.has(i)&&(!name||tc.name===name));
+        if(matchIdx>=0) matchEntry={tc:liveToolMetadata[matchIdx],idx:matchIdx};
+      }
+      if(matchEntry){
+        usedLiveToolMetadata.add(matchEntry.idx);
+        const live=matchEntry.tc||{};
+        for(const key of ['activityBurstId','duration','started_at']){
+          if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
+        }
+      }
+      return next;
+    };
     fallbackToolSources.forEach(({m,rawIdx})=>{
+      const assistantToolAnchorIdx=_assistantToolAnchorIdxForMessage(S.messages,rawIdx);
       // OpenAI format: top-level tool_calls field on the assistant message
       (m.tool_calls||[]).forEach(tc=>{
         if(!tc||typeof tc!=='object') return;
@@ -6660,15 +6777,15 @@ function renderMessages(options){
         const resultSnippet=resultsByTid[tid]||'';
         let argsSnap={};
         Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-        derived.push({
+        derived.push(copyLiveToolMetadata({
           name,
           snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
           is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
           tid,
-          assistant_msg_idx:rawIdx,
+          assistant_msg_idx:assistantToolAnchorIdx,
           args:argsSnap,
           done:true,
-        });
+        }, name, tid));
       });
       // Anthropic format: tool_use blocks inside assistant content array
       if(Array.isArray(m.content)){
@@ -6683,19 +6800,20 @@ function renderMessages(options){
           if(args && typeof args==='object'){
             Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
           }
-          derived.push({
+          derived.push(copyLiveToolMetadata({
             name,
             snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
             is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
-            assistant_msg_idx:rawIdx,
+            assistant_msg_idx:assistantToolAnchorIdx,
             args:argsSnap,
             done:true,
-          });
+          }, name, tid));
         });
       }
     });
     if(derived.length) S.toolCalls=derived;
+    if(S._settledLiveToolMetadata) S._settledLiveToolMetadata=null;
   }
   if(!S.busy){
     inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"])').forEach(el=>el.remove());
@@ -6706,26 +6824,83 @@ function renderMessages(options){
       byAssistant[key].push(tc);
     }
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
+    const _assistantAnchorForActivity=(aIdx,burstId)=>{
+      const wantedBurst=burstId!==undefined&&burstId!==null&&String(burstId)!==''&&String(burstId)!=='0'?String(burstId):'';
+      if(wantedBurst){
+        for(const seg of assistantSegments.values()){
+          if(seg&&seg.getAttribute('data-activity-burst-id')===wantedBurst) return seg;
+        }
+      }
+      let anchorRow=assistantSegments.get(aIdx)||null;
+      if(!anchorRow&&assistantIdxs.length){
+        if(aIdx<assistantIdxs[0]) return null;
+        const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+        anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+      }
+      return anchorRow;
+    };
+    const _ensureSettledRunActivityForAnchor=(anchorRow)=>{
+      if(!anchorRow) return;
+      const turn=anchorRow.closest('.assistant-turn');
+      const blocks=_assistantTurnBlocks(turn);
+      if(!blocks) return;
+      let duration;
+      for(const seg of blocks.querySelectorAll('.assistant-segment')){
+        const idx=Number(seg.dataset&&seg.dataset.msgIdx);
+        const msg=Number.isFinite(idx)?S.messages[idx]:null;
+        if(msg&&msg._turnDuration!==undefined) duration=msg._turnDuration;
+      }
+      ensureRunActivityGroup(blocks,{live:false,collapsed:true,turnDuration:duration});
+    };
     const anchorInsertAfter = new Map();
     if(isSimplifiedToolCalling()){
-      const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
-      for(const aIdx of activityIdxs){
-        const cards=byAssistant[aIdx]||[];
-        let anchorRow=assistantSegments.get(aIdx)||null;
-        if(!anchorRow&&assistantIdxs.length){
-          if(aIdx<assistantIdxs[0]) continue;
-          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+      const byActivity = new Map();
+      const activityOrder = [];
+      const ensureActivityBucket=(key,aIdx,burstId)=>{
+        if(!byActivity.has(key)){
+          const entry={key,aIdx,burstId,cards:[],thinkingIdx:null};
+          byActivity.set(key,entry);
+          activityOrder.push(entry);
         }
+        return byActivity.get(key);
+      };
+      for(const tc of (S.toolCalls||[])){
+        if(!tc) continue;
+        const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
+        const burstId=tc.activityBurstId!==undefined&&tc.activityBurstId!==null&&String(tc.activityBurstId)!=='0'?String(tc.activityBurstId):'';
+        const key=burstId?`burst:${burstId}`:`assistant:${aIdx}`;
+        ensureActivityBucket(key,aIdx,burstId).cards.push(tc);
+      }
+      for(const aIdx of assistantThinking.keys()){
+        const seg=assistantSegments.get(aIdx);
+        const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
+        const key=burstId?`burst:${burstId}`:`assistant:${aIdx}`;
+        const entry=ensureActivityBucket(key,aIdx,burstId);
+        if(entry.thinkingIdx===null) entry.thinkingIdx=aIdx;
+      }
+      activityOrder.sort((a,b)=>{
+        const anchorA=_assistantAnchorForActivity(a.aIdx,a.burstId);
+        const anchorB=_assistantAnchorForActivity(b.aIdx,b.burstId);
+        const idxA=(anchorA&&anchorA.parentElement)?Array.prototype.indexOf.call(anchorA.parentElement.children,anchorA):Number.MAX_SAFE_INTEGER;
+        const idxB=(anchorB&&anchorB.parentElement)?Array.prototype.indexOf.call(anchorB.parentElement.children,anchorB):Number.MAX_SAFE_INTEGER;
+        if(idxA!==idxB) return idxA-idxB;
+        const burstA=a.burstId===''?Number.MAX_SAFE_INTEGER:Number(a.burstId);
+        const burstB=b.burstId===''?Number.MAX_SAFE_INTEGER:Number(b.burstId);
+        if(Number.isFinite(burstA)&&Number.isFinite(burstB)&&burstA!==burstB) return burstA-burstB;
+        return a.aIdx-b.aIdx;
+      });
+      for(const entry of activityOrder){
+        const {aIdx,burstId,cards,thinkingIdx}=entry;
+        const anchorRow=_assistantAnchorForActivity(aIdx,burstId);
         if(!anchorRow) continue;
         const anchorParent=anchorRow.parentElement;
         let insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode,activityKey:`assistant:${aIdx}`});
-        const sourceMsg=S.messages[aIdx]||{};
-        if(sourceMsg._turnDuration!==undefined) group.setAttribute('data-turn-duration', String(sourceMsg._turnDuration));
+        _ensureSettledRunActivityForAnchor(anchorRow);
+        const activityKey=burstId?`assistant:${aIdx}:burst:${burstId}`:`assistant:${aIdx}`;
+        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode,activityKey,burstId});
         const body=group&&group.querySelector('.tool-call-group-body');
         if(!body) continue;
-        const thinkingText=assistantThinking.get(aIdx);
+        const thinkingText=thinkingIdx!==null?assistantThinking.get(thinkingIdx):'';
         if(thinkingText){
           body.appendChild(_thinkingActivityNode(thinkingText, false));
         }
@@ -6738,13 +6913,9 @@ function renderMessages(options){
     }else if(S.toolCalls && S.toolCalls.length){
       for(const [key, cards] of Object.entries(byAssistant)){
         const aIdx = parseInt(key);
-        let anchorRow=assistantSegments.get(aIdx)||null;
-        if(!anchorRow&&assistantIdxs.length){
-          if(aIdx<assistantIdxs[0]) continue;
-          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
-        }
+        const anchorRow=_assistantAnchorForActivity(aIdx,'');
         if(!anchorRow) continue;
+        _ensureSettledRunActivityForAnchor(anchorRow);
         const anchorParent=anchorRow.parentElement;
         const frag=document.createDocumentFragment();
         let lastInsertedNode=null;
@@ -6920,6 +7091,8 @@ function buildToolCard(tc){
   const moreLabel=tc.is_diff?'Show diff':'Show more';
   const lessLabel=tc.is_diff?'Hide diff':'Show less';
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
+  const durationText=tc.duration!==undefined&&tc.duration!==null?_formatTurnDuration(tc.duration):'';
+  const durationHtml=durationText?`<span class="tool-card-duration">Done in ${esc(durationText)}</span>`:'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
@@ -6934,6 +7107,7 @@ function buildToolCard(tc){
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name">${esc(displayName)}</span>
         <span class="tool-card-preview">${esc(previewText)}</span>
+        ${durationHtml}
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       </div>
       ${hasDetail?`<div class="tool-card-detail">
@@ -6956,6 +7130,9 @@ function _syncToolCallGroupSummary(group){
   const label=group.querySelector('.tool-call-group-label');
   const durationEl=group.querySelector('.tool-call-group-duration');
   if(label){
+    if(group.getAttribute('data-run-activity-group')==='1'){
+      label.textContent='Activity';
+    }else
     if(group.getAttribute('data-live-tool-call-group')==='1'){
       label.textContent=toolCount?`Activity: ${toolCount} tool${toolCount===1?'':'s'}`:'Activity · Running';
     }else if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
@@ -6963,13 +7140,15 @@ function _syncToolCallGroupSummary(group){
     label.setAttribute('data-sweep-label', label.textContent);
   }
   if(durationEl){
-    if(group.getAttribute('data-live-tool-call-group')==='1'){
-      const activeText=_activityElapsedLabel(group);
-      const progressText=_activityLiveProgressLabel(group);
-      if(activeText) group.setAttribute('data-active-turn-elapsed',activeText);
-      else group.removeAttribute('data-active-turn-elapsed');
-      durationEl.textContent=[progressText, activeText].filter(Boolean).join(' · ');
+    if(group.getAttribute('data-run-activity-group')==='1'){
+      const durationText=_formatTurnDuration(group.dataset.turnDuration);
+      const activeText=durationText?'':_activityElapsedLabel(group);
+      durationEl.textContent=durationText?`Done in ${durationText}`:(activeText?`Working for ${activeText}`:'');
       durationEl.style.display=durationEl.textContent?'':'none';
+    }else if(group.getAttribute('data-live-tool-call-group')==='1'){
+      group.removeAttribute('data-active-turn-elapsed');
+      durationEl.textContent='';
+      durationEl.style.display='none';
     }else{
       const durationText=_formatTurnDuration(group.dataset.turnDuration);
       durationEl.textContent=durationText?`Done in ${durationText}`:'';
@@ -7022,6 +7201,7 @@ function appendLiveToolCard(tc){
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return;
+  if(typeof ensureRunActivityGroup==='function') ensureRunActivityGroup(inner,{live:true,collapsed:true});
   const tid=tc.tid||'';
   if(!isSimplifiedToolCalling()){
     // Update existing card in place (tool_complete after tool_start)
@@ -7062,22 +7242,13 @@ function appendLiveToolCard(tc){
     return;
   }
   const children=Array.from(inner.children);
-  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')).pop();
-  const group=ensureActivityGroup(inner,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
+  const burstId=tc.activityBurstId!==undefined&&tc.activityBurstId!==null&&String(tc.activityBurstId)!=='0'?String(tc.activityBurstId):'';
+  const burstAnchor=burstId?inner.querySelector(`[data-live-assistant="1"][data-activity-burst-id="${CSS.escape(burstId)}"]`):null;
+  const anchor=burstAnchor||children.filter(el=>el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')).pop();
+  const group=ensureActivityGroup(inner,{live:true,collapsed:true,anchor,activityKey:burstId?`live:${S.activeStreamId}:burst:${burstId}`:_activityKeyForLiveTurn(),burstId});
   const body=group.querySelector('.tool-call-group-body');
-  const toolName=_toolDisplayName(tc);
-  const toolEventId=tid?`tool-${tid}`:`tool-${String(tc.name||'tool').replace(/[^a-z0-9_-]/gi,'_')}`;
-  const toolDone=tc.done!==false;
-  _appendActivityEvent(group,{
-    id:toolEventId,
-    kind:'tool',
-    label:toolDone?`Tool finished: ${toolName}`:`Running tool: ${toolName}`,
-    detail:tc.preview||tc.snippet||'',
-    status:toolDone?(tc.is_error?'error':'done'):'waiting',
-    ts:_activityNowSeconds(),
-  });
   const waiting=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"] .agent-activity-status-label');
-  if(waiting&&!toolDone) waiting.textContent='Waiting on tool result';
+  if(waiting&&tc.done===false) waiting.textContent='Waiting on tool result';
   // Update existing card in place (tool_complete after tool_start)
   if(tid){
     const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
@@ -7880,6 +8051,7 @@ function appendThinking(text='', options){
   }
   const blocks=_assistantTurnBlocks(turn);
   if(!blocks) return;
+  if(typeof ensureRunActivityGroup==='function') ensureRunActivityGroup(blocks,{live:true,collapsed:true});
   if(!isSimplifiedToolCalling()){
     let row=$('thinkingRow');
     if(!row){
@@ -7914,6 +8086,10 @@ function appendThinking(text='', options){
   }
   const thinkingText=String(text||'').trim()||'Thinking…';
   const cleanThinking=_sanitizeThinkingDisplayText(thinkingText);
+  if(!cleanThinking||cleanThinking==='Thinking…'){
+    scrollIfPinned();
+    return;
+  }
   const allChildren=Array.from(blocks.children);
   const anchor=allChildren.filter(el=>
     el.id!=='toolRunningRow' &&
@@ -7922,18 +8098,6 @@ function appendThinking(text='', options){
   const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
   const body=group&&group.querySelector('.tool-call-group-body');
   if(!body) return;
-  if(!cleanThinking||cleanThinking==='Thinking…'){
-    const label=body.querySelector('.tool-card.tool-card-running')?'Waiting on tool result':'Waiting on model';
-    const detail=body.querySelector('.tool-card-row')
-      ? 'The agent is running; tool results and response text will appear here.'
-      : 'No tool activity has been reported yet.';
-    _appendActivityEvent(group,{id:'thinking-placeholder',kind:'waiting',label,detail,status:'waiting',ts:_activityNowSeconds()});
-    const active=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
-    if(active) active.removeAttribute('data-thinking-active');
-    _syncToolCallGroupSummary(group);
-    scrollIfPinned();
-    return;
-  }
   const placeholder=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"]');
   if(placeholder) placeholder.remove();
   let row=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
@@ -7970,7 +8134,7 @@ function removeThinking(){
   const turn=$('liveAssistantTurn');
   const blocks=_assistantTurnBlocks(turn);
   if(blocks) blocks.querySelectorAll('.agent-activity-thinking').forEach(el=>el.remove());
-  if(blocks) blocks.querySelectorAll('.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
+  if(blocks) blocks.querySelectorAll('.tool-call-group[data-agent-activity-group="1"]:not([data-run-activity-group])').forEach(group=>{
     _syncToolCallGroupSummary(group);
     if(!group.querySelector('.tool-card-row,.agent-activity-thinking')){
       if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();

@@ -160,6 +160,7 @@ class TestReconnectAccumulatorPreservation:
         # from INFLIGHT so the already-rendered content survives the session switch.
         assert ("let assistantText=''" in prelude
                 or 'let assistantText = _lastLiveAssistant' in prelude
+                or 'let assistantText=_lastLiveAssistant' in prelude
                 or 'let assistantText = ""' in prelude), (
             "assistantText must be initialised at closure scope — "
             "this is the only legitimate reset; _wireSSE must not re-reset"
