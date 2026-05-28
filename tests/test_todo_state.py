@@ -342,6 +342,90 @@ class TestDeriveTodoState:
         assert state["todos"][0]["id"] == "early"
 
 
+class TestDeriveTodoStateTimestamp:
+    """Recency-floor behaviour for the cold-load ``ts`` field.
+
+    These pin the fix for the "shows an old todo list" bug: a context
+    compression/rebuild can strip the ``timestamp`` off the latest todo
+    tool message (it ends up ``None`` on disk). derive_todo_state still
+    finds the correct latest todos by position, but if it emits a
+    snapshot with no ``ts``, the frontend reads coldTs=0 and a stale-but-
+    timestamped INFLIGHT snapshot wins the recency reconcile, rendering a
+    historical list. The latest-by-position snapshot must therefore carry
+    a ts >= any earlier todo write's ts even when its own field is lost.
+    """
+
+    def test_uses_own_timestamp_when_present(self):
+        msg = {**_todo_msg([{"id": "1", "content": "x", "status": "pending"}]),
+               "timestamp": 1234.5}
+        state = derive_todo_state([msg])
+        assert state is not None
+        assert state["ts"] == 1234.5
+
+    def test_no_ts_field_when_no_timestamps_anywhere(self):
+        # Nothing in the history carries a timestamp -> snapshot omits ts
+        # entirely (matches the historical contract for un-timestamped
+        # sessions; the frontend treats missing ts as coldTs=0).
+        state = derive_todo_state([
+            _todo_msg([{"id": "1", "content": "x", "status": "pending"}]),
+        ])
+        assert state is not None
+        assert "ts" not in state
+
+    def test_falls_back_to_max_prior_timestamp_when_latest_todo_ts_lost(self):
+        # The latest todo message lost its timestamp during compression,
+        # but earlier messages still carry real timestamps. The cold-load
+        # ts must floor to the max prior timestamp so it cannot lose a
+        # recency comparison against a stale earlier todo snapshot.
+        msgs = [
+            {"role": "user", "content": "go", "timestamp": 100.0},
+            {"role": "assistant", "content": "ok", "timestamp": 200.0},
+            # earlier todo that an INFLIGHT snapshot might still hold
+            {**_todo_msg([{"id": "old", "content": "v1", "status": "pending"}]),
+             "timestamp": 250.0},
+            {"role": "assistant", "content": "more", "timestamp": 300.0},
+            # latest todo — timestamp stripped by compression
+            {**_todo_msg([{"id": "new", "content": "v2", "status": "in_progress"}]),
+             "timestamp": None},
+        ]
+        state = derive_todo_state(msgs)
+        assert state is not None
+        # correct latest list by position
+        assert state["todos"][0]["id"] == "new"
+        # ts floored to the max prior timestamp (300.0), strictly greater
+        # than the earlier todo's 250.0 so cold-load wins the reconcile
+        assert state["ts"] == 300.0
+
+    def test_fallback_floor_does_not_borrow_future_timestamp(self):
+        # The recency floor scans only messages at or before the todo's
+        # position, so a later message's timestamp is never borrowed.
+        msgs = [
+            {"role": "user", "content": "go", "timestamp": 100.0},
+            # latest todo (by position) with no timestamp
+            {**_todo_msg([{"id": "new", "content": "v2", "status": "pending"}]),
+             "timestamp": None},
+            # a message AFTER the todo with a large timestamp — must be
+            # ignored by the floor since it comes later in the transcript
+            {"role": "assistant", "content": "later", "timestamp": 9999.0},
+        ]
+        state = derive_todo_state(msgs)
+        assert state is not None
+        assert state["todos"][0]["id"] == "new"
+        # floor is 100.0 (the only prior timestamp), NOT 9999.0
+        assert state["ts"] == 100.0
+
+    def test_malformed_own_timestamp_uses_floor(self):
+        # A non-numeric timestamp coerces to 0 and triggers the floor.
+        msgs = [
+            {"role": "user", "content": "go", "timestamp": 500.0},
+            {**_todo_msg([{"id": "1", "content": "x", "status": "pending"}]),
+             "timestamp": "not-a-number"},
+        ]
+        state = derive_todo_state(msgs)
+        assert state is not None
+        assert state["ts"] == 500.0
+
+
 # ---------------------------------------------------------------------------
 # Module-level constants
 # ---------------------------------------------------------------------------

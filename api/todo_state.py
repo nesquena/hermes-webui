@@ -47,7 +47,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 
 logger = logging.getLogger(__name__)
@@ -134,7 +134,8 @@ def derive_todo_state(messages: Optional[Iterable[dict]]) -> Optional[dict]:
     # always pass a list, so this branch is normally a no-op.
     if not isinstance(messages, (list, tuple)):
         messages = list(messages)
-    for msg in reversed(messages):
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
         if not isinstance(msg, dict) or msg.get("role") != "tool":
             continue
         content = msg.get("content", "")
@@ -146,17 +147,56 @@ def derive_todo_state(messages: Optional[Iterable[dict]]) -> Optional[dict]:
             continue
         snapshot = _normalize_snapshot(data)
         if snapshot is not None:
-            # Carry the source message timestamp so the frontend can
-            # reconcile cold-load vs. INFLIGHT snapshots by recency.
-            ts_raw = msg.get("timestamp")
-            try:
-                ts_val = float(ts_raw) if ts_raw is not None else 0.0
-            except (TypeError, ValueError):
-                ts_val = 0.0
+            # Carry a timestamp so the frontend can reconcile cold-load
+            # vs. INFLIGHT snapshots by recency.
+            #
+            # Primary source: this message's own ``timestamp``. But a
+            # todo tool message can lose its timestamp during context
+            # compression/rebuild — the on-disk message ends up with
+            # ``timestamp=None``. If we emit a snapshot with no ``ts``,
+            # the frontend reads coldTs=0 and a STALE-but-timestamped
+            # INFLIGHT snapshot wins the recency comparison, so the panel
+            # renders a historical todo list. This is the latest-by-
+            # POSITION snapshot, so it must never lose recency to an
+            # earlier list. When this message has no usable timestamp,
+            # fall back to the max timestamp seen anywhere at or before
+            # this position — guaranteeing cold ts >= any earlier todo
+            # write's ts.
+            ts_val = _message_ts_float(msg.get("timestamp"))
+            if ts_val <= 0:
+                ts_val = _max_timestamp_through(messages, idx)
             if ts_val > 0:
                 snapshot["ts"] = ts_val
             return snapshot
     return None
+
+
+def _message_ts_float(ts_raw: Any) -> float:
+    """Coerce a message ``timestamp`` field to a positive float, or 0.0."""
+    try:
+        return float(ts_raw) if ts_raw is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _max_timestamp_through(messages: "Sequence[Any]", upto_idx: int) -> float:
+    """Largest valid ``timestamp`` among messages[0:upto_idx+1].
+
+    Used as a recency floor when the latest todo message itself lost its
+    timestamp during compression/rebuild. Scanning only up to the todo's
+    position keeps the floor causally correct — it never borrows a
+    timestamp from a message that came after the todo write.
+    """
+    best = 0.0
+    end = min(upto_idx, len(messages) - 1)
+    for i in range(end, -1, -1):
+        m = messages[i]
+        if not isinstance(m, dict):
+            continue
+        ts = _message_ts_float(m.get("timestamp"))
+        if ts > best:
+            best = ts
+    return best
 
 
 def emit_todo_state(

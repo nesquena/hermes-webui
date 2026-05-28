@@ -40,6 +40,12 @@ does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
   to implement those slices.
 - [`docs/rfcs/turn-journal.md`](rfcs/turn-journal.md): proposed crash-safe
   write-ahead journal for browser-originated chat turns.
+- [`docs/rfcs/todo-state-contract.md`](rfcs/todo-state-contract.md): implemented
+  contract for the realtime Todos panel — `todo_state` wire format, the cold-load
+  vs INFLIGHT reconciliation rule, the `ts` recency floor, and how it layers on
+  the run-journal / partial-output recovery machinery. Read this before touching
+  `api/todo_state.py`, the `todo_state` SSE emit/attach sites, or the frontend
+  Todos panel hydration.
 - [`docs/rfcs/README.md`](rfcs/README.md): RFC conventions and current RFC index.
 
 When a change touches streaming, recovery, replay, compression, context
