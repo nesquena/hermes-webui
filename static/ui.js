@@ -4375,6 +4375,9 @@ function _compactInflightState(state){
     messages,
     uploaded:Array.isArray(state.uploaded)?state.uploaded.slice(-20):[],
     toolCalls,
+    lastAssistantText:state.lastAssistantText||'',
+    lastReasoningText:state.lastReasoningText||'',
+    lastRunJournalSeq:state.lastRunJournalSeq||0,
   }, limits.stringChars);
 }
 function _writeInflightStateMap(all){

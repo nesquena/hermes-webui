@@ -396,7 +396,22 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         self.assertTrue(callable(init_kwargs["interim_assistant_callback"]))
         self.assertIn("WebUI progress guidance", captured["agent"].ephemeral_system_prompt)
         self.assertIn("Match the normal Hermes messaging style", captured["agent"].ephemeral_system_prompt)
-        self.assertIn("user-visible progress updates", captured["agent"].ephemeral_system_prompt)
+        self.assertIn(
+            "do not let long tool-running WebUI turns appear silent",
+            captured["agent"].ephemeral_system_prompt,
+        )
+        self.assertIn(
+            "provide brief user-visible progress updates as normal assistant content",
+            captured["agent"].ephemeral_system_prompt,
+        )
+        self.assertIn(
+            "Do not keep all progress only in reasoning, thinking, or tool-result channels",
+            captured["agent"].ephemeral_system_prompt,
+        )
+        self.assertNotIn(
+            "you may provide brief user-visible progress updates",
+            captured["agent"].ephemeral_system_prompt,
+        )
 
         interim_events = []
         while not fake_queue.empty():
@@ -405,13 +420,13 @@ class TestRuntimeRouteInjection(unittest.TestCase):
             except queue.Empty:
                 break
         self.assertTrue(
-            any(event == "interim_assistant" for event, _ in interim_events),
+            any(event == "interim_assistant" for event, *_ in interim_events),
             "interim_assistant callback should emit interim_assistant SSE events",
         )
         self.assertTrue(
             any(
                 event == "interim_assistant" and event_data.get("text") == "Inspecting repo structure."
-                for event, event_data in interim_events
+                for event, event_data, *_ in interim_events
             ),
             "interim_assistant event should carry the assistant commentary text"
         )

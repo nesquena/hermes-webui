@@ -4591,9 +4591,21 @@ class StreamChannel:
     def __init__(self):
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue] = []
-        self._offline_buffer: list[tuple[str, object]] = []
+        self._offline_buffer: list[tuple[str, object] | tuple[str, object, str | None]] = []
+        self._last_event_id: str | None = None
+
+    @staticmethod
+    def _event_id_from_item(item) -> str | None:
+        if isinstance(item, tuple) and len(item) >= 3:
+            event_id = item[2]
+            return str(event_id) if event_id else None
+        return None
 
     def subscribe(self) -> queue.Queue:
+        q, _snapshot = self.subscribe_with_snapshot()
+        return q
+
+    def subscribe_with_snapshot(self) -> tuple[queue.Queue, dict[str, object]]:
         q: queue.Queue = queue.Queue()
         with self._lock:
             # Replay buffered events to the new subscriber INSIDE the lock so a
@@ -4604,7 +4616,17 @@ class StreamChannel:
             for item in self._offline_buffer:
                 q.put_nowait(item)
             self._subscribers.append(q)
-        return q
+            snapshot = {
+                "subscriber_count": len(self._subscribers),
+                "offline_buffered_events": len(self._offline_buffer),
+                "offline_buffered_event_ids": [
+                    event_id
+                    for event_id in (self._event_id_from_item(item) for item in self._offline_buffer)
+                    if event_id
+                ],
+                "last_event_id": self._last_event_id,
+            }
+        return q, snapshot
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
@@ -4613,8 +4635,11 @@ class StreamChannel:
             except ValueError:
                 pass
 
-    def put_nowait(self, item: tuple[str, object]) -> None:
+    def put_nowait(self, item: tuple[str, object] | tuple[str, object, str | None]) -> None:
         with self._lock:
+            event_id = self._event_id_from_item(item)
+            if event_id:
+                self._last_event_id = event_id
             subscribers = list(self._subscribers)
             if not subscribers:
                 self._offline_buffer.append(item)
@@ -4629,6 +4654,12 @@ class StreamChannel:
             return {
                 "subscriber_count": len(self._subscribers),
                 "offline_buffered_events": len(self._offline_buffer),
+                "offline_buffered_event_ids": [
+                    event_id
+                    for event_id in (self._event_id_from_item(item) for item in self._offline_buffer)
+                    if event_id
+                ],
+                "last_event_id": self._last_event_id,
             }
 
 

@@ -625,7 +625,20 @@ function closeLiveStream(sessionId, streamId, source){
   // finishes and a metadata refresh swaps in the final reply.
   // If the stream is terminating cleanly, _clearOwnerInflightState() has
   // already deleted INFLIGHT[sessionId], so this is a safe no-op.
-  if(INFLIGHT[sessionId]) INFLIGHT[sessionId].reattach=true;
+  if(INFLIGHT[sessionId]){
+    INFLIGHT[sessionId].reattach=true;
+    if(typeof saveInflightState==='function'){
+      saveInflightState(sessionId,{
+        streamId:live.streamId||streamId||null,
+        messages:INFLIGHT[sessionId].messages||[],
+        uploaded:INFLIGHT[sessionId].uploaded||[],
+        toolCalls:INFLIGHT[sessionId].toolCalls||[],
+        lastAssistantText:INFLIGHT[sessionId].lastAssistantText||'',
+        lastReasoningText:INFLIGHT[sessionId].lastReasoningText||'',
+        lastRunJournalSeq:INFLIGHT[sessionId].lastRunJournalSeq||0,
+      });
+    }
+  }
 }
 
 function closeOtherLiveStreams(activeSid){
@@ -663,11 +676,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // empty and tokens arriving on the new SSE connection append to nothing —
   // the already-rendered content vanishes.
   const _lastLiveAssistant = reconnecting
-    ? INFLIGHT[activeSid]?.messages?.findLast?.(m => m.role === 'assistant' && m._live)
-    : null;
-  let assistantText = _lastLiveAssistant ? (_lastLiveAssistant.content || '') : '';
-  let reasoningText = _lastLiveAssistant ? (_lastLiveAssistant.reasoning || '') : '';
-  let liveReasoningText = reasoningText;
+    ? (INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastAssistantText)
+      || (INFLIGHT[activeSid]?.messages?.findLast?.(m => m.role === 'assistant' && m._live)?.content || '')
+    : '';
+  const _lastLiveReasoning = reconnecting
+    ? (INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastReasoningText)
+      || (INFLIGHT[activeSid]?.messages?.findLast?.(m => m.role === 'assistant' && m._live)?.reasoning || '')
+    : '';
+  let assistantText=_lastLiveAssistant;
+  let reasoningText=_lastLiveReasoning;
+  let liveReasoningText=_lastLiveReasoning;
   let visibleInterimSnippets=[];
   let _latestGoalStatus=null;
   let _pendingGoalContinuation=null;
@@ -748,6 +766,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       messages:inflight.messages||[],
       uploaded:inflight.uploaded||[...uploaded],
       toolCalls:inflight.toolCalls||[],
+      lastAssistantText:inflight.lastAssistantText||'',
+      lastReasoningText:inflight.lastReasoningText||'',
+      lastRunJournalSeq:inflight.lastRunJournalSeq||0,
     });
   }
   function snapshotLiveTurn(){
@@ -784,6 +805,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function syncInflightAssistantMessage(){
     const inflight=INFLIGHT[activeSid];
     if(!inflight) return;
+    inflight.lastAssistantText=assistantText;
+    inflight.lastReasoningText=reasoningText;
     if(!Array.isArray(inflight.messages)) inflight.messages=[];
     let assistantIdx=-1;
     for(let i=inflight.messages.length-1;i>=0;i--){
@@ -862,7 +885,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
           if(st.active){
             setComposerStatus('Reconnected');
-            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
+            _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
           }
         }
@@ -918,7 +941,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamFadeReduceMotionMql=null;
   let _streamFadeReduceMotion=false;
   let _streamFadeReduceMotionOnChange=null;
-  let _lastRunJournalSeq=0;
+  let _lastRunJournalSeq=reconnecting
+    ? Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalSeq)||0)
+    : 0;
   const _STREAM_FADE_MS=200;
   const _STREAM_FADE_MAX_MS=350;
   const _STREAM_FADE_STAGGER_MS=16;
@@ -1430,12 +1455,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _smdEndParser();
     _resetStreamFadeState();
   }
-  function _rememberRunJournalCursor(e){
+  function _runJournalSeqFromEvent(e){
     const raw=String(e&&e.lastEventId||'').trim();
-    if(!raw) return;
+    if(!raw) return 0;
     const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
     const seq=Number.parseInt(tail,10);
-    if(Number.isFinite(seq)&&seq>_lastRunJournalSeq) _lastRunJournalSeq=seq;
+    return Number.isFinite(seq)?seq:0;
+  }
+  function _rememberRunJournalCursor(e){
+    const seq=_runJournalSeqFromEvent(e);
+    if(Number.isFinite(seq)&&seq>_lastRunJournalSeq){
+      _lastRunJournalSeq=seq;
+      if(INFLIGHT[activeSid]) INFLIGHT[activeSid].lastRunJournalSeq=_lastRunJournalSeq;
+    }
   }
   function _runJournalReplayAfterSeq(){
     return Math.max(0,_lastRunJournalSeq||0);
@@ -2168,7 +2200,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st.active){
               setComposerStatus('Reconnected');
-              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
+              _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${_runJournalReplayParams()}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
             if(st.replay_available){
@@ -2354,7 +2386,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }catch(_){}
     }
-    const replayParams=replayOnly?_runJournalReplayParams():'';
+    const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 

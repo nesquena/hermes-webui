@@ -119,7 +119,8 @@ def test_close_live_stream_marks_inflight_for_reattach_on_return():
         "SSE when the user switches back to a still-streaming session"
     )
     assert re.search(r"INFLIGHT\[\w+\]\s*&&\s*\(?INFLIGHT\[\w+\]\.reattach\s*=\s*true", body) \
-           or re.search(r"if\s*\(\s*INFLIGHT\[\w+\]\s*\)\s*INFLIGHT\[\w+\]\.reattach\s*=\s*true", body), (
+           or re.search(r"if\s*\(\s*INFLIGHT\[\w+\]\s*\)\s*INFLIGHT\[\w+\]\.reattach\s*=\s*true", body) \
+           or re.search(r"if\s*\(\s*INFLIGHT\[\w+\]\s*\)\s*\{[^}]*INFLIGHT\[\w+\]\.reattach\s*=\s*true", body, re.DOTALL), (
         "closeLiveStream() must set INFLIGHT[sessionId].reattach = true "
         "(guarded by an existence check) so loadSession()'s reattach branch fires"
     )

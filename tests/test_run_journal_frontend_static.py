@@ -11,8 +11,16 @@ def test_reattach_path_uses_replay_when_status_reports_journal():
 
     assert "st.replay_available" in block
     assert "replayOnly=true" in block
-    assert "replayOnly?_runJournalReplayParams():''" in block
+    assert "(reconnecting||replayOnly)?_runJournalReplayParams():''" in block
     assert "_clearOwnerInflightState()" in block
+
+
+def test_active_reattach_also_requests_journal_replay_gap():
+    reconnect_pos = MESSAGES_SRC.index("if(st.active){")
+    block = MESSAGES_SRC[reconnect_pos : reconnect_pos + 500]
+
+    assert "_runJournalReplayParams()" in block
+    assert "lastRunJournalSeq" in MESSAGES_SRC
 
 
 def test_error_reconnect_path_can_restore_from_journal():
@@ -26,15 +34,19 @@ def test_error_reconnect_path_can_restore_from_journal():
 
 
 def test_frontend_replay_cursor_uses_eventsource_last_event_id():
+    parser_pos = MESSAGES_SRC.index("function _runJournalSeqFromEvent")
+    parser_block = MESSAGES_SRC[parser_pos : parser_pos + 500]
     cursor_pos = MESSAGES_SRC.index("function _rememberRunJournalCursor")
     block = MESSAGES_SRC[cursor_pos : cursor_pos + 1000]
 
-    assert "e.lastEventId" in block
-    assert "lastIndexOf(':')" in block
+    assert "e.lastEventId" in parser_block
+    assert "lastIndexOf(':')" in parser_block
     assert "_lastRunJournalSeq=seq" in block
+    assert "lastRunJournalSeq" in block
     assert "source.addEventListener(_runJournalEventName,_rememberRunJournalCursor)" in MESSAGES_SRC
     assert "after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}" in MESSAGES_SRC
     assert "after_seq=0" not in MESSAGES_SRC
+    assert "assistantSeq" not in MESSAGES_SRC
 
 
 def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
