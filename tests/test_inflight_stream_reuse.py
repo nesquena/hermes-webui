@@ -273,10 +273,47 @@ assert.strictEqual(merged[merged.length - 1].content, 'Recovered progress text.'
     assert result.returncode == 0, result.stderr
 
 
+def test_running_reattach_projects_live_text_into_activity_burst_segments():
+    """Fallback reattach should rebuild the same process-text/tool-burst
+    timeline even when the DOM snapshot is unavailable.
+    """
+    assert NODE, "node not on PATH"
+    start = SESSIONS_JS.find("function _messageComparableText")
+    end = SESSIONS_JS.find("// Load older messages", start)
+    assert start != -1 and end != -1
+    helper_src = SESSIONS_JS[start:end]
+    script = f"""
+const assert = require('assert');
+{helper_src}
+
+const inflight = {{
+  currentActivityBurstId: 2,
+  activityBurstAnchors: [
+    {{id: 1, textEnd: 'First progress.'.length}},
+    {{id: 2, textEnd: 'First progress.\\n\\nSecond progress.'.length}},
+  ],
+  messages: [
+    {{role:'user', content:'go'}},
+    {{role:'assistant', _live:true, content:'First progress.\\n\\nSecond progress.\\n\\nTail progress.'}},
+  ],
+}};
+const projected = _projectInflightMessagesForActivityBursts(inflight);
+assert.strictEqual(projected.length, 4);
+assert.strictEqual(projected[1].content, 'First progress.');
+assert.strictEqual(projected[1]._activityBurstId, 1);
+assert.strictEqual(projected[2].content, 'Second progress.');
+assert.strictEqual(projected[2]._activityBurstId, 2);
+assert.strictEqual(projected[3].content, 'Tail progress.');
+assert.strictEqual(projected[3]._activityBurstId, 2);
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+
 def test_load_session_rebuilds_live_tail_before_dropping_stale_dom_snapshot():
     body = _function_body(SESSIONS_JS, "loadSession")
     ensure_pos = body.find("_ensureInflightLiveAssistantMessage(INFLIGHT[sid]);")
-    inflight_pos = body.find("const inflightMessages=INFLIGHT[sid].messages||[];")
+    inflight_pos = body.find("const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);")
     prepare_pos = body.find("const liveTailPrepared=_prepareRunningLiveTail(S.messages,inflightMessages);")
     drop_dom_pos = body.find("delete INFLIGHT[sid].liveTurnHtml;")
     drop_assistant_pos = body.find("S.messages=_dropCurrentTurnAssistantMessages(S.messages);")

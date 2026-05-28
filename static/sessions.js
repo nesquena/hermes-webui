@@ -693,13 +693,15 @@ async function loadSession(sid){
         lastAssistantText:String(stored.lastAssistantText||''),
         lastReasoningText:String(stored.lastReasoningText||''),
         lastRunJournalSeq:Number(stored.lastRunJournalSeq||0)||0,
+        currentActivityBurstId:Number(stored.currentActivityBurstId||0)||0,
+        activityBurstAnchors:Array.isArray(stored.activityBurstAnchors)?stored.activityBurstAnchors:[],
       };
     }
   }
 
   if(INFLIGHT[sid]){
     _ensureInflightLiveAssistantMessage(INFLIGHT[sid]);
-    const inflightMessages=INFLIGHT[sid].messages||[];
+    const inflightMessages=_projectInflightMessagesForActivityBursts(INFLIGHT[sid]);
     S.messages=[];
     S.toolCalls=[];
     try {
@@ -724,7 +726,7 @@ async function loadSession(sid){
       INFLIGHT[sid].lastRunJournalSeq=journalSeq;
     }
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
-    if(_mergePendingSessionMessage(S.session,S.messages)){
+    if(_mergePendingSessionMessage(S.session,S.messages)&&inflightMessages===(INFLIGHT[sid].messages||[])){
       INFLIGHT[sid].messages=S.messages;
     }
     S.busy=true;
@@ -733,6 +735,7 @@ async function loadSession(sid){
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
     syncTopbar();renderMessages();
+    if(typeof ensureRunActivityForCurrentTurn==='function') ensureRunActivityForCurrentTurn();
     const restoredLiveTurn=typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
     if(!restoredLiveTurn){
       appendThinking();
@@ -1432,9 +1435,43 @@ function _ensureInflightLiveAssistantMessage(inflight){
   return true;
 }
 
+function _projectInflightMessagesForActivityBursts(inflight){
+  const messages=Array.isArray(inflight&&inflight.messages)?inflight.messages:[];
+  const anchors=Array.isArray(inflight&&inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[];
+  if(!anchors.length) return messages;
+  let liveIdx=-1;
+  for(let i=messages.length-1;i>=0;i--){
+    const msg=messages[i];
+    if(msg&&msg.role==='assistant'&&msg._live){liveIdx=i;break;}
+  }
+  if(liveIdx<0) return messages;
+  const live=messages[liveIdx];
+  const text=_messageComparableText(live);
+  if(!text) return messages;
+  const cleanAnchors=anchors
+    .map(a=>({id:Number(a&&a.id),textEnd:Number(a&&a.textEnd)}))
+    .filter(a=>Number.isFinite(a.id)&&Number.isFinite(a.textEnd)&&a.textEnd>0)
+    .sort((a,b)=>a.textEnd-b.textEnd);
+  if(!cleanAnchors.length) return messages;
+  const projected=[];
+  let prev=0;
+  for(const anchor of cleanAnchors){
+    const end=Math.max(prev,Math.min(text.length,anchor.textEnd));
+    const part=text.slice(prev,end).trim();
+    if(part) projected.push({...live,content:part,_activityBurstId:anchor.id});
+    prev=end;
+  }
+  const tail=text.slice(prev).trim();
+  if(tail) projected.push({...live,content:tail,_activityBurstId:Number(inflight.currentActivityBurstId||0)||0});
+  if(!projected.length) return messages;
+  return [...messages.slice(0,liveIdx),...projected,...messages.slice(liveIdx+1)];
+}
+
 function _prepareRunningLiveTail(baseMessages,inflightMessages){
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
-  const live=[...inflight].reverse().find(m=>m&&m.role==='assistant'&&m._live);
+  const liveMessages=inflight.filter(m=>m&&m.role==='assistant'&&m._live);
+  if(liveMessages.length>1) return liveMessages.some(m=>!!_messageComparableText(m));
+  const live=liveMessages[0]||null;
   if(!live) return false;
   const liveText=_messageComparableText(live);
   const persistedText=_currentTurnAssistantText(baseMessages);

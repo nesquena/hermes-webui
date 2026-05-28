@@ -2424,6 +2424,7 @@ body.resizing .sidebar{transition:none!important;}
 .tool-card-icon{font-size:13px;flex-shrink:0;opacity:.65;}
 .tool-card-name{font-size:var(--font-size-xs);font-weight:600;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;flex-shrink:0;}
 .tool-card-preview{font-size:var(--font-size-xs);color:var(--muted);opacity:.62;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.tool-card-duration{font-size:var(--font-size-xs);color:var(--muted);opacity:.72;white-space:nowrap;margin-left:auto;}
 .tool-card-toggle{font-size:10px;color:var(--muted);opacity:.45;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform;}
 .tool-card.open .tool-card-toggle{transform:rotate(90deg);}
 .tool-card-detail{display:block;max-height:0;opacity:0;overflow:hidden;border-top:1px solid transparent;padding:0 var(--space-3);transition:max-height .22s ease,opacity .18s ease,padding .22s ease,border-top-color .22s ease;}

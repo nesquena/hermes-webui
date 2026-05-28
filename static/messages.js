@@ -457,9 +457,9 @@ async function send(){
       }
     });
     optimisticMessages=[...S.messages];
-    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[]};
+    INFLIGHT[activeSid]={messages:optimisticMessages,uploaded:uploadedNames,toolCalls:[],currentActivityBurstId:0,activityBurstAnchors:[]};
     if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
+      saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[],currentActivityBurstId:0,activityBurstAnchors:[]});
     }
     _runOptionalPreStartUiStep('renderSessionListFromCache.initial', ()=>{
       if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
@@ -636,6 +636,8 @@ function closeLiveStream(sessionId, streamId, source){
         lastAssistantText:INFLIGHT[sessionId].lastAssistantText||'',
         lastReasoningText:INFLIGHT[sessionId].lastReasoningText||'',
         lastRunJournalSeq:INFLIGHT[sessionId].lastRunJournalSeq||0,
+        currentActivityBurstId:INFLIGHT[sessionId].currentActivityBurstId||0,
+        activityBurstAnchors:Array.isArray(INFLIGHT[sessionId].activityBurstAnchors)?INFLIGHT[sessionId].activityBurstAnchors:[],
       });
     }
   }
@@ -659,6 +661,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded];
     if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
   }
+  if(!Array.isArray(INFLIGHT[activeSid].activityBurstAnchors)) INFLIGHT[activeSid].activityBurstAnchors=[];
+  if(INFLIGHT[activeSid].currentActivityBurstId===undefined) INFLIGHT[activeSid].currentActivityBurstId=0;
   const existingLive=LIVE_STREAMS[activeSid];
   if(
     existingLive&&existingLive.streamId===streamId&&existingLive.source&&
@@ -774,6 +778,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       lastAssistantText:inflight.lastAssistantText||'',
       lastReasoningText:inflight.lastReasoningText||'',
       lastRunJournalSeq:inflight.lastRunJournalSeq||0,
+      currentActivityBurstId:inflight.currentActivityBurstId||0,
+      activityBurstAnchors:Array.isArray(inflight.activityBurstAnchors)?inflight.activityBurstAnchors:[],
     });
   }
   function snapshotLiveTurn(){
@@ -829,6 +835,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     inflight.messages.push({role:'assistant',content:assistantText,reasoning:reasoningText||undefined,_live:true,_ts:ts});
     _throttledPersist();
   }
+  function recordActivityBoundary(){
+    const inflight=INFLIGHT[activeSid];
+    if(!inflight) return;
+    if(!Array.isArray(inflight.activityBurstAnchors)) inflight.activityBurstAnchors=[];
+    _currentActivityBurstId+=1;
+    inflight.currentActivityBurstId=_currentActivityBurstId;
+    const textEnd=String(assistantText||'').length;
+    const existing=inflight.activityBurstAnchors.find(a=>Number(a&&a.id)===_currentActivityBurstId);
+    if(existing) existing.textEnd=textEnd;
+    else inflight.activityBurstAnchors.push({id:_currentActivityBurstId,textEnd});
+    _throttledPersist();
+  }
   function ensureAssistantRow(force=false){
     if(!_isActiveSession()) return;
     if(assistantRow&&!assistantRow.isConnected){assistantRow=null;assistantBody=null;}
@@ -843,6 +861,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     const blocks=(typeof _assistantTurnBlocks==='function')?_assistantTurnBlocks(turn):null;
     if(!blocks) return;
+    if(typeof ensureRunActivityGroup==='function') ensureRunActivityGroup(blocks,{live:true,collapsed:true});
     if(!assistantRow){
       // Only reuse an existing segment on the very first creation (e.g. reconnect).
       // After a tool call _freshSegment=true, so we always create a new segment
@@ -865,6 +884,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     assistantRow=document.createElement('div');
     assistantRow.className='assistant-segment';
     assistantRow.setAttribute('data-live-assistant','1');
+    assistantRow.setAttribute('data-activity-burst-id',String(_currentActivityBurstId));
     assistantBody=document.createElement('div');assistantBody.className='msg-body';
     assistantRow.appendChild(assistantBody);
     blocks.appendChild(assistantRow);
@@ -946,6 +966,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamFadeReduceMotionMql=null;
   let _streamFadeReduceMotion=false;
   let _streamFadeReduceMotionOnChange=null;
+  let _currentActivityBurstId=Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].currentActivityBurstId)||0)||0;
   let _lastRunJournalSeq=reconnecting
     ? Number((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastRunJournalSeq)||0)
     : 0;
@@ -1599,6 +1620,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           ensureAssistantRow(true);
           _flushPendingSegmentRender({force:true});
           if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
+          recordActivityBoundary();
         }
         _resetAssistantSegment();
         return;
@@ -1614,6 +1636,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       ensureAssistantRow(true);
       _flushPendingSegmentRender({force:true});
       if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
+      recordActivityBoundary();
       _resetAssistantSegment();
       _scheduleRender();
     });
@@ -1639,7 +1662,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('tool',e=>{
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
-      const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`};
+      const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`, activityBurstId:_currentActivityBurstId, started_at:Date.now()/1000};
       const inflight = INFLIGHT[activeSid] || (INFLIGHT[activeSid] = {
         messages:[...S.messages],
         uploaded:[],
@@ -1687,7 +1710,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }
       if(!tc){
-        tc={name:d.name||'tool', preview:d.preview||'', args:d.args||{}, snippet:'', done:true};
+        tc={name:d.name||'tool', preview:d.preview||'', args:d.args||{}, snippet:'', done:true, activityBurstId:_currentActivityBurstId};
         inflight.toolCalls.push(tc);
       }
       tc.preview=d.preview||tc.preview||'';
