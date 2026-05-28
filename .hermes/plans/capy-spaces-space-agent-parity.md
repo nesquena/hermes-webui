@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): preflight source-style Space creation`
+  - Added RED/GREEN backend coverage proving `space.create` / `space.spaces.create` run `active_space_instructions` prompt preflight before persisting supplied create-time instructions.
+  - Hostile create-time instruction injection is blocked before manifest creation with only a fixed safe error, while safe instruction creates return metadata-only prompt-preflight/action-policy/progress/compaction evidence and avoid echoing raw instruction text in the tool response.
+
 - `feat(spaces): compact recovery module quarantine receipts`
   - Added RED/GREEN backend coverage proving `upsert_recovery_module(...)` returns a metadata-only `output_compaction` receipt beside its existing prompt-preflight, autonomy-policy, and structured progress evidence.
   - The quarantine receipt is reconstructed only from allow-listed action, recovery-module Space id, module id, revision handle, policy/model-route status, and progress run metadata while omitting raw module source/html/renderer/API-auth fields, raw prompts, scripts, bearer strings, and secret-looking fixture values.

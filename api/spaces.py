@@ -1776,13 +1776,33 @@ def _shared_data_slot_action_policy_receipt(action: str, preflight_receipt: dict
 
 
 
-def _space_create_action_policy_receipt(action: str) -> dict[str, Any]:
+def _space_create_prompt_preflight_receipt(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Preflight source-style create instructions before they can enter active context."""
+    supplied_values: list[str] = []
+    for key in ("agent_instructions", "instructions"):
+        if key in payload:
+            supplied_values.append(str(payload.get(key) or ""))
+    if not supplied_values:
+        return None
+
+    receipts = [_space_current_instruction_prompt_preflight_receipt(value) for value in supplied_values]
+    if any(receipt.get("status") != "pass" for receipt in receipts):
+        raise ValueError("Space create prompt preflight blocked")
+
+    effective_instruction = str(payload.get("agent_instructions") or payload.get("instructions") or "")
+    return _space_current_instruction_prompt_preflight_receipt(effective_instruction)
+
+
+def _space_create_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
     return action_policy_receipt(
         action,
         approval_gates=["creator_commit"],
-        prompt_preflight_status="required",
+        prompt_preflight_status=status,
         model_route_hint="hint:reasoning",
     )
 
@@ -6894,11 +6914,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         result = export_space_agent_package(space_id, format=export_format)
         return {"ok": True, "action": name, **result}
     if name in {"space.create", "space.spaces.create", "space.spaces.createspace"}:
-        created = create_space(_space_tool_create_payload(data))
+        create_payload = _space_tool_create_payload(data)
+        prompt_preflight = _space_create_prompt_preflight_receipt(create_payload)
+        created = create_space(create_payload)
         space = read_space_detail(created["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
+        if prompt_preflight is not None:
+            space["agent_instructions"] = "[metadata-only instructions stored after prompt preflight]"
         progress_event = _record_space_tool_progress_event(created["space_id"], run_prefix="space.create")
-        autonomy_policy = _space_create_action_policy_receipt(name)
+        autonomy_policy = _space_create_action_policy_receipt(name, prompt_preflight)
         output_compaction = _space_create_output_compaction_receipt(
             action=name,
             raw_payload=data,
@@ -6906,7 +6930,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             autonomy_policy=autonomy_policy,
             progress_event=progress_event,
         )
-        return {
+        response = {
             "ok": True,
             "action": name,
             "space": space,
@@ -6914,6 +6938,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "progress_event": progress_event,
             "output_compaction": output_compaction,
         }
+        if prompt_preflight is not None:
+            response["prompt_preflight"] = prompt_preflight
+        return response
     if name in {"space.creator.preview", "space.creator.spec.preview", "space.spaces.previewcreatorspec"}:
         return _space_creator_preview_payload(name, data)
     if name in {"space.creator.commit", "space.creator.spec.commit", "space.spaces.commitcreatorspec"}:
