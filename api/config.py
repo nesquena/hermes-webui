@@ -2131,6 +2131,12 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     )
     if any(model.startswith(prefix) for prefix in prefixes):
         return list(VALID_REASONING_EFFORTS)
+    # Custom providers: the user configured this endpoint themselves and knows
+    # what model is behind it. Hiding reasoning options is worse than showing
+    # them when they might not apply — the agent gracefully ignores unsupported
+    # effort params. Default to full list so the UI stays functional (#custom).
+    if provider.startswith("custom:") or provider.startswith("custom-"):
+        return list(VALID_REASONING_EFFORTS)
     return []
 
 
@@ -2145,24 +2151,48 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
     provider = str(provider_id or "").strip().lower()
     if not model or not provider:
         return None
+    # Custom providers use "custom" (bare) or "custom:<name>" slug format.
+    # Both are user-configured relay endpoints — normalise to "custom" so the
+    # agent's model-family inference kicks in. When the agent module is
+    # unavailable, fall through to our own inline inference below.
+    lookup_provider = "custom" if provider.startswith("custom:") else provider
 
     try:
         from agent.models_dev import get_model_capabilities
     except Exception:
-        return None
+        get_model_capabilities = None
 
-    try:
-        capabilities = get_model_capabilities(provider=provider, model=model)
-    except Exception:
-        return None
-    if capabilities is None:
-        return None
+    if get_model_capabilities is not None:
+        try:
+            capabilities = get_model_capabilities(provider=lookup_provider, model=model)
+        except Exception:
+            capabilities = None
+        if capabilities is not None:
+            supports_reasoning = getattr(capabilities, "supports_reasoning", None)
+            if supports_reasoning is True:
+                return list(VALID_REASONING_EFFORTS)
+            if supports_reasoning is False:
+                return []
+            return None
 
-    supports_reasoning = getattr(capabilities, "supports_reasoning", None)
-    if supports_reasoning is True:
-        return list(VALID_REASONING_EFFORTS)
-    if supports_reasoning is False:
-        return []
+    # Inline fallback: infer model family from name when agent module is
+    # unavailable (e.g. agent PR not yet merged). Same logic as the agent's
+    # infer_semantic_provider_for_model — if the model name matches a known
+    # family, we know it supports reasoning.
+    if lookup_provider == "custom":
+        model_lower = model.lower()
+        reasoning_families = (
+            "claude-",          # Anthropic
+            "gpt-",            # OpenAI
+            "o1-", "o3-", "o4-",  # OpenAI reasoning
+            "deepseek-",       # DeepSeek
+            "gemini-",         # Google
+            "qwen",            # Alibaba
+            "glm-",           # Zhipu
+        )
+        if any(model_lower.startswith(prefix) for prefix in reasoning_families):
+            return list(VALID_REASONING_EFFORTS)
+
     return None
 
 
