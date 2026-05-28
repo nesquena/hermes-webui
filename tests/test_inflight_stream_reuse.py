@@ -204,6 +204,7 @@ let inflight = [
 let merged = _mergeInflightTailMessages(base, inflight);
 assert.strictEqual(merged.length, base.length);
 assert.strictEqual(inflight[1].content, '');
+assert.strictEqual(inflight[1]._coveredAssistantPrefixStripped, true);
 
 base = [
   {{role:'user', content:'go'}},
@@ -219,9 +220,29 @@ merged = _mergeInflightTailMessages(base, inflight);
 assert.strictEqual(merged.length, base.length + 1);
 assert.strictEqual(merged[merged.length - 1].content, 'Third progress.');
 assert.strictEqual(inflight[1].content, 'Third progress.');
+assert.strictEqual(inflight[1]._coveredAssistantPrefixStripped, true);
 """
     result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_load_session_drops_stale_live_dom_snapshot_after_trimming_covered_tail():
+    body = _function_body(SESSIONS_JS, "loadSession")
+    merge_pos = body.find("S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);")
+    drop_pos = body.find("delete INFLIGHT[sid].liveTurnHtml;")
+    restore_pos = body.find("restoreLiveTurnHtmlForSession(sid)")
+    assert merge_pos != -1 and drop_pos != -1 and restore_pos != -1
+    assert merge_pos < drop_pos < restore_pos
+    assert "_coveredAssistantPrefixStripped" in body[merge_pos:restore_pos]
+
+
+def test_load_session_advances_replay_cursor_when_loaded_transcript_has_current_turn_output():
+    body = _function_body(SESSIONS_JS, "loadSession")
+    assert "const journalSeq=_runJournalSeqFromSession(S.session);" in body
+    assert "_currentTurnHasVisibleOutput(S.messages)" in body
+    assert "INFLIGHT[sid].lastRunJournalSeq=journalSeq;" in body
+    ensure_body = _function_body(SESSIONS_JS, "_ensureMessagesLoaded")
+    assert "S.session.runtime_journal=data.session.runtime_journal;" in ensure_body
 
 
 def test_reconnect_prefers_trimmed_live_message_over_stale_full_assistant_cache():

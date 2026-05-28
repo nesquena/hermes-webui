@@ -707,6 +707,18 @@ async function loadSession(sid){
       S.messages=inflightMessages;
     }
     S.messages=_mergeInflightTailMessages(S.messages,inflightMessages);
+    const coveredLiveTail=Array.isArray(inflightMessages)&&inflightMessages.some(m=>m&&m._coveredAssistantPrefixStripped);
+    if(coveredLiveTail&&INFLIGHT[sid]){
+      delete INFLIGHT[sid].liveTurnHtml;
+    }
+    const journalSeq=_runJournalSeqFromSession(S.session);
+    if(
+      activeStreamId
+      && journalSeq>Number(INFLIGHT[sid].lastRunJournalSeq||0)
+      && _currentTurnHasVisibleOutput(S.messages)
+    ){
+      INFLIGHT[sid].lastRunJournalSeq=journalSeq;
+    }
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     if(_mergePendingSessionMessage(S.session,S.messages)){
       INFLIGHT[sid].messages=S.messages;
@@ -1319,6 +1331,9 @@ async function _ensureMessagesLoaded(sid) {
   } else {
     S.toolCalls = [];
   }
+  if(S.session&&S.session.session_id===sid&&data.session.runtime_journal){
+    S.session.runtime_journal=data.session.runtime_journal;
+  }
   clearLiveToolCards();
   S.messages = msgs;
   if(S.session&&S.session.session_id===sid){
@@ -1381,18 +1396,47 @@ function _stripPersistedAssistantPrefixFromLiveTail(msg,baseMessages){
   const covered=_currentTurnAssistantText(baseMessages);
   if(!covered) return msg;
   if(liveText===covered||covered.startsWith(liveText)){
+    msg._coveredAssistantPrefixStripped=true;
     return null;
   }
   if(liveText.startsWith(covered)){
     const suffix=liveText.slice(covered.length).trim();
+    msg._coveredAssistantPrefixStripped=true;
     if(!suffix) return null;
     const trimmed={...msg,content:suffix};
     return trimmed;
   }
   if(_compactTranscriptText(liveText)===_compactTranscriptText(covered)){
+    msg._coveredAssistantPrefixStripped=true;
     return null;
   }
   return msg;
+}
+
+function _runJournalSeqFromSession(session){
+  const journal=session&&session.runtime_journal;
+  if(!journal) return 0;
+  const direct=Number(journal.last_seq||0)||0;
+  if(direct>0) return direct;
+  const raw=String(journal.last_event_id||'').trim();
+  const tail=raw.split(':').pop();
+  return Number(tail||0)||0;
+}
+
+function _currentTurnHasVisibleOutput(messages){
+  const list=Array.isArray(messages)?messages:[];
+  let start=-1;
+  for(let i=list.length-1;i>=0;i--){
+    if(list[i]&&list[i].role==='user'){start=i;break;}
+  }
+  if(start<0) return false;
+  for(let i=start+1;i<list.length;i++){
+    const msg=list[i];
+    if(!msg) continue;
+    if(msg.role==='tool') return true;
+    if(msg.role==='assistant'&&_messageComparableText(msg)) return true;
+  }
+  return false;
 }
 
 function _mergeInflightTailMessages(baseMessages, inflightMessages){
@@ -1412,6 +1456,7 @@ function _mergeInflightTailMessages(baseMessages, inflightMessages){
     if(msg&&msg.role==='assistant'&&msg._live){
       msg.content=candidate?_messageComparableText(candidate):'';
       if(candidate&&candidate.reasoning!==undefined) msg.reasoning=candidate.reasoning;
+      if(!msg.content) msg._coveredAssistantPrefixStripped=true;
     }
     if(!candidate) continue;
     const duplicate=merged.slice(-Math.max(5,tail.length+2)).some(existing=>_sameTranscriptMessage(existing,candidate));
