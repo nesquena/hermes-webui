@@ -7,6 +7,17 @@
 
 - Gateway-backed WebUI chat now forwards configured prefill/session-recall context and a compact WebUI session-context block into delegated Gateway turns, so browser sessions retain note recall, connected-platform awareness, and delivery hints instead of sending only the latest user message. If the dynamic prefill script fails, WebUI falls back to the configured static router prefill when available.
 
+## [v0.51.156] — 2026-05-28 — Release EB (stage-batch38 — 2-PR Tier B cleanup: WebUI request/runtime hardening + chat-start provider fallback)
+
+### Fixed
+
+- Hardened WebUI request/session/runtime edges: malformed request body lengths are rejected before reads, session writes reject unsafe IDs, auth session/login-attempt maps avoid unsynchronized mutation, and successful password login clears stale rate-limit failures.
+- Hardened frontend startup and navigation fallbacks: early storage access now survives blocked `localStorage`, stale session recovery preserves subpath mounts, session URL generation removes both legacy session query aliases, canceling a stream closes the local EventSource, and the PWA shell precaches same-origin markdown/KaTeX vendor assets.
+- Added missing i18n keys used by command, cron, provider, search/default, and session-rename UI paths across supported locales so missing translations fall back to labels instead of raw key names.
+- Made workspace Git tests pin their temporary repository branch to `master` so the suite is independent of the host Git default-branch setting.
+- Browser chat start and queued-turn payloads now fall back to the selected/persisted provider only when it belongs to the same model being sent, preventing fresh sessions from sending a dropdown-selected model with `model_provider=null`.
+
+
 ## [v0.51.155] — 2026-05-28 — Release EA (stage-batch37 — 3-PR very low-risk cleanup: passive timeout toasts + sidecar order + subsecond timestamps)
 
 ### Fixed
