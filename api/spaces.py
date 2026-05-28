@@ -11873,29 +11873,89 @@ def _development_tool_requested_action(action: str) -> str:
     return "development"
 
 
-def _development_tool_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
-    safe_action = _context_value(action, 120) or "space.development.action"
-    return {
-        "available": True,
-        "action": safe_action,
-        "boundary": "development_tool",
-        "status": "required",
-        "severity": "none",
-        "categories": [],
-        "checks": ["shared_confirmation_required", "prompt_injection_preflight_required"],
-        "metadata_only": True,
-        "raw_prompt_stored": False,
-        "local_only": True,
+def _development_tool_prompt_preflight_corpus(action: str, payload: dict[str, Any]) -> str:
+    """Build an internal-only prompt-preflight corpus for development tools.
+
+    The returned string is passed only to ``prompt_preflight`` for hashing and
+    classification; it must never be surfaced in Spaces receipts.
+    """
+
+    high_risk_keys = {
+        "api_auth",
+        "api_key",
+        "args",
+        "argv",
+        "auth",
+        "authorization",
+        "body",
+        "cmd",
+        "command",
+        "content",
+        "html",
+        "input",
+        "message",
+        "messages",
+        "prompt",
+        "renderer",
+        "script",
+        "source",
+        "stderr",
+        "stdin",
+        "stdout",
+        "text",
+        "token",
     }
+    credential_keys = {"api_auth", "api_key", "auth", "authorization", "token"}
+    parts: list[str] = [_context_value(action, 120) or "space.development.action"]
+
+    def collect(value: Any, *, key: str = "", depth: int = 0) -> None:
+        if depth > 8 or len(parts) >= 200:
+            return
+        normalized_key = str(key or "").strip().lower()
+        if isinstance(value, dict):
+            for child_key, child_value in value.items():
+                child_key_text = str(child_key or "")
+                if child_key_text.strip().lower() in high_risk_keys:
+                    parts.append(child_key_text)
+                    if child_key_text.strip().lower() in credential_keys:
+                        parts.append("credential")
+                    collect(child_value, key=child_key_text, depth=depth + 1)
+                elif isinstance(child_value, (dict, list, tuple)):
+                    collect(child_value, key=child_key_text, depth=depth + 1)
+            return
+        if isinstance(value, (list, tuple)):
+            sequence = list(value)
+            if len(sequence) > 160:
+                sequence = sequence[:80] + sequence[-80:]
+            for item in sequence:
+                collect(item, key=normalized_key, depth=depth + 1)
+            return
+        if normalized_key not in high_risk_keys:
+            return
+        text = str(value or "")
+        if text.strip():
+            parts.append(text[:2000])
+
+    collect(payload)
+    return "\n".join(parts)
 
 
-def _development_tool_action_policy_receipt(action: str) -> dict[str, Any]:
+def _development_tool_prompt_preflight_receipt(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from api.capy_policy import prompt_preflight
+
+    receipt = prompt_preflight(_development_tool_prompt_preflight_corpus(action, payload), boundary="development_tool")
+    receipt["action"] = _context_value(action, 120) or "space.development.action"
+    receipt["checks"] = ["shared_confirmation_required", "prompt_injection_preflight_complete"]
+    return receipt
+
+
+def _development_tool_action_policy_receipt(action: str, *, prompt_preflight_status: str) -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
     return action_policy_receipt(
         action,
         approval_gates=["destructive_external_action"],
-        prompt_preflight_status="required",
+        prompt_preflight_status=prompt_preflight_status,
         model_route_hint="hint:code",
     )
 
@@ -11961,8 +12021,11 @@ def _development_tool_output_compaction_receipt(
 def _development_tool_receipt(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     space_id = validate_space_id(_space_tool_current_id(payload))
     requested_action = _development_tool_requested_action(action)
-    prompt_preflight = _development_tool_required_prompt_preflight_receipt(action)
-    autonomy_policy = _development_tool_action_policy_receipt(action)
+    prompt_preflight = _development_tool_prompt_preflight_receipt(action, payload)
+    autonomy_policy = _development_tool_action_policy_receipt(
+        action,
+        prompt_preflight_status=str(prompt_preflight.get("status") or "required"),
+    )
     progress_event = _record_space_tool_progress_event(space_id, run_prefix=f"development.{requested_action}")
     development_surface = {
         "mode": "metadata-only",
