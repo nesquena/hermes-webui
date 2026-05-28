@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+
+### Added
+
+- Settings → Appearance sidebar-tab chips can now be dragged to reorder the visible sidebar/rail tabs. The new `tab_order` setting persists per profile, keeps Chat and Settings fixed, and sanitizes tampered payloads the same way hidden tabs are sanitized.
+
 ## [v0.51.171] — 2026-05-30 — Release EQ (stage-batch53 — tool-output card badge + Neon opt-in skin)
 
 ### Added
