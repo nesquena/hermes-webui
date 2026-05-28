@@ -728,6 +728,80 @@ function _renderAttachmentHtml(fname, url){
   }
   return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
 }
+function _attachedFilesMarkerInfo(content){
+  const text=String(content||'');
+  // New format: closing bracket lives on its own line, so paths may contain
+  // commas and `]` safely. Keep a legacy single-line fallback for old sessions.
+  let match=text.match(/(?:^|\n+)\[Attached files:\s*\n([\s\S]*?)\n\]\s*$/);
+  let files=[];
+  if(match){
+    files=String(match[1]||'').replace(/\r/g,'').split(/\n+/).map(p=>p.trim()).filter(Boolean);
+  }else{
+    const legacyMatch=text.match(/(?:^|\n+)\[Attached files:\s*([^\n\]]*?)\]\s*$/);
+    if(!legacyMatch) return {content:text, files:[]};
+    match=legacyMatch;
+    const rawLegacy=String(match[1]||'').replace(/\r/g,'').trim();
+    files=rawLegacy.includes(',')
+      ? rawLegacy.split(/\s*,\s*/).map(p=>p.trim()).filter(Boolean)
+      : rawLegacy.split(/\n+/).map(p=>p.trim()).filter(Boolean);
+  }
+  return {content:text.slice(0,match.index).trimEnd(), files};
+}
+function _attachedFileMediaUrl(path, inline=false){
+  const ref=String(path||'').trim();
+  if(/^https?:\/\//i.test(ref)) return ref;
+  let url='api/media?path='+encodeURIComponent(ref);
+  if(inline) url+='&inline=1';
+  return url;
+}
+function _renderLazyAttachedFileHtml(path){
+  const ref=String(path||'').trim();
+  if(!ref) return '';
+  const fname=ref.split(/[\\/]/).pop()||ref;
+  const kind=_mediaKindForName(fname);
+  if(kind==='image'){
+    const src=_attachedFileMediaUrl(ref);
+    return `<img class="msg-media-img msg-attached-lazy" data-attached-src="${esc(src)}" alt="${esc(fname)}" loading="lazy">`;
+  }
+  if(kind==='audio'||kind==='video'){
+    const src=_attachedFileMediaUrl(ref,true);
+    const safeName=esc(fname);
+    const safeSrc=esc(src);
+    const tag=kind==='video'
+      ? `<video class="msg-media-player msg-media-video msg-attached-lazy" data-attached-src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
+      : `<audio class="msg-media-player msg-media-audio msg-attached-lazy" data-attached-src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
+    return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span></div>${_mediaSpeedControlsHtml(kind,safeName)}</div>`;
+  }
+  const url=_attachedFileMediaUrl(ref,false)+'&download=1';
+  return `<a class="msg-media-link" href="${esc(url)}" download="${esc(fname)}">${li('paperclip',12)} ${esc(fname)}</a>`;
+}
+function _renderAttachedFilesMarkerHtml(files){
+  const clean=(files||[]).map(f=>String(f||'').trim()).filter(Boolean);
+  if(!clean.length) return '';
+  const label=clean.length===1?t('attached_file'):t('attached_files');
+  return `<details class="msg-attached-files"><summary>${li('paperclip',12)} ${esc(label)} (${clean.length})</summary><div class="msg-files msg-files--attached">${clean.map(_renderLazyAttachedFileHtml).join('')}</div></details>`;
+}
+function _activateLazyAttachedFiles(root){
+  const scope=root&&root.querySelectorAll?root:document;
+  scope.querySelectorAll('.msg-attached-files[open] [data-attached-src]').forEach(el=>{
+    const src=el.getAttribute('data-attached-src');
+    if(!src||el.getAttribute('src')) return;
+    el.setAttribute('src',src);
+  });
+}
+document.addEventListener('toggle', e=>{
+  const details=e.target&&e.target.closest?e.target.closest('.msg-attached-files'):null;
+  if(details&&details.open) _activateLazyAttachedFiles(details);
+}, true);
+document.addEventListener('error', e=>{
+  const el=e.target;
+  if(!el||!el.matches||!el.matches('.msg-attached-files [data-attached-src]')) return;
+  const label=el.getAttribute('alt')||el.getAttribute('title')||'attachment';
+  const missing=document.createElement('div');
+  missing.className='msg-file-badge msg-file-badge--missing';
+  missing.textContent='⚠ '+label+' unavailable';
+  el.replaceWith(missing);
+}, true);
 document.addEventListener('click', e => {
   const btn=e.target&&e.target.closest?e.target.closest('.media-speed-btn'):null;
   if(!btn) return;
@@ -6531,14 +6605,18 @@ function renderMessages(options){
       content='**Error:** No response received after context compression. Please retry.';
     }
     const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;
+    const attachedMarker=isUser?_attachedFilesMarkerInfo(displayContent):{content:displayContent,files:[]};
+    const bodyContent=isUser?attachedMarker.content:displayContent;
     if(thinkingText&&!isUser){
-      thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent);
+      thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, bodyContent);
     }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     const nextRendered=renderVisWithIdx[vi+1];
     const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
     let filesHtml='';
-    if(m.attachments&&m.attachments.length){
+    const hasAttachedMarkerFiles=isUser&&attachedMarker.files&&attachedMarker.files.length;
+    const renderStructuredAttachments=!hasAttachedMarkerFiles&&(m.attachments&&m.attachments.length);
+    if(renderStructuredAttachments){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
       const _attachSid=(S.session&&S.session.session_id)||'';
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
@@ -6549,7 +6627,10 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    let bodyHtml = _getCachedRender(displayContent, isUser);
+    if(isUser&&attachedMarker.files&&attachedMarker.files.length){
+      filesHtml+=_renderAttachedFilesMarkerHtml(attachedMarker.files);
+    }
+    let bodyHtml = _getCachedRender(bodyContent, isUser);
     if(!isUser&&m.provider_details){
       const summary=m.provider_details_label||'Provider details';
       bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
@@ -6601,7 +6682,7 @@ function renderMessages(options){
       row.id=_userMessageDomId(rawIdx);
       row.dataset.msgIdx=rawIdx;
       row.dataset.role='user';
-      row.dataset.rawText=String(displayContent).trim();
+      row.dataset.rawText=String(bodyContent).trim();
       row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       inner.appendChild(row);
       userRows.set(rawIdx, row);
