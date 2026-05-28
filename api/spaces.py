@@ -6775,6 +6775,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         instructions = str(read_space(space_id).get("agent_instructions", ""))
         preflight = _space_current_instruction_prompt_preflight_receipt(instructions)
         safe_instructions = _space_current_instruction_after_preflight(space_id, instructions, preflight)
+        autonomy_policy = _space_current_instruction_action_policy_receipt(name, preflight)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="instructions")
         key = "agent_instructions" if name.endswith("agentinstructions") else "special_instructions"
         return {
             "ok": True,
@@ -6782,7 +6784,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "active_space_id": space_id,
             key: safe_instructions,
             "prompt_preflight": preflight,
-            "autonomy_policy": _space_current_instruction_action_policy_receipt(name, preflight),
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+                include_widget_count=False,
+            ),
         }
     if name in {"space.spaces.listwidgets", "space.spaces.widgets"}:
         space_id = validate_space_id(_space_tool_current_id(data))
@@ -11986,6 +11996,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "browser.type_ref",
         "checkpoint",
         "context",
+        "instructions",
         "package.export",
         "package.import",
         "path.helper",
