@@ -2263,6 +2263,12 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     sidecar_messages = list(getattr(session, "messages", []) or [])
     if cli_messages:
         if sidecar_messages and sidecar_messages != cli_messages:
+            if len(sidecar_messages) >= len(cli_messages):
+                return merge_session_messages_append_only(
+                    sidecar_messages,
+                    cli_messages,
+                    truncation_watermark=getattr(session, "truncation_watermark", None),
+                )
             merged_messages = []
             seen_message_keys = set()
             for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (

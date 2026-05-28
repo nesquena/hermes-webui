@@ -224,6 +224,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     saved = models.get_session(s.session_id)
     assert [m["role"] for m in saved.messages] == ["user", "assistant"]
     assert saved.messages[-1]["content"] == "hello"
+    assert isinstance(saved.messages[0]["timestamp"], float)
+    assert isinstance(saved.messages[1]["timestamp"], float)
+    assert saved.messages[0]["timestamp"] < saved.messages[1]["timestamp"]
     assert saved.active_stream_id is None
     assert stream_id not in STREAMS
     assert captured["url"] == "http://gateway.local/v1/chat/completions"

@@ -2982,6 +2982,22 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     return merged
 
 
+def _stamp_missing_message_timestamps(messages, *, now: float | None = None) -> int:
+    """Stamp missing message timestamps without collapsing transcript order.
+
+    Compacted/reconciled rows can arrive without timestamps. Assigning one
+    integer seconds value to the whole batch makes later timestamp-based display
+    merges unstable; use a subsecond sequence instead.
+    """
+    base = time.time() if now is None else float(now)
+    stamped = 0
+    for msg in messages or []:
+        if isinstance(msg, dict) and not msg.get('timestamp') and not msg.get('_ts'):
+            msg['timestamp'] = base + (stamped * 0.000001)
+            stamped += 1
+    return stamped
+
+
 def _assistant_reply_added_after_current_turn(result_messages, previous_context, msg_text) -> bool:
     """Return True only when the just-finished turn produced assistant text."""
     result_messages = list(result_messages or [])
@@ -5298,11 +5314,9 @@ def _run_agent_streaming(
                         'usage': _live_usage_snapshot(),
                     })
 
-                # Stamp 'timestamp' on any messages that don't have one yet
-                _now = time.time()
-                for _m in s.messages:
-                    if isinstance(_m, dict) and not _m.get('timestamp') and not _m.get('_ts'):
-                        _m['timestamp'] = int(_now)
+                # Stamp 'timestamp' on any messages that don't have one yet,
+                # preserving transcript order across compacted/reconciled batches.
+                _stamp_missing_message_timestamps(s.messages)
                 # Only auto-generate title when still default; preserves user renames
                 if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
                     s.title = title_from(s.messages, s.title)

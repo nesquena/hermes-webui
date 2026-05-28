@@ -475,7 +475,7 @@ async function refreshDashboardStatus(force=false){
     return _dashboardStatusCache;
   }
   try{
-    const status=await api('/api/dashboard/status');
+    const status=await api('/api/dashboard/status',{timeoutToast:false});
     _dashboardStatusCache=status||{running:false};
   }catch(_){
     _dashboardStatusCache={running:false};
@@ -4588,7 +4588,7 @@ async function pollSystemHealth(){
   if(document.visibilityState !== 'visible') return;
   if(!_systemHealthPanelIsVisible()) return;
   try{
-    const payload=await api('/api/system/health');
+    const payload=await api('/api/system/health',{timeoutToast:false});
     renderSystemHealth(payload);
   }catch(_){
     setSystemHealthUnavailable('Unavailable');
@@ -4654,7 +4654,7 @@ function dismissAgentHealthAlert(){
 async function pollAgentHealth(){
   if(document.visibilityState !== 'visible') return;
   try{
-    const payload=await api('/api/health/agent');
+    const payload=await api('/api/health/agent',{timeoutToast:false});
     if(payload.alive === true){
       _agentHealthLastState='alive';
       _setAgentHealthDismissed(false);

@@ -2280,8 +2280,8 @@ async function renderSessionList(opts={}){
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const allProfilesQS = _showAllProfiles ? '?all_profiles=1' : '';
     const [sessData, projData] = await Promise.all([
-      api('/api/sessions' + allProfilesQS),
-      api('/api/projects' + allProfilesQS),
+      api('/api/sessions' + allProfilesQS,{timeoutToast:false}),
+      api('/api/projects' + allProfilesQS,{timeoutToast:false}),
     ]);
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
@@ -2354,7 +2354,7 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
   _activeSessionExternalRefreshInFlight = true;
   try{
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false});
     if(!data || !data.session) return;
     if(!S.session || S.session.session_id !== sid) return;
     if(S.busy || S.activeStreamId) return;

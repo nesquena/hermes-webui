@@ -7,6 +7,14 @@
 - Activity disclosures now have a Settings → Appearance option to expand the activity feed by default, while still honoring per-turn manual collapse/expand choices.
 - Live Activity waiting rows now explain the agent's current step instead of stopping at `Waiting on model`, including a prompt/context review hint before tools run and the latest tool-derived action while the model chooses the next step.
 
+## [v0.51.155] — 2026-05-28 — Release EA (stage-batch37 — 3-PR very low-risk cleanup: passive timeout toasts + sidecar order + subsecond timestamps)
+
+### Fixed
+
+- Passive background refreshes such as sidebar/project polling, health checks, cron-status watches, and client-event logging no longer surface generic timeout toasts; explicit user actions still show timeout errors. (Related to #3024)
+- Messaging/session display merges now preserve sidecar transcript order when the sidecar already contains at least as many rows as the mirrored state store, avoiding role/content fallback sorting when timestamp precision collapses.
+- Gateway-backed turns and compacted/reconciled message batches now keep subsecond timestamp ordering instead of assigning the same integer-second timestamp to multiple transcript rows.
+
 ## [v0.51.154] — 2026-05-28 — Release DZ (stage-batch36 — 9-PR medium-risk cleanup: cron project chip + KaTeX streaming + recovery + .env keys + discoverability repair + media MEDIA tokens + gateway 401 + notes prefill + cron filter)
 
 ### Added

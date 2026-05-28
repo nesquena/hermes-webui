@@ -186,7 +186,7 @@ def test_agent_health_banner_markup_and_styles_exist():
 
 def test_agent_health_frontend_polls_only_visible_and_distinguishes_states():
     assert "const AGENT_HEALTH_INTERVAL_MS=30000" in UI_JS
-    assert "api('/api/health/agent')" in UI_JS
+    assert "api('/api/health/agent',{timeoutToast:false})" in UI_JS
     assert "document.visibilityState !== 'visible'" in UI_JS
     assert "document.addEventListener('visibilitychange',_syncAgentHealthMonitorVisibility)" in UI_JS
     assert "if(payload.alive === true)" in UI_JS

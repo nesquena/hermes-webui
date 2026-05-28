@@ -297,11 +297,16 @@ def _run_gateway_chat_streaming(
             s = get_session(session_id)
             if not _stream_writeback_is_current(s, stream_id):
                 return
-            now = int(time.time())
+            now = time.time()
+            # Preserve subsecond ordering for gateway-backed turns. Using an
+            # integer seconds timestamp gives the user and assistant rows the
+            # same sort key; later transcript merges can then fall back to
+            # role/content ordering instead of turn order.
+            assistant_ts = now + 0.000001
             user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
             if attachments:
                 user_msg["attachments"] = list(attachments)
-            assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": now}
+            assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
             s.context_messages = previous_context + [user_msg, assistant_msg]
             display = list(getattr(s, "messages", None) or [])
