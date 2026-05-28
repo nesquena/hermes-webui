@@ -3133,6 +3133,9 @@ AUX_TASK_SLOTS: tuple[str, ...] = (
  "mcp",
  "title_generation",
  "curator",
+ "kanban_decomposer",
+ "profile_describer",
+ "triage_specifier",
 )
 
 
@@ -3169,6 +3172,11 @@ def get_auxiliary_models() -> dict:
             "provider": str(entry.get("provider") or "auto").strip(),
             "model": str(entry.get("model") or "").strip(),
             "base_url": str(entry.get("base_url") or "").strip(),
+            "timeout": entry.get("timeout", ""),
+            "download_timeout": entry.get("download_timeout", ""),
+            "max_concurrency": entry.get("max_concurrency", ""),
+            "extra_body": entry.get("extra_body") if isinstance(entry.get("extra_body"), dict) else {},
+            "api_key_set": bool(str(entry.get("api_key") or "").strip()),
         })
 
     return {
@@ -3177,10 +3185,29 @@ def get_auxiliary_models() -> dict:
     }
 
 
-def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
+def _coerce_optional_positive_int(value, field: str):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return ""
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a positive integer") from exc
+    if number < 1:
+        raise ValueError(f"{field} must be a positive integer")
+    return number
+
+
+def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | None = None) -> dict:
     """Persist an auxiliary model assignment in config.yaml.
 
     Special case: task='__reset__' clears all auxiliary slots.
+    ``advanced`` may update per-slot fields surfaced behind the WebUI gear menu.
+    Sensitive api_key values are write-only: get_auxiliary_models() only reports
+    whether one is set.
     """
     if task != "__reset__" and task not in AUX_TASK_SLOTS:
         raise ValueError(
@@ -3213,6 +3240,41 @@ def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
                 slot_cfg = {}
             slot_cfg["provider"] = provider or "auto"
             slot_cfg["model"] = model or ""
+            if advanced is not None:
+                if not isinstance(advanced, dict):
+                    raise ValueError("advanced auxiliary options must be an object")
+                if "base_url" in advanced:
+                    base_url = str(advanced.get("base_url") or "").strip().rstrip("/")
+                    if base_url:
+                        slot_cfg["base_url"] = base_url
+                    else:
+                        slot_cfg.pop("base_url", None)
+                for field in ("timeout", "download_timeout", "max_concurrency"):
+                    if field in advanced:
+                        coerced = _coerce_optional_positive_int(advanced.get(field), field)
+                        if coerced == "":
+                            slot_cfg.pop(field, None)
+                        elif coerced is not None:
+                            slot_cfg[field] = coerced
+                if "extra_body" in advanced:
+                    extra_body = advanced.get("extra_body")
+                    if isinstance(extra_body, str):
+                        text = extra_body.strip()
+                        extra_body = json.loads(text) if text else {}
+                    if extra_body in (None, ""):
+                        slot_cfg.pop("extra_body", None)
+                    elif isinstance(extra_body, dict):
+                        if extra_body:
+                            slot_cfg["extra_body"] = extra_body
+                        else:
+                            slot_cfg.pop("extra_body", None)
+                    else:
+                        raise ValueError("extra_body must be a JSON object")
+                if advanced.get("api_key_clear"):
+                    slot_cfg["api_key"] = ""
+                api_key = str(advanced.get("api_key") or "").strip()
+                if api_key:
+                    slot_cfg["api_key"] = api_key
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 try:
                     _, _, resolved_base_url = resolve_model_provider(model)
