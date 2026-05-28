@@ -2833,9 +2833,9 @@ function stopSessionStream() {
 // PR (c) UX surface: post-dedupe the handler marks the session viewed (when
 // the session pane is current and the doc is visible+focused), then runs the
 // T4 drop-when-focused gate; only out-of-focus or off-pane completions spawn
-// a toast. The diagnostic ack POST fires on the toast path only;
-// the focused-viewer branch is a pure client-side drop (no ack, no
-// toast — bookkeeping already happened via _markSessionViewed).
+// a toast. The diagnostic ack POST still fires for both focused and
+// unfocused viewers so the server receives the delivery/cleanup signal;
+// the focus gate suppresses UI noise only.
 function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
   try {
     const d = JSON.parse(e.data || '{}');
@@ -2849,13 +2849,14 @@ function _handleBgTaskCompleteEvent(e, expectedSid, opts) {
     if (_viewed) {
       try { _markSessionViewed(sid, (S&&S.session&&S.session.session_id===sid)?(S.session.message_count??(S.messages&&S.messages.length)??0):0); } catch(_){}
       try { if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(sid); } catch(_){}
-      return;  // T4 drop-when-focused: suppress toast + ack; bookkeeping already fired
+    } else {
+      // T4 drop-when-focused: suppress toast only; ack below still fires.
+      try {
+        const tid = (d.task_id || '').slice(0, 8) || '?';
+        const tail = d.summary ? `: ${String(d.summary).slice(0, 80)}` : '';
+        showToast(`Task ${tid} done${tail}`, 2600);
+      } catch (_) {}
     }
-    try {
-      const tid = (d.task_id || '').slice(0, 8) || '?';
-      const tail = d.summary ? `: ${String(d.summary).slice(0, 80)}` : '';
-      showToast(`Task ${tid} done${tail}`, 2600);
-    } catch (_) {}
 
     // Fire-and-forget ack (diagnostic only — Option Z made this a no-op for
     // state. The agent wakeup is now started SERVER-SIDE by the drain thread
