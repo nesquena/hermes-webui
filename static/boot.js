@@ -459,12 +459,23 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   let _prefix='';
   let _isRecording=false;
 
+  function _setButtonTooltipAndKey(btn, key){
+    const text = t(key);
+    btn.setAttribute('data-i18n-title', key);
+    if(btn.hasAttribute('data-tooltip')){
+      btn.setAttribute('data-tooltip', text);
+      if(btn.hasAttribute('title')) btn.removeAttribute('title');
+    } else {
+      btn.title = text;
+    }
+  }
+
   function _setRecording(on){
     window._micActive=on;
     btn.classList.toggle('recording',on);
     // Active-state title flips so the tooltip is honest about what
     // pressing the button will do (#1488).
-    _setButtonTooltip(btn, on ? t('voice_dictate_active') : (_rawAudioMode ? t('voice_send_raw') : t('voice_dictate')));
+    _setButtonTooltipAndKey(btn, on ? 'voice_dictate_active' : (_rawAudioMode ? 'voice_send_raw' : 'voice_dictate'));
     status.style.display=on?'':'none';
     if(statusText) statusText.textContent=on?'Listening':'Listening';
     if(!on){ _finalText=''; _prefix=''; }
@@ -473,7 +484,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   function _updateMicBadge(){
     btn.classList.toggle('raw-audio-mode', _rawAudioMode);
     if(!window._micActive){
-      _setButtonTooltip(btn, _rawAudioMode ? t('voice_send_raw') : t('voice_dictate'));
+      _setButtonTooltipAndKey(btn, _rawAudioMode ? 'voice_send_raw' : 'voice_dictate');
     }
   }
 

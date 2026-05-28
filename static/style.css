@@ -1772,7 +1772,7 @@
   .mic-btn{transition:color .15s,background .15s;}
   .mic-btn.recording{color:var(--error);background:rgba(239,83,80,.12);animation:mic-pulse 1.2s ease-in-out infinite;}
   .mic-btn{position:relative;}
-  .mic-btn.raw-audio-mode::after{content:"RAW";position:absolute;top:-2px;right:-4px;font-size:8px;font-weight:700;background:var(--accent,#6366f1);color:#fff;padding:1px 3px;border-radius:3px;line-height:1;}
+  .mic-btn.raw-audio-mode::before{content:"RAW";position:absolute;top:-2px;right:-4px;font-size:8px;font-weight:700;background:var(--accent,#6366f1);color:#fff;padding:1px 3px;border-radius:3px;line-height:1;z-index:1;}
   @keyframes mic-pulse{0%,100%{box-shadow:0 0 0 0 rgba(239,83,80,.3);}50%{box-shadow:0 0 0 6px rgba(239,83,80,0);}}
   .mic-status{font-size:11px;color:var(--error);padding:4px 12px;display:flex;align-items:center;gap:6px;}
   .mic-dot{width:6px;height:6px;border-radius:50%;background:var(--error);animation:mic-pulse 1.2s ease-in-out infinite;flex-shrink:0;}
