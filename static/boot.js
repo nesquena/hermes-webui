@@ -394,6 +394,9 @@ function expandSidebar(){
 // panels.js hasn't loaded yet (typeof guard).
 (function _restoreTabVisibility(){
   try{
+    if(typeof _applyTabOrder==='function'&&typeof _getTabOrder==='function'){
+      _applyTabOrder(_getTabOrder());
+    }
     if(typeof _applyTabVisibility==='function'&&typeof _getHiddenTabs==='function'){
       _applyTabVisibility(_getHiddenTabs());
     }

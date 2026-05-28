@@ -23,10 +23,18 @@ def test_backend_round_trip_and_validation(monkeypatch, tmp_path):
 
     loaded = config.load_settings()
     assert loaded["hidden_tabs"] == [], "default must be empty list"
+    assert loaded["tab_order"] == [], "tab order default must be empty list"
 
     saved = config.save_settings({"hidden_tabs": ["kanban", "insights"]})
     assert saved["hidden_tabs"] == ["kanban", "insights"]
     assert config.load_settings()["hidden_tabs"] == ["kanban", "insights"]
+
+    saved = config.save_settings({"tab_order": ["logs", "tasks", "kanban"]})
+    assert saved["tab_order"] == ["logs", "tasks", "kanban"]
+    assert config.load_settings()["tab_order"] == ["logs", "tasks", "kanban"]
+
+    bad_order = config.save_settings({"tab_order": "logs,tasks"})
+    assert bad_order["tab_order"] == ["logs", "tasks", "kanban"]
 
     # Non-list is rejected, default preserved
     bad = config.save_settings({"hidden_tabs": "not-a-list"})
@@ -61,8 +69,11 @@ def test_frontend_static_contracts():
     assert "'settings'" in PANELS_JS.split("_ALWAYS_VISIBLE_TABS")[1][:80]
     assert "_HIDDEN_TABS_LS_KEY" in PANELS_JS
     assert "hermes-webui-hidden-tabs" in PANELS_JS
-    for fn in ("_getHiddenTabs", "_setHiddenTabs", "_applyTabVisibility",
-               "_renderTabVisibilityChips", "_toggleTabVisibilityChip"):
+    assert "_TAB_ORDER_LS_KEY" in PANELS_JS
+    assert "hermes-webui-tab-order" in PANELS_JS
+    for fn in ("_getHiddenTabs", "_setHiddenTabs", "_getTabOrder", "_setTabOrder",
+               "_applyTabOrder", "_applyTabVisibility", "_renderTabVisibilityChips",
+               "_toggleTabVisibilityChip", "_moveTabOrderPanel", "_wireTabChipDrag"):
         assert f"function {fn}(" in PANELS_JS, f"panels.js must define {fn}()"
 
     # Toggle must autosave and respect always-visible tabs
@@ -71,11 +82,13 @@ def test_frontend_static_contracts():
     assert "_scheduleAppearanceAutosave" in toggle_body
     assert "_ALWAYS_VISIBLE_TABS" in toggle_body
 
-    # Appearance payload must include hidden_tabs
+    # Appearance payload must include hidden_tabs and tab_order
     payload_block = PANELS_JS[PANELS_JS.find("function _appearancePayloadFromUi"):]
     payload_body = payload_block[:payload_block.find("\nfunction ", 1) or 2000]
     assert "hidden_tabs" in payload_body
     assert "_getHiddenTabs" in payload_body
+    assert "tab_order" in payload_body
+    assert "_getTabOrder" in payload_body
 
     # CSS: hidden class and chip styles
     assert ".nav-tab-hidden" in STYLE_CSS
@@ -158,6 +171,38 @@ def test_chip_a11y_uses_switch_role_with_aria_checked():
     assert 'role="group"' in INDEX_HTML, "chip container needs role=group"
     assert 'aria-labelledby="tabVisibilityLabel"' in INDEX_HTML, \
         "chip container needs aria-labelledby pointing at the label"
-    # Focus-visible style exists
+    # Focus-visible and drag styles exist
     assert ".tab-visibility-chip:focus-visible" in STYLE_CSS, \
         "chip needs a :focus-visible style for keyboard nav"
+    assert ".tab-visibility-chip.dragging" in STYLE_CSS, \
+        "chip needs dragging style for mouse reorder feedback"
+    assert ".tab-visibility-chip.drag-over" in STYLE_CSS, \
+        "chip needs drag-over style for mouse reorder target feedback"
+
+
+def test_tab_order_excludes_always_visible_tabs(monkeypatch, tmp_path):
+    """Server-side tab_order validation mirrors hidden_tabs: chat and settings
+    remain fixed, so a tampered payload must not persist them in custom order."""
+    import api.config as config
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+
+    saved = config.save_settings({"tab_order": ["chat", "logs", "settings", "tasks", "logs"]})
+    assert saved["tab_order"] == ["logs", "tasks"], \
+        "chat/settings must be stripped and duplicate panel ids collapsed server-side"
+
+
+def test_profile_switch_reconciles_tab_order():
+    """Profile switching must also restore per-profile custom tab ordering."""
+    bg_start = PANELS_JS.find("function _refreshProfileSwitchBackground")
+    assert bg_start >= 0, "_refreshProfileSwitchBackground not found"
+    bg_end = PANELS_JS.find("\nfunction ", bg_start + 1)
+    if bg_end < 0:
+        bg_end = bg_start + 4000
+    bg_body = PANELS_JS[bg_start:bg_end]
+    assert "tab_order" in bg_body, \
+        "profile-switch background refresh must read tab_order from server response"
+    assert "_setTabOrder" in bg_body, \
+        "profile-switch background refresh must store tab_order for the new profile"
+    assert "_applyTabOrder" in bg_body, \
+        "profile-switch background refresh must apply tab ordering"
