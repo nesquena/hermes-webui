@@ -3418,11 +3418,25 @@ def duplicate_space_metadata_only(space_id: str, *, target_space_id: str | None 
             safe_value = _payload_text_summary(value, 120)
             if safe_value and safe_value != "[REDACTED]":
                 safe_layout[safe_key] = safe_value
+    duplicate_space_id = validate_space_id(target_space_id) if target_space_id else _unique_space_id(duplicate_name)
+    source_instructions = str(source.get("agent_instructions") or "")
+    instruction_preflight = _space_current_instruction_prompt_preflight_receipt(source_instructions)
+    safe_instructions = _payload_text_summary(source_instructions, 500)
+    if safe_instructions == "[REDACTED]":
+        safe_instructions = ""
+    instruction_input = safe_instructions
+    if not instruction_input and instruction_preflight.get("status") != "pass" and source_instructions.strip():
+        instruction_input = "withheld copied active-space instructions"
+    duplicate_instructions = _space_current_instruction_after_preflight(
+        duplicate_space_id,
+        instruction_input,
+        instruction_preflight,
+    )
     payload: dict[str, Any] = {
-        "space_id": validate_space_id(target_space_id) if target_space_id else _unique_space_id(duplicate_name),
+        "space_id": duplicate_space_id,
         "name": duplicate_name,
         "description": _payload_text_summary(source.get("description") or "", 500),
-        "agent_instructions": _payload_text_summary(source.get("agent_instructions") or "", 500),
+        "agent_instructions": duplicate_instructions,
         "template": _payload_text_summary(source.get("template") or "blank", 80) or "blank",
         "layout": safe_layout,
         "widgets": [],
@@ -3431,7 +3445,12 @@ def duplicate_space_metadata_only(space_id: str, *, target_space_id: str | None 
     widgets = source.get("widgets") if isinstance(source.get("widgets"), list) else []
     payload["widgets"] = [_space_tool_widget_payload(widget) for widget in widgets if isinstance(widget, dict)]
     created = create_space(payload)
-    return {"source_space_id": source_id, "space_id": created["space_id"], "revision_event_id": created["revision_event_id"]}
+    return {
+        "source_space_id": source_id,
+        "space_id": created["space_id"],
+        "revision_event_id": created["revision_event_id"],
+        "prompt_preflight": instruction_preflight,
+    }
 
 
 def read_space(space_id: str) -> dict[str, Any]:
@@ -7129,7 +7148,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space = read_space_detail(result["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="space.duplicate")
-        autonomy_policy = _space_layout_action_policy_receipt(name)
+        preflight_receipt = result.get("prompt_preflight") if isinstance(result.get("prompt_preflight"), dict) else None
+        autonomy_policy = _space_layout_action_policy_receipt(name, preflight_receipt)
         return {
             "ok": True,
             "action": name,
