@@ -618,8 +618,8 @@ async function loadSession(sid){
         // always clear persisted session, strip /session/{id} from URL, and
         // rethrow so boot can deterministically fall through to empty-state.
         if(!currentSid){
-          localStorage.removeItem('hermes-webui-session');
-          try{ history.replaceState(null,'','/'); }catch(_){ }
+          try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+          try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
           if (_loadingSessionId === sid) _loadingSessionId = null;
           throw e;
         }
@@ -1673,6 +1673,12 @@ function _sessionIdFromLocation(){
     return qs.get('session')||qs.get('session_id')||null;
   }catch(_e){return null;}
 }
+function _appRootPath(){
+  try{
+    const base = new URL(document.baseURI||window.location.origin+'/', window.location.origin);
+    return base.pathname || '/';
+  }catch(_e){return '/';}
+}
 function _sessionUrlForSid(sid){
   const encoded=encodeURIComponent(sid);
   let base;
@@ -1681,6 +1687,7 @@ function _sessionUrlForSid(sid){
   try{
     const current=new URL(window.location.href);
     current.searchParams.delete('session');
+    current.searchParams.delete('session_id');
     base.search=current.searchParams.toString();
     base.hash=current.hash;
   }catch(_e){}
