@@ -518,6 +518,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Load older messages while scrolling up',
 
     settings_desc_session_endless_scroll: 'When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: 'Sidebar tabs',
     settings_desc_tab_visibility: 'Choose which tabs appear in the sidebar and rail. Chat and Settings are always visible.',
@@ -1810,6 +1812,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Carica messaggi precedenti scorrendo in alto',
 
     settings_desc_session_endless_scroll: 'Se abilitato, i messaggi precedenti si caricano automaticamente scorrendo in alto. Se disabilitato, usa il pulsante messaggi precedenti.',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: 'Schede della barra laterale',
     settings_desc_tab_visibility: 'Scegli quali schede mostrare nella barra laterale e nel rail. Chat e Impostazioni sono sempre visibili.',
@@ -3094,6 +3098,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: '上スクロールで古いメッセージを読み込む',
 
     settings_desc_session_endless_scroll: '有効にすると、上にスクロールしたとき古いメッセージを自動で読み込みます。無効の場合は古いメッセージボタンを使います。',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: 'サイドバータブ',
     settings_desc_tab_visibility: 'サイドバーとレールに表示するタブを選択します。チャットと設定は常に表示されます。',
@@ -4943,6 +4949,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Загружать старые сообщения при прокрутке вверх',
 
     settings_desc_session_endless_scroll: 'Если включено, старые сообщения загружаются автоматически при прокрутке вверх. Если выключено, используйте кнопку загрузки старых сообщений.',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: 'Вкладки боковой панели',
     settings_desc_tab_visibility: 'Выберите, какие вкладки отображаются на боковой панели и в рейле. Чат и настройки всегда видны.',
@@ -6154,6 +6162,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Cargar mensajes antiguos al desplazarse hacia arriba',
 
     settings_desc_session_endless_scroll: 'Si está activado, los mensajes antiguos se cargan automáticamente al desplazarte hacia arriba. Si está desactivado, usa el botón de mensajes antiguos.',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: 'Pestañas de la barra lateral',
     settings_desc_tab_visibility: 'Elige qué pestañas aparecen en la barra lateral y el rail. Chat y Configuración siempre están visibles.',
@@ -7080,6 +7090,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Ältere Nachrichten beim Hochscrollen laden',
 
     settings_desc_session_endless_scroll: 'Wenn aktiviert, werden ältere Nachrichten beim Hochscrollen automatisch geladen. Wenn deaktiviert, nutzt du den Button für ältere Nachrichten.',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: 'Seitenleiste-Tabs',
     settings_desc_tab_visibility: 'Wähle, welche Tabs in der Seitenleiste und im Rail angezeigt werden. Chat und Einstellungen sind immer sichtbar.',
@@ -8608,6 +8620,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: '向上滚动时加载更早的消息',
 
     settings_desc_session_endless_scroll: '启用后，向上滚动时会自动加载更早的消息。禁用时请使用加载更早消息按钮。',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: '侧边栏标签',
     settings_desc_tab_visibility: '选择在侧边栏和导航栏中显示哪些标签。聊天和设置始终可见。',
@@ -9096,6 +9110,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: '向上捲動時載入較早訊息',
 
     settings_desc_session_endless_scroll: '啟用後，向上捲動時會自動載入較早訊息。停用時請使用載入較早訊息按鈕。',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: '側邊欄標籤',
     settings_desc_tab_visibility: '選擇在側邊欄和導航列中顯示哪些標籤。聊天和設定始終可見。',
@@ -10456,6 +10472,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Carregar mensagens antigas ao rolar para cima',
 
     settings_desc_session_endless_scroll: 'Quando ativado, mensagens antigas carregam automaticamente ao rolar para cima. Quando desativado, use o botão de mensagens antigas.',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: 'Abas da barra lateral',
     settings_desc_tab_visibility: 'Escolha quais abas aparecem na barra lateral e no rail. Chat e Configurações estão sempre visíveis.',
@@ -11643,6 +11661,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: '위로 스크롤할 때 이전 메시지 불러오기',
 
     settings_desc_session_endless_scroll: '활성화하면 위로 스크롤할 때 이전 메시지를 자동으로 불러옵니다. 비활성화하면 이전 메시지 버튼을 사용합니다.',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: '사이드바 탭',
     settings_desc_tab_visibility: '사이드바와 레일에 표시할 탭을 선택하세요. 채팅과 설정은 항상 표시됩니다.',
@@ -12843,6 +12863,8 @@ const LOCALES = {
     settings_desc_session_jump_buttons: 'Affichez les boutons flottants de début et de fin lors de la lecture de longs historiques de session.',
     settings_label_session_endless_scroll: 'Charger les anciens messages en faisant défiler vers le haut',
     settings_desc_session_endless_scroll: 'Lorsqu\'ils sont activés, les anciens messages se chargent automatiquement lorsque vous faites défiler vers le haut. Lorsqu\'il est désactivé, utilisez le bouton des messages plus anciens.',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: 'Onglets de la barre latérale',
     settings_desc_tab_visibility: 'Choisissez quels onglets apparaissent dans la barre latérale et le rail. Chat et Paramètres sont toujours visibles.',
@@ -14146,6 +14168,8 @@ const LOCALES = {
     settings_label_session_endless_scroll: 'Yukarı kaydırırken eski mesajları yükle',
 
     settings_desc_session_endless_scroll: 'Etkinleştirildiğinde, yukarı doğru kaydırdığınızda eski mesajlar otomatik olarak yüklenir. Devre dışı bırakıldığında eski mesajlar düğmesini kullanın.',
+    settings_label_activity_feed_expanded_default: 'Expand activity feed by default',
+    settings_desc_activity_feed_expanded_default: 'Open new Activity disclosures automatically so tool and model progress is visible without an extra click. Per-turn manual collapse/expand choices still win.',
 
     settings_label_tab_visibility: 'Kenar çubuğu sekmeleri',
     settings_desc_tab_visibility: 'Kenar çubuğunda ve rayda hangi sekmelerin görüneceğini seçin. Sohbet ve Ayarlar her zaman görünür durumdadır.',

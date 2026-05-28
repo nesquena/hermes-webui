@@ -5445,6 +5445,7 @@ function ensureActivityGroup(inner, opts){
   if(!group){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
+    if(window._activityFeedExpandedDefault===true) collapsed=false;
     const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
@@ -6990,14 +6991,32 @@ function _activityProgressLabelForToolName(name){
   return 'Working';
 }
 
+function _activityLatestToolName(group){
+  if(!group) return '';
+  const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
+  const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
+  return latest?String(latest.textContent||'').trim():'';
+}
+
+function _activityWaitingDetail(group,label=''){
+  const toolName=_activityLatestToolName(group);
+  if(toolName){
+    const action=_activityProgressLabelForToolName(toolName);
+    if(group&&group.querySelector('.tool-card.tool-card-running')) return `${action}: ${toolName}. Results will appear here.`;
+    return `Last step: ${action} (${toolName}); now choosing the next action or composing a response.`;
+  }
+  if(String(label||'').toLowerCase().includes('model')) return 'Reviewing the prompt and context, then choosing the next action or composing the response.';
+  return 'The agent is running; tool results and response text will appear here.';
+}
+
 function _activityLiveProgressLabel(group){
   if(!group||group.getAttribute('data-live-tool-call-group')!=='1') return '';
   const idleAge=_activityLastObservedAge(group);
   if(idleAge!==null&&idleAge>=90) return `No recent activity for ${_formatActiveElapsedTimer(idleAge)}`;
-  const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
-  const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
+  const latest=_activityLatestToolName(group);
   const waiting=group.querySelector('.agent-activity-status-waiting .agent-activity-status-label');
-  if(latest) return _activityProgressLabelForToolName(latest.textContent);
+  if(latest) return _activityProgressLabelForToolName(latest);
+  if(waiting&&waiting.textContent&&String(waiting.textContent).toLowerCase().includes('model')) return 'Reviewing prompt and context';
   if(waiting&&waiting.textContent) return waiting.textContent;
   return 'Starting agent';
 }
@@ -7076,8 +7095,13 @@ function appendLiveToolCard(tc){
     status:toolDone?(tc.is_error?'error':'done'):'waiting',
     ts:_activityNowSeconds(),
   });
-  const waiting=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"] .agent-activity-status-label');
-  if(waiting&&!toolDone) waiting.textContent='Waiting on tool result';
+  const waiting=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"]');
+  if(waiting&&!toolDone){
+    const labelEl=waiting.querySelector('.agent-activity-status-label');
+    const detailEl=waiting.querySelector('.agent-activity-status-detail');
+    if(labelEl) labelEl.textContent='Waiting on tool result';
+    if(detailEl) detailEl.textContent=`${_activityProgressLabelForToolName(toolName)}: ${toolName}. Results will appear here.`;
+  }
   // Update existing card in place (tool_complete after tool_start)
   if(tid){
     const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
@@ -7924,9 +7948,7 @@ function appendThinking(text='', options){
   if(!body) return;
   if(!cleanThinking||cleanThinking==='Thinking…'){
     const label=body.querySelector('.tool-card.tool-card-running')?'Waiting on tool result':'Waiting on model';
-    const detail=body.querySelector('.tool-card-row')
-      ? 'The agent is running; tool results and response text will appear here.'
-      : 'No tool activity has been reported yet.';
+    const detail=_activityWaitingDetail(group,label);
     _appendActivityEvent(group,{id:'thinking-placeholder',kind:'waiting',label,detail,status:'waiting',ts:_activityNowSeconds()});
     const active=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
     if(active) active.removeAttribute('data-thinking-active');

@@ -24,9 +24,25 @@ def test_live_activity_group_has_observable_baseline_events():
 def test_empty_thinking_placeholder_becomes_status_row_not_raw_thinking_card():
     assert "data-activity-event-id=\"thinking-placeholder\"" in UI_JS
     assert "Waiting on model" in UI_JS
-    assert "No tool activity has been reported yet." in UI_JS
+    assert "Reviewing the prompt and context, then choosing the next action or composing the response." in UI_JS
+    assert "Reviewing prompt and context" in UI_JS
     assert "Waiting on tool result" in UI_JS
+    assert "Last step: ${action} (${toolName}); now choosing the next action or composing a response." in UI_JS
     assert "_thinkingActivityNode(thinkingText, false)" in UI_JS
+
+
+def test_activity_feed_default_expand_setting_is_wired():
+    index_html = (REPO / "static" / "index.html").read_text(encoding="utf-8")
+    panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    config_py = (REPO / "api" / "config.py").read_text(encoding="utf-8")
+
+    assert 'id="settingsActivityFeedExpandedDefault"' in index_html
+    assert "settings_label_activity_feed_expanded_default" in index_html
+    assert '"activity_feed_expanded_default": False' in config_py
+    assert "activity_feed_expanded_default" in panels_js
+    assert "window._activityFeedExpandedDefault=!!s.activity_feed_expanded_default;" in boot_js
+    assert "if(window._activityFeedExpandedDefault===true) collapsed=false;" in UI_JS
 
 
 def test_tool_events_update_activity_timeline_and_summary():

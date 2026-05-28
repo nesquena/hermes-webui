@@ -5801,6 +5801,7 @@ function _appearancePayloadFromUi(){
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
+    activity_feed_expanded_default: !!($('settingsActivityFeedExpandedDefault')||{}).checked,
     hidden_tabs: _getHiddenTabs(),
   };
 }
@@ -5854,6 +5855,9 @@ async function _autosaveAppearanceSettings(payload){
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
+    if(saved&&Object.prototype.hasOwnProperty.call(saved,'activity_feed_expanded_default')){
+      window._activityFeedExpandedDefault=!!saved.activity_feed_expanded_default;
+    }
     _setAppearanceAutosaveStatus('saved');
   }catch(e){
     console.warn('[settings] appearance autosave failed', e);
@@ -6065,6 +6069,15 @@ async function loadSettingsPanel(){
       window._sessionEndlessScrollEnabled=endlessScrollCb.checked;
       endlessScrollCb.onchange=function(){
         window._sessionEndlessScrollEnabled=this.checked;
+        _scheduleAppearanceAutosave();
+      };
+    }
+    const activityExpandedCb=$('settingsActivityFeedExpandedDefault');
+    if(activityExpandedCb){
+      activityExpandedCb.checked=!!settings.activity_feed_expanded_default;
+      window._activityFeedExpandedDefault=activityExpandedCb.checked;
+      activityExpandedCb.onchange=function(){
+        window._activityFeedExpandedDefault=this.checked;
         _scheduleAppearanceAutosave();
       };
     }
