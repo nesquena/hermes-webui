@@ -1362,7 +1362,10 @@ function _messageComparableText(m){
 }
 
 function _stripAttachedFilesMarker(text){
-  return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
+  const value=String(text||'');
+  const withoutNewMarker=value.replace(/(?:\n{1,2}|^)\[Attached files:\s*\n[\s\S]*?\n\]\s*$/,'').trim();
+  if(withoutNewMarker!==value.trim()) return withoutNewMarker;
+  return value.replace(/(?:\n{1,2}|^)\[Attached files:\s*[^\n\]]*?\]\s*$/,'').trim();
 }
 
 function _sameTranscriptMessage(a,b){

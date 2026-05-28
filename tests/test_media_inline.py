@@ -25,6 +25,9 @@ from tests._pytest_port import BASE, TEST_STATE_DIR
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 
 
@@ -90,6 +93,67 @@ class TestMediaRenderMdStash(unittest.TestCase):
         # PR #1135: CSS class toggle replaced by proper lightbox overlay
         self.assertIn("_openImgLightbox", UI_JS,
                       "Clicking the image must open lightbox overlay (_openImgLightbox)")
+
+
+class TestReloadedAttachedFilesMarker(unittest.TestCase):
+    """Persisted transcript markers should render as guarded lazy media again."""
+
+    def test_attached_files_marker_parser_exists(self):
+        self.assertIn("_attachedFilesMarkerInfo", UI_JS)
+        self.assertIn("Attached files:", UI_JS)
+        self.assertIn("msg-attached-files", UI_JS)
+
+    def test_attached_files_marker_renders_lazy_guard(self):
+        self.assertIn("<details class=\"msg-attached-files\"", UI_JS)
+        self.assertIn("data-attached-src", UI_JS)
+        self.assertIn("_activateLazyAttachedFiles", UI_JS)
+        self.assertIn("api/media?path=", UI_JS)
+
+    def test_render_messages_strips_marker_from_user_body(self):
+        render_start = UI_JS.index("function renderMessages(options)")
+        marker_start = UI_JS.index("const attachedMarker=", render_start)
+        render_body = UI_JS[marker_start:marker_start + 2500]
+        self.assertIn("_attachedFilesMarkerInfo(displayContent)", render_body)
+        self.assertIn("attachedMarker.content", render_body)
+        self.assertIn("_renderAttachedFilesMarkerHtml", render_body)
+
+    def test_dedupe_strip_handles_multiline_marker(self):
+        self.assertIn("[\\s\\S]*?", SESSIONS_JS)
+        self.assertIn("Attached files:", SESSIONS_JS)
+
+    def test_marker_preview_suppresses_duplicate_structured_preview(self):
+        render_start = UI_JS.index("function renderMessages(options)")
+        marker_start = UI_JS.index("const attachedMarker=", render_start)
+        render_body = UI_JS[marker_start:marker_start + 2500]
+        self.assertIn("const hasAttachedMarkerFiles=", render_body)
+        self.assertIn("const renderStructuredAttachments=", render_body)
+        self.assertIn("!hasAttachedMarkerFiles&&(m.attachments&&m.attachments.length)", render_body)
+
+    def test_new_marker_serialization_is_newline_based(self):
+        self.assertIn("function _attachedFilesMarkerText", MESSAGES_JS)
+        marker_start = MESSAGES_JS.index("function _attachedFilesMarkerText")
+        marker_body = MESSAGES_JS[marker_start:marker_start + 800]
+        self.assertIn("clean.join('\\n')", marker_body)
+        self.assertNotIn("paths.join(', ')", marker_body)
+        self.assertIn("_attachedFilesMarkerText(uploadedPaths)", MESSAGES_JS)
+
+    def test_upload_only_messages_keep_machine_readable_marker(self):
+        send_start = MESSAGES_JS.index("const attachedFilesMarker=_attachedFilesMarkerText(uploadedPaths)")
+        send_body = MESSAGES_JS[send_start:send_start + 500]
+        self.assertIn("if(uploaded.length&&!msgText)", send_body)
+        self.assertIn("${attachedFilesMarker}", send_body)
+
+    def test_parser_supports_newline_marker_with_brackets_in_path(self):
+        parser_start = UI_JS.index("function _attachedFilesMarkerInfo")
+        parser_body = UI_JS[parser_start:parser_start + 1600]
+        self.assertIn("\\n\\]", parser_body)
+        self.assertIn("legacyMatch", parser_body)
+
+    def test_attached_files_summary_uses_i18n_keys(self):
+        self.assertIn("t('attached_file')", UI_JS)
+        self.assertIn("t('attached_files')", UI_JS)
+        self.assertIn("attached_file:", I18N_JS)
+        self.assertIn("attached_files:", I18N_JS)
 
 
 # ── Static analysis: CSS ──────────────────────────────────────────────────────

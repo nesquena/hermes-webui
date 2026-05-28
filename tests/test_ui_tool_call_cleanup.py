@@ -250,7 +250,7 @@ class TestToolCallGroupingStatic:
     def test_settled_thinking_suppresses_visible_assistant_echoes(self):
         render_fn = _function_body(UI_JS, "renderMessages")
         helper = _function_body(UI_JS, "_stripVisibleAssistantEchoFromThinking")
-        assert "_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent)" in render_fn, (
+        assert "_stripVisibleAssistantEchoFromThinking(thinkingText, bodyContent)" in render_fn, (
             "Settled Thinking cards should not repeat text already rendered as visible assistant content."
         )
         assert "s.length>=20" in helper, (

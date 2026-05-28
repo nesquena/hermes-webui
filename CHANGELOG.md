@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+
+### Fixed
+
+- Persisted chat attachment markers now render back into guarded, lazy-loading media previews after session reload/import instead of appearing only as raw `[Attached files: ...]` text. The renderer supports images, audio/video players, and downloads, keeps legacy marker compatibility, and avoids duplicate previews when live structured attachments are also present.
+
 ## [v0.51.171] — 2026-05-30 — Release EQ (stage-batch53 — tool-output card badge + Neon opt-in skin)
 
 ### Added

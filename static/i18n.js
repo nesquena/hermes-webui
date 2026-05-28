@@ -47,6 +47,8 @@ const LOCALES = {
     selected_text_reply: 'Reply with selection',
     selected_text_reply_title: 'Append selected chat text as quoted context',
     selected_text_reply_appended: 'Selected text added to composer',
+    attached_file: 'Attached file',
+    attached_files: 'Attached files',
 
     diff_loading: 'Loading diff',
     diff_error: 'Could not load patch file',
@@ -1348,6 +1350,8 @@ const LOCALES = {
     selected_text_reply: 'Rispondi con selezione',
     selected_text_reply_title: 'Aggiungi il testo della chat selezionato come contesto citato',
     selected_text_reply_appended: 'Testo selezionato aggiunto al compositore',
+    attached_file: 'File allegato',
+    attached_files: 'File allegati',
 
     diff_loading: 'Caricamento diff',
     diff_error: 'Impossibile caricare il file patch',
@@ -2641,6 +2645,8 @@ const LOCALES = {
     selected_text_reply: '選択範囲で返信',
     selected_text_reply_title: '選択したチャットテキストを引用コンテキストとして追加',
     selected_text_reply_appended: '選択したテキストを入力欄に追加しました',
+    attached_file: '添付ファイル',
+    attached_files: '添付ファイル',
 
     diff_loading: '差分を読み込み中',
     diff_error: 'パッチファイルを読み込めませんでした',
@@ -3936,6 +3942,8 @@ const LOCALES = {
     selected_text_reply: 'Ответить с выделенным',
     selected_text_reply_title: 'Добавить выделенный текст чата как цитируемый контекст',
     selected_text_reply_appended: 'Выделенный текст добавлен в поле ввода',
+    attached_file: 'Прикрепленный файл',
+    attached_files: 'Прикрепленные файлы',
 
     diff_loading: 'Загрузка diff',
     diff_error: 'Не удалось загрузить файл патча',
@@ -5162,6 +5170,8 @@ const LOCALES = {
     selected_text_reply: 'Responder con selección',
     selected_text_reply_title: 'Añadir el texto del chat seleccionado como contexto citado',
     selected_text_reply_appended: 'Texto seleccionado añadido al compositor',
+    attached_file: 'Archivo adjunto',
+    attached_files: 'Archivos adjuntos',
 
     diff_loading: 'Cargando diff',
     diff_error: 'No se pudo cargar el archivo de parche',
@@ -6391,6 +6401,8 @@ const LOCALES = {
     selected_text_reply: 'Mit Auswahl antworten',
     selected_text_reply_title: 'Ausgewählten Chattext als Zitatkontext anhängen',
     selected_text_reply_appended: 'Auswahl zum Composer hinzugefügt',
+    attached_file: 'Angehängte Datei',
+    attached_files: 'Angehängte Dateien',
 
     diff_loading: 'Lade Diff',
     diff_error: 'Patch-Datei konnte nicht geladen werden',
@@ -7624,6 +7636,8 @@ const LOCALES = {
     selected_text_reply: '用所选内容回复',
     selected_text_reply_title: '将所选聊天文本作为引用上下文追加',
     selected_text_reply_appended: '已将所选文本添加到输入框',
+    attached_file: '附加文件',
+    attached_files: '附加文件',
 
     diff_loading: '加载 diff',
     diff_error: '无法加载 patch 文件',
@@ -10157,6 +10171,8 @@ const LOCALES = {
     selected_text_reply: 'Responder com seleção',
     selected_text_reply_title: 'Anexar o texto selecionado do chat como contexto citado',
     selected_text_reply_appended: 'Texto selecionado adicionado ao compositor',
+    attached_file: 'Arquivo anexado',
+    attached_files: 'Arquivos anexados',
     you: 'Você',
     thinking: 'Pensando',
     expand_all: 'Expandir tudo',
@@ -11269,6 +11285,8 @@ const LOCALES = {
     selected_text_reply: '선택 항목으로 답장',
     selected_text_reply_title: '선택한 채팅 텍스트를 인용 컨텍스트로 추가',
     selected_text_reply_appended: '선택한 텍스트가 입력창에 추가되었습니다',
+    attached_file: '첨부 파일',
+    attached_files: '첨부 파일',
 
     diff_loading: 'diff 불러오는 중',
     diff_error: '패치 파일을 로드할 수 없습니다',
@@ -12560,6 +12578,8 @@ const LOCALES = {
     selected_text_reply: 'Répondre avec la sélection',
     selected_text_reply_title: 'Ajouter le texte sélectionné du chat comme contexte cité',
     selected_text_reply_appended: 'Texte sélectionné ajouté au compositeur',
+    attached_file: 'Fichier joint',
+    attached_files: 'Fichiers joints',
     diff_loading: 'Chargement des différences',
     diff_error: 'Impossible de charger le fichier de correctif',
     diff_too_large: 'Fichier de correctif trop volumineux pour être affiché en ligne',
@@ -13788,6 +13808,8 @@ const LOCALES = {
     selected_text_reply: 'Seçimle yanıtla',
     selected_text_reply_title: 'Seçilen sohbet metnini alıntılanan bağlam olarak ekle',
     selected_text_reply_appended: 'Seçilen metin besteciye eklendi',
+    attached_file: 'Ekli dosya',
+    attached_files: 'Ekli dosyalar',
 
     diff_loading: 'Fark yükleniyor',
     diff_error: 'Yama dosyası yüklenemedi',
