@@ -1864,6 +1864,7 @@ def _space_tool_action_output_compaction_receipt(
     space_id: str | None = None,
     source_space_id: str | None = None,
     target_space_id: str | None = None,
+    widget_id: str | None = None,
     widget_count: int | None = None,
     revision_event_id: str | None = None,
     revision_event_ids: list[str] | None = None,
@@ -1883,6 +1884,7 @@ def _space_tool_action_output_compaction_receipt(
     safe_space_id = _context_value(space_id, 120) if space_id else None
     safe_source_space_id = _context_value(source_space_id, 120) if source_space_id else None
     safe_target_space_id = _context_value(target_space_id, 120) if target_space_id else None
+    safe_widget_id = _widget_event_label_summary(widget_id, 120) if widget_id else None
     try:
         safe_widget_count = max(0, int(widget_count or 0))
     except (TypeError, ValueError):
@@ -1906,6 +1908,8 @@ def _space_tool_action_output_compaction_receipt(
         lines.append(f"space_id: {safe_space_id}")
     if safe_target_space_id:
         lines.append(f"target_space_id: {safe_target_space_id}")
+    if safe_widget_id:
+        lines.append(f"widget_id: {safe_widget_id}")
     if include_widget_count:
         lines.append(f"widget_count: {safe_widget_count}")
     if public_revision_event_ids:
@@ -1936,6 +1940,14 @@ def _space_tool_action_output_compaction_receipt(
                 "kind": "space",
                 "handle": f"space:{retained_space_id}",
                 "label": "Space action metadata",
+            }
+        )
+    if retained_space_id and safe_widget_id:
+        artifact_handles.append(
+            {
+                "kind": "widget",
+                "handle": f"widget:{retained_space_id}:{safe_widget_id}",
+                "label": "Widget action metadata",
             }
         )
     for event_id in public_revision_event_ids[:3]:
@@ -8367,16 +8379,27 @@ def restore_revision(space_id: str, event_id: str, *, action: str = "space.recov
     restored = _preserve_admin_space_recovery_control_state(current, restored)
     saved = _write_manifest(restored, "space.restored", {"restored_event_id": safe_event_id}, allow_stale_revision=True)
     safe_action = _context_value(action, 120) or "space.recovery.restore"
+    prompt_preflight = _recovery_required_prompt_preflight_receipt(safe_action)
+    autonomy_policy = _recovery_restore_action_policy_receipt(safe_action)
+    progress_event = _record_space_recovery_progress_event(
+        sid,
+        action=safe_action if safe_action.startswith("space.current.") else "restore",
+    )
     return {
         "ok": True,
         "space": read_space_detail(sid),
         "restored_event_id": safe_event_id,
         "revision_event_id": saved["revision_event_id"],
-        "prompt_preflight": _recovery_required_prompt_preflight_receipt(safe_action),
-        "autonomy_policy": _recovery_restore_action_policy_receipt(safe_action),
-        "progress_event": _record_space_recovery_progress_event(
-            sid,
-            action=safe_action if safe_action.startswith("space.current.") else "restore",
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "output_compaction": _space_tool_action_output_compaction_receipt(
+            action=safe_action,
+            space_id=sid,
+            revision_event_ids=[safe_event_id, saved["revision_event_id"]],
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+            include_widget_count=False,
         ),
     }
 
@@ -8433,15 +8456,27 @@ def restore_widget_revision(
     current["widgets"] = restored_widgets
     saved = _write_manifest(current, "widget.restored", {"restored_event_id": safe_event_id, "widget_id": wid})
     safe_action = _context_value(action, 120) or "space.recovery.restore_widget"
+    prompt_preflight = _recovery_required_prompt_preflight_receipt(safe_action)
+    autonomy_policy = _recovery_restore_action_policy_receipt(safe_action)
+    progress_event = _record_space_recovery_progress_event(sid, action="widget.restore")
     return {
         "ok": True,
         "space_id": sid,
         "widget": read_widget_detail(sid, wid),
         "restored_event_id": safe_event_id,
         "revision_event_id": saved["revision_event_id"],
-        "prompt_preflight": _recovery_required_prompt_preflight_receipt(safe_action),
-        "autonomy_policy": _recovery_restore_action_policy_receipt(safe_action),
-        "progress_event": _record_space_recovery_progress_event(sid, action="widget.restore"),
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "output_compaction": _space_tool_action_output_compaction_receipt(
+            action=safe_action,
+            space_id=sid,
+            widget_id=wid,
+            revision_event_ids=[safe_event_id, saved["revision_event_id"]],
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+            include_widget_count=False,
+        ),
     }
 
 

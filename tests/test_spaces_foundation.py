@@ -12533,6 +12533,18 @@ def test_space_tool_adapter_lists_and_restores_revisions_metadata_only(monkeypat
     assert restored["progress_event"]["run_id"] == "recovery.restore:tool-rollback"
     assert restored["progress_event"]["space_id"] == created["space_id"]
     assert restored["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = restored["output_compaction"]
+    assert compaction["metadata_only"] is True
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == "space.recovery.restore"
+    assert compaction["exit_status"] == 0
+    assert "retain_artifact_handles" in compaction["rules_applied"]
+    assert f"space_id: {created['space_id']}" in compaction["text"]
+    assert original_event_id in compaction["text"]
+    assert restored["revision_event_id"] in compaction["text"]
+    assert "prompt_preflight_status: required" in compaction["text"]
+    assert "model_route_hint: hint:reasoning" in compaction["text"]
+    assert "progress_run_id: recovery.restore:tool-rollback" in compaction["text"]
     from api.capy_progress import progress_status
 
     status = progress_status(space_id=created["space_id"])
@@ -13157,12 +13169,47 @@ def test_restore_widget_revision_restores_one_widget_without_leaking_sources(mon
     assert restored["progress_event"]["run_id"] == f"recovery.widget.restore:{created['space_id']}"
     assert restored["progress_event"]["space_id"] == created["space_id"]
     assert restored["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = restored["output_compaction"]
+    assert compaction["metadata_only"] is True
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == "space.recovery.restore_widget"
+    assert compaction["exit_status"] == 0
+    assert "retain_artifact_handles" in compaction["rules_applied"]
+    assert f"space_id: {created['space_id']}" in compaction["text"]
+    assert "widget_id: weather" in compaction["text"]
+    assert original["revision_event_id"] in compaction["text"]
+    assert restored["revision_event_id"] in compaction["text"]
+    assert "prompt_preflight_status: required" in compaction["text"]
+    assert "model_route_hint: hint:reasoning" in compaction["text"]
+    assert f"progress_run_id: recovery.widget.restore:{created['space_id']}" in compaction["text"]
+    widget_handles = [handle["handle"] for handle in compaction["retained_artifact_handles"] if handle["kind"] == "widget"]
+    assert widget_handles == [f"widget:{created['space_id']}:weather"]
     serialized = json.dumps({"restored": restored, "revisions": revisions}).lower()
     assert "keptbutneverreturned" not in serialized
     assert "secret_source_do_not_leak" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_restore_widget_compaction_redacts_unsafe_widget_handle_labels(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    receipt = spaces._space_tool_action_output_compaction_receipt(
+        action="space.recovery.restore_widget",
+        space_id="safe-space",
+        widget_id="SECRET_VALUE_DO_NOT_LEAK",
+        revision_event_ids=["evt-safe-001"],
+        autonomy_policy={"prompt_preflight_status": "required", "model_route_hint": "hint:reasoning"},
+        progress_event={"run_id": "recovery.widget.restore:safe-space", "event_type": "tool.completed"},
+        include_widget_count=False,
+    )
+
+    serialized = json.dumps(receipt, sort_keys=True).lower()
+    assert receipt["metadata_only"] is True
+    assert "widget_id: [REDACTED]" in receipt["text"]
+    assert "widget:safe-space:secret" not in serialized
     assert "secret_value_do_not_leak" not in serialized
 
 
