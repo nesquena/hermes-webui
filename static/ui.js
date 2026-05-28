@@ -897,6 +897,34 @@ function _captureModelDropdownSelection(sel){
   }catch(_){}
   return {model:String(sel.value||''),model_provider:null};
 }
+function _modelProviderForSend(modelId){
+  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
+  if(sessionProvider) return sessionProvider;
+  const model=String(modelId||'').trim();
+  if(!model) return null;
+  const explicitProvider=typeof _providerFromModelValue==='function'
+    ? _providerFromModelValue(model)
+    : '';
+  if(explicitProvider) return explicitProvider;
+  const sel=typeof $==='function' ? $('modelSelect') : null;
+  if(sel&&String(sel.value||'').trim()===model&&typeof _modelStateForSelect==='function'){
+    try{
+      const dropdownState=_modelStateForSelect(sel,sel.value);
+      if(dropdownState&&String(dropdownState.model||'').trim()===model){
+        return dropdownState.model_provider||null;
+      }
+    }catch(_){}
+  }
+  if(typeof _readPersistedModelState==='function'){
+    try{
+      const persisted=_readPersistedModelState();
+      if(persisted&&String(persisted.model||'').trim()===model){
+        return persisted.model_provider||null;
+      }
+    }catch(_){}
+  }
+  return null;
+}
 function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   if(!sel) return null;
   const activeSession=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
