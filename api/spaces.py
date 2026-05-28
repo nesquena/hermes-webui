@@ -8589,8 +8589,18 @@ def update_space(space_id: str, updates: dict[str, Any], *, include_safety_recei
         result: dict[str, Any] = {"space": detail}
         if prompt_preflight is not None:
             result["prompt_preflight"] = prompt_preflight
-            result["autonomy_policy"] = _space_current_instruction_action_policy_receipt("space.update", prompt_preflight)
-            result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="space.update")
+            autonomy_policy = _space_current_instruction_action_policy_receipt("space.update", prompt_preflight)
+            progress_event = _record_space_tool_progress_event(sid, run_prefix="space.update")
+            result["autonomy_policy"] = autonomy_policy
+            result["progress_event"] = progress_event
+            result["output_compaction"] = _space_tool_action_output_compaction_receipt(
+                action="space.update",
+                space_id=sid,
+                revision_event_id=saved.get("revision_event_id"),
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+                include_widget_count=False,
+            )
         return result
 
 

@@ -19636,7 +19636,12 @@ def test_space_update_route_can_return_metadata_only_safety_receipts_for_agent_i
         "/api/spaces/update",
         {
             "spaceId": target["space_id"],
-            "updates": {"agent_instructions": "Use Memory Tree summaries only as advisory context."},
+            "updates": {
+                "agent_instructions": "Use Memory Tree summaries only as advisory context.",
+                "source": "SECRET_SOURCE_DO_NOT_LEAK",
+                "html": "<script>nestedRoutePolicyLeak()</script>",
+                "api_auth": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+            },
             "includeSafetyReceipts": True,
             "renderer": "<script>routePolicyLeak()</script>",
             "api_key": "SECRET_VALUE_DO_NOT_LEAK",
@@ -19655,6 +19660,28 @@ def test_space_update_route_can_return_metadata_only_safety_receipts_for_agent_i
     assert body["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
     assert body["progress_event"]["event_type"] == "tool.completed"
     assert body["progress_event"]["run_id"] == f"space.update:{target['space_id']}"
+    compaction = body["output_compaction"]
+    compaction_text = compaction["text"].lower()
+    assert compaction["tool"] == "capy-spaces-tool-action"
+    assert compaction["command"] == "space.update"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] in {"metadata_only", "redacted"}
+    assert "space_action: space.update" in compaction_text
+    assert f"space_id: {target['space_id']}" in compaction_text
+    assert "widget_count" not in compaction_text
+    assert "revision_event_id:" in compaction_text
+    assert "prompt_preflight_status: pass" in compaction_text
+    assert "model_route_hint: hint:reasoning" in compaction_text
+    assert f"progress_run_id: space.update:{target['space_id']}" in compaction_text
+    assert "use memory tree summaries" not in compaction_text
+    assert "secret_source_do_not_leak" not in json.dumps(compaction).lower()
+    assert "secret_value_do_not_leak" not in json.dumps(compaction).lower()
+    assert "<script" not in json.dumps(compaction).lower()
+    assert "renderer" not in json.dumps(compaction).lower()
+    assert "api_key" not in json.dumps(compaction).lower()
+    assert '"html"' not in json.dumps(compaction).lower()
+    assert "source" not in json.dumps(compaction).lower()
+    assert "bearer" not in json.dumps(compaction).lower()
     assert "secret_value_do_not_leak" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
