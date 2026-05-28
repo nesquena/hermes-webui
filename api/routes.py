@@ -9477,13 +9477,11 @@ def _handle_bg_task_complete_ack(handler, body):
         return bad(handler, "Session not found", 404)
     # process_id accepted as transitional alias; see Deprecation response header
     # + maintainer decision on removal milestone / future Sunset header. Only
-    # flag Deprecation when the alias was ACTUALLY used (i.e. task_id absent
-    # AND process_id non-empty) — otherwise a request that sends BOTH during
-    # migration would see a spurious Deprecation warning even though the
-    # canonical field was honoured and the alias was ignored.
+    # flag Deprecation when the alias was ACTUALLY used (i.e. process_id present
+    # and not empty), even if task_id is also present.
     _task_id_present = bool(str(body.get("task_id") or "").strip())
     _process_id_present = bool(str(body.get("process_id") or "").strip())
-    legacy_process_id_used = (not _task_id_present) and _process_id_present
+    legacy_process_id_used = _process_id_present
     pid = str(body.get("task_id") or body.get("process_id") or "").strip()
     # Post Option-Z pivot this endpoint owns no state: the server-side drain
     # thread starts the wakeup turn, the browser never re-POSTs /api/chat/start.
