@@ -486,6 +486,16 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     if(!window._micActive){
       _setButtonTooltipAndKey(btn, _rawAudioMode ? 'voice_send_raw' : 'voice_dictate');
     }
+    // Add/remove badge span (can't use ::after — conflicts with .has-tooltip::after)
+    let badge = btn.querySelector('.mic-raw-badge');
+    if(_rawAudioMode && !badge){
+      badge = document.createElement('span');
+      badge.className = 'mic-raw-badge';
+      badge.textContent = 'RAW';
+      btn.appendChild(badge);
+    } else if(!_rawAudioMode && badge){
+      badge.remove();
+    }
   }
 
   async function _sendRawAudio(blob){
