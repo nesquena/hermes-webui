@@ -977,6 +977,35 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
   const _streamFadeEnabledForStream=window._fadeTextEffect===true;
 
+  function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
+    const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
+    const byTid=new Map();
+    liveCalls.forEach((tc,idx)=>{
+      if(!tc||typeof tc!=='object') return;
+      const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+      if(tid&&!byTid.has(tid)) byTid.set(tid,{tc,idx});
+    });
+    const used=new Set();
+    return (rawCalls||[]).map((raw,idx)=>{
+      const next={...(raw||{}),done:true};
+      const tid=next.tid||next.id||next.tool_call_id||next.call_id||'';
+      let matchEntry=tid?byTid.get(tid):null;
+      if(!matchEntry){
+        const name=next.name||((next.function||{}).name)||'';
+        const matchIdx=liveCalls.findIndex((tc,i)=>tc&&!used.has(i)&&(!name||tc.name===name));
+        if(matchIdx>=0) matchEntry={tc:liveCalls[matchIdx],idx:matchIdx};
+      }
+      if(matchEntry){
+        used.add(matchEntry.idx);
+        const live=matchEntry.tc||{};
+        for(const key of ['activityBurstId','duration','started_at']){
+          if(next[key]===undefined&&live[key]!==undefined) next[key]=live[key];
+        }
+      }
+      return next;
+    });
+  }
+
   // rAF-throttled rendering: buffer tokens, render at most once per frame
   let _renderPending=false;
   // Extract display text from assistantText, stripping completed thinking blocks
@@ -1948,7 +1977,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return hasTc||hasPartialTc||hasTu;
           });
           if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
-            S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
+            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
           } else {
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
           }
@@ -2352,7 +2381,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           return hasTc||hasPartialTc||hasTu;
         });
         if(!hasMessageToolMetadata&&session.tool_calls&&session.tool_calls.length){
-          S.toolCalls=(session.tool_calls||[]).map(tc=>({...tc,done:true}));
+          S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(session.tool_calls||[]);
         }else{
           S.toolCalls=[];
         }

@@ -2480,9 +2480,11 @@ function _updateActiveActivityElapsedTimer(){
     group.removeAttribute('data-active-turn-elapsed');
   }
   if(durationEl){
-    const activeText=label?`Working for ${label}`:'';
-    const progressText=group.getAttribute('data-run-activity-group')==='1'?'':_activityLiveProgressLabel(group);
+    const settledText=_formatTurnDuration(group.dataset.turnDuration);
+    const activeText=(!settledText&&label)?`Working for ${label}`:'';
+    const progressText=(settledText||group.getAttribute('data-run-activity-group')==='1')?'':_activityLiveProgressLabel(group);
     durationEl.textContent=[progressText, activeText].filter(Boolean).join(' · ');
+    if(settledText) durationEl.textContent=`Done in ${settledText}`;
     durationEl.style.display=durationEl.textContent?'':'none';
   }
 }
@@ -5507,6 +5509,8 @@ function ensureRunActivityGroup(inner, opts){
     if(inner.firstChild) inner.insertBefore(group, inner.firstChild);
     else inner.appendChild(group);
   }
+  if(opts.turnDuration!==undefined&&opts.turnDuration!==null) group.setAttribute('data-turn-duration',String(opts.turnDuration));
+  if(opts.turnStartedAt!==undefined&&opts.turnStartedAt!==null) group.setAttribute('data-turn-started-at',String(opts.turnStartedAt));
   _setActivityElapsedStartedAt(group);
   _ensureLiveActivityBaseline(group);
   _syncToolCallGroupSummary(group);
@@ -6751,26 +6755,83 @@ function renderMessages(options){
       byAssistant[key].push(tc);
     }
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
+    const _assistantAnchorForActivity=(aIdx,burstId)=>{
+      const wantedBurst=burstId!==undefined&&burstId!==null&&String(burstId)!==''?String(burstId):'';
+      if(wantedBurst){
+        for(const seg of assistantSegments.values()){
+          if(seg&&seg.getAttribute('data-activity-burst-id')===wantedBurst) return seg;
+        }
+      }
+      let anchorRow=assistantSegments.get(aIdx)||null;
+      if(!anchorRow&&assistantIdxs.length){
+        if(aIdx<assistantIdxs[0]) return null;
+        const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+        anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+      }
+      return anchorRow;
+    };
+    const _ensureSettledRunActivityForAnchor=(anchorRow)=>{
+      if(!anchorRow) return;
+      const turn=anchorRow.closest('.assistant-turn');
+      const blocks=_assistantTurnBlocks(turn);
+      if(!blocks) return;
+      let duration;
+      for(const seg of blocks.querySelectorAll('.assistant-segment')){
+        const idx=Number(seg.dataset&&seg.dataset.msgIdx);
+        const msg=Number.isFinite(idx)?S.messages[idx]:null;
+        if(msg&&msg._turnDuration!==undefined) duration=msg._turnDuration;
+      }
+      ensureRunActivityGroup(blocks,{live:false,collapsed:true,turnDuration:duration});
+    };
     const anchorInsertAfter = new Map();
     if(isSimplifiedToolCalling()){
-      const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
-      for(const aIdx of activityIdxs){
-        const cards=byAssistant[aIdx]||[];
-        let anchorRow=assistantSegments.get(aIdx)||null;
-        if(!anchorRow&&assistantIdxs.length){
-          if(aIdx<assistantIdxs[0]) continue;
-          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+      const byActivity = new Map();
+      const activityOrder = [];
+      const ensureActivityBucket=(key,aIdx,burstId)=>{
+        if(!byActivity.has(key)){
+          const entry={key,aIdx,burstId,cards:[],thinkingIdx:null};
+          byActivity.set(key,entry);
+          activityOrder.push(entry);
         }
+        return byActivity.get(key);
+      };
+      for(const tc of (S.toolCalls||[])){
+        if(!tc) continue;
+        const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
+        const burstId=tc.activityBurstId!==undefined&&tc.activityBurstId!==null?String(tc.activityBurstId):'';
+        const key=burstId?`burst:${burstId}`:`assistant:${aIdx}`;
+        ensureActivityBucket(key,aIdx,burstId).cards.push(tc);
+      }
+      for(const aIdx of assistantThinking.keys()){
+        const seg=assistantSegments.get(aIdx);
+        const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
+        const key=burstId?`burst:${burstId}`:`assistant:${aIdx}`;
+        const entry=ensureActivityBucket(key,aIdx,burstId);
+        if(entry.thinkingIdx===null) entry.thinkingIdx=aIdx;
+      }
+      activityOrder.sort((a,b)=>{
+        const anchorA=_assistantAnchorForActivity(a.aIdx,a.burstId);
+        const anchorB=_assistantAnchorForActivity(b.aIdx,b.burstId);
+        const idxA=(anchorA&&anchorA.parentElement)?Array.prototype.indexOf.call(anchorA.parentElement.children,anchorA):Number.MAX_SAFE_INTEGER;
+        const idxB=(anchorB&&anchorB.parentElement)?Array.prototype.indexOf.call(anchorB.parentElement.children,anchorB):Number.MAX_SAFE_INTEGER;
+        if(idxA!==idxB) return idxA-idxB;
+        const burstA=a.burstId===''?Number.MAX_SAFE_INTEGER:Number(a.burstId);
+        const burstB=b.burstId===''?Number.MAX_SAFE_INTEGER:Number(b.burstId);
+        if(Number.isFinite(burstA)&&Number.isFinite(burstB)&&burstA!==burstB) return burstA-burstB;
+        return a.aIdx-b.aIdx;
+      });
+      for(const entry of activityOrder){
+        const {aIdx,burstId,cards,thinkingIdx}=entry;
+        const anchorRow=_assistantAnchorForActivity(aIdx,burstId);
         if(!anchorRow) continue;
         const anchorParent=anchorRow.parentElement;
         let insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode,activityKey:`assistant:${aIdx}`});
-        const sourceMsg=S.messages[aIdx]||{};
-        if(sourceMsg._turnDuration!==undefined) group.setAttribute('data-turn-duration', String(sourceMsg._turnDuration));
+        _ensureSettledRunActivityForAnchor(anchorRow);
+        const activityKey=burstId?`assistant:${aIdx}:burst:${burstId}`:`assistant:${aIdx}`;
+        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode,activityKey,burstId});
         const body=group&&group.querySelector('.tool-call-group-body');
         if(!body) continue;
-        const thinkingText=assistantThinking.get(aIdx);
+        const thinkingText=thinkingIdx!==null?assistantThinking.get(thinkingIdx):'';
         if(thinkingText){
           body.appendChild(_thinkingActivityNode(thinkingText, false));
         }
@@ -6783,13 +6844,9 @@ function renderMessages(options){
     }else if(S.toolCalls && S.toolCalls.length){
       for(const [key, cards] of Object.entries(byAssistant)){
         const aIdx = parseInt(key);
-        let anchorRow=assistantSegments.get(aIdx)||null;
-        if(!anchorRow&&assistantIdxs.length){
-          if(aIdx<assistantIdxs[0]) continue;
-          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
-        }
+        const anchorRow=_assistantAnchorForActivity(aIdx,'');
         if(!anchorRow) continue;
+        _ensureSettledRunActivityForAnchor(anchorRow);
         const anchorParent=anchorRow.parentElement;
         const frag=document.createDocumentFragment();
         let lastInsertedNode=null;
@@ -7015,8 +7072,9 @@ function _syncToolCallGroupSummary(group){
   }
   if(durationEl){
     if(group.getAttribute('data-run-activity-group')==='1'){
-      const activeText=_activityElapsedLabel(group);
-      durationEl.textContent=activeText?`Working for ${activeText}`:'';
+      const durationText=_formatTurnDuration(group.dataset.turnDuration);
+      const activeText=durationText?'':_activityElapsedLabel(group);
+      durationEl.textContent=durationText?`Done in ${durationText}`:(activeText?`Working for ${activeText}`:'');
       durationEl.style.display=durationEl.textContent?'':'none';
     }else if(group.getAttribute('data-live-tool-call-group')==='1'){
       const activeText=_activityElapsedLabel(group);

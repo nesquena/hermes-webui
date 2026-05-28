@@ -53,7 +53,11 @@ def test_ui_formats_and_renders_turn_duration_in_footer_and_activity_summary():
         "Compact tool activity summary should have a dedicated duration span at the end of the line."
     )
     assert "data-turn-duration" in UI_JS, (
-        "Activity groups need a stable data-turn-duration hook so settled duration can update the summary."
+        "The top run Activity needs a stable data-turn-duration hook so settled duration can update its summary."
+    )
+    assert "ensureRunActivityGroup(blocks,{live:false,collapsed:true,turnDuration:duration})" in UI_JS, (
+        "Settled compact activity should put turn duration on the top Run Activity, "
+        "not on each tool Activity group."
     )
     assert "compactActivityForMessage" in UI_JS, (
         "When compact activity is present, duration should live on the Activity row "
