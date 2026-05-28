@@ -7693,11 +7693,31 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return response
     if name in {"space.data.list", "space.current.data.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
-        return {"ok": True, "action": name, "space_id": space_id, "items": list_shared_data_slots(space_id)}
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "items": list_shared_data_slots(space_id),
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=0,
+            ),
+        }
     if name in {"space.data.get", "space.current.data.get"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         data_key = validate_data_key(data.get("key"))
-        return {"ok": True, "action": name, "space_id": space_id, "item": read_shared_data_slot(space_id, data_key)}
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "item": read_shared_data_slot(space_id, data_key),
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=0,
+            ),
+        }
     if name in {"space.data.delete", "space.current.data.delete"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = delete_shared_data_slot(space_id, data.get("key"))

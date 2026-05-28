@@ -11228,6 +11228,65 @@ def test_space_data_delete_tool_returns_metadata_only_output_compaction_receipt(
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_space_data_read_list_tools_return_metadata_only_output_compaction_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "shared-data-read-compaction", "name": "Shared Data Read Compaction"})
+    written = spaces.run_space_tool(
+        "space.data.set",
+        {
+            "space_id": created["space_id"],
+            "key": "research-summary",
+            "value": {
+                "title": "Safe shared data",
+            },
+            "metadata": {
+                "source_widget": "research-summary",
+                "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+            },
+        },
+    )
+
+    listed = spaces.run_space_tool(
+        "space.data.list",
+        {
+            "space_id": created["space_id"],
+            "renderer": "<script>listBad()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    read = spaces.run_space_tool(
+        "space.data.get",
+        {
+            "space_id": created["space_id"],
+            "key": "research-summary",
+            "source": "raw slot body should not render",
+            "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    serialized = json.dumps({"written": written, "listed": listed, "read": read}, sort_keys=True).lower()
+
+    assert listed["items"] == [written["item"]]
+    assert read["item"] == written["item"]
+    for action_result, command in ((listed, "space.data.list"), (read, "space.data.get")):
+        compaction = action_result["output_compaction"]
+        assert compaction["tool"] == "capy-spaces-tool-action"
+        assert compaction["command"] == command
+        assert compaction["metadata_only"] is True
+        assert compaction["redaction_status"] == "metadata_only"
+        assert f"space_action: {command}" in compaction["text"]
+        assert f"space_id: {created['space_id']}" in compaction["text"]
+        assert "widget_count: 0" in compaction["text"]
+    assert "safe shared data" in serialized
+    assert "raw slot body should not render" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_tool_adapter_shared_data_slots_are_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "shared-data-lab", "name": "Shared Data Lab"})
