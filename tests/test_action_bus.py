@@ -200,6 +200,85 @@ class TestEchoTest(unittest.TestCase):
         register_builtins(reg)
         self.assertEqual(reg.known_actions(), ["echo.test"])
 
+    def test_action_can_chain_via_context_dispatch(self):
+        """A registered action can dispatch a sibling via ``context.dispatch``.
+
+        v1 ships no chaining actions, but the bus contract supports the
+        pattern (see docs/rfcs/action-bus.md ``Chaining`` section). This
+        test locks the contract in so follow-up actions
+        (``session.nudge -> session.refresh``, etc) can rely on it and
+        their PR diffs do not have to also grow the test surface.
+
+        Exercises the ``_ctx(dispatch=...)`` extensibility too: the
+        chaining action only works when its ``context.dispatch`` is
+        wired to the registry's own dispatch method.
+        """
+        reg = ActionRegistry()
+        reg.register(EchoTestAction())
+
+        class _ChainEchoAction:
+            name = "chain.echo"
+
+            def run(self, payload, context):
+                inner_payload = {"content": payload.get("forward", "")}
+                inner = context.dispatch("echo.test", inner_payload, context)
+                if not inner.ok:
+                    return ActionResult(
+                        ok=False, silent=True, error=f"inner: {inner.error}"
+                    )
+                return ActionResult(
+                    ok=True,
+                    silent=False,
+                    assistant_message=f"chain -> {inner.assistant_message}",
+                    refresh_chat=False,
+                )
+
+        reg.register(_ChainEchoAction())
+
+        # _ctx already accepts arbitrary overrides; passing dispatch=
+        # wires the chain through the same registry the outer dispatch
+        # uses. Without this wiring, the default _no_dispatch raises
+        # RuntimeError -- which is the right failure mode for callers
+        # that did not opt in to chaining.
+        result = reg.dispatch(
+            "chain.echo",
+            {"forward": "ping"},
+            _ctx(dispatch=reg.dispatch),
+        )
+
+        self.assertTrue(result.ok)
+        self.assertFalse(result.silent)
+        self.assertEqual(result.assistant_message, "chain -> ping")
+
+    def test_chaining_without_dispatch_raises(self):
+        """If the test surface forgets to wire dispatch, chaining fails loud.
+
+        The bus default for ``ActionContext.dispatch`` is ``_no_dispatch``
+        which raises ``RuntimeError``. The registry's outer ``dispatch``
+        catches the resulting ``Exception`` and wraps it in an error
+        ``ActionResult`` -- which is the right behavior, but means the
+        test surface must explicitly opt in to chaining via
+        ``_ctx(dispatch=...)``. This test asserts that omission is
+        observable rather than silently producing wrong results.
+        """
+        reg = ActionRegistry()
+        reg.register(EchoTestAction())
+
+        class _ChainEchoAction:
+            name = "chain.echo"
+
+            def run(self, payload, context):
+                context.dispatch("echo.test", {"content": "x"}, context)
+                return ActionResult(ok=True, silent=False, assistant_message="ok")
+
+        reg.register(_ChainEchoAction())
+
+        result = reg.dispatch("chain.echo", {}, _ctx())
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.silent)
+        self.assertIn("RuntimeError", result.error or "")
+
     def test_register_builtins_default_registry_is_idempotent(self):
         """Repeated calls against default_registry must not raise.
 
