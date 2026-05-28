@@ -1,4 +1,5 @@
 import importlib
+import io
 import queue
 
 from tests.conftest import requires_agent_modules
@@ -592,12 +593,61 @@ def test_runtime_runner_client_factory_stays_bounded_until_endpoint_configured(m
         routes._runtime_runner_client_factory()
     except NotImplementedError as exc:
         assert "runner-local chat backend is not configured" in str(exc)
-    else:
-        raise AssertionError("runner-local must stay not-configured without an explicit runner endpoint")
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("runner-local should remain bounded without an endpoint")
 
-    monkeypatch.setenv("HERMES_WEBUI_RUNNER_BASE_URL", "http://runner.local")
+    monkeypatch.setenv("HERMES_WEBUI_RUNNER_BASE_URL", "http://runner.local/")
     client = routes._runtime_runner_client_factory()
+
     assert client.base_url == "http://runner.local"
+
+
+def test_configured_runner_sse_stream_observes_runner_without_process_maps(monkeypatch):
+    routes = importlib.import_module("api.routes")
+    calls = []
+
+    class FakeRunnerClient:
+        def observe_run(self, run_id, *, cursor=None):
+            calls.append((run_id, cursor))
+            return {
+                "run_id": run_id,
+                "cursor": "7",
+                "events": [
+                    {"event": "message", "payload": {"content": "hello"}, "event_id": "run-1:6"},
+                    {"event": "stream_end", "payload": {"ok": True}, "event_id": "run-1:7"},
+                ],
+            }
+
+    class FakeHandler:
+        def __init__(self):
+            self.status = None
+            self.headers = []
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.headers.append((key, value))
+
+        def end_headers(self):
+            self.headers.append(("__end__", ""))
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setattr(routes, "_runtime_runner_client_factory", lambda: FakeRunnerClient())
+    handler = FakeHandler()
+
+    assert routes._stream_runner_run_events(handler, "run-1", "5") is True
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert handler.status == 200
+    assert calls == [("run-1", "5")]
+    assert "event: message" in body
+    assert "id: run-1:6" in body
+    assert 'data: {"content": "hello"}' in body
+    assert "event: stream_end" in body
+    assert "STREAMS" not in routes._stream_runner_run_events.__code__.co_names
+
 
 
 def test_runner_runtime_adapter_passes_explicit_start_payload_without_env_mutation(monkeypatch):

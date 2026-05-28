@@ -5,7 +5,7 @@
 
 ### Added
 
-- `runner-local` runtime adapter mode can now use an explicitly configured HTTP runner endpoint via `HERMES_WEBUI_RUNNER_BASE_URL`, replacing the bounded not-configured path only when the external runner boundary is configured.
+- `runner-local` runtime adapter mode can now use an explicitly configured HTTP runner endpoint via `HERMES_WEBUI_RUNNER_BASE_URL`, replacing the bounded not-configured path only when the external runner boundary is configured and streaming configured runner events through the existing SSE route without WebUI-owned runner maps.
 
 ## [v0.51.152] — 2026-05-28 — Release DX (stage-batch34 — single-PR optional gateway-backed browser chat)
 
