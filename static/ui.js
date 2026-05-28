@@ -2518,7 +2518,6 @@ function _setCtxCompressButton(btn,text){
 }
 
 function _syncMobileCtxDisplay(state){
-  const badge=$('composerMobileCtxBadge');
   const mobileConfigBtn=$('composerMobileConfigBtn');
   const row=$('composerMobileContextAction');
   const usageLine=$('composerMobileContextUsage');
@@ -2543,13 +2542,6 @@ function _syncMobileCtxDisplay(state){
       arc.setAttribute('stroke', '#22c55e');
     }
     return;
-  }
-  if(badge){
-    badge.style.display='inline-flex';
-    badge.textContent=state.hasPromptTok?String(state.pct):'\u00b7';
-    badge.classList.toggle('ctx-mid',state.pct>50&&state.pct<=75);
-    badge.classList.toggle('ctx-high',state.pct>75);
-    badge.setAttribute('title',state.label);
   }
   (function updateCtxRing(pct) {
     var arc = document.getElementById('ctx-arc');
