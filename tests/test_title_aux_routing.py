@@ -199,7 +199,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertEqual(captured.get('api_key'), 'test-title-api-key')
 
     def test_title_prompt_requires_matching_user_language(self):
-        """German conversation starts should not invite English title output."""
+        """Conversation starts should get a language-neutral match-language instruction."""
         from api.streaming import generate_title_raw_via_aux
 
         mock_resp = types.SimpleNamespace(
@@ -227,7 +227,45 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertEqual(status, 'llm_aux')
         messages = captured.get('messages') or []
         self.assertIn('Match the language of the user question', messages[0]['content'])
-        self.assertIn('If the user writes German, output a German title', messages[0]['content'])
+        self.assertNotIn('If the user writes German', messages[0]['content'])
+        self.assertNotIn('German good:', messages[0]['content'])
+
+    def test_title_prompt_language_rule_is_same_for_supported_locales(self):
+        from api.streaming import _title_prompt_language_rule
+
+        expected = "Match the language of the user question.\n"
+        examples = [
+            'Warum werden hier die Bilder nicht angezeigt?',
+            'Pourquoi les images ne sont-elles pas affichées ?',
+            '¿Por qué no se muestran las imágenes?',
+            '为什么图片没有显示？',
+            'Why are the images not displayed?',
+        ]
+        for text in examples:
+            with self.subTest(text=text):
+                self.assertEqual(_title_prompt_language_rule(text), expected)
+
+    def test_title_language_detection_avoids_english_tech_false_positives(self):
+        """English tech/jargon text must not be classified as German by shared tokens."""
+        from api.streaming import _detect_title_language
+
+        examples = [
+            'Why did the session die after the DAS storage failover?',
+            'The session can die when DAS storage disconnects.',
+            'Debug the session and DER certificate import failure.',
+        ]
+        for text in examples:
+            with self.subTest(text=text):
+                self.assertEqual(_detect_title_language(text), '')
+
+    def test_title_language_detection_keeps_german_without_umlaut(self):
+        """German without umlauts still needs a language hint when evidence is specific."""
+        from api.streaming import _detect_title_language
+
+        self.assertEqual(
+            _detect_title_language('Warum werden hier die Bilder der alten Session nicht angezeigt?'),
+            'de',
+        )
 
     def test_german_source_rejects_english_aux_title(self):
         """Regression: an English aux title must not overwrite a German conversation."""
@@ -253,7 +291,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertEqual(status, 'llm_language_mismatch_aux')
         self.assertEqual(raw_preview, 'Old Session Image Display Issue')
 
-    def test_german_fallback_keeps_german_topic_words(self):
+    def test_german_fallback_uses_generic_topic_extraction_without_literal_override(self):
         from api.streaming import _fallback_title_from_exchange
 
         title = _fallback_title_from_exchange(
@@ -261,7 +299,11 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
             'Ich prüfe die Rendering- und Attachment-Pfade im WebUI.',
         )
 
-        self.assertEqual(title, 'Alte Session Bilder')
+        self.assertIsNotNone(title)
+        self.assertIsInstance(title, str)
+        self.assertNotEqual(title, 'Alte Session Bilder')
+        self.assertNotEqual(title, 'Session Bilder')
+        self.assertIn('Warum', title)
 
     def test_configured_api_key_is_not_sent_to_caller_supplied_route(self):
         """Regression: title task keys must not leak to explicit fallback routes.

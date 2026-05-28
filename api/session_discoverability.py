@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sqlite3
 from collections import Counter
 from pathlib import Path
@@ -252,15 +254,19 @@ def audit_session_discoverability(
         parent = _merged_field(sid, stores, "parent_session_id")
         parent_by_id[sid] = str(parent) if parent else None
     api_lineage_ids: set[str] = set()
+    api_lineage_representative_by_id: dict[str, str] = {}
     for sid, row in api.items():
         explicit_root = row.get("_lineage_root_id")
         if explicit_root:
-            api_lineage_ids.add(str(explicit_root))
+            root_id = str(explicit_root)
+            api_lineage_ids.add(root_id)
+            api_lineage_representative_by_id.setdefault(root_id, sid)
         current = sid
         seen: set[str] = set()
         while current and current not in seen:
             seen.add(current)
             api_lineage_ids.add(current)
+            api_lineage_representative_by_id.setdefault(current, sid)
             current = parent_by_id.get(current) or ""
 
     items: list[dict] = []
@@ -282,6 +288,12 @@ def audit_session_discoverability(
         api_computed_is_cli = _computed_is_cli_session(api_row) if api_row else False
         index_is_cli = index_row.get("is_cli_session") is True
         sidecar_is_cli = sidecar.get("is_cli_session") is True
+        lineage_root = _lineage_root(sid, parent_by_id)
+        api_representative = api_lineage_representative_by_id.get(sid) or api_lineage_representative_by_id.get(lineage_root)
+        api_lineage_extra = {
+            "represented_by_api_lineage": bool(api_representative),
+            "api_representative_session_id": api_representative,
+        }
         if webui_origin and api_is_cli and api_computed_is_cli:
             items.append(_new_item(
                 sid,
@@ -295,6 +307,7 @@ def audit_session_discoverability(
                 index_is_cli_session=index_row.get("is_cli_session"),
                 sidecar_is_cli_session=sidecar.get("is_cli_session"),
                 present_in=present_in,
+                **api_lineage_extra,
             ))
         elif webui_origin and (api_is_cli or index_is_cli or sidecar_is_cli):
             items.append(_new_item(
@@ -309,12 +322,12 @@ def audit_session_discoverability(
                 index_is_cli_session=index_row.get("is_cli_session"),
                 sidecar_is_cli_session=sidecar.get("is_cli_session"),
                 present_in=present_in,
+                **api_lineage_extra,
             ))
 
         if message_count <= 0 or sid in api:
             continue
 
-        lineage_root = _lineage_root(sid, parent_by_id)
         is_hidden_snapshot = bool(sidecar.get("pre_compression_snapshot") or index_row.get("pre_compression_snapshot"))
         if sid in api_lineage_ids or lineage_root in api_lineage_ids:
             continue
@@ -373,6 +386,184 @@ def audit_session_discoverability(
     }
 
 
+def _atomic_write_json(path: Path, payload) -> None:
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _backup_file(path: Path, backup_dir: Path, backed_up: dict[Path, str]) -> str | None:
+    if not path.exists():
+        return None
+    resolved = path.resolve()
+    if resolved in backed_up:
+        return backed_up[resolved]
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    target = backup_dir / path.name
+    if target.exists():
+        stem = target.name
+        i = 1
+        while (backup_dir / f"{stem}.{i}").exists():
+            i += 1
+        target = backup_dir / f"{stem}.{i}"
+    shutil.copy2(path, target)
+    backed_up[resolved] = str(target)
+    return str(target)
+
+
+def _plan_discoverability_repairs(report: dict) -> list[dict]:
+    actions: list[dict] = []
+    for item in report.get("items") or []:
+        sid = str(item.get("session_id") or "")
+        if not sid:
+            continue
+        if item.get("kind") == "persisted_source_flag_stale":
+            if item.get("sidecar_is_cli_session") is True:
+                actions.append({"session_id": sid, "action": "clear_sidecar_cli_flag"})
+            if item.get("index_is_cli_session") is True:
+                actions.append({"session_id": sid, "action": "clear_index_cli_flag"})
+        elif item.get("kind") == "state_db_messageful_missing_sidecar":
+            actions.append({"session_id": sid, "action": "materialize_sidecar_from_state_db"})
+    return actions
+
+
+def _clear_sidecar_cli_flag(session_dir: Path, sid: str, backup_dir: Path, backed_up: dict[Path, str]) -> dict:
+    path = session_dir / f"{sid}.json"
+    payload = _read_json(path)
+    if not isinstance(payload, dict):
+        return {"session_id": sid, "action": "clear_sidecar_cli_flag", "applied": False, "error": "sidecar_unreadable"}
+    if not _webui_origin(payload):
+        return {"session_id": sid, "action": "clear_sidecar_cli_flag", "applied": False, "skipped": "not_webui_origin"}
+    if payload.get("is_cli_session") is not True:
+        return {"session_id": sid, "action": "clear_sidecar_cli_flag", "applied": False, "skipped": "already_clear"}
+    backup = _backup_file(path, backup_dir, backed_up)
+    payload["is_cli_session"] = False
+    _atomic_write_json(path, payload)
+    return {"session_id": sid, "action": "clear_sidecar_cli_flag", "applied": True, "backup": backup}
+
+
+def _clear_index_cli_flag(session_dir: Path, sid: str, backup_dir: Path, backed_up: dict[Path, str]) -> dict:
+    path = session_dir / "_index.json"
+    payload = _read_json(path)
+    if not isinstance(payload, list):
+        return {"session_id": sid, "action": "clear_index_cli_flag", "applied": False, "error": "index_unreadable"}
+    changed = False
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("session_id") or "") != sid:
+            continue
+        if not _webui_origin(entry):
+            continue
+        if entry.get("is_cli_session") is True:
+            entry["is_cli_session"] = False
+            changed = True
+    if not changed:
+        return {"session_id": sid, "action": "clear_index_cli_flag", "applied": False, "skipped": "already_clear_or_missing"}
+    backup = _backup_file(path, backup_dir, backed_up)
+    _atomic_write_json(path, payload)
+    return {"session_id": sid, "action": "clear_index_cli_flag", "applied": True, "backup": backup}
+
+
+def _materialize_sidecar_from_state_db(session_dir: Path, state_db_path: Path | None, sid: str, backup_dir: Path, backed_up: dict[Path, str]) -> dict:
+    if state_db_path is None:
+        return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "error": "state_db_required"}
+    target = session_dir / f"{sid}.json"
+    if target.exists():
+        return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "sidecar_exists"}
+    try:
+        from api.session_recovery import _read_state_db_missing_sidecar_rows, _state_db_row_to_sidecar
+    except Exception as exc:
+        return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "error": f"recovery_import_failed:{exc}"}
+    rows = {str(row.get("id") or ""): row for row in _read_state_db_missing_sidecar_rows(session_dir, state_db_path)}
+    row = rows.get(sid)
+    if not row:
+        return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "state_row_not_repairable"}
+    payload = _state_db_row_to_sidecar(row)
+    _backup_file(state_db_path, backup_dir, backed_up)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        os.link(str(tmp), str(target))
+    except FileExistsError:
+        return {"session_id": sid, "action": "materialize_sidecar_from_state_db", "applied": False, "skipped": "sidecar_appeared_during_repair"}
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    index_updated = False
+    index_path = session_dir / "_index.json"
+    index_payload = _read_json(index_path)
+    if not isinstance(index_payload, list):
+        index_payload = []
+    if not any(isinstance(entry, dict) and str(entry.get("session_id") or "") == sid for entry in index_payload):
+        _backup_file(index_path, backup_dir, backed_up)
+        index_entry = {key: value for key, value in payload.items() if key not in {"messages", "tool_calls"}}
+        index_payload.append(index_entry)
+        _atomic_write_json(index_path, index_payload)
+        index_updated = True
+    return {
+        "session_id": sid,
+        "action": "materialize_sidecar_from_state_db",
+        "applied": True,
+        "messages": len(payload.get("messages") or []),
+        "index_updated": index_updated,
+        "backup": str((backup_dir / state_db_path.name)) if (backup_dir / state_db_path.name).exists() else None,
+    }
+
+
+def repair_session_discoverability(
+    session_dir: Path,
+    state_db_path: Path | None = None,
+    *,
+    api_sessions: Iterable[dict] | None = None,
+    dry_run: bool = True,
+    backup_dir: Path | None = None,
+) -> dict:
+    """Plan or apply deterministic discoverability repairs.
+
+    Default mode is read-only. Applying mutations requires ``backup_dir`` and is
+    limited to stale persisted WebUI-as-CLI flags plus materializing WebUI
+    messageful sidecars from canonical state.db rows.
+    """
+    before = audit_session_discoverability(session_dir, state_db_path=state_db_path, api_sessions=api_sessions)
+    planned = _plan_discoverability_repairs(before)
+    if dry_run:
+        return {"ok": True, "dry_run": True, "planned": planned, "applied": [], "before": before, "after": before}
+    if backup_dir is None:
+        return {"ok": False, "dry_run": False, "error": "backup_dir_required_for_apply", "planned": planned, "applied": [], "before": before}
+
+    session_dir = Path(session_dir)
+    backup_dir = Path(backup_dir)
+    backed_up: dict[Path, str] = {}
+    applied: list[dict] = []
+    for action in planned:
+        sid = str(action.get("session_id") or "")
+        name = action.get("action")
+        try:
+            if name == "clear_sidecar_cli_flag":
+                applied.append(_clear_sidecar_cli_flag(session_dir, sid, backup_dir, backed_up))
+            elif name == "clear_index_cli_flag":
+                applied.append(_clear_index_cli_flag(session_dir, sid, backup_dir, backed_up))
+            elif name == "materialize_sidecar_from_state_db":
+                applied.append(_materialize_sidecar_from_state_db(session_dir, state_db_path, sid, backup_dir, backed_up))
+        except Exception as exc:
+            applied.append({"session_id": sid, "action": name, "applied": False, "error": str(exc)})
+    after = audit_session_discoverability(session_dir, state_db_path=state_db_path, api_sessions=api_sessions)
+    errors = [item for item in applied if item.get("error")]
+    return {
+        "ok": not errors,
+        "dry_run": False,
+        "planned": planned,
+        "applied": applied,
+        "backups": sorted(set(backed_up.values())),
+        "before": before,
+        "after": after,
+    }
+
+
 def render_discoverability_markdown(report: dict) -> str:
     lines = [
         "# WebUI Session Discoverability Audit",
@@ -407,6 +598,10 @@ def render_discoverability_markdown(report: dict) -> str:
                 lines.append(
                     "  - present_in: " + ", ".join(f"{k}={v}" for k, v in sorted(present.items()))
                 )
+            if item.get("represented_by_api_lineage"):
+                lines.append(
+                    f"  - represented_by_api_lineage: true via `{item.get('api_representative_session_id')}`"
+                )
     lines.append("")
     return "\n".join(lines)
 
@@ -416,11 +611,23 @@ def _main() -> int:
     parser.add_argument("--session-dir", type=Path, required=True)
     parser.add_argument("--state-db", type=Path, default=None)
     parser.add_argument("--format", choices=("json", "markdown"), default="json")
+    parser.add_argument("--repair-safe", action="store_true", help="Plan/apply deterministic discoverability repairs")
+    parser.add_argument("--apply", action="store_true", help="Apply --repair-safe changes; default is dry-run")
+    parser.add_argument("--backup-dir", type=Path, default=None, help="Required with --repair-safe --apply")
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
-    report = audit_session_discoverability(args.session_dir, state_db_path=args.state_db)
-    text = render_discoverability_markdown(report) if args.format == "markdown" else json.dumps(report, sort_keys=True)
+    if args.repair_safe:
+        report = repair_session_discoverability(
+            args.session_dir,
+            state_db_path=args.state_db,
+            dry_run=not args.apply,
+            backup_dir=args.backup_dir,
+        )
+        text = json.dumps(report, sort_keys=True)
+    else:
+        report = audit_session_discoverability(args.session_dir, state_db_path=args.state_db)
+        text = render_discoverability_markdown(report) if args.format == "markdown" else json.dumps(report, sort_keys=True)
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(text, encoding="utf-8")

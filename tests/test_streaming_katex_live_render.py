@@ -11,7 +11,7 @@ def test_live_smd_writes_schedule_incremental_katex_rendering():
     assert "let _streamingKatexTimer=null" in MESSAGES_JS
     assert "function _scheduleStreamingKatex()" in MESSAGES_JS
     assert "setTimeout(()=>{" in MESSAGES_JS
-    assert "renderKatexBlocks(assistantBody)" in MESSAGES_JS
+    assert "renderKatexBlocks(assistantBody,{streaming:true})" in MESSAGES_JS
 
     smd_write_idx = MESSAGES_JS.index("function _smdWrite(displayText, fade=false){")
     done_idx = MESSAGES_JS.index("source.addEventListener('done'")
@@ -28,8 +28,9 @@ def test_streaming_katex_timer_is_cleared_when_smd_parser_ends():
 
 
 def test_katex_renderer_scans_live_and_settled_unrendered_nodes_under_container():
-    assert "function renderKatexBlocks(container){" in UI_JS
+    assert "function renderKatexBlocks(container,options){" in UI_JS
     assert "const root=container||document;" in UI_JS
+    assert "const streaming=Boolean(options&&options.streaming);" in UI_JS
     assert ".katex-block:not([data-rendered]),.katex-inline:not([data-rendered])," in UI_JS
     assert "equation-block:not([data-rendered]),equation-inline:not([data-rendered])" in UI_JS
     assert "const tagName=(el.tagName||'').toLowerCase();" in UI_JS

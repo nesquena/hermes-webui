@@ -43,7 +43,11 @@ from api.metering import meter
 from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
-from api.models import get_state_db_session_messages, reconciled_state_db_messages_for_session
+from api.models import (
+    _is_empty_partial_activity_message,
+    get_state_db_session_messages,
+    reconciled_state_db_messages_for_session,
+)
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -1385,24 +1389,17 @@ def _detect_title_language(text: str) -> str:
         return ''
     german_markers = {
         'warum', 'werden', 'wird', 'wurde', 'hier', 'nicht', 'mehr', 'alte', 'alten',
-        'bilder', 'angezeigt', 'session', 'prüfe', 'ich', 'die', 'der', 'das', 'den',
-        'und', 'oder', 'mit', 'für', 'von', 'zu', 'ist', 'sind', 'bitte', 'kannst',
+        'bilder', 'angezeigt', 'prüfe', 'ich', 'und', 'oder', 'mit', 'für', 'von',
+        'zu', 'ist', 'sind', 'bitte', 'kannst',
     }
     tokens = re.findall(r'[A-Za-zÀ-ÖØ-öø-ÿ]+', s)
     german_hits = sum(1 for tok in tokens if tok in german_markers)
-    if re.search(r'[äöüß]', s) or german_hits >= 2:
+    if re.search(r'[äöüß]', s) or german_hits >= 3:
         return 'de'
     return ''
 
 
 def _title_prompt_language_rule(user_text: str) -> str:
-    lang = _detect_title_language(user_text)
-    if lang == 'de':
-        return (
-            "Match the language of the user question.\n"
-            "If the user writes German, output a German title.\n"
-            "German good: Alte Session Bilder, WebUI Attachment-Pfade, Kontextkompression Status.\n"
-        )
     return "Match the language of the user question.\n"
 
 
@@ -1869,13 +1866,6 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     assistant_text = re.sub(r'\s+', ' ', assistant_text).strip()
     combined = f"{user_text} {assistant_text}".strip().lower()
     combined_raw = f"{user_text} {assistant_text}".strip()
-    source_lang = _detect_title_language(user_text)
-
-    if source_lang == 'de' and 'bilder' in combined and 'session' in combined:
-        if 'alt' in combined or 'alte' in combined or 'alten' in combined:
-            return 'Alte Session Bilder'
-        return 'Session Bilder'
-
     def _contains_latin(text: str) -> bool:
         return bool(re.search(r'[A-Za-z]', text or ''))
 
@@ -2448,6 +2438,8 @@ def _restore_display_reasoning_metadata(previous_messages, updated_messages):
     safe_indices = {idx for idx, _ in prev_safe}
     inserted_reasoning_only = 0
     for prev_idx, prev_msg in enumerate(previous_messages):
+        if _is_empty_partial_activity_message(prev_msg):
+            continue
         if prev_idx in safe_indices or not _is_reasoning_only_assistant_message(prev_msg):
             continue
         safe_pos = sum(1 for idx, _ in prev_safe if idx < prev_idx) + inserted_reasoning_only
@@ -2988,6 +2980,22 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         if key is not None:
             seen.add(key)
     return merged
+
+
+def _stamp_missing_message_timestamps(messages, *, now: float | None = None) -> int:
+    """Stamp missing message timestamps without collapsing transcript order.
+
+    Compacted/reconciled rows can arrive without timestamps. Assigning one
+    integer seconds value to the whole batch makes later timestamp-based display
+    merges unstable; use a subsecond sequence instead.
+    """
+    base = time.time() if now is None else float(now)
+    stamped = 0
+    for msg in messages or []:
+        if isinstance(msg, dict) and not msg.get('timestamp') and not msg.get('_ts'):
+            msg['timestamp'] = base + (stamped * 0.000001)
+            stamped += 1
+    return stamped
 
 
 def _assistant_reply_added_after_current_turn(result_messages, previous_context, msg_text) -> bool:
@@ -5197,6 +5205,14 @@ def _run_agent_streaming(
                     # the write when the file already contains up-to-date data
                     # (i.e. it was just saved by a checkpoint).
                     _preserve_pre_compression_snapshot(s, old_sid)
+                    # The continuation is the live/tip session, not another archived
+                    # snapshot. If the in-memory object was itself loaded from a
+                    # pre-compression snapshot (possible on repeated compression chains
+                    # or stale-cache repair paths), _preserve_pre_compression_snapshot()
+                    # intentionally restores that old flag; clear it before saving the
+                    # new continuation so sidebar/discoverability code does not hide the
+                    # session that owns the completed turn.
+                    s.pre_compression_snapshot = False
                     # Always link the continuation session to its immediate predecessor
                     # (the preserved snapshot).  This OVERRIDES any prior
                     # parent_session_id because the new continuation IS the next link
@@ -5298,11 +5314,9 @@ def _run_agent_streaming(
                         'usage': _live_usage_snapshot(),
                     })
 
-                # Stamp 'timestamp' on any messages that don't have one yet
-                _now = time.time()
-                for _m in s.messages:
-                    if isinstance(_m, dict) and not _m.get('timestamp') and not _m.get('_ts'):
-                        _m['timestamp'] = int(_now)
+                # Stamp 'timestamp' on any messages that don't have one yet,
+                # preserving transcript order across compacted/reconciled batches.
+                _stamp_missing_message_timestamps(s.messages)
                 # Only auto-generate title when still default; preserves user renames
                 if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
                     s.title = title_from(s.messages, s.title)

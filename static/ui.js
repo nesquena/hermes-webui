@@ -475,7 +475,7 @@ async function refreshDashboardStatus(force=false){
     return _dashboardStatusCache;
   }
   try{
-    const status=await api('/api/dashboard/status');
+    const status=await api('/api/dashboard/status',{timeoutToast:false});
     _dashboardStatusCache=status||{running:false};
   }catch(_){
     _dashboardStatusCache={running:false};
@@ -3419,7 +3419,8 @@ function renderMd(raw){
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
-    const apiUrl='api/media?path='+encodeURIComponent(ref);
+    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const apiUrl='api/media?path='+encodeURIComponent(ref)+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
     const localKind=mediaKindForName(ref);
     if(localKind==='image'){
       return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
@@ -4587,7 +4588,7 @@ async function pollSystemHealth(){
   if(document.visibilityState !== 'visible') return;
   if(!_systemHealthPanelIsVisible()) return;
   try{
-    const payload=await api('/api/system/health');
+    const payload=await api('/api/system/health',{timeoutToast:false});
     renderSystemHealth(payload);
   }catch(_){
     setSystemHealthUnavailable('Unavailable');
@@ -4653,7 +4654,7 @@ function dismissAgentHealthAlert(){
 async function pollAgentHealth(){
   if(document.visibilityState !== 'visible') return;
   try{
-    const payload=await api('/api/health/agent');
+    const payload=await api('/api/health/agent',{timeoutToast:false});
     if(payload.alive === true){
       _agentHealthLastState='alive';
       _setAgentHealthDismissed(false);
@@ -7754,8 +7755,25 @@ function renderMermaidBlocks(container){
 let _katexLoading=false;
 let _katexReady=false;
 
-function renderKatexBlocks(container){
+function _isStreamingEquationPending(el,root){
+  const tagName=(el&&el.tagName||'').toLowerCase();
+  if(tagName!=='equation-block'&&tagName!=='equation-inline') return false;
+  // streaming-markdown fills custom equation elements while the parser owns the
+  // open node. If the equation is currently the last descendant of the live
+  // assistant body, we cannot tell whether more TeX is still coming. Skip it
+  // during live debounce passes so a partial source is not permanently marked
+  // data-rendered before the final parser_end flush.
+  let node=el;
+  while(node&&node!==root){
+    if(node.nextSibling) return false;
+    node=node.parentNode;
+  }
+  return Boolean(node===root);
+}
+
+function renderKatexBlocks(container,options){
   const root=container||document;
+  const streaming=Boolean(options&&options.streaming);
   const blocks=root.querySelectorAll(
     '.katex-block:not([data-rendered]),.katex-inline:not([data-rendered]),'+
     'equation-block:not([data-rendered]),equation-inline:not([data-rendered])'
@@ -7779,6 +7797,7 @@ function renderKatexBlocks(container){
     return;
   }
   blocks.forEach(el=>{
+    if(streaming&&_isStreamingEquationPending(el,root)) return;
     el.dataset.rendered='true';
     const src=el.textContent||'';
     const tagName=(el.tagName||'').toLowerCase();

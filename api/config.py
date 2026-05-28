@@ -2202,10 +2202,6 @@ def resolve_model_reasoning_efforts(
         if provider in {"copilot", "github-copilot"}:
             return github_model_reasoning_efforts(hinted_model)
 
-        if provider == "openai-codex":
-            bare = hinted_model.rsplit("/", 1)[-1]
-            return github_model_reasoning_efforts(bare)
-
         if provider == "lmstudio":
             probe_base = resolved_base_url or _get_provider_base_url(provider)
             opts = lmstudio_model_reasoning_options(hinted_model, probe_base)

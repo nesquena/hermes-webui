@@ -159,7 +159,7 @@ def test_system_health_panel_markup_and_styles_live_under_insights_not_top_chrom
 
 def test_system_health_frontend_polls_visible_and_renders_progress_labels():
     assert "const SYSTEM_HEALTH_INTERVAL_MS=5000" in UI_JS
-    assert "api('/api/system/health')" in UI_JS
+    assert "api('/api/system/health',{timeoutToast:false})" in UI_JS
     assert "document.visibilityState !== 'visible'" in UI_JS
     assert "document.querySelector('main.main.showing-insights')" in UI_JS
     assert "document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility)" in UI_JS

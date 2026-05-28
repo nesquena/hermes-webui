@@ -7,6 +7,56 @@
 
 - `runner-local` runtime adapter mode can now use an explicitly configured HTTP runner endpoint via `HERMES_WEBUI_RUNNER_BASE_URL`, replacing the bounded not-configured path only when the external runner boundary is configured and streaming configured runner events through the existing SSE route without WebUI-owned runner maps.
 
+## [v0.51.155] — 2026-05-28 — Release EA (stage-batch37 — 3-PR very low-risk cleanup: passive timeout toasts + sidecar order + subsecond timestamps)
+
+### Fixed
+
+- Passive background refreshes such as sidebar/project polling, health checks, cron-status watches, and client-event logging no longer surface generic timeout toasts; explicit user actions still show timeout errors. (Related to #3024)
+- Messaging/session display merges now preserve sidecar transcript order when the sidecar already contains at least as many rows as the mirrored state store, avoiding role/content fallback sorting when timestamp precision collapses.
+- Gateway-backed turns and compacted/reconciled message batches now keep subsecond timestamp ordering instead of assigning the same integer-second timestamp to multiple transcript rows.
+
+## [v0.51.154] — 2026-05-28 — Release DZ (stage-batch36 — 9-PR medium-risk cleanup: cron project chip + KaTeX streaming + recovery + .env keys + discoverability repair + media MEDIA tokens + gateway 401 + notes prefill + cron filter)
+
+### Added
+
+- Session discoverability audit now has a default-dry-run `--repair-safe` routine for deterministic cleanup: stale persisted WebUI-as-CLI flags can be cleared from sidecars/index entries, and messageful WebUI rows present only in `state.db` can be materialized into sidecars/index entries when `--apply --backup-dir <dir>` is explicitly provided.
+
+### Changed
+
+- The third-party notes drawer's "Recently used by AI" list now follows the provider-neutral WebUI-specific `HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT` / `webui_prefill_messages_script` hook when configured, including argv-style hooks such as `[python3, /path/to/recall.py]` and command strings such as `python3 /path/to/recall.py`, before falling back to the legacy generic `prefill_messages_script`. Configured third-party notes sources such as Joplin, Obsidian, Notion, and llm-wiki remain visible even before runtime tool inventory hydrates.
+
+### Fixed
+
+- Streaming KaTeX render passes now skip parser-owned equation placeholders that may still be receiving text, preventing long equations from being marked rendered before the final parser flush completes. (#2976)
+- Cron sessions assigned to the dedicated Cron Jobs project now remain hidden from the default sidebar while still appearing when that project chip is selected.
+- Compression parent sessions are no longer repaired as stale interrupted turns when a continuation already exists, preventing false "Response interrupted" markers and hidden continuation rows after auto-compression session rotation. (Refs #2361)
+- Empty partial activity rows preserved from cancelled turns no longer define sidebar recency, anchor the initial paginated message window, or get restored after newer completed turns. Long sessions with old activity-only partials after recent replies now stay grouped by their latest real message and open on the recent readable transcript. (#3057)
+- Local `MEDIA:` image tokens in chat history now include the current session id and can render exact image paths already present in that session transcript, so agent-generated artifacts outside the active workspace no longer show as broken thumbnails while arbitrary local paths remain blocked.
+- Gateway-backed browser chat now turns Gateway API Server 401s into a specific `gateway_auth_error` explaining that `HERMES_WEBUI_GATEWAY_API_KEY` must match `API_SERVER_KEY`, instead of surfacing the Gateway's generic "Invalid API key" body as if the model provider key failed. The browser error renderer recognizes this event type as "Gateway authentication failed" instead of falling back to a generic "Error" heading. `/api/health/agent` also reports redacted gateway-chat configuration status (`enabled`, backend, base URL configured, API key configured) as an operator diagnostic payload; it is not currently rendered as a user-facing health banner.
+- New profiles with an API key supplied at create time now write the key to the profile's `.env` under the correct provider-specific variable (e.g. `KIMI_API_KEY`, `DEEPSEEK_API_KEY`) at mode 0o600, instead of writing it to `config.yaml` where Hermes Agent never reads it.
+
+## [v0.51.153] — 2026-05-28 — Release DY (stage-batch35 — 11-PR low-risk cleanup: title-language + clarify SSE + upload filename + discoverability + SSE reconnect + gateway image + docker docs)
+
+### Changed
+
+- Local fallback title generation no longer has a German-only `Session Bilder` special case; it now uses the same generic topic extraction path as other fallback titles. (Refs #3040)
+- Title-generation prompts now use the same language-neutral "match the user language" instruction for every locale instead of adding German-only exemplars. (Refs #3040)
+- Session discoverability audit findings for stale persisted WebUI-as-CLI flags now report whether an API-visible lineage representative already covers the hidden snapshot, including the representative session id in JSON and Markdown output.
+
+### Fixed
+
+- Title-language detection no longer treats common English tech/jargon text such as "session die" or DAS/DER references as German just because of shared tokens. (Refs #3040)
+- Clarify prompt SSE fallback polling now preserves its owner session id, matching approval polling behavior so terminal events from another session cannot stop the active clarify fallback poller.
+- Duplicate chat uploads now report the actual stored filename in `/api/upload` responses, so suffixed files such as `photo-1.png` do not appear under the original basename in WebUI attachment metadata.
+- Visible but unfocused chat windows now still attempt the immediate SSE reconnect for the current session; only a real session switch skips the reconnect path. (Refs #3040)
+- Gateway-backed WebUI chat now forwards current-turn image attachments as OpenAI-style multimodal `image_url` parts when native image input is enabled, matching the legacy WebUI runtime's image handoff.
+- New chat sessions reset `_messagesTruncated` / `_oldestIdx` so a fresh conversation never displays the stale "Scroll up or click to load older messages" indicator inherited from a previously-paginated session.
+- `openai-codex` reasoning-effort resolution now lets the existing `models.dev` metadata pass set the supported levels (including `xhigh`) instead of being silently clipped through the Copilot model heuristic.
+
+### Documentation
+
+- Clarify two Docker onboarding traps: `sudo docker compose` can mount `/root/.hermes` instead of the user's Hermes home on Linux, and Linux Docker Engine users should use a `host-gateway` alias such as `api.local` for host-local model servers instead of configuring `localhost` inside the container. (#3006, #3012)
+
 ## [v0.51.152] — 2026-05-28 — Release DX (stage-batch34 — single-PR optional gateway-backed browser chat)
 
 ### Added

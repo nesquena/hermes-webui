@@ -121,12 +121,24 @@ API root. Common examples:
 | Ollama on the same non-Docker host | `http://127.0.0.1:11434/v1` |
 | LM Studio from Docker Desktop | `http://host.docker.internal:1234/v1` |
 | Ollama from Docker Desktop | `http://host.docker.internal:11434/v1` |
+| Local server from Linux Docker Engine | `http://api.local:<port>/v1` with `api.local:host-gateway` in Compose `extra_hosts` |
 | Local server on another LAN machine | `http://<lan-ip>:<port>/v1` |
 
 Inside Docker, `localhost` means the WebUI container itself, not your Mac,
-Windows host, or another machine on your LAN. If LM Studio or Ollama is running
-outside the container, use `host.docker.internal` on Docker Desktop or the
-server's LAN IP address.
+Windows host, Linux host, or another machine on your LAN. If LM Studio or Ollama
+is running outside the container, use `host.docker.internal` on Docker Desktop,
+use the server's LAN IP address, or add a Linux Docker host alias:
+
+```yaml
+services:
+  hermes-webui:
+    extra_hosts:
+      - "api.local:host-gateway"
+```
+
+Then use `http://api.local:<port>/v1` as the Base URL. The alias avoids writing
+`localhost` in WebUI config where it would resolve to the container loopback
+instead of the host service.
 
 The wizard probes `<base-url>/models` before saving. A successful probe fills
 the model dropdown. A failed probe blocks the setup step and shows an inline
