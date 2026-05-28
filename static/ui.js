@@ -5449,7 +5449,9 @@ function ensureActivityGroup(inner, opts){
     const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
-    // state win across session switches and reloads.
+    // state win across session switches and reloads. Saved closed-state should
+    // override the default-expanded preference for settled groups the user has
+    // explicitly collapsed.
     if(live && _liveActivityUserExpanded === true) collapsed=false;
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
     if(savedState==='open') collapsed=false;
@@ -7879,7 +7881,9 @@ function finalizeThinkingCard(){
     // when the user has not manually expanded this turn's activity group, or
     // has manually collapsed it. Otherwise the panel snaps shut whenever new
     // activity arrives, even mid-read.
-    if(_liveActivityUserExpanded !== true){
+    const shouldKeepOpen = (_liveActivityUserExpanded === true)
+      || (window._activityFeedExpandedDefault === true && _liveActivityUserExpanded !== false);
+    if(!shouldKeepOpen){
       group.classList.add('tool-call-group-collapsed');
       const summary=group.querySelector('.tool-call-group-summary');
       if(summary) summary.setAttribute('aria-expanded','false');

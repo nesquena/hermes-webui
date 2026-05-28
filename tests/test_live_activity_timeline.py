@@ -43,6 +43,9 @@ def test_activity_feed_default_expand_setting_is_wired():
     assert "activity_feed_expanded_default" in panels_js
     assert "window._activityFeedExpandedDefault=!!s.activity_feed_expanded_default;" in boot_js
     assert "if(window._activityFeedExpandedDefault===true) collapsed=false;" in UI_JS
+    finalize_fn = UI_JS.split("function finalizeThinkingCard")[1].split("\nfunction ")[0]
+    assert "_activityFeedExpandedDefault" in finalize_fn
+    assert "_liveActivityUserExpanded !== false" in finalize_fn
 
 
 def test_tool_events_update_activity_timeline_and_summary():
