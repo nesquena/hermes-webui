@@ -1,6 +1,6 @@
 (function(){
   // Clear stale stop-server flag on successful page load (server is reachable)
-  localStorage.removeItem('hermes-webui-server-stopped');
+  try{localStorage.removeItem('hermes-webui-server-stopped');}catch(_){}
   // Listen for shutdown broadcast from other tabs
   try {
     var _stopChan = new BroadcastChannel('hermes-webui-shutdown');
@@ -29,7 +29,8 @@ async function cancelSessionStream(session){
   if(!streamId||!sid) return;
   try{
     await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
-  }catch(e){/* cancel request failed - cleanup below still runs */}
+  }catch(e){/* close local stream; keep UI state honest below */}
+  if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
   clearInflightState(sid);
