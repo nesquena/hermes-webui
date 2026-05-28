@@ -679,13 +679,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // progress made before the session switch. Without this the closure starts
   // empty and tokens arriving on the new SSE connection append to nothing —
   // the already-rendered content vanishes.
-  const _liveInflightAssistant = reconnecting
-    ? (INFLIGHT[activeSid]?.messages?.findLast?.(m => m.role === 'assistant' && m._live) || null)
+  const _liveInflightAssistantMessages = reconnecting
+    ? ((INFLIGHT[activeSid]&&Array.isArray(INFLIGHT[activeSid].messages))
+      ? INFLIGHT[activeSid].messages.filter(m=>m&&m.role==='assistant'&&m._live)
+      : [])
+    : [];
+  const _liveInflightAssistant = _liveInflightAssistantMessages.length===1
+    ? _liveInflightAssistantMessages[0]
     : null;
+  const _fullInflightAssistant = (INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastAssistantText) || '';
+  const _joinedInflightSegments = _liveInflightAssistantMessages.length>1
+    ? _liveInflightAssistantMessages.map(m=>m&&m.content?String(m.content).trim():'').filter(Boolean).join('\n\n')
+    : '';
   const _lastLiveAssistant = reconnecting
-    ? (_liveInflightAssistant
-      ? (_liveInflightAssistant.content || '')
-      : ((INFLIGHT[activeSid]&&INFLIGHT[activeSid].lastAssistantText) || ''))
+    ? (_liveInflightAssistantMessages.length>1
+      ? (_fullInflightAssistant || _joinedInflightSegments)
+      : (_liveInflightAssistant
+        ? (_liveInflightAssistant.content || '')
+        : _fullInflightAssistant))
     : '';
   const _lastLiveReasoning = reconnecting
     ? (_liveInflightAssistant&&_liveInflightAssistant.reasoning)

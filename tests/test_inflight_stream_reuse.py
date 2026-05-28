@@ -377,4 +377,29 @@ def test_reconnect_prefers_trimmed_live_message_over_stale_full_assistant_cache(
     assert live_msg_pos < last_text_pos
     assistant_block = body[last_text_pos:body.find("const _lastLiveReasoning", last_text_pos)]
     assert "_liveInflightAssistant.content" in assistant_block
-    assert "lastAssistantText" in assistant_block
+    assert "_fullInflightAssistant" in assistant_block
+    assert "lastAssistantText" in body[live_msg_pos:last_text_pos]
+
+
+def test_reconnect_uses_full_accumulator_when_live_tail_is_segmented():
+    """When reattach projection splits the live assistant into multiple
+    visible process-text segments, reconnect must resume from the full
+    accumulator instead of the last segment.
+
+    Otherwise the next syncInflightAssistantMessage() write truncates
+    lastAssistantText to only the latest visible segment, so earlier process
+    text anchors disappear on the next session switch and Activity groups fall
+    back to the end of the turn.
+    """
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    helper_pos = body.find("const _liveInflightAssistantMessages")
+    last_text_pos = body.find("const _lastLiveAssistant")
+    assert helper_pos != -1, (
+        "attachLiveStream() should collect all live assistant segments before "
+        "choosing reconnect text"
+    )
+    assert helper_pos < last_text_pos
+    assistant_block = body[last_text_pos:body.find("const _lastLiveReasoning", last_text_pos)]
+    assert "_liveInflightAssistantMessages.length>1" in assistant_block.replace(" ", "")
+    assert "_fullInflightAssistant" in assistant_block
+    assert "lastAssistantText" in body[helper_pos:last_text_pos]
