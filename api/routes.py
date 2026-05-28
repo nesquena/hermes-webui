@@ -2853,6 +2853,7 @@ from api.run_journal import (
     read_run_events,
     stale_interrupted_event,
 )
+from api.todo_state import attach_todo_state
 from api.providers import get_providers, get_provider_quota, get_provider_cost_history, set_provider_key, remove_provider_key
 from api.onboarding import (
     apply_onboarding_setup,
@@ -4679,6 +4680,19 @@ def handle_get(handler, parsed) -> bool:
                         journal,
                         active=bool(getattr(s, "active_stream_id", None)),
                     )
+            # Cold-load: derive the latest todo snapshot from settled
+            # messages so opening any session (with or without an active
+            # stream) shows the current task list immediately, without
+            # waiting for the next live `todo` write. Mirrors the
+            # agent-side ``_hydrate_todo_store`` logic.
+            #
+            # Gated on ``load_messages`` — sidebar listings don't render
+            # the todos panel, and ``_all_msgs`` is intentionally empty
+            # there. The helper itself swallows derivation errors so a
+            # malformed sidecar never breaks the session GET response.
+            # See ``api/todo_state.py`` for the contract.
+            if load_messages and _all_msgs:
+                attach_todo_state(raw, _all_msgs)
             if _merged_last_message_at:
                 raw["last_message_at"] = max(
                     float(raw.get("last_message_at") or 0),
@@ -4754,6 +4768,13 @@ def handle_get(handler, parsed) -> bool:
                     "messages": msgs,
                     "tool_calls": [],
                 }
+                # CLI sessions can also carry todo writes — see the
+                # WebUI-side cold-load above. Attach the same snapshot
+                # shape so the Todos panel hydrates identically when a
+                # CLI-only session is opened from the sidebar. The
+                # helper swallows derivation errors and is a no-op when
+                # the session never invoked the todo tool.
+                attach_todo_state(sess, msgs)
                 sess = _merge_cli_sidebar_metadata(sess, cli_meta)
                 return j(handler, {"session": redact_session_data(sess)})
             return bad(handler, "Session not found", 404)
