@@ -9628,6 +9628,7 @@ def _handle_chat_sync(handler, body):
                 session_id=s.session_id,
             )
             from api.streaming import (
+                _WEBUI_PROGRESS_PROMPT,
                 _dedupe_replayed_context_messages,
                 _merge_display_messages_after_agent_result,
                 _restore_display_reasoning_metadata,
@@ -9652,7 +9653,8 @@ def _handle_chat_sync(handler, body):
                 "notes only for explicit captures, durable preferences, decisions, blockers/open "
                 "issues, runbook-worthy workflows, or other clearly reusable signals; otherwise "
                 "leave external notes and durable memory unchanged. When you do write or update a durable note, briefly tell "
-                "the user what note or section changed so the write is reviewable."
+                "the user what note or section changed so the write is reviewable.\n\n"
+                f"{_WEBUI_PROGRESS_PROMPT}"
             )
 
             _previous_messages = list(s.messages or [])
@@ -12975,6 +12977,11 @@ def _joplin_api_get(path: str, params: dict | None = None) -> dict:
         raise ValueError("Joplin token is not configured")
     safe_path = "/" + str(path or "").lstrip("/")
     query = dict(params or {})
+    # Joplin Web Clipper builds can reject header-only auth on /search even when
+    # they accept it elsewhere. Keep the Authorization header for defense in
+    # depth and add the query token only for /search compatibility.
+    if safe_path == "/search":
+        query["token"] = token
     url = f"{base_url}{safe_path}?{urlencode(query)}"
     request = Request(url, headers={"Authorization": f"token {token}"})
     try:
