@@ -79,6 +79,11 @@ class TestSSEStaticAnalysis:
         assert "no-cache" in ROUTES_SRC, \
             "SSE handler must set Cache-Control: no-cache"
 
+    def test_sse_does_not_force_connection_close(self):
+        """SSE handlers must not send Connection: close on long-lived EventSource responses."""
+        assert "Connection', 'close'" not in ROUTES_SRC, \
+            "SSE handlers must not force Connection: close because it triggers needless reconnect churn"
+
     def test_sse_initial_snapshot(self):
         """SSE handler must send initial snapshot on connect."""
         assert "'initial'" in ROUTES_SRC, \

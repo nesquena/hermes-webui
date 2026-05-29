@@ -1779,7 +1779,15 @@ function applyBotName(){
         S.session.active_stream_id ||
         S.session.pending_user_message
       );
-      if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight){
+      const _restoredDraft = S.session && S.session.composer_draft;
+      const _restoredDraftText = _restoredDraft && typeof _restoredDraft.text === 'string'
+        ? _restoredDraft.text.trim()
+        : '';
+      const _restoredDraftFiles = Array.isArray(_restoredDraft && _restoredDraft.files)
+        ? _restoredDraft.files.length
+        : 0;
+      const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles);
+      if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){
         S.session=null; S.messages=[];
         S._bootReady=true;
         // Restore panel pref before syncing so the workspace panel stays visible

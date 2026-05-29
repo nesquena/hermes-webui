@@ -14,6 +14,12 @@ def test_session_events_endpoint_and_bus_are_defined():
     assert "Content-Type', 'text/event-stream; charset=utf-8'" in ROUTES
 
 
+def test_session_event_sse_does_not_force_connection_close():
+    assert "def _handle_session_events_stream" in ROUTES
+    assert "Connection', 'close'" not in ROUTES, \
+        "Session SSE endpoints must not force Connection: close on long-lived EventSource responses"
+
+
 def test_session_events_publish_for_minimal_sidebar_mutations():
     for reason in (
         "session_new",

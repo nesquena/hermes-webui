@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced chat/session-list refresh churn that could flicker the active conversation, re-trigger scroll-to-bottom, and make the sidebar feel jumpy: active-session external refresh now polls less aggressively, streaming sidebar refresh is less frequent, and session SSE endpoints no longer force `Connection: close` on long-lived EventSource responses.
+- Queue restoration is now more durable across refreshes and tab detours by mirroring queued-turn state to both `sessionStorage` and `localStorage`, while keeping queue-card mutations on the shared persistence path.
+
 ## [v0.51.152] — 2026-05-28 — Release DX (stage-batch34 — single-PR optional gateway-backed browser chat)
 
 ### Added

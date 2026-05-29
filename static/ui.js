@@ -6,6 +6,7 @@ function assistantDisplayName(){
 }
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
+const QUEUE_STORAGE_PREFIX='hermes-queue-';
 const MAX_UPLOAD_BYTES=(window.__HERMES_CONFIG__&&window.__HERMES_CONFIG__.maxUploadBytes)||20*1024*1024;
 const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // Tracks which session's queue to drain in setBusy(false).
@@ -119,8 +120,48 @@ else initOfflineMonitor();
 // Handles iOS PWA standalone mode and keeps subpath mounts like /hermes/ from
 // escaping to the personal site root /login.
 function _redirectIfUnauth(res){if(res&&res.status===401){window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);return true;}return false;}
+function _queueStorageKey(sid){
+  return QUEUE_STORAGE_PREFIX+sid;
+}
+function _persistSessionQueueStorage(sid, queue){
+  if(!sid) return;
+  const key=_queueStorageKey(sid);
+  const payload=JSON.stringify(Array.isArray(queue)?queue:[]);
+  try{ sessionStorage.setItem(key,payload); }catch(_){}
+  try{ localStorage.setItem(key,payload); }catch(_){}
+}
+function _removeSessionQueueStorage(sid){
+  if(!sid) return;
+  const key=_queueStorageKey(sid);
+  try{ sessionStorage.removeItem(key); }catch(_){}
+  try{ localStorage.removeItem(key); }catch(_){}
+}
+function _readPersistedSessionQueue(sid){
+  if(!sid) return [];
+  const key=_queueStorageKey(sid);
+  const read=(storage)=>{
+    try{
+      const raw=storage.getItem(key);
+      if(!raw) return null;
+      const parsed=JSON.parse(raw);
+      return Array.isArray(parsed)?parsed:null;
+    }catch(_){ return null; }
+  };
+  const sessionValue=read(sessionStorage);
+  if(sessionValue) return sessionValue;
+  const localValue=read(localStorage);
+  if(localValue){
+    try{ sessionStorage.setItem(key, JSON.stringify(localValue)); }catch(_){}
+    return localValue;
+  }
+  return [];
+}
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
+  if(!SESSION_QUEUES[sid]){
+    const restored=_readPersistedSessionQueue(sid);
+    if(restored.length) SESSION_QUEUES[sid]=restored;
+  }
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
   return SESSION_QUEUES[sid]||[];
 }
@@ -130,8 +171,9 @@ function queueSessionMessage(sid, payload){
   // Stamp created_at so the restore path can detect stale entries (agent already responded)
   const entry={...payload, _queued_at: Date.now()};
   q.push(entry);
-  // Persist to sessionStorage so the queue survives page refresh
-  try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
+  // Persist to both sessionStorage and localStorage so the queue survives refreshes,
+  // session-switch detours, and tab restores.
+  _persistSessionQueueStorage(sid,q);
   return q.length;
 }
 function shiftQueuedSessionMessage(sid){
@@ -140,9 +182,9 @@ function shiftQueuedSessionMessage(sid){
   const next=q.shift();
   if(!q.length){
     delete SESSION_QUEUES[sid];
-    try{ sessionStorage.removeItem('hermes-queue-'+sid); }catch(_){}
+    _removeSessionQueueStorage(sid);
   } else {
-    try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
+    _persistSessionQueueStorage(sid,q);
   }
   return next;
 }
@@ -3689,6 +3731,13 @@ function setBusy(v){
 // normal user bubble in the chat — the chip is removed at drain time.
 const _queueRenderKeys={};  // per-session fingerprint to avoid redundant rebuilds
 const _queueCollapsed={};   // per-session: true when user explicitly collapsed the card
+function _syncQueueUiScroll(){
+  // Queue card/pill height changes should only follow the transcript when the
+  // reader is still pinned to bottom. When they have scrolled up to read older
+  // messages, preserve that position instead of treating queue UI growth as an
+  // intentional jump-to-latest action.
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
+}
 
 function _renderQueueChips(sid){
   const card=document.getElementById('queueCard');
@@ -3697,8 +3746,12 @@ function _renderQueueChips(sid){
   const q=_getSessionQueue(sid,false);
   const key=q.map(e=>{const t=e&&(e.text||e.message||e.content||'');return(e&&e._queued_at||0)+':'+t.length+':'+t.slice(0,20);}).join('|');
   if(key===(_queueRenderKeys[sid]||'')&&key!='') return;
-  // Skip re-render if user is actively editing inside the queue panel
-  if(inner.contains(document.activeElement)&&document.activeElement!==inner) return;
+  // Skip re-render only while the inline editable text itself is focused.
+  // Do NOT skip when queue buttons (e.g. combine / remove) are focused, or the
+  // card can look stale even though the live queue already changed.
+  const _activeQueueEl=document.activeElement;
+  const _editingQueueText=!!(_activeQueueEl&&inner.contains(_activeQueueEl)&&_activeQueueEl.classList&&_activeQueueEl.classList.contains('queue-card-text'));
+  if(_editingQueueText) return;
   _queueRenderKeys[sid]=key;
   inner.innerHTML='';
   if(!q.length){
@@ -3724,15 +3777,14 @@ function _renderQueueChips(sid){
       if(!card.classList.contains('visible')) return;
       const h=card.getBoundingClientRect().height;
       if(h>0) _msgs.style.setProperty('--queue-card-height', h+'px');
-      if(S.activeStreamId&&typeof scrollIfPinned==='function') scrollIfPinned();
-      else if(!S.activeStreamId&&typeof scrollToBottom==='function') scrollToBottom();
+      _syncQueueUiScroll();
     }, 360);
   }
 
   function _saveAndRefresh(){
     const liveQ=_getSessionQueue(sid,false);
-    if(!liveQ.length){delete SESSION_QUEUES[sid];try{sessionStorage.removeItem('hermes-queue-'+sid);}catch(_){}}
-    else{SESSION_QUEUES[sid]=[...liveQ];try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}}
+    if(!liveQ.length){delete SESSION_QUEUES[sid];_removeSessionQueueStorage(sid);}
+    else{SESSION_QUEUES[sid]=[...liveQ];_persistSessionQueueStorage(sid,liveQ);}
     delete _queueRenderKeys[sid];
     updateQueueBadge(sid);
   }
@@ -3758,10 +3810,7 @@ function _renderQueueChips(sid){
         const first=snapshot.find(e=>e)||{};
         const firstFiles=(snapshot.find(e=>e&&Array.isArray(e.files)&&e.files.length)||{files:[]}).files;
         liveQ.length=0;liveQ.push({text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,_queued_at:Date.now()});
-        SESSION_QUEUES[sid]=liveQ;
-        try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}
-        delete _queueRenderKeys[sid];
-        updateQueueBadge(sid);
+        _saveAndRefresh();
       };
       if(hasFiles){
         if(typeof showToast==='function') showToast('Attachments on queued items will be removed',2600,'warning');
@@ -3839,7 +3888,7 @@ function _renderQueueChips(sid){
         const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
         if(idx!==-1){
           liveQ[idx]={...liveQ[idx],text:newText};
-          try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}
+          _persistSessionQueueStorage(sid,liveQ);
           delete _queueRenderKeys[sid];
           updateQueueBadge(sid);
         }
@@ -3878,8 +3927,8 @@ function _renderQueueChips(sid){
       const liveQ=_getSessionQueue(sid,false);
       const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
       if(idx!==-1) liveQ.splice(idx,1);
-      if(!liveQ.length){delete SESSION_QUEUES[sid];try{sessionStorage.removeItem('hermes-queue-'+sid);}catch(_){}}
-      else{SESSION_QUEUES[sid]=[...liveQ];try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}}
+      if(!liveQ.length){delete SESSION_QUEUES[sid];_removeSessionQueueStorage(sid);}
+      else{SESSION_QUEUES[sid]=[...liveQ];_persistSessionQueueStorage(sid,liveQ);}
       delete _queueRenderKeys[sid];
       updateQueueBadge(sid);
     };
@@ -3915,8 +3964,7 @@ function _updateQueuePill(sid,count){
         }, 360);
       }
       if(pillOuter) pillOuter.classList.remove('show');
-      if(S.activeStreamId&&typeof scrollIfPinned==='function') scrollIfPinned();
-      else if(!S.activeStreamId&&typeof scrollToBottom==='function') scrollToBottom();
+      _syncQueueUiScroll();
     };
   } else {
     if(pillOuter) pillOuter.classList.remove('show');
@@ -6458,8 +6506,9 @@ function renderMessages(options){
     const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const questionJumpBtn = (!isUser&&!m._live&&isTurnFinalAssistant)
-      ? _questionJumpButtonHtml(questionRawIdxByAssistantRawIdx.get(rawIdx))
+    const questionJumpTarget = questionRawIdxByAssistantRawIdx.get(rawIdx);
+    const questionJumpBtn = (!isUser&&!m._live&&typeof questionJumpTarget==='number'&&questionJumpTarget>=0)
+      ? _questionJumpButtonHtml(questionJumpTarget)
       : '';
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 

@@ -7331,7 +7331,6 @@ def _handle_gateway_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     q = watcher.subscribe()
@@ -7364,7 +7363,6 @@ def _handle_session_events_stream(handler):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     q = subscribe_session_events()
@@ -7934,7 +7932,6 @@ def _handle_approval_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     from api.streaming import _sse
@@ -8035,7 +8032,6 @@ def _handle_clarify_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     from api.streaming import _sse

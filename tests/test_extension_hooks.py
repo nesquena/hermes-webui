@@ -7,7 +7,11 @@ The extension surface must stay deliberately small and safe:
 - static assets sandboxed to the configured extension directory
 """
 
+from pathlib import Path
 from types import SimpleNamespace
+
+
+UI_JS = (Path(__file__).resolve().parents[1] / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 class FakeHandler:
@@ -207,3 +211,14 @@ def test_extension_static_serving_rejects_symlink_escape(tmp_path, monkeypatch):
     escaped = FakeHandler()
     assert serve_extension_static(escaped, SimpleNamespace(path="/extensions/outside-link.txt")) is True
     assert escaped.status == 404
+
+
+def test_queue_ui_updates_only_follow_bottom_when_reader_is_still_pinned():
+    queue_start = UI_JS.index("const _queueRenderKeys={};")
+    queue_end = UI_JS.index("function updateQueueBadge(sessionId){", queue_start)
+    queue_ui = UI_JS[queue_start:queue_end]
+
+    assert "function _syncQueueUiScroll(){" in queue_ui
+    assert "if(typeof scrollIfPinned==='function') scrollIfPinned();" in queue_ui
+    assert queue_ui.count("_syncQueueUiScroll();") >= 2
+    assert "else if(!S.activeStreamId&&typeof scrollToBottom==='function') scrollToBottom();" not in queue_ui

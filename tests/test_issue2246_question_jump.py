@@ -14,9 +14,9 @@ def test_assistant_footer_gets_completed_turn_question_jump_button():
     assert "const questionRawIdxByAssistantRawIdx=new Map()" in UI_JS
     assert "questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx)" in UI_JS
     assert "row.id=_userMessageDomId(rawIdx)" in UI_JS
-    assert "const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant')" in UI_JS
-    assert "(!isUser&&!m._live&&isTurnFinalAssistant)" in UI_JS
-    assert "_questionJumpButtonHtml(questionRawIdxByAssistantRawIdx.get(rawIdx))" in UI_JS
+    assert "const questionJumpTarget = questionRawIdxByAssistantRawIdx.get(rawIdx);" in UI_JS
+    assert "(!isUser&&!m._live&&typeof questionJumpTarget==='number'&&questionJumpTarget>=0)" in UI_JS
+    assert "_questionJumpButtonHtml(questionJumpTarget)" in UI_JS
     assert "msg-question-jump-btn" in UI_JS
 
 

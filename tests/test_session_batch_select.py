@@ -167,6 +167,18 @@ def test_boot_does_not_drop_zero_message_inflight_session():
         "Zero-message cleanup must not run for in-flight sessions"
 
 
+def test_boot_does_not_drop_zero_message_draft_only_session():
+    """Reloading a draft-only zero-message session must preserve unsent composer work."""
+    with open('static/boot.js') as f:
+        src = f.read()
+    assert "const _restoredDraft = S.session && S.session.composer_draft;" in src, \
+        "Boot must inspect restored composer_draft before ephemeral cleanup"
+    assert "const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles);" in src, \
+        "Boot must treat draft text/files as a real restorable session"
+    assert "&& !_restoredHasDraft" in src, \
+        "Zero-message cleanup must not run when the restored session still has unsent draft work"
+
+
 def test_batch_select_i18n_keys():
     """Verify all batch select i18n keys exist in all locales."""
     with open('static/i18n.js') as f:

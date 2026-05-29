@@ -754,34 +754,37 @@ async function loadSession(sid){
     // Stale? A newer loadSession() call has already started (#1060).
     if (_loadingSessionId !== sid) return;
 
-    // Restore any queued message that survived page refresh via sessionStorage.
+    // Restore any queued message that survived page refresh or a tab detour.
     if(typeof queueSessionMessage==='function'){
       try{
-        const _storedQ=sessionStorage.getItem('hermes-queue-'+sid);
-        if(_storedQ){
-          const _entries=JSON.parse(_storedQ);
-          if(Array.isArray(_entries)&&_entries.length){
-            const _lastMsg=S.messages.slice().reverse()
-              .find(m=>m&&m.role==='assistant');
-            const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
-            const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
-            if(_fresh.length){
-              const _first=_fresh[0];
-              const _msg=$&&$('msg');
-              if(_msg&&_first.text&&!_msg.value){
-                _msg.value=_first.text||'';
-                if(typeof autoResize==='function') autoResize();
-                if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
-              }
-              sessionStorage.removeItem('hermes-queue-'+sid);
-            } else {
-              sessionStorage.removeItem('hermes-queue-'+sid);
+        const _storedQ=typeof _readPersistedSessionQueue==='function' ? _readPersistedSessionQueue(sid) : [];
+        if(Array.isArray(_storedQ) && _storedQ.length){
+          const _entries=_storedQ;
+          const _lastMsg=S.messages.slice().reverse()
+            .find(m=>m&&m.role==='assistant');
+          const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
+          const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
+          if(_fresh.length){
+            SESSION_QUEUES[sid]=_fresh;
+            const _first=_fresh[0];
+            const _msg=$&&$('msg');
+            if(_msg&&_first.text&&!_msg.value){
+              _msg.value=_first.text||'';
+              if(typeof autoResize==='function') autoResize();
+              if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
             }
-          } else {
-            sessionStorage.removeItem('hermes-queue-'+sid);
+          } else if(typeof _removeSessionQueueStorage==='function') {
+            _removeSessionQueueStorage(sid);
+            delete SESSION_QUEUES[sid];
           }
+        } else if(typeof _removeSessionQueueStorage==='function') {
+          _removeSessionQueueStorage(sid);
+          delete SESSION_QUEUES[sid];
         }
-      }catch(_){sessionStorage.removeItem('hermes-queue-'+sid);}
+      }catch(_){
+        if(typeof _removeSessionQueueStorage==='function') _removeSessionQueueStorage(sid);
+        delete SESSION_QUEUES[sid];
+      }
     }
 
     // Reconstruct tool calls from message metadata, or fall back to session-level summary.
@@ -2298,9 +2301,9 @@ let _gatewayPollTimer = null;
 let _gatewayProbeInFlight = false;
 let _gatewaySSEWarningShown = false;
 const _gatewayFallbackPollMs = 30000;
-const _streamingPollMs = 5000;
+const _streamingPollMs = 15000;
 const _sessionTimeRefreshMs = 60000;
-const _activeSessionExternalRefreshMs = 5000;
+const _activeSessionExternalRefreshMs = 20000;
 let _streamingPollTimer = null;
 let _sessionTimeRefreshTimer = null;
 let _activeSessionExternalRefreshTimer = null;

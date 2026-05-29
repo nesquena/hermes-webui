@@ -42,11 +42,9 @@ def test_queue_card_measurement_does_not_force_repin_during_streaming():
     assert measurement_idx != -1, "queue card measurement timeout not found"
     measurement_block = fn[measurement_idx:measurement_idx + 500]
 
-    assert "S.activeStreamId" in measurement_block
-    assert "scrollIfPinned()" in measurement_block
-    assert "!S.activeStreamId" in measurement_block
-    assert "scrollToBottom()" in measurement_block
-    assert measurement_block.find("scrollIfPinned()") < measurement_block.find("scrollToBottom()")
+    assert "_syncQueueUiScroll();" in measurement_block
+    assert "S.activeStreamId" not in measurement_block
+    assert "scrollToBottom()" not in measurement_block
 
 
 def test_queue_pill_click_does_not_force_repin_during_streaming():
@@ -55,8 +53,6 @@ def test_queue_pill_click_does_not_force_repin_during_streaming():
     assert click_idx != -1, "queue pill click handler not found"
     click_block = fn[click_idx:click_idx + 700]
 
-    assert "S.activeStreamId" in click_block
-    assert "scrollIfPinned()" in click_block
-    assert "!S.activeStreamId" in click_block
-    assert "scrollToBottom()" in click_block
-    assert click_block.find("scrollIfPinned()") < click_block.find("scrollToBottom()")
+    assert "_syncQueueUiScroll();" in click_block
+    assert "S.activeStreamId" not in click_block
+    assert "scrollToBottom()" not in click_block
