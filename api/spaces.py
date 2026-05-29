@@ -2292,6 +2292,34 @@ def _space_widget_delete_prompt_preflight_receipt(widget_count: int, *, delete_a
 
 
 
+def _space_delete_prompt_preflight_receipt(widget_count: int) -> dict[str, Any]:
+    """Preflight metadata-only Space delete intent before persisted mutation.
+
+    Space ids and request payload fields are deliberately excluded from the
+    preflight text. Valid selectors can contain policy-rule words, while ignored
+    route/tool payloads may contain raw renderer/source/API-auth markers. The
+    receipt should gate only the destructive Space delete intent metadata.
+    """
+    from api.capy_policy import prompt_preflight
+
+    preflight_text = json.dumps(
+        {
+            "space_delete": {
+                "selector_scope": "validated_space_selector",
+                "widget_count": max(0, int(widget_count or 0)),
+                "generated_widget_execution": "disabled",
+            }
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    receipt = prompt_preflight(preflight_text, boundary="creator_commit")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+
 def _context_value(value: Any, limit: int = 500) -> str:
     """Return a single-line value safe for compact agent context."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -7283,25 +7311,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.spaces.removespace", "space.spaces.deletespace"}:
         _space_tool_reject_ambient_current_selectors(data)
         space_id = validate_space_id(_space_tool_current_id(data))
-        space_detail = read_space_detail(space_id)
-        widget_count = len(space_detail.get("widgets") or [])
-        result = delete_space(space_id)
-        progress_event = _record_space_tool_progress_event(space_id, run_prefix="space.delete")
-        autonomy_policy = _space_layout_action_policy_receipt(name)
+        result = delete_space(space_id, include_safety_receipts=True, action=name)
         return {
             "ok": True,
             "action": name,
             **result,
-            "autonomy_policy": autonomy_policy,
-            "progress_event": progress_event,
-            "output_compaction": _space_tool_action_output_compaction_receipt(
-                action=name,
-                space_id=space_id,
-                widget_count=widget_count,
-                revision_event_id=result.get("revision_event_id"),
-                autonomy_policy=autonomy_policy,
-                progress_event=progress_event,
-            ),
         }
     if name in {"space.spaces.upsertwidget", "space.spaces.upsertwidgets"}:
         _space_tool_reject_ambient_current_selectors(data)
@@ -8715,7 +8729,7 @@ def update_space(space_id: str, updates: dict[str, Any], *, include_safety_recei
         return result
 
 
-def delete_space(space_id: str) -> dict[str, Any]:
+def delete_space(space_id: str, *, include_safety_receipts: bool = False, action: str = "space.delete") -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     with _SPACE_MANIFEST_LOCK:
@@ -8723,9 +8737,33 @@ def delete_space(space_id: str) -> dict[str, Any]:
         path = _space_dir(sid)
         if not path.exists():
             raise FileNotFoundError("Space not found")
+        detail = read_space_detail(sid) if include_safety_receipts else {}
+        widget_count = len(detail.get("widgets") or []) if include_safety_receipts else 0
+        prompt_preflight = _space_delete_prompt_preflight_receipt(widget_count) if include_safety_receipts else None
+        if isinstance(prompt_preflight, dict) and prompt_preflight.get("status") != "pass":
+            raise ValueError("Space delete prompt preflight blocked")
         event_id = _record_event(sid, "space.deleted")
         shutil.rmtree(path)
-        return {"deleted": True, "space_id": sid, "revision_event_id": event_id}
+        result: dict[str, Any] = {"deleted": True, "space_id": sid, "revision_event_id": event_id}
+        if include_safety_receipts:
+            progress_event = _record_space_tool_progress_event(sid, run_prefix="space.delete")
+            autonomy_policy = _space_layout_action_policy_receipt(action, prompt_preflight)
+            result.update(
+                {
+                    "prompt_preflight": prompt_preflight,
+                    "autonomy_policy": autonomy_policy,
+                    "progress_event": progress_event,
+                    "output_compaction": _space_tool_action_output_compaction_receipt(
+                        action=action,
+                        space_id=sid,
+                        widget_count=widget_count,
+                        revision_event_id=event_id,
+                        autonomy_policy=autonomy_policy,
+                        progress_event=progress_event,
+                    ),
+                }
+            )
+        return result
 
 
 def _load_yaml_mapping(text: str, label: str) -> dict[str, Any]:

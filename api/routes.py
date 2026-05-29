@@ -5454,7 +5454,7 @@ def handle_post(handler, parsed) -> bool:
             space_id = _route_alias_value("space_id", "spaceId")
             if not space_id:
                 return bad(handler, "Missing space_id")
-            return j(handler, capy_spaces.delete_space(space_id))
+            return j(handler, capy_spaces.delete_space(space_id, include_safety_receipts=True, action="space.delete"))
         except RuntimeError as e:
             return bad(handler, str(e), 403)
         except ValueError as e:

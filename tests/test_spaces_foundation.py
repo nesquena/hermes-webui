@@ -3376,7 +3376,11 @@ def test_space_tool_delete_space_progress_fallback_redacts_secret_like_space_ids
     assert deleted["ok"] is True
     assert deleted["space_id"] == "secret-delete-lab"
     assert deleted["autonomy_policy"]["approval_gates"] == ["creator_commit"]
-    assert deleted["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert deleted["prompt_preflight"]["boundary"] == "creator_commit"
+    assert deleted["prompt_preflight"]["status"] == "pass"
+    assert deleted["prompt_preflight"]["metadata_only"] is True
+    assert deleted["prompt_preflight"]["raw_prompt_stored"] is False
+    assert deleted["autonomy_policy"]["prompt_preflight_status"] == "pass"
     assert deleted["progress_event"] == {
         "stored": False,
         "queued": False,
@@ -8336,9 +8340,13 @@ def test_space_tool_adapter_supports_source_space_delete_helpers_metadata_only(m
     assert removed["deleted"] is True
     assert removed["space_id"] == first["space_id"]
     assert removed["revision_event_id"]
+    assert removed["prompt_preflight"]["boundary"] == "creator_commit"
+    assert removed["prompt_preflight"]["status"] == "pass"
+    assert removed["prompt_preflight"]["metadata_only"] is True
+    assert removed["prompt_preflight"]["raw_prompt_stored"] is False
     assert removed["autonomy_policy"]["action"] == "space.spaces.removespace"
     assert removed["autonomy_policy"]["approval_gates"] == ["creator_commit"]
-    assert removed["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert removed["autonomy_policy"]["prompt_preflight_status"] == "pass"
     assert removed["autonomy_policy"]["model_route_hint"] == "hint:fast"
     assert removed["autonomy_policy"]["metadata_only"] is True
     assert removed["progress_event"]["event_type"] == "tool.completed"
@@ -8350,9 +8358,13 @@ def test_space_tool_adapter_supports_source_space_delete_helpers_metadata_only(m
     assert deleted["action"] == "space.spaces.deletespace"
     assert deleted["deleted"] is True
     assert deleted["space_id"] == second["space_id"]
+    assert deleted["prompt_preflight"]["boundary"] == "creator_commit"
+    assert deleted["prompt_preflight"]["status"] == "pass"
+    assert deleted["prompt_preflight"]["metadata_only"] is True
+    assert deleted["prompt_preflight"]["raw_prompt_stored"] is False
     assert deleted["autonomy_policy"]["action"] == "space.spaces.deletespace"
     assert deleted["autonomy_policy"]["approval_gates"] == ["creator_commit"]
-    assert deleted["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert deleted["autonomy_policy"]["prompt_preflight_status"] == "pass"
     assert deleted["autonomy_policy"]["model_route_hint"] == "hint:fast"
     assert deleted["autonomy_policy"]["metadata_only"] is True
     assert deleted["progress_event"]["event_type"] == "tool.completed"
@@ -8602,7 +8614,7 @@ def test_space_tool_adapter_duplicate_delete_source_output_compaction_receipts_m
     assert compaction["redaction_status"] in {"metadata_only", "redacted"}
     assert f"space_action: {action.lower()}" in text
     assert "widget_count: 1" in text
-    expected_preflight_status = "block" if operation == "duplicate" else "required"
+    expected_preflight_status = "block" if operation == "duplicate" else "pass"
     assert f"prompt_preflight_status: {expected_preflight_status}" in text
     assert "model_route_hint: hint:fast" in text
     assert "progress_status: completed" in text
@@ -20443,6 +20455,22 @@ def test_space_delete_route_accepts_camelcase_id_and_rejects_conflicts_metadata_
     assert status == 200
     assert body["deleted"] is True
     assert body["space_id"] == camel["space_id"]
+    assert body["prompt_preflight"]["boundary"] == "creator_commit"
+    assert body["prompt_preflight"]["status"] == "pass"
+    assert body["prompt_preflight"]["metadata_only"] is True
+    assert body["prompt_preflight"]["raw_prompt_stored"] is False
+    assert body["autonomy_policy"]["action"] == "space.delete"
+    assert body["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert body["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert body["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert body["autonomy_policy"]["metadata_only"] is True
+    assert body["progress_event"]["event_type"] == "tool.completed"
+    assert body["progress_event"]["run_id"] == f"space.delete:{camel['space_id']}"
+    assert body["progress_event"]["space_id"] == camel["space_id"]
+    assert body["progress_event"]["redaction_status"] == "metadata_only"
+    assert body["output_compaction"]["metadata_only"] is True
+    assert body["output_compaction"]["redaction_status"] == "metadata_only"
+    assert "space_action: space.delete" in body["output_compaction"]["text"]
     with pytest.raises(FileNotFoundError):
         spaces.read_space_detail(camel["space_id"])
 
