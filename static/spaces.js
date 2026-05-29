@@ -1364,6 +1364,13 @@
     if (receipt) root.innerHTML = receipt + root.innerHTML;
   }
 
+  function prependSpacesRootRecoveryActionReceipt(data){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    const receipt = renderRecoveryActionReceipt(data);
+    if (receipt) root.innerHTML = receipt + root.innerHTML;
+  }
+
   function renderCreatorPreviewResult(data){
     const previewId = safeCreatorIdText(data && data.preview_id || '');
     const stage = safeCreatorSummaryText(data && data.stage || 'sandbox-preview-required') || 'sandbox-preview-required';
@@ -3495,8 +3502,9 @@
       if (!spaceId || !eventId || typeof showConfirmDialog !== 'function') return;
       const ok = await showConfirmDialog({title: 'Restore Space revision?', message: 'Restore space "'+spaceId+'" to revision '+eventId.slice(0, 12)+'? The current manifest remains in revision history.', confirmLabel: 'Restore revision', danger: true, focusCancel: true});
       if (!ok) return;
-      await postSpacesJson('api/spaces/revision/restore', {space_id: spaceId, event_id: eventId});
+      const restoreResult = await postSpacesJson('api/spaces/revision/restore', {space_id: spaceId, event_id: eventId});
       await openSpaceDetail(spaceId);
+      prependSpacesRootRecoveryActionReceipt(restoreResult || {});
       return;
     }
     if (action === 'restoreWidgetRevision') {
@@ -3505,8 +3513,9 @@
       if (!spaceId || !eventId || !widgetId || typeof showConfirmDialog !== 'function') return;
       const ok = await showConfirmDialog({title: 'Restore widget revision?', message: 'Restore widget "'+widgetId+'" from revision '+eventId.slice(0, 12)+'? Other widgets in this Space are left unchanged.', confirmLabel: 'Restore widget', danger: true, focusCancel: true});
       if (!ok) return;
-      await postSpacesJson('api/spaces/revision/restore-widget', {space_id: spaceId, event_id: eventId, widget_id: widgetId});
+      const restoreResult = await postSpacesJson('api/spaces/revision/restore-widget', {space_id: spaceId, event_id: eventId, widget_id: widgetId});
       await openSpaceDetail(spaceId);
+      prependSpacesRootRecoveryActionReceipt(restoreResult || {});
       return;
     }
     if (action === 'deleteSharedData') {

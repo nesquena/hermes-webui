@@ -2234,6 +2234,7 @@ global.fetch = async function(path, opts = {}) {
       revision_event_id: 'rev-restore',
       progress_event: { event_id: 'evt-recovery-restore', event_type: 'tool.completed', family: 'tool', run_id: 'recovery.restore:' + (body.space_id || 'lab'), redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
       autonomy_policy: { available: true, action: 'space.recovery.restore', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit', 'generated_widget_execution'], prompt_preflight_status: 'required', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      output_compaction: { tool: 'capy-spaces-recovery', command: 'space.recovery.restore', exit_status: 0, original_chars: 940, compacted_chars: 210, compacted: true, rules_applied: ['retain_artifact_handles'], redaction_status: 'metadata_only', redacted_count: 0, retained_artifact_handles: [{ kind: 'revision', handle: 'recovery.restore:' + (body.space_id || 'lab'), label: 'restored Space revision' }], retained_citations: [], text: 'recovery restore metadata only\nrenderer <script>bad()</script> SECRET_VALUE_DO_NOT_LEAK' },
       renderer: '<script>bad()</script>',
       api_key: 'SECRET',
     });
@@ -2248,6 +2249,7 @@ global.fetch = async function(path, opts = {}) {
       revision_event_id: 'rev-widget-restore',
       progress_event: { event_id: 'evt-recovery-widget-restore', event_type: 'tool.completed', family: 'tool', run_id: 'recovery.widget.restore:' + (body.space_id || 'lab'), redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
       autonomy_policy: { available: true, action: 'space.recovery.restore_widget', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit', 'generated_widget_execution'], prompt_preflight_status: 'required', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      output_compaction: { tool: 'capy-spaces-recovery', command: 'space.recovery.restore_widget', exit_status: 0, original_chars: 760, compacted_chars: 190, compacted: true, rules_applied: ['retain_artifact_handles'], redaction_status: 'metadata_only', redacted_count: 0, retained_artifact_handles: [{ kind: 'widget-revision', handle: 'recovery.widget.restore:' + (body.space_id || 'lab'), label: 'restored widget revision' }], retained_citations: [], text: 'widget restore metadata only\nrenderer <script>bad()</script> SECRET_VALUE_DO_NOT_LEAK' },
       renderer: '<script>bad()</script>',
       api_key: 'SECRET',
     });
@@ -7304,9 +7306,23 @@ def test_spaces_ui_restore_revision_uses_shared_confirm_and_reload_without_widge
     assert out["calls"][-3]["path"] == "api/spaces/revisions?space_id=lab&limit=10"
     assert out["calls"][-2]["path"] == "api/spaces/memory?space_id=lab"
     assert out["calls"][-1]["path"] == "api/capy-progress/status?space_id=lab"
+    assert "Recovery action receipt" in out["rootHtml"]
+    assert "Confirmed recovery action completed with metadata-only policy and progress evidence" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Action: space.recovery.restore" in out["rootHtml"]
+    assert "Prompt preflight: required" in out["rootHtml"]
+    assert "Model route hint: hint:reasoning" in out["rootHtml"]
+    assert "Recovery progress" in out["rootHtml"]
+    assert "run recovery.restore:lab" in out["rootHtml"]
+    assert "metadata-only progress receipt" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 940 chars" in out["rootHtml"]
+    assert "Compacted output: 210 chars" in out["rootHtml"]
+    assert "retain_artifact_handles" in out["rootHtml"]
+    assert "recovery restore metadata only" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
-    assert "renderer" not in out["rootHtml"]
-    assert "api_key" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"].lower()
+    assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
 
 
@@ -7324,9 +7340,19 @@ def test_spaces_ui_restore_widget_revision_posts_widget_only_and_refreshes_detai
     assert out["calls"][-3]["path"] == "api/spaces/revisions?space_id=lab&limit=10"
     assert out["calls"][-2]["path"] == "api/spaces/memory?space_id=lab"
     assert out["calls"][-1]["path"] == "api/capy-progress/status?space_id=lab"
+    assert "Recovery action receipt" in out["rootHtml"]
+    assert "Action: space.recovery.restore_widget" in out["rootHtml"]
+    assert "Recovery progress" in out["rootHtml"]
+    assert "run recovery.widget.restore:lab" in out["rootHtml"]
+    assert "metadata-only progress receipt" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 760 chars" in out["rootHtml"]
+    assert "Compacted output: 190 chars" in out["rootHtml"]
+    assert "retain_artifact_handles" in out["rootHtml"]
+    assert "widget restore metadata only" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
-    assert "renderer" not in out["rootHtml"]
-    assert "api_key" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"].lower()
+    assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
 
 
