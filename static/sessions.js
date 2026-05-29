@@ -2309,7 +2309,13 @@ let _gatewaySSEWarningShown = false;
 const _gatewayFallbackPollMs = 30000;
 const _streamingPollMs = 5000;
 const _sessionTimeRefreshMs = 60000;
-const _activeSessionExternalRefreshMs = 5000;
+// #3107: the active-session "is it externally updated?" poll used to fire
+// every 5 s. On long sessions this caused visible scroll jitter and a
+// noticeable network/CPU floor because the SSE session-events stream
+// already pushes invalidations in real time; this poll exists only as a
+// fallback for the case where SSE is broken/unavailable. Bump to 30 s
+// to keep the safety net without turning it into a primary refresh path.
+const _activeSessionExternalRefreshMs = 30000;
 let _streamingPollTimer = null;
 let _sessionTimeRefreshTimer = null;
 let _activeSessionExternalRefreshTimer = null;
