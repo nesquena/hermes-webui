@@ -11693,7 +11693,7 @@ def _space_repair_event_summary(event: dict[str, Any], sid: str) -> dict[str, An
     if not isinstance(details, dict):
         return None
     payload_summary = _space_repair_payload_summary(details.get("payload_summary") if isinstance(details.get("payload_summary"), dict) else {})
-    return {
+    summary = {
         "schema_version": event.get("schema_version", SCHEMA_VERSION),
         "event_id": event_id,
         "space_id": sid,
@@ -11703,6 +11703,15 @@ def _space_repair_event_summary(event: dict[str, Any], sid: str) -> dict[str, An
         "payload_summary": payload_summary,
         "created_at": _space_repair_created_at(event.get("created_at")),
     }
+    raw_prompt_preflight = details.get("prompt_preflight")
+    prompt_preflight = raw_prompt_preflight if isinstance(raw_prompt_preflight, dict) else None
+    if prompt_preflight:
+        summary["prompt_preflight"] = _prompt_preflight_receipt_metadata_summary(prompt_preflight)
+    raw_autonomy_policy = details.get("autonomy_policy")
+    autonomy_policy = raw_autonomy_policy if isinstance(raw_autonomy_policy, dict) else None
+    if autonomy_policy:
+        summary["autonomy_policy"] = _action_policy_receipt_metadata_summary(autonomy_policy)
+    return summary
 
 
 def list_space_repair_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]:
@@ -12576,11 +12585,18 @@ def recovery_snapshot() -> dict[str, Any]:
                 latest_space_repair = space_repair_events[0]
                 counts["queued_event_count"] += len(space_repair_events)
                 summary["queued_space_repair_count"] = len(space_repair_events)
-                summary["latest_space_repair_event"] = {
+                latest_space_repair_event: dict[str, Any] = {
                     "event_id": _context_value(latest_space_repair.get("event_id"), 120),
                     "event_name": _context_value(latest_space_repair.get("event_name"), 120),
                     "status": _context_value(latest_space_repair.get("status") or "queued", 80),
                 }
+                latest_prompt_preflight = latest_space_repair.get("prompt_preflight")
+                if isinstance(latest_prompt_preflight, dict):
+                    latest_space_repair_event["prompt_preflight"] = _prompt_preflight_receipt_metadata_summary(latest_prompt_preflight)
+                latest_autonomy_policy = latest_space_repair.get("autonomy_policy")
+                if isinstance(latest_autonomy_policy, dict):
+                    latest_space_repair_event["autonomy_policy"] = _action_policy_receipt_metadata_summary(latest_autonomy_policy)
+                summary["latest_space_repair_event"] = latest_space_repair_event
             queued_events_by_widget: dict[str, list[dict[str, Any]]] = {}
             for event in list_widget_events(summary["space_id"], limit=100):
                 wid = _context_value(event.get("widget_id"), 120)

@@ -15292,6 +15292,16 @@ def test_space_tool_adapter_queues_whole_space_repair_metadata_only(monkeypatch,
     assert listed["action"] == "space.recovery.space_repair_events"
     assert listed["space_id"] == created["space_id"]
     assert listed["events"][0]["event_id"] == queued["event_id"]
+    recovery_event = recovery["spaces"][0]["latest_space_repair_event"]
+    assert recovery_event["event_id"] == queued["event_id"]
+    assert recovery_event["prompt_preflight"]["boundary"] == "space_repair_prompt"
+    assert recovery_event["prompt_preflight"]["status"] == "pass"
+    assert recovery_event["prompt_preflight"]["metadata_only"] is True
+    assert recovery_event["prompt_preflight"]["raw_prompt_stored"] is False
+    assert recovery_event["autonomy_policy"]["action"] == "space.repair.queue"
+    assert recovery_event["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert recovery_event["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+    assert recovery_event["autonomy_policy"]["metadata_only"] is True
     assert recovery["summary"]["queued_event_count"] == 1
     assert "renderer" not in serialized
     assert "source" not in serialized
@@ -15344,7 +15354,16 @@ def test_space_repair_events_tool_response_includes_metadata_only_output_compact
     assert listed["ok"] is True
     assert listed["action"] == "space.recovery.space_repair_events"
     assert listed["space_id"] == created["space_id"]
-    assert listed["events"][0]["event_id"] == queued["event_id"]
+    event = listed["events"][0]
+    assert event["event_id"] == queued["event_id"]
+    assert event["prompt_preflight"]["boundary"] == "space_repair_prompt"
+    assert event["prompt_preflight"]["status"] == "pass"
+    assert event["prompt_preflight"]["metadata_only"] is True
+    assert event["prompt_preflight"]["raw_prompt_stored"] is False
+    assert event["autonomy_policy"]["action"] == "space.repair.queue"
+    assert event["autonomy_policy"]["prompt_preflight_status"] == "pass"
+    assert event["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+    assert event["autonomy_policy"]["metadata_only"] is True
     assert "output_compaction" in listed
     compaction = listed["output_compaction"]
     assert compaction["tool"] == "capy-spaces-recovery-repair"

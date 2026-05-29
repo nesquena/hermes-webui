@@ -1183,7 +1183,39 @@ global.fetch = async function(path, opts = {}) {
           disabled: false,
           disabled_reason: '',
           queued_space_repair_count: 1,
-          latest_space_repair_event: { event_id: 'evt-space-repair', event_name: 'agent.repair', status: 'queued', prompt_preview: 'SECRET_VALUE_DO_NOT_LEAK', payload_summary: { api_key: 'SECRET' } },
+          latest_space_repair_event: {
+            event_id: 'evt-space-repair',
+            event_name: 'agent.repair',
+            status: 'queued',
+            prompt_preview: 'SECRET_VALUE_DO_NOT_LEAK',
+            payload_summary: { api_key: 'SECRET' },
+            prompt_preflight: {
+              status: 'pass',
+              boundary: 'space_repair_prompt',
+              severity: 'low',
+              metadata_only: true,
+              raw_prompt_stored: false,
+              checks: ['prompt_injection_scan'],
+              raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+              renderer: '<script>bad()</script>',
+              api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+            },
+            autonomy_policy: {
+              available: true,
+              action: 'space.repair.queue',
+              mode: 'supervised',
+              label: 'Supervised',
+              approval_required: true,
+              approval_gates: ['generated_widget_execution'],
+              prompt_preflight_status: 'pass',
+              model_route_hint: 'hint:reasoning',
+              metadata_only: true,
+              local_only: true,
+              raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+              renderer: '<script>bad()</script>',
+              api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+            },
+          },
           renderer: '<script>bad()</script>',
           revisions: (scenario === 'recoveryUnsafeRevisionEventId' ? [
             { event_id: 'renderer/../api_key-SECRET_VALUE_DO_NOT_LEAK', event_type: 'space.updated', space_id: 'broken', created_at: 1710000250, details: { note: 'safe recovery unsafe-event probe' }, restore_preview: { name: 'Recovery unsafe revision probe', widget_count: 1, widgets: [{ id: 'safe-widget', title: 'Safe Widget', kind: 'markdown' }] }, restore_diff: { has_changes: true, widgets_to_update: ['safe-widget'], widgets_to_add: [], widgets_to_remove: [] } },
@@ -6521,6 +6553,10 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "Enable space" in out["recoveryHtml"]
     assert "Ask Capy to repair Space" in out["recoveryHtml"]
     assert "Space repair queued: agent.repair · queued" in out["recoveryHtml"]
+    assert "Space repair safety: preflight pass · policy space.repair.queue" in out["recoveryHtml"]
+    assert "Generated widget execution approval" in out["recoveryHtml"]
+    assert "prompt text omitted" in out["recoveryHtml"]
+    assert "hint:reasoning" in out["recoveryHtml"]
     assert "evt-space-re" in out["recoveryHtml"]
     assert "Disable widget" in out["recoveryHtml"]
     assert "Enable widget" in out["recoveryHtml"]

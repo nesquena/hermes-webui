@@ -3757,7 +3757,24 @@
     const state = [eventName, status].filter(Boolean).join(' · ');
     parts.push('Space repair queued:'+(state ? ' '+state : ' '+count));
     if (latest.event_id) parts.push('Event: '+String(latest.event_id).slice(0, 12));
-    return '<div class="capy-spaces-muted">'+escapeHtml(parts.join(' · '))+'</div>';
+    const preflight = latest.prompt_preflight && typeof latest.prompt_preflight === 'object' && !Array.isArray(latest.prompt_preflight) ? latest.prompt_preflight : null;
+    const policy = latest.autonomy_policy && typeof latest.autonomy_policy === 'object' && !Array.isArray(latest.autonomy_policy) ? latest.autonomy_policy : null;
+    const safetyParts = [];
+    const preflightStatus = safeDisplayMetadataText(preflight && preflight.status, '');
+    if (preflightStatus && preflightStatus !== '[REDACTED]') safetyParts.push('preflight '+preflightStatus);
+    const policyAction = safeProgressPublicId(policy && policy.action);
+    if (policyAction) safetyParts.push('policy '+policyAction);
+    const rawGates = Array.isArray(policy && policy.approval_gates) ? policy.approval_gates : [];
+    const recognizedGates = rawGates.filter(function(gate){
+      return ['creator_commit', 'destructive_external_action', 'generated_widget_execution', 'credential_change'].indexOf(String(gate || '').trim()) !== -1;
+    });
+    const gateLabels = recognizedGates.length ? safePolicyGateLabels(recognizedGates) : [];
+    if (gateLabels.length) safetyParts.push(gateLabels.join(', '));
+    if (preflight && preflight.raw_prompt_stored === false) safetyParts.push('prompt text omitted');
+    const routeHint = safeModelRouteHint(policy && policy.model_route_hint);
+    if (routeHint) safetyParts.push(routeHint);
+    return '<div class="capy-spaces-muted">'+escapeHtml(parts.join(' · '))+'</div>' +
+      (safetyParts.length ? '<div class="capy-spaces-muted">Space repair safety: '+escapeHtml(safetyParts.join(' · '))+'</div>' : '');
   }
 
   function renderRecoveryModuleEventStatus(module){
