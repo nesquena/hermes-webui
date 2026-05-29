@@ -4431,6 +4431,15 @@ def handle_get(handler, parsed) -> bool:
                 raw["model"] = effective_model
             if effective_provider:
                 raw["model_provider"] = effective_provider
+            # ── Creator attribution ──────────────────────────────────────────
+            # compact() includes created_by from the session JSON. If it's None
+            # (legacy session), fall back to the sidecar DB, then unknown default.
+            if not raw.get("created_by"):
+                try:
+                    from api.session_attribution import get_session_creator
+                    raw["created_by"] = get_session_creator(sid)
+                except Exception:
+                    raw["created_by"] = {"source": "unknown", "display_name": None}
             redact = redact_session_data(raw)
             _t5 = _time.monotonic()
             resp = j(handler, {"session": redact})
@@ -4622,6 +4631,29 @@ def handle_get(handler, parsed) -> bool:
                 if isinstance(item.get("title"), str):
                     item["title"] = _redact_text(item["title"])
                 safe_merged.append(item)
+            # ── Creator attribution enrichment ────────────────────────────────
+            # Sessions loaded from disk that predate this feature have created_by=None.
+            # Batch-fetch from the sidecar attribution DB and fill in the gaps.
+            # Sessions that have a populated created_by (set at creation time or already
+            # returned from compact()) keep their value. Unknown sessions get the default.
+            try:
+                from api.session_attribution import get_many_session_creators
+                _need_lookup = [
+                    s.get("session_id") for s in safe_merged
+                    if not s.get("created_by")
+                ]
+                if _need_lookup:
+                    _creator_map = get_many_session_creators(_need_lookup)
+                    for s in safe_merged:
+                        if not s.get("created_by"):
+                            sid = s.get("session_id")
+                            s["created_by"] = _creator_map.get(sid, {"source": "unknown", "display_name": None})
+                # Ensure every session has a non-None created_by
+                for s in safe_merged:
+                    if s.get("created_by") is None:
+                        s["created_by"] = {"source": "unknown", "display_name": None}
+            except Exception:
+                pass
             diag.stage("response_write")
             return j(handler, {
                 "sessions": safe_merged,
@@ -5283,6 +5315,33 @@ def handle_post(handler, parsed) -> bool:
                 commit_session_memory(prev_session_id, agent=prev_agent)
             except Exception:
                 logger.debug("Lifecycle commit for prev_session %s failed", prev_session_id, exc_info=True)
+        # ── Creator attribution ──────────────────────────────────────────────
+        # Prefer creator headers (injected by slack-router or other integrations)
+        # over cookie-based WebUI inference. Fall back to env var (kanban/cron).
+        try:
+            from api.session_attribution import (
+                build_webui_created_by,
+                infer_creator_from_env,
+                infer_creator_from_headers,
+                record_session_creator,
+            )
+            _created_by = infer_creator_from_headers(dict(handler.headers))
+            if _created_by is None:
+                _created_by = infer_creator_from_env()
+            if _created_by is None:
+                # WebUI path — infer from auth cookie
+                try:
+                    from api.userauth_routes import _parse_user_session_cookie
+                    from api.userauth import get_session_user
+                    _token = _parse_user_session_cookie(handler)
+                    _webui_user = get_session_user(_token) if _token else None
+                except Exception:
+                    _webui_user = None
+                # Determine agent_identity from request body profile param
+                _agent_id = body.get("profile") or None
+                _created_by = build_webui_created_by(_webui_user, agent_identity=_agent_id)
+        except Exception:
+            _created_by = None
         s = new_session(
             workspace=workspace,
             model=model,
@@ -5290,7 +5349,14 @@ def handle_post(handler, parsed) -> bool:
             profile=body.get("profile") or None,
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
+            created_by=_created_by,
         )
+        # Also write to the sidecar attribution DB for efficient batch lookups
+        try:
+            if _created_by is not None:
+                record_session_creator(s.session_id, _created_by)
+        except Exception:
+            pass
         if worktree_info:
             publish_session_list_changed("session_new")
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
