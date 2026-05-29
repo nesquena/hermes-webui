@@ -11,6 +11,32 @@
 - Self-update restart safety now checks active agent runs as well as open SSE streams and waits for in-flight work before re-exec, avoiding update-triggered interruption when a run outlives its browser stream.
 - Documented the WebUI prefill context budget in README and architecture notes so operators can keep new-browser-turn startup context compact.
 
+## [v0.51.159] — 2026-05-29 — Release EE (stage-batch41 — 5-PR low-risk cleanup: Gateway tool-progress forwarding + shutdown diagnostics + CLI snippet-limit parity + numpad-Enter submit + sync-chat notes guardrail)
+
+### Changed
+
+- WebUI's durable-notes guardrail now also applies to sync chat and explicitly asks agents to leave external notes and durable memory unchanged unless a turn contains an explicit capture or reusable durable signal; durable note writes should be summarized back to the user.
+
+### Fixed
+
+- Gateway-backed browser chat now forwards Hermes Gateway `hermes.tool.progress` SSE events into WebUI's live tool/activity stream, so Gateway runs no longer appear idle while server-side tools are running.
+- WebUI now logs structured shutdown diagnostics when the server exits or `/api/shutdown` is called, including active stream IDs to help diagnose interrupted turns after restarts.
+- The chat composer now treats the numeric keypad Enter key as a submit shortcut even when the send-key preference is set to Ctrl/Cmd+Enter, while preserving regular Enter-as-newline behavior in that mode.
+- The CLI tool-result snippet limit in the browser now matches the backend (`_TOOL_RESULT_SNIPPET_MAX = 4000`), so longer non-diff CLI tool output is no longer truncated to 200 characters before reaching the tool card.
+
+## [v0.51.158] — 2026-05-29 — Release ED (stage-batch40 — 5-PR low-risk cleanup: numpad/keyboard composer fixes + Joplin search auth + provider-qualified model preservation + SSE fallback poll throttle + assistant-reply polish)
+
+### Changed
+
+- WebUI chat instructions now explicitly prevent terse scratchpad/planning fragments from appearing in visible assistant replies, while still allowing clear user-facing progress updates during tool-heavy work.
+
+### Fixed
+
+- The chat composer no longer forces mobile newline-on-Enter behavior on touch-primary devices that also have a fine pointer present (tablet plus Bluetooth keyboard, detachable Surface, iPad plus Magic Keyboard), so Enter submits with desktop semantics when a real keyboard is in the picture.
+- The active-session external-refresh fallback poll now fires every 30 s instead of every 5 s. The SSE session-events stream already pushes invalidations in real time, so the poll is only a fallback; the slower interval removes visible scroll jitter and a network/CPU floor on long sessions.
+- The model picker no longer fuzzy-matches a provider-qualified model id (`@provider:model` or slash-qualified `vendor/model`) to a nearby curated sibling once exact lookup fails, preserving the raw typed value so uncatalogued models stay routable instead of silently snapping to a different model.
+- Joplin notes search now keeps the `Authorization` header and adds a query-token compatibility shim only for Web Clipper `/search` calls, covering clipper builds that return HTTP 403 for header-only search auth while keeping other Joplin API URLs token-free.
+
 ## [v0.51.157] — 2026-05-28 — Release EC (stage-batch39 — 5-PR mixed-risk cleanup: gateway prefill forward + prefill budget + compressed-continuation sidebar + browser-transcript memory guidance + reasoning max parity)
 
 ### Added

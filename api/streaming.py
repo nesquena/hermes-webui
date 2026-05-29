@@ -203,6 +203,7 @@ WebUI progress guidance:
 - Each update should say what you are about to check, what you just confirmed, or why the next tool call is needed.
 - Keep updates concise, factual, and in the user's language. One or two short sentences are enough.
 - Do not reveal hidden reasoning, chain-of-thought, private scratchpads, secrets, raw logs, or long tool output.
+- Do not include terse planning fragments or scratchpad shorthand in visible assistant text. Avoid fragments like "Need check logs", "Need inspect email", or "maybe invite"; either omit them or rewrite them as clear user-facing progress.
 - For direct answers or very short tasks, skip progress updates and answer normally.
 """.strip()
 
@@ -222,7 +223,9 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         "WebUI session context:",
         "- This browser session is not the same live transcript as Telegram, Discord, Slack, or other messaging surfaces.",
         "- Use durable memory, saved sessions, and available tools for cross-surface recall instead of assuming those transcripts are in this browser chat.",
-        "- Do not copy or dump this browser transcript into external notes or durable memory by default. Save only explicit captures, durable user preferences, decisions, blockers, runbook-worthy workflows, or other clearly reusable signals.",
+        "- Do not copy or dump this browser transcript into external notes or durable memory by default.",
+        "- Write to external notes or durable memory only for explicit captures, durable user preferences, decisions, blockers/open issues, runbook-worthy workflows, or other clearly reusable signals; otherwise leave notes unchanged.",
+        "- When you do write or update a durable note, briefly tell the user what note/section changed so the write is reviewable.",
     ]
     fields = (
         ("source", "Source"),
