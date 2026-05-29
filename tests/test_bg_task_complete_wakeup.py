@@ -33,8 +33,6 @@ import queue
 import threading
 import types
 
-import pytest
-
 
 class _FakeProcessRegistry:
     """Minimal stand-in for tools.process_registry.process_registry."""
