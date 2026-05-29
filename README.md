@@ -180,7 +180,14 @@ HERMES_WEBUI_GATEWAY_API_KEY=... \
 `api_server`, or `api-server` enable the bridge. Generic truthy values such as
 `1` or `true` are ignored so existing deployments do not change execution
 ownership accidentally. If `HERMES_WEBUI_GATEWAY_API_KEY` is omitted, WebUI falls
-back to `API_SERVER_KEY` when present.
+back to `API_SERVER_KEY` when present. When Gateway returns HTTP 401, WebUI
+reports a `gateway_auth_error` that points at this WebUI↔Gateway key mismatch
+rather than showing the Gateway's generic provider-style "Invalid API key" body.
+`/api/health/agent` also includes a redacted `gateway_chat` block so operators can
+see whether gateway mode, base URL, and API-key presence are configured without
+exposing the key value. That `gateway_chat` field is an operator diagnostic
+payload only; it is not currently rendered as a user-facing health banner in the
+browser UI.
 
 The bridge is best used by operators who already run Hermes Gateway/API Server
 locally and want browser-originated chat to use the same runtime/tool path as

@@ -1083,9 +1083,117 @@ def _create_profile_fallback(name: str, clone_from: str = None,
     return profile_dir
 
 
+# Provider → .env variable name mapping.
+# When a user supplies an API key during profile creation in the WebUI,
+# the key must be written to the profile's .env file so that Hermes Agent's
+# provider layer can read it — config.yaml model.api_key is not consumed.
+_PROVIDER_ENV_MAP: dict[str, str] = {
+    "kimi-coding": "KIMI_API_KEY",
+    "kimi-coding-cn": "KIMI_CN_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "xai": "XAI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+    "minimax-cn": "MINIMAX_CN_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "zai": "ZAI_API_KEY",
+    "dashscope": "DASHSCOPE_API_KEY",
+    "kilocode": "KILOCODE_API_KEY",
+    "cerebras": "CEREBRAS_API_KEY",
+    "github-copilot": "COPILOT_GITHUB_TOKEN",
+    "nous": "NOUS_API_KEY",
+}
+
+
+def _resolve_env_var_for_provider(provider: Optional[str]) -> Optional[str]:
+    """Return the .env variable name for *provider*, or the generic fallback."""
+    if not provider:
+        return None
+    return _PROVIDER_ENV_MAP.get(str(provider).strip().lower())
+
+
+def _upsert_dotenv_line(env_path: Path, key: str, value: str) -> None:
+    """Write or replace a KEY=value line in a dotenv file.
+
+    Reads existing lines; if *key* already exists its value is replaced.
+    Otherwise a new line is appended.  The file (and parent dirs) are created
+    when they do not exist yet.
+    """
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    except Exception:
+        lines = []
+
+    new_line = f"{key}={value}"
+    found = False
+    new_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k, _ = stripped.split("=", 1)
+            if k.strip() == key:
+                new_lines.append(new_line)
+                found = True
+                continue
+        new_lines.append(line)
+
+    if not found:
+        new_lines.append(new_line)
+
+    try:
+        env_path.write_text("\n".join(new_lines).rstrip("\n") + "\n", encoding="utf-8")
+    except Exception as exc:
+        logger.error("Failed to write %s to %s: %s", key, env_path, exc)
+        raise
+
+
+def _write_api_key_to_dotenv(
+    profile_dir: Path,
+    api_key: str,
+    model_provider: Optional[str] = None,
+) -> None:
+    """Write *api_key* to the profile's .env under the correct variable name.
+
+    If *model_provider* is known, the key is stored under the provider-specific
+    env var (e.g. ``KIMI_API_KEY``); otherwise it falls back to a generic
+    ``HERMES_API_KEY`` that the user can rename later.
+    """
+    env_var = _resolve_env_var_for_provider(model_provider)
+    if not env_var:
+        env_var = "HERMES_API_KEY"
+        logger.info(
+            "No provider→env mapping for %r; writing API key as %s",
+            model_provider,
+            env_var,
+        )
+
+    env_path = profile_dir / ".env"
+    _upsert_dotenv_line(env_path, env_var, api_key)
+
+    # Tighten permissions so the key isn't world-readable.
+    try:
+        env_path.chmod(0o600)
+    except Exception:
+        logger.debug("Failed to chmod 0o600 on %s", env_path)
+
+
 def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: str = None) -> None:
-    """Write custom endpoint fields into config.yaml for a profile."""
-    if not base_url and not api_key:
+    """Write base_url into config.yaml for a profile.
+
+    API keys are intentionally NOT written to config.yaml — they belong in
+    the profile's .env file instead (see ``_write_api_key_to_dotenv``).
+    The *api_key* parameter is accepted for backward compatibility with
+    callers that still pass it; it is silently dropped here (the caller
+    should have already called ``_write_api_key_to_dotenv``).
+    """
+    if not base_url:
         return
     config_path = profile_dir / 'config.yaml'
     try:
@@ -1105,8 +1213,6 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
         model_section = {}
     if base_url:
         model_section['base_url'] = base_url
-    if api_key:
-        model_section['api_key'] = api_key
     cfg['model'] = model_section
     config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
 
@@ -1312,7 +1418,13 @@ def create_profile_api(name: str, clone_from: str = None,
                 exc_info=True,
             )
 
-    _write_endpoint_to_config(profile_path, base_url=base_url, api_key=api_key)
+    _write_endpoint_to_config(profile_path, base_url=base_url)
+    if api_key:
+        _write_api_key_to_dotenv(
+            profile_path,
+            api_key=api_key,
+            model_provider=model_provider,
+        )
     _write_model_defaults_to_config(
         profile_path,
         default_model=default_model,

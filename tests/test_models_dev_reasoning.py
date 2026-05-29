@@ -2,6 +2,8 @@
 
 import sys
 import types
+
+import pytest
 from types import SimpleNamespace
 
 
@@ -76,6 +78,48 @@ def test_models_dev_false_suppresses_prefix_heuristic(monkeypatch):
     assert cfg.resolve_model_reasoning_efforts(
         "x-ai/grok-4-non-reasoning", provider_id="openrouter"
     ) == []
+
+
+def test_codex_gpt55_uses_models_dev_including_xhigh(monkeypatch):
+    _install_fake_models_dev(
+        monkeypatch,
+        lambda provider, model: SimpleNamespace(supports_reasoning=True),
+    )
+
+    import api.config as cfg
+
+    result = cfg.resolve_model_reasoning_efforts(
+        "gpt-5.5", provider_id="openai-codex"
+    )
+    assert result == list(cfg.VALID_REASONING_EFFORTS)
+    assert "xhigh" in result
+
+
+def test_codex_metadata_false_returns_empty(monkeypatch):
+    _install_fake_models_dev(
+        monkeypatch,
+        lambda provider, model: SimpleNamespace(supports_reasoning=False),
+    )
+
+    import api.config as cfg
+
+    assert cfg.resolve_model_reasoning_efforts(
+        "gpt-5.5", provider_id="openai-codex"
+    ) == []
+
+
+def test_copilot_gpt55_caps_at_high(monkeypatch):
+    import api.config as cfg
+
+    try:
+        from hermes_cli.models import github_model_reasoning_efforts
+    except ImportError:
+        pytest.skip("hermes_cli not available")
+
+    result = cfg.resolve_model_reasoning_efforts(
+        "gpt-5.5", provider_id="copilot"
+    )
+    assert "xhigh" not in result
 
 
 def test_get_reasoning_status_uses_config_default_model(monkeypatch, tmp_path):

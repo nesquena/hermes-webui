@@ -1145,7 +1145,7 @@ function _startCronWatch(jobId) {
   _cronWatchStart = Date.now();
   _cronWatchInterval = setInterval(async () => {
     try {
-      const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`);
+      const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false});
       if (!data.running) {
         _stopCronWatch();
         if (_currentCronDetail && _currentCronDetail.id === jobId) {
@@ -1200,7 +1200,7 @@ function _formatElapsed(seconds) {
 
 function _checkCronWatchOnDetail(jobId) {
   // When opening a detail view, check if job is running
-  api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`).then(data => {
+  api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`,{timeoutToast:false}).then(data => {
     if (data.running && _currentCronDetail && _currentCronDetail.id === jobId) {
       _startCronWatch(jobId);
     }

@@ -98,6 +98,51 @@ def test_audit_reports_stale_cli_flag_on_webui_session(tmp_path):
     assert item["sidecar_is_cli_session"] is True
 
 
+def test_stale_flag_hidden_snapshot_reports_visible_api_representative(tmp_path):
+    root = "webui-hidden-stale-cli-root"
+    tip = "webui-visible-lineage-tip"
+    _write_sidecar(
+        tmp_path,
+        root,
+        messages=12,
+        source_tag="webui",
+        session_source="webui",
+        is_cli_session=True,
+        pre_compression_snapshot=True,
+    )
+    _write_index(
+        tmp_path,
+        {
+            "session_id": root,
+            "message_count": 12,
+            "source_tag": "webui",
+            "session_source": "webui",
+            "is_cli_session": True,
+            "pre_compression_snapshot": True,
+        },
+    )
+    db = _state_db(
+        tmp_path,
+        [
+            {"id": root, "source": "webui", "message_count": 12},
+            {"id": tip, "source": "webui", "parent_session_id": root, "message_count": 14},
+        ],
+        {root: 12, tip: 14},
+    )
+
+    report = audit_session_discoverability(
+        tmp_path,
+        state_db_path=db,
+        api_sessions=[{"session_id": tip, "message_count": 14, "parent_session_id": root, "_lineage_root_id": root}],
+    )
+
+    item = next(item for item in report["items"] if item["session_id"] == root)
+    assert item["kind"] == "persisted_source_flag_stale"
+    assert item["present_in"] == {"sidecar": True, "index": True, "state_db": True, "api": False}
+    assert item["represented_by_api_lineage"] is True
+    assert item["api_representative_session_id"] == tip
+
+
 def test_audit_classifies_state_db_only_messageful_rows_as_missing_sidecar(tmp_path):
     sid = "state-only-session"
     db = _state_db(tmp_path, [{"id": sid, "source": "webui", "message_count": 5}], {sid: 5})
