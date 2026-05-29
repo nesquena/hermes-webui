@@ -22,6 +22,9 @@ def test_webui_ephemeral_prompt_includes_browser_surface_context():
     assert "Do not copy or dump this browser transcript" in prompt
     assert "explicit captures" in prompt
     assert "durable user preferences" in prompt
+    assert "Do not include terse planning fragments" in prompt
+    assert "Need inspect email" in prompt
+    assert "clear user-facing progress" in prompt
 
 
 def test_webui_ephemeral_prompt_skips_empty_surface_fields():
