@@ -4540,3 +4540,60 @@ main.main.showing-logs > #mainLogs{display:flex;}
 @media (min-width:1600px) {
   .composer-box{max-width:1600px;margin:0 auto;}
 }
+
+/* ── Voice transcription panel ─────────────────────────────────────────── */
+.voice-panel{display:flex;flex-direction:column;gap:12px;padding:12px;overflow-y:auto;}
+.voice-record-wrap{display:flex;flex-direction:column;align-items:center;gap:8px;padding:8px 0;}
+.voice-record-btn{width:64px;height:64px;border-radius:50%;border:1px solid var(--border2);
+  background:var(--surface);color:var(--text);display:flex;align-items:center;justify-content:center;
+  cursor:pointer;transition:background .15s,border-color .15s,transform .1s;}
+.voice-record-btn:hover:not(:disabled){background:var(--hover);border-color:var(--accent);}
+.voice-record-btn:disabled{opacity:.5;cursor:not-allowed;}
+.voice-record-btn svg{width:28px;height:28px;}
+.voice-record-btn.recording{background:var(--danger);border-color:var(--danger);color:#fff;
+  animation:voicePulse 1.4s ease-in-out infinite;}
+@keyframes voicePulse{0%,100%{box-shadow:0 0 0 0 rgba(var(--accent-rgb,220,60,60),.45);}
+  50%{box-shadow:0 0 0 10px rgba(var(--accent-rgb,220,60,60),0);}}
+.voice-status{font-size:12px;color:var(--muted);text-align:center;min-height:16px;}
+.voice-transcript{width:100%;resize:vertical;min-height:96px;background:var(--code-bg);color:var(--text);
+  border:1px solid var(--border2);border-radius:8px;padding:10px;font-size:13px;line-height:1.5;outline:none;}
+.voice-transcript:focus{border-color:var(--accent);}
+.voice-actions{display:flex;gap:8px;}
+.voice-actions .sm-btn{flex:1;}
+.voice-history-head{display:flex;align-items:center;justify-content:space-between;
+  font-size:12px;font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.04em;
+  margin-top:4px;}
+.voice-history{display:flex;flex-direction:column;gap:6px;}
+.voice-history-empty{font-size:12px;color:var(--muted);padding:8px 2px;}
+.voice-history-item{border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--surface-subtle);}
+.voice-history-item:hover{background:var(--surface-subtle-hover);}
+.voice-history-text{font-size:12px;color:var(--text);line-height:1.45;cursor:pointer;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
+.voice-history-meta{display:flex;align-items:center;justify-content:space-between;margin-top:6px;}
+.voice-history-time{font-size:11px;color:var(--muted);}
+.voice-history-del{border:none;background:none;color:var(--muted);cursor:pointer;font-size:16px;
+  line-height:1;padding:0 4px;border-radius:4px;}
+.voice-history-del:hover{color:var(--danger);background:var(--hover);}
+
+/* ── Voice transcription: panel model selector + settings editor ──────────── */
+.voice-model-row{display:flex;align-items:center;gap:8px;}
+.voice-model-label{font-size:12px;color:var(--text-secondary);}
+.voice-model-select{flex:1;padding:6px 8px;background:var(--code-bg);color:var(--text);
+  border:1px solid var(--border2);border-radius:6px;font-size:13px;}
+.voice-config-notice{font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:6px;
+  padding:10px;border:1px dashed var(--border2);border-radius:8px;}
+.voice-config-link{align-self:flex-start;background:var(--accent);color:#fff;border:none;
+  border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;}
+.voice-models-empty{font-size:12px;color:var(--muted);padding:8px 0;}
+.voice-model-card{border:1px solid var(--border2);border-radius:10px;padding:12px;
+  display:flex;flex-direction:column;gap:8px;background:var(--surface-subtle);}
+.voice-model-card-head{display:flex;align-items:center;gap:8px;}
+.voice-model-card-head .voice-cfg-input{flex:1;font-weight:600;}
+.voice-model-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+.voice-cfg-input{width:100%;padding:7px 9px;background:var(--code-bg);color:var(--text);
+  border:1px solid var(--border2);border-radius:6px;font-size:12px;outline:none;box-sizing:border-box;}
+.voice-cfg-input:focus{border-color:var(--accent);}
+.voice-model-del{border:none;background:none;color:var(--muted);cursor:pointer;font-size:20px;
+  line-height:1;padding:0 6px;border-radius:6px;}
+.voice-model-del:hover{color:var(--danger);background:var(--hover);}
+.voice-env-note{font-size:11px;color:var(--muted);margin-top:8px;font-style:italic;}

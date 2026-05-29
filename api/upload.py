@@ -320,3 +320,43 @@ def handle_transcribe(handler):
                 Path(temp_path).unlink(missing_ok=True)
             except Exception:
                 pass
+
+
+def handle_voice_transcribe(handler):
+    """Dedicated Voice module endpoint: transcribe browser audio via IBM Granite.
+
+    Unlike ``handle_transcribe`` (composer dictation, agent-tool backed), this
+    forwards the audio to a configured OpenAI-compatible Granite endpoint and,
+    on success, stores the result in the WebUI transcript history.
+    """
+    import traceback as _tb
+    try:
+        content_type = handler.headers.get('Content-Type', '')
+        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        if content_length > MAX_UPLOAD_BYTES:
+            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
+        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        if 'file' not in files:
+            return j(handler, {'error': 'No file field in request'}, status=400)
+        filename, file_bytes = files['file']
+        if not file_bytes:
+            return j(handler, {'error': 'Empty audio upload'}, status=400)
+        safe_name = _sanitize_upload_name(filename or 'voice-input.webm')
+        audio_type = mimetypes.guess_type(safe_name)[0] or 'audio/webm'
+        model_id = (fields.get('model_id') or '').strip() or None
+
+        from api.voice_transcription import transcribe, add_transcript
+        result = transcribe(file_bytes, safe_name, audio_type, model_id=model_id)
+        if not result.get('success'):
+            msg = str(result.get('error') or 'Transcription failed')
+            low = msg.lower()
+            status = 503 if ('configured' in low or 'could not reach' in low) else 400
+            return j(handler, {'error': msg}, status=status)
+        transcript = str(result.get('transcript') or '').strip()
+        entry = add_transcript(transcript, model_id=result.get('model_id'))
+        return j(handler, {'ok': True, 'transcript': transcript, 'entry': entry, 'model_id': result.get('model_id')})
+    except ValueError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    except Exception:
+        print('[webui] voice transcribe error: ' + _tb.format_exc(), flush=True)
+        return j(handler, {'error': 'Transcription failed'}, status=500)

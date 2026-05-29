@@ -230,6 +230,11 @@ async function switchPanel(name, opts = {}) {
   if (prevPanel === 'kanban' && nextPanel !== 'kanban') {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
+  // Abort any in-progress voice recording when leaving the Voice panel so the
+  // mic does not stay live in the background.
+  if (prevPanel === 'voice' && nextPanel !== 'voice') {
+    if (typeof _voiceStopRecording === 'function') _voiceStopRecording(true);
+  }
   _currentPanel = nextPanel;
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
@@ -256,6 +261,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'profiles') await loadProfilesPanel();
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'insights') await loadInsights();
+  if (nextPanel === 'voice') await loadVoicePanel();
   if (nextPanel === 'logs') await loadLogs();
   _syncLogsAutoRefresh();
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
@@ -272,6 +278,363 @@ async function switchPanel(name, opts = {}) {
   _resyncChatSidebarAfterPanelSwitch();
   syncAppTitlebar();
   return true;
+}
+
+// ── Voice transcription panel (IBM Granite) ────────────────────────────────
+let _voiceMediaStream = null;
+let _voiceRecorder = null;
+let _voiceChunks = [];
+let _voiceIsRecording = false;
+let _voiceDiscard = false;
+
+function _voiceSetStatus(msg) {
+  const el = $('voiceStatus');
+  if (el) el.textContent = msg;
+}
+
+function _voiceSetRecording(on) {
+  _voiceIsRecording = on;
+  const btn = $('voiceRecordBtn');
+  if (btn) {
+    btn.classList.toggle('recording', on);
+    btn.setAttribute('aria-label', on ? t('voice_stop') : t('voice_record'));
+  }
+}
+
+let _voiceActiveModelId = '';
+
+async function loadVoicePanel() {
+  // Disable the mic button up front if the browser cannot record audio.
+  const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+  const btn = $('voiceRecordBtn');
+  if (btn) btn.disabled = !canRecord;
+  if (btn && !canRecord) _voiceSetStatus(t('voice_unsupported'));
+  await _voiceLoadModels();
+  try {
+    const res = await fetch('api/voice/history');
+    const data = await res.json().catch(() => ({}));
+    _voiceRenderHistory(data.transcripts || []);
+  } catch (_) {
+    _voiceRenderHistory([]);
+  }
+}
+
+async function _voiceLoadModels() {
+  let cfg = { models: [], active_id: '', configured: false };
+  try {
+    const res = await fetch('api/voice/config');
+    cfg = await res.json();
+  } catch (_) {}
+  const sel = $('voiceModelSelect');
+  const row = $('voiceModelRow');
+  const notice = $('voiceConfigNotice');
+  const recBtn = $('voiceRecordBtn');
+  const configured = !!(cfg.models && cfg.models.length);
+  if (row) row.style.display = configured ? '' : 'none';
+  if (notice) notice.style.display = configured ? 'none' : '';
+  if (recBtn) recBtn.disabled = recBtn.disabled || !configured;
+  if (!configured) { _voiceSetStatus(t('voice_unconfigured')); return; }
+  _voiceActiveModelId = cfg.active_id || (cfg.models[0] && cfg.models[0].id) || '';
+  if (sel) {
+    sel.innerHTML = cfg.models.map(m =>
+      `<option value="${esc(m.id)}"${m.id === _voiceActiveModelId ? ' selected' : ''}>${esc(m.label)}</option>`
+    ).join('');
+  }
+  if (_voiceIsRecording === false) _voiceSetStatus(t('voice_idle'));
+}
+
+async function voiceSetActiveModel(id) {
+  _voiceActiveModelId = id;
+  try {
+    await fetch('api/voice/active', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+  } catch (_) {}
+}
+
+function voiceToggleRecord() {
+  if (_voiceIsRecording) { _voiceStopRecording(false); return; }
+  _voiceStartRecording();
+}
+
+async function _voiceStartRecording() {
+  const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+  if (!canRecord) { showToast(t('voice_unsupported')); return; }
+  try {
+    _voiceMediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (_) {
+    showToast(t('voice_mic_denied'));
+    return;
+  }
+  const preferred = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/ogg'];
+  const mimeType = preferred.find(ty => window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(ty)) || '';
+  _voiceRecorder = new MediaRecorder(_voiceMediaStream, mimeType ? { mimeType } : undefined);
+  _voiceChunks = [];
+  _voiceDiscard = false;
+  _voiceRecorder.ondataavailable = e => { if (e.data && e.data.size) _voiceChunks.push(e.data); };
+  _voiceRecorder.onerror = () => { _voiceStopRecording(true); showToast(t('voice_unsupported')); };
+  _voiceRecorder.onstop = async () => {
+    const type = _voiceRecorder.mimeType || mimeType || 'audio/webm';
+    _voiceStopTracks();
+    _voiceSetRecording(false);
+    if (_voiceDiscard) { _voiceSetStatus(t('voice_idle')); return; }
+    const blob = new Blob(_voiceChunks, { type });
+    if (blob.size) await _voiceTranscribe(blob);
+    else _voiceSetStatus(t('voice_idle'));
+  };
+  _voiceRecorder.start();
+  _voiceSetRecording(true);
+  _voiceSetStatus(t('voice_recording'));
+}
+
+function _voiceStopTracks() {
+  if (_voiceMediaStream) {
+    _voiceMediaStream.getTracks().forEach(tr => tr.stop());
+    _voiceMediaStream = null;
+  }
+}
+
+function _voiceStopRecording(discard) {
+  _voiceDiscard = !!discard;
+  if (_voiceRecorder && _voiceRecorder.state !== 'inactive') {
+    _voiceRecorder.stop();
+    return;
+  }
+  _voiceStopTracks();
+  _voiceSetRecording(false);
+}
+
+async function _voiceTranscribe(blob) {
+  const ext = (blob.type && blob.type.includes('ogg')) ? 'ogg' : 'webm';
+  const form = new FormData();
+  form.append('file', new File([blob], `voice-input.${ext}`, { type: blob.type || `audio/${ext}` }));
+  if (_voiceActiveModelId) form.append('model_id', _voiceActiveModelId);
+  _voiceSetStatus(t('voice_transcribing'));
+  try {
+    const res = await fetch('api/voice/transcribe', { method: 'POST', body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Transcription failed');
+    const ta = $('voiceTranscript');
+    if (ta) ta.value = data.transcript || '';
+    _voiceSetStatus(t('voice_idle'));
+    await loadVoicePanel();
+  } catch (err) {
+    _voiceSetStatus(err.message || 'Transcription failed');
+    showToast(err.message || 'Transcription failed');
+  }
+}
+
+function voiceCopyTranscript() {
+  const ta = $('voiceTranscript');
+  const text = ta ? (ta.value || '').trim() : '';
+  if (!text) return;
+  const done = () => showToast(t('voice_copied'));
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => { ta.select(); done(); });
+  } else {
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    done();
+  }
+}
+
+function voiceInsertToChat() {
+  const ta = $('voiceTranscript');
+  const text = ta ? (ta.value || '').trim() : '';
+  if (!text) return;
+  const msg = $('msg');
+  if (!msg) return;
+  const existing = msg.value || '';
+  msg.value = existing ? (existing.replace(/\s*$/, '') + ' ' + text) : text;
+  if (typeof autoResize === 'function') autoResize();
+  if (typeof switchPanel === 'function') switchPanel('chat');
+  msg.focus();
+  showToast(t('voice_inserted'));
+}
+
+async function voiceClearHistory() {
+  try {
+    const res = await fetch('api/voice/history/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ all: true }),
+    });
+    const data = await res.json().catch(() => ({}));
+    _voiceRenderHistory(data.transcripts || []);
+  } catch (_) {}
+}
+
+async function _voiceDeleteHistory(id) {
+  try {
+    const res = await fetch('api/voice/history/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    const data = await res.json().catch(() => ({}));
+    _voiceRenderHistory(data.transcripts || []);
+  } catch (_) {}
+}
+
+function _voiceLoadHistoryItem(text) {
+  const ta = $('voiceTranscript');
+  if (ta) { ta.value = text; ta.focus(); }
+}
+
+function _voiceRenderHistory(items) {
+  const wrap = $('voiceHistory');
+  if (!wrap) return;
+  if (!items.length) {
+    wrap.innerHTML = `<div class="voice-history-empty">${esc(t('voice_history_empty'))}</div>`;
+    return;
+  }
+  wrap.innerHTML = items.map(it => {
+    const when = it.created_at ? new Date(it.created_at * 1000).toLocaleString() : '';
+    return `<div class="voice-history-item" data-id="${esc(it.id)}">
+      <div class="voice-history-text" role="button" tabindex="0" title="Load into transcript">${esc(it.text)}</div>
+      <div class="voice-history-meta">
+        <span class="voice-history-time">${esc(when)}</span>
+        <button class="voice-history-del" type="button" aria-label="${esc(t('voice_delete'))}" title="${esc(t('voice_delete'))}">&times;</button>
+      </div>
+    </div>`;
+  }).join('');
+  wrap.querySelectorAll('.voice-history-item').forEach(el => {
+    const id = el.dataset.id;
+    const item = items.find(x => x.id === id);
+    const textEl = el.querySelector('.voice-history-text');
+    if (textEl && item) {
+      textEl.onclick = () => _voiceLoadHistoryItem(item.text);
+      textEl.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); _voiceLoadHistoryItem(item.text); } };
+    }
+    const delEl = el.querySelector('.voice-history-del');
+    if (delEl) delEl.onclick = () => _voiceDeleteHistory(id);
+  });
+}
+
+// ── Voice transcription settings (Settings → Voice) ────────────────────────
+let _voiceSettingsModels = [];  // working copy of editable rows
+
+async function loadVoiceSettings() {
+  let cfg = { models: [], active_id: '' };
+  try {
+    const res = await fetch('api/voice/config');
+    cfg = await res.json();
+  } catch (_) {}
+  // Editable rows exclude the read-only env model; note it separately.
+  const envModel = (cfg.models || []).find(m => m.source === 'env');
+  _voiceSettingsModels = (cfg.models || [])
+    .filter(m => m.source !== 'env')
+    .map(m => ({ id: m.id, label: m.label, base_url: m.base_url, model: m.model, timeout: m.timeout, has_api_key: m.has_api_key, api_key: null }));
+  const envNote = $('voiceModelsEnvNote');
+  if (envNote) envNote.style.display = envModel ? '' : 'none';
+  _renderVoiceModelRows();
+  _renderVoiceDefaultSelect(cfg.active_id, envModel);
+}
+
+function _renderVoiceDefaultSelect(activeId, envModel) {
+  const sel = $('voiceDefaultSelect');
+  if (!sel) return;
+  const opts = _voiceSettingsModels.map(m =>
+    `<option value="${esc(m.id)}">${esc(m.label || m.id)}</option>`);
+  if (envModel) opts.push(`<option value="${esc(envModel.id)}">${esc(envModel.label)} (env)</option>`);
+  sel.innerHTML = opts.join('') || `<option value="">${esc(t('voice_no_models'))}</option>`;
+  if (activeId) sel.value = activeId;
+}
+
+function _renderVoiceModelRows() {
+  const wrap = $('voiceModelsList');
+  if (!wrap) return;
+  if (!_voiceSettingsModels.length) {
+    wrap.innerHTML = `<div class="voice-models-empty">${esc(t('voice_no_models'))}</div>`;
+    return;
+  }
+  wrap.innerHTML = _voiceSettingsModels.map((m, i) => {
+    const keyPlaceholder = m.has_api_key ? '••••••••  (unchanged)' : t('voice_api_key_optional');
+    return `<div class="voice-model-card" data-idx="${i}">
+      <div class="voice-model-card-head">
+        <input class="voice-cfg-input" data-field="label" placeholder="${esc(t('voice_field_label'))}" value="${esc(m.label || '')}">
+        <button type="button" class="voice-model-del" title="${esc(t('voice_delete'))}" aria-label="${esc(t('voice_delete'))}" onclick="removeVoiceModelRow(${i})">&times;</button>
+      </div>
+      <div class="voice-model-grid">
+        <input class="voice-cfg-input" data-field="id" placeholder="${esc(t('voice_field_id'))}" value="${esc(m.id || '')}">
+        <input class="voice-cfg-input" data-field="model" placeholder="${esc(t('voice_field_model'))}" value="${esc(m.model || '')}">
+      </div>
+      <input class="voice-cfg-input" data-field="base_url" placeholder="https://host:port/v1" value="${esc(m.base_url || '')}">
+      <div class="voice-model-grid">
+        <input class="voice-cfg-input" data-field="api_key" type="password" placeholder="${esc(keyPlaceholder)}" autocomplete="off">
+        <input class="voice-cfg-input" data-field="timeout" type="number" min="1" max="600" placeholder="120" value="${esc(String(m.timeout || 120))}">
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// Pull current DOM values back into the working model array.
+function _syncVoiceModelsFromDom() {
+  const wrap = $('voiceModelsList');
+  if (!wrap) return;
+  wrap.querySelectorAll('.voice-model-card').forEach(card => {
+    const idx = parseInt(card.dataset.idx, 10);
+    const m = _voiceSettingsModels[idx];
+    if (!m) return;
+    card.querySelectorAll('.voice-cfg-input').forEach(inp => {
+      const f = inp.dataset.field;
+      if (f === 'api_key') {
+        // Only override when the user actually typed something.
+        if (inp.value) m.api_key = inp.value;
+      } else if (f === 'timeout') {
+        m.timeout = parseInt(inp.value, 10) || 120;
+      } else {
+        m[f] = inp.value.trim();
+      }
+    });
+  });
+}
+
+function addVoiceModelRow() {
+  _syncVoiceModelsFromDom();
+  _voiceSettingsModels.push({ id: '', label: '', base_url: '', model: '', timeout: 120, has_api_key: false, api_key: null });
+  _renderVoiceModelRows();
+}
+
+function removeVoiceModelRow(idx) {
+  _syncVoiceModelsFromDom();
+  _voiceSettingsModels.splice(idx, 1);
+  _renderVoiceModelRows();
+}
+
+function _voiceSettingsStatus(msg, isError) {
+  const el = $('voiceSettingsStatus');
+  if (!el) return;
+  el.textContent = msg || '';
+  el.style.color = isError ? 'var(--danger)' : 'var(--muted)';
+}
+
+async function saveVoiceModels() {
+  _syncVoiceModelsFromDom();
+  // Build payload: omit api_key when unchanged (null) so the backend preserves it.
+  const models = _voiceSettingsModels.map(m => {
+    const out = { id: m.id, label: m.label, base_url: m.base_url, model: m.model, timeout: m.timeout };
+    if (m.api_key !== null && m.api_key !== undefined) out.api_key = m.api_key;
+    return out;
+  });
+  const activeId = ($('voiceDefaultSelect') && $('voiceDefaultSelect').value) || '';
+  try {
+    const res = await fetch('api/voice/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ models, active_id: activeId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Save failed');
+    _voiceSettingsStatus(t('voice_saved'), false);
+    await loadVoiceSettings();
+    // Refresh the Voice panel selector if it is mounted.
+    if (typeof _voiceLoadModels === 'function') _voiceLoadModels();
+  } catch (err) {
+    _voiceSettingsStatus(err.message || 'Save failed', true);
+  }
 }
 
 // ── Cron panel ──
@@ -5675,16 +6038,16 @@ function _toggleTabVisibilityChip(panel){
 }
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='voice'||name==='plugins'||name==='system')?name:'conversation';
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',voice:'Voice',plugins:'Plugins',system:'System'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','system'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','voice','plugins','system'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -5694,6 +6057,7 @@ function switchSettingsSection(name){
   // Lazy-load integration panels when their tabs are opened
   if(section==='providers') loadProvidersPanel();
   if(section==='plugins') loadPluginsPanel();
+  if(section==='voice') loadVoiceSettings();
 }
 
 function _syncHermesPanelSessionActions(){

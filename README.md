@@ -653,6 +653,7 @@ State lives outside the repo at `~/.hermes/webui/` by default
 - `docs/troubleshooting.md` -- diagnostic flows for common failures (e.g. "AIAgent not available")
 - `docs/wsl-autostart.md` -- WSL2 auto-start at Windows login
 - `docs/EXTENSIONS.md` -- administrator-controlled WebUI extension injection
+- `docs/voice-transcription.md` -- Voice module: mic panel, multi-model config, `/api/voice/*` endpoints
 - `docs/rfcs/README.md` -- RFC index for larger architecture and durability proposals
 
 ## Contributors

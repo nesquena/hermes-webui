@@ -2673,7 +2673,7 @@ from api.workspace import (
     _strip_surrounding_quotes,
     _workspace_blocked_roots,
 )
-from api.upload import handle_upload, handle_upload_extract, handle_transcribe
+from api.upload import handle_upload, handle_upload_extract, handle_transcribe, handle_voice_transcribe
 from api.streaming import (
     _sse,
     _run_agent_streaming,
@@ -4652,6 +4652,14 @@ def handle_get(handler, parsed) -> bool:
             "other_profile_count": len(all_projects) - len(scoped),
         })
 
+    if parsed.path == "/api/voice/history":
+        from api.voice_transcription import load_transcripts, is_configured
+        return j(handler, {"transcripts": load_transcripts(), "configured": is_configured()})
+
+    if parsed.path == "/api/voice/config":
+        from api.voice_transcription import public_config
+        return j(handler, public_config())
+
     if parsed.path == "/api/session/export":
         return _handle_session_export(handler, parsed)
 
@@ -5164,6 +5172,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
 
+    if parsed.path == "/api/voice/transcribe":
+        return handle_voice_transcribe(handler)
+
     if parsed.path == "/api/client-events/log":
         if diag:
             diag.stage("read_client_event_body")
@@ -5187,6 +5198,33 @@ def handle_post(handler, parsed) -> bool:
         from api.session_recovery import repair_safe_session_recovery
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
         return j(handler, result, status=200 if result.get("clean") else 409)
+
+    if parsed.path == "/api/voice/config":
+        from api.voice_transcription import save_voice_config
+        try:
+            cfg = save_voice_config(body.get("models", []), body.get("active_id"))
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        return j(handler, cfg)
+
+    if parsed.path == "/api/voice/active":
+        from api.voice_transcription import set_active_model
+        try:
+            cfg = set_active_model(body.get("id") or body.get("active_id") or "")
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+        return j(handler, cfg)
+
+    if parsed.path == "/api/voice/history/delete":
+        from api.voice_transcription import delete_transcript, clear_transcripts, load_transcripts
+        if body.get("all") is True:
+            clear_transcripts()
+            return j(handler, {"ok": True, "transcripts": []})
+        entry_id = str(body.get("id") or "").strip()
+        if not entry_id:
+            return bad(handler, "Missing transcript id")
+        removed = delete_transcript(entry_id)
+        return j(handler, {"ok": removed, "transcripts": load_transcripts()})
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post

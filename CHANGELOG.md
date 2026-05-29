@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- New **Voice** module in the left sidebar (mic icon, rail + mobile nav). It records from the device microphone that opened the WebUI (`getUserMedia` + `MediaRecorder`) and transcribes through user-configurable, OpenAI-compatible speech-to-text endpoints (e.g. a local server hosting `ibm-granite/granite-speech-3.3-8b`). Users register multiple endpoints in **Settings → Voice** (label, base URL, model name, API key, timeout) and **switch between them on the fly** from a dropdown in the Voice panel. The panel shows the live transcript, offers Copy and Insert-to-chat, and keeps a persisted transcript history with per-item delete and clear-all. Config is stored in `voice_config.json` (api keys masked on read, preserved-on-omit on write); an environment fallback model is synthesized from `GRANITE_STT_BASE_URL` / `GRANITE_STT_MODEL` / `GRANITE_STT_API_KEY` / `GRANITE_STT_TIMEOUT` when no models are configured. New endpoints: `GET`/`POST /api/voice/config`, `POST /api/voice/active`, `POST /api/voice/transcribe`, `GET /api/voice/history`, `POST /api/voice/history/delete`. Agent-facing reference: `docs/voice-transcription.md`. Independent of the existing composer dictation button, which still routes through the agent's `tools.transcription_tools`.
+
 ## [v0.51.157] — 2026-05-28 — Release EC (stage-batch39 — 5-PR mixed-risk cleanup: gateway prefill forward + prefill budget + compressed-continuation sidebar + browser-transcript memory guidance + reasoning max parity)
 
 ### Added

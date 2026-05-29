@@ -76,6 +76,14 @@ the current code and tests prove that model still applies.
 For UI or UX work, include before/after evidence, verify relevant responsive
 states, and prefer stable class/data hooks over one-off visual behavior.
 
+## Feature module contracts
+
+- [`docs/voice-transcription.md`](voice-transcription.md): the Voice module
+  (sidebar mic panel + Settings → Voice). Read it before changing voice
+  transcription code, the `voice_config.json` schema, the `/api/voice/*`
+  endpoints, or the api-key masking contract. Note it is separate from the
+  composer dictation button (`/api/transcribe`).
+
 ## Choosing the relevant contract
 
 Before editing, identify which contract family the task exercises. This is a
