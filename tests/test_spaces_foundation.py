@@ -23163,22 +23163,68 @@ def test_widget_event_ready_resize_runtime_messages_are_local_noops_metadata_onl
     assert ready["event_name"] == "capy:ready"
     assert ready["local"] is True
     assert "event_id" not in ready
+    assert ready["progress_event"]["event_type"] == "tool.completed"
+    assert ready["progress_event"]["family"] == "tool"
+    assert ready["progress_event"]["run_id"] == "widget.local-noop:local-runtime-gate:sandbox:capy-ready"
+    assert ready["progress_event"]["space_id"] == created["space_id"]
+    assert ready["progress_event"]["redaction_status"] == "metadata_only"
+    assert ready["output_compaction"]["tool"] == "capy-spaces-widget-event"
+    assert ready["output_compaction"]["command"] == "space.widget.event"
+    assert "widget_event_status: local-noop" in ready["output_compaction"]["text"]
+    assert "event_name: capy:ready" in ready["output_compaction"]["text"]
     assert resize["queued"] is False
     assert resize["status"] == "local-noop"
     assert resize["event_name"] == "capy:resize"
     assert resize["local"] is True
     assert "event_id" not in resize
+    assert resize["progress_event"]["event_type"] == "tool.completed"
+    assert resize["progress_event"]["run_id"] == "widget.local-noop:local-runtime-gate:sandbox:capy-resize"
+    assert resize["output_compaction"]["tool"] == "capy-spaces-widget-event"
+    assert resize["output_compaction"]["command"] == "space.widget.event"
+    assert "widget_event_status: local-noop" in resize["output_compaction"]["text"]
+    assert "event_name: capy:resize" in resize["output_compaction"]["text"]
     assert mixed_ready_prompt["queued"] is False
     assert mixed_ready_prompt["status"] == "local-noop"
     assert mixed_ready_prompt["event_name"] == "capy:ready"
     assert mixed_ready_prompt["local"] is True
     assert "event_id" not in mixed_ready_prompt
+    assert mixed_ready_prompt["progress_event"]["run_id"] == "widget.local-noop:local-runtime-gate:sandbox:capy-ready"
+    assert mixed_ready_prompt["output_compaction"]["command"] == "space.widget.event"
     assert events == []
     assert "secret_value_do_not_leak" not in serialized
     assert "secret_source" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert "source" not in serialized
+    assert "api_key" not in serialized
+
+
+def test_widget_event_local_noop_progress_run_id_stays_bounded_for_long_ids(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    space_id = "s" + ("a" * 63)
+    widget_id = "w" + ("b" * 63)
+    created = spaces.create_space({"space_id": space_id, "name": "Long Local Runtime Gate"})
+    spaces.upsert_widget(created["space_id"], {"id": widget_id, "kind": "html", "title": "Long Sandbox"})
+
+    ready = spaces.queue_widget_event(
+        space_id,
+        widget_id,
+        "capy:ready",
+        {"message_type": "capy:ready", "renderer": "<script>bad()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        prompt="Use SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+    )
+    serialized = json.dumps(ready, sort_keys=True).lower()
+
+    assert ready["queued"] is False
+    assert ready["status"] == "local-noop"
+    assert ready["progress_event"]["run_id"]
+    assert ready["progress_event"]["run_id"].startswith("widget.local-noop:")
+    assert len(ready["progress_event"]["run_id"]) <= 121
+    assert ready["output_compaction"]["metadata_only"] is True
+    assert ready["output_compaction"]["redaction_status"] == "metadata_only"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
     assert "api_key" not in serialized
 
 

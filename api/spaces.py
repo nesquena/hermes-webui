@@ -11782,28 +11782,64 @@ def _record_widget_event_progress_event(space_id: str, event_id: str) -> dict[st
     safe_event_id = str(event_id or "").strip()
     if not _event_id_is_safe(safe_event_id):
         safe_event_id = "unknown"
-    run_id = f"widget-event:{safe_event_id}"
+    return _record_widget_runtime_progress_event(sid, f"widget-event:{safe_event_id}")
+
+
+def _record_widget_local_noop_progress_event(space_id: str, widget_id: str, event_name: str) -> dict[str, Any]:
+    """Best-effort metadata-only progress producer for local runtime no-ops."""
+    sid = validate_space_id(space_id)
+    wid = validate_widget_id(widget_id)
+    safe_event_name = re.sub(r"[^a-z0-9]+", "-", str(event_name or "widget-event").strip().lower()).strip("-")
+    if safe_event_name not in {"capy-ready", "capy-resize"}:
+        safe_event_name = "widget-event"
+    return _record_widget_runtime_progress_event(sid, _widget_local_noop_run_id(sid, wid, safe_event_name))
+
+
+def _widget_local_noop_run_id(space_id: str, widget_id: str, safe_event_name: str) -> str:
+    """Return a bounded public run id for local runtime no-op receipts."""
+    base = f"widget.local-noop:{space_id}:{widget_id}:{safe_event_name}"
+    if len(base) <= 121 and not _SPACE_REPAIR_UNSAFE_TEXT_RE.search(base):
+        return base
+    digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
+    return f"widget.local-noop:{safe_event_name}:{digest}"
+
+
+def _record_widget_runtime_progress_event(space_id: str, run_id: str) -> dict[str, Any]:
+    """Persist or synthesize a metadata-only widget runtime progress receipt."""
+    sid = validate_space_id(space_id)
+    safe_run_id = _widget_runtime_public_progress_id(run_id, fallback="widget-event")
+    safe_space_id = _widget_runtime_public_progress_id(sid, fallback="")
     try:
         from api.capy_progress import record_progress_event
 
-        return record_progress_event(
-            {
-                "event_type": "tool.completed",
-                "run_id": run_id,
-                "space_id": sid,
-            }
-        )
+        payload = {
+            "event_type": "tool.completed",
+            "run_id": safe_run_id,
+        }
+        if safe_space_id:
+            payload["space_id"] = safe_space_id
+        return record_progress_event(payload)
     except Exception:
+        fallback_sid = safe_space_id or "redacted-space"
         return {
             "stored": False,
             "queued": False,
             "event_type": "tool.completed",
             "family": "tool",
-            "run_id": run_id,
-            "space_id": sid,
+            "run_id": safe_run_id,
+            "space_id": fallback_sid,
             "redaction_status": "metadata_only",
             "error": "progress event recording unavailable",
         }
+
+
+def _widget_runtime_public_progress_id(value: Any, *, fallback: str) -> str:
+    text = str(value or "").strip()
+    if not text or len(text) > 121 or _SPACE_REPAIR_UNSAFE_TEXT_RE.search(text):
+        return fallback
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,120}", text):
+        return fallback
+    return text
 
 
 def _widget_event_output_compaction_receipt(
@@ -11936,6 +11972,17 @@ def queue_widget_event(
         raise ValueError("Widget is disabled for recovery")
     local_message_type = _local_runtime_message_type(name, payload_data)
     if local_message_type:
+        progress_event = _record_widget_local_noop_progress_event(sid, wid, local_message_type)
+        output_compaction = _widget_event_output_compaction_receipt(
+            action=action,
+            space_id=sid,
+            widget_id=wid,
+            event_name=local_message_type,
+            status="local-noop",
+        )
+        output_compaction["metadata_only"] = True
+        if output_compaction.get("redaction_status") == "none":
+            output_compaction["redaction_status"] = "metadata_only"
         return {
             "queued": False,
             "status": "local-noop",
@@ -11943,6 +11990,8 @@ def queue_widget_event(
             "space_id": sid,
             "widget_id": wid,
             "event_name": local_message_type,
+            "progress_event": progress_event,
+            "output_compaction": output_compaction,
         }
     is_reload_event = _is_widget_reload_event(name)
     preflight_receipt = _widget_runtime_prompt_preflight_receipt(name, payload_data, prompt=prompt)

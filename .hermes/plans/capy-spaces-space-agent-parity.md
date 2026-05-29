@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): receipt local runtime no-op events`
+  - Added RED/GREEN backend coverage proving `capy:ready` / `capy:resize` local widget runtime no-ops remain non-queued and omit widget event ids while returning metadata-only progress and output-compaction receipts.
+  - Bounded long valid Space/widget ids into safe progress run ids and preserved hostile payload/prompt redaction, so local runtime handshakes can appear in progress/receipt evidence without persisting widget event payloads, renderer/source/API-auth fields, scripts, bearer strings, or secret-looking fixture values.
+
 - `feat(spaces): compact module repair event receipts`
   - Added RED/GREEN backend coverage proving recovery-module repair-event list tool responses include metadata-only `output_compaction` evidence beside the safe event list.
   - The receipt is reconstructed only from allow-listed action, module id, event count, and event ids/names/statuses while omitting raw repair prompts, payloads, renderer/source/API-auth fields, scripts, bearer strings, and secret-looking fixture values.

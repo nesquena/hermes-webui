@@ -131,7 +131,7 @@ Status: **recorder/status/product-home and Space-detail cards implemented; broad
 
 Delivered:
 - `api/capy_progress.py` records and summarizes bounded metadata-only progress events.
-- `static/spaces.js` renders product-home Progress events stats, family-count chips, recent event types, timestamps, recent stream rows, and queued widget-event prompt-preflight/compaction evidence without raw payload/prompt leakage.
+- `static/spaces.js` renders product-home Progress events stats, family-count chips, recent event types, timestamps, recent stream rows, and queued widget-event prompt-preflight/compaction evidence without raw payload/prompt leakage; backend local widget runtime no-ops now return metadata-only progress/compaction receipts for receipt-aware clients without persisting widget events.
 - Space detail now loads `/api/capy-progress/status?space_id=...` and renders a Space-scoped progress card next to Memory Tree context/revision history, showing bounded active-run/recent-event metadata without unsafe event families, generated bodies, renderer/source fields, raw prompts, or credentials.
 - Recent progress family counts cover conservative event families such as `run`, `tool`, `subagent`, `taskboard`, `memory.ingest`, and `space.visual_qa`.
 - Research Harness progress updates now emit metadata-only structured progress events so product-home progress status can reflect real research workflow activity without storing raw prompts, source text, renderer fields, or credentials.
