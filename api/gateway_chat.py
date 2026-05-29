@@ -142,6 +142,28 @@ def _gateway_stream_usage(payload: dict) -> dict:
     }
 
 
+def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
+    """Translate Hermes Gateway tool-progress SSE payloads to WebUI events."""
+    if not isinstance(payload, dict):
+        return None
+    name = str(payload.get("tool") or payload.get("name") or payload.get("function_name") or "").strip()
+    if not name or name.startswith("_"):
+        return None
+    status = str(payload.get("status") or "running").strip().lower()
+    tid = payload.get("toolCallId") or payload.get("tool_call_id") or payload.get("id")
+    is_complete = status in {"completed", "complete", "success", "error", "failed"}
+    event_payload = {
+        "event_type": "tool.completed" if is_complete else "tool.started",
+        "name": name,
+        "preview": payload.get("label") or payload.get("preview"),
+        "args": payload.get("args") if isinstance(payload.get("args"), dict) else {},
+        "is_error": status in {"error", "failed"},
+    }
+    if tid:
+        event_payload["tid"] = str(tid)
+    return ("tool_complete" if is_complete else "tool"), event_payload
+
+
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
     return bool(stream_id and getattr(session, "active_stream_id", None) == stream_id)
 
@@ -276,13 +298,20 @@ def _run_gateway_chat_streaming(
         )
         update_active_run(stream_id, phase="gateway-request")
         last_payload = {}
+        sse_event = "message"
         with urllib.request.urlopen(req, timeout=600) as resp:
             for raw_line in resp:
                 if cancel_event.is_set():
                     put_gateway_event("cancel", {"message": "Cancelled by user"})
                     return
                 line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line or not line.startswith("data:"):
+                if not line:
+                    sse_event = "message"
+                    continue
+                if line.startswith("event:"):
+                    sse_event = line[6:].strip() or "message"
+                    continue
+                if not line.startswith("data:"):
                     continue
                 data = line[5:].strip()
                 if data == "[DONE]":
@@ -290,6 +319,32 @@ def _run_gateway_chat_streaming(
                 try:
                     payload = json.loads(data)
                 except json.JSONDecodeError:
+                    continue
+                if sse_event == "hermes.tool.progress":
+                    translated = _gateway_tool_progress_event(payload)
+                    if translated:
+                        event_name, event_payload = translated
+                        if stream_id in STREAM_LIVE_TOOL_CALLS:
+                            if event_name == "tool":
+                                STREAM_LIVE_TOOL_CALLS[stream_id].append({
+                                    "name": event_payload.get("name"),
+                                    "args": event_payload.get("args") or {},
+                                    "done": False,
+                                    **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
+                                })
+                            else:
+                                for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                                    if shared_tc.get("done"):
+                                        continue
+                                    if (
+                                        event_payload.get("tid") and shared_tc.get("tid") == event_payload.get("tid")
+                                    ) or shared_tc.get("name") == event_payload.get("name"):
+                                        shared_tc["done"] = True
+                                        shared_tc["is_error"] = bool(event_payload.get("is_error"))
+                                        break
+                        put_gateway_event(event_name, event_payload)
+                        update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
+                    sse_event = "message"
                     continue
                 last_payload = payload
                 delta = _gateway_sse_delta(payload)

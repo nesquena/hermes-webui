@@ -45,10 +45,22 @@ function extractFunc(name) {
   }
   return ui.slice(start, i);
 }
+function _getOptionProviderId(opt) {
+  if (!opt) return '';
+  if (opt.dataset && opt.dataset.provider) return opt.dataset.provider;
+  const group = opt.parentElement;
+  if (group && group.tagName === 'OPTGROUP' && group.dataset && group.dataset.provider) {
+    return group.dataset.provider;
+  }
+  const value = String(opt.value || '');
+  if (value.startsWith('@') && value.includes(':')) return value.slice(1, value.lastIndexOf(':'));
+  return '';
+}
+
 eval(extractFunc('_findModelInDropdown'));
 const args = JSON.parse(process.argv[3]);
 const sel = { options: args.options.map(v => ({value: v})) };
-const got = _findModelInDropdown(args.modelId, sel);
+const got = _findModelInDropdown(args.modelId, sel, args.preferredProvider || undefined);
 process.stdout.write(JSON.stringify(got));
 """
 
@@ -60,11 +72,11 @@ def driver_path(tmp_path_factory):
     return str(p)
 
 
-def _find(driver_path, model_id: str, options: list[str]):
+def _find(driver_path, model_id: str, options: list[str], preferred: str | None = None):
     import json
     result = subprocess.run(
         [NODE, driver_path, str(UI_JS_PATH),
-         json.dumps({"modelId": model_id, "options": options})],
+         json.dumps({"modelId": model_id, "options": options, "preferredProvider": preferred})],
         capture_output=True, text=True, timeout=10,
     )
     if result.returncode != 0:
@@ -112,6 +124,33 @@ class TestPreservedFuzzyMatches:
             ["@nous:openai/gpt-5.5", "@nous:openai/gpt-5.4-mini"],
         )
         assert got == "@nous:openai/gpt-5.5"
+
+    def test_explicit_provider_hint_does_not_snap_to_sibling_model(self, driver_path):
+        """Provider-qualified requests must not fuzzy-match a sibling catalog entry.
+
+        This is the generalized regression behind #3113: any slash-qualified or
+        @provider-qualified model that is missing from the curated catalog should
+        preserve its exact value instead of snapping to a nearby curated sibling.
+        """
+        got = _find(
+            driver_path,
+            "vendor/special-model",
+            ["@openrouter:vendor/special-model-pro"],
+            preferred="openrouter",
+        )
+        assert got is None, (
+            "provider-qualified uncatalogued models must not fuzzy-match sibling models "
+            "(#3113)"
+        )
+
+    def test_provider_qualified_exact_match_still_resolves(self, driver_path):
+        got = _find(
+            driver_path,
+            "vendor/special-model",
+            ["@openrouter:vendor/special-model"],
+            preferred="openrouter",
+        )
+        assert got == "@openrouter:vendor/special-model"
 
     def test_bare_root_gpt_matches_versioned_option(self, driver_path):
         """Short root targets still fall back to the looser prefix match."""
