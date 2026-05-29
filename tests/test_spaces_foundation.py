@@ -16608,6 +16608,109 @@ def test_space_tool_adapter_recovery_module_repair_aliases_metadata_only(monkeyp
     assert "repair module using safe metadata summary" not in serialized
 
 
+def test_module_repair_events_tool_response_includes_metadata_only_output_compaction(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "module-repair-events-compaction",
+            "name": "Module Repair Events Compaction",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+            "source": "raw module source should never be listed",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='x'</script>",
+            "credentials": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        }
+    )
+
+    queued = spaces.run_space_tool(
+        "space.admin.recovery.repair_module",
+        {
+            "moduleId": "module-repair-events-compaction",
+            "payload": {
+                "action": "repair-module",
+                "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='x'</script>",
+                "source": "raw module source should never be listed",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "authorization": "bearer placeholder",
+            },
+            "prompt": "Repair module using safe metadata summary.",
+            "session_id": "session SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    listed = spaces.run_space_tool(
+        "space.recovery.module_repair_events",
+        {"module_id": "module-repair-events-compaction", "limit": 5},
+    )
+    serialized = json.dumps(listed, sort_keys=True).lower()
+
+    assert listed["ok"] is True
+    assert listed["action"] == "space.recovery.module_repair_events"
+    assert listed["module_id"] == "module-repair-events-compaction"
+    assert listed["events"][0]["event_id"] == queued["event_id"]
+    assert listed["events"][0]["prompt_preflight"]["boundary"] == "space_repair_prompt"
+    assert listed["events"][0]["prompt_preflight"]["status"] == "pass"
+    assert listed["events"][0]["prompt_preflight"]["metadata_only"] is True
+    assert listed["events"][0]["autonomy_policy"]["action"] == "space.module.repair.queue"
+    assert listed["events"][0]["autonomy_policy"]["metadata_only"] is True
+    assert "output_compaction" in listed
+    compaction = listed["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-recovery-repair"
+    assert compaction["command"] == "space.recovery.module_repair_events"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert "module_action: space.recovery.module_repair_events" in compaction["text"]
+    assert "module_id: module-repair-events-compaction" in compaction["text"]
+    assert "event_count: 1" in compaction["text"]
+    assert queued["event_id"] in compaction["text"]
+    assert "source" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "bearer placeholder" not in serialized
+    assert "<script" not in serialized
+    assert "raw module source" not in serialized
+    assert "repair module using safe metadata summary" not in serialized
+
+
+def test_module_repair_events_compaction_redacts_unsafe_but_valid_module_ids(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.upsert_recovery_module(
+        {
+            "module_id": "secret-module",
+            "name": "Hostile-looking Module Id",
+            "description": "Metadata-only module descriptor",
+            "scope": "space",
+        }
+    )
+
+    spaces.run_space_tool(
+        "space.admin.recovery.repair_module",
+        {
+            "moduleId": "secret-module",
+            "payload": {"action": "repair-module"},
+            "prompt": "Repair module using safe metadata summary.",
+        },
+    )
+    listed = spaces.run_space_tool(
+        "space.recovery.module_repair_events",
+        {"module_id": "secret-module"},
+    )
+    compaction = listed["output_compaction"]
+    serialized_compaction = json.dumps(compaction, sort_keys=True).lower()
+
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert compaction["retained_artifact_handles"] == [
+        {
+            "kind": "recovery_module",
+            "handle": "module:metadata-only",
+            "label": "module:metadata-only",
+        }
+    ]
+    assert "secret-module" not in serialized_compaction
+    assert "repair module using safe metadata summary" not in serialized_compaction
+
+
 def test_space_tool_adapter_admin_recovery_module_aliases_accept_camelcase_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     spaces.upsert_recovery_module(
