@@ -1950,17 +1950,27 @@ def test_space_tool_adapter_supports_source_open_alias_and_camelcase_space_id_me
         "space.spaces.open",
         {"spaceId": created["space_id"], "renderer": "<script>ignore()</script>", "token": "***"},
     )
-    read_by_camelcase_id = spaces.run_space_tool(
-        "space.spaces.read",
-        {"spaceId": created["space_id"], "source": "SECRET_SOURCE", "api_key": "***"},
-    )
-    get_by_camelcase_id = spaces.run_space_tool(
+    read_actions = [
+        "space.get",
         "space.spaces.get",
-        {"spaceId": created["space_id"], "html": "<img src=x onerror=steal()>", "token": "***"},
-    )
-    serialized = json.dumps(
-        {"opened": opened, "read_by_camelcase_id": read_by_camelcase_id, "get_by_camelcase_id": get_by_camelcase_id}
-    ).lower()
+        "space.spaces.read",
+        "space.spaces.getSpace",
+        "space.spaces.readSpace",
+    ]
+    read_results = {
+        action: spaces.run_space_tool(
+            action,
+            {
+                "spaceId": created["space_id"],
+                "source": "SECRET_SOURCE",
+                "html": "<img src=x onerror=steal()>",
+                "api_key": "***",
+                "token": "***",
+            },
+        )
+        for action in read_actions
+    }
+    serialized = json.dumps({"opened": opened, "read_results": read_results}).lower()
 
     assert opened["ok"] is True
     assert opened["action"] == "space.spaces.open"
@@ -1991,8 +2001,24 @@ def test_space_tool_adapter_supports_source_open_alias_and_camelcase_space_id_me
     assert "prompt_preflight_status: required" in open_compaction_text
     assert "model_route_hint: hint:fast" in open_compaction_text
     assert "progress_run_id: space.open:source-open-lab" in open_compaction_text
-    assert read_by_camelcase_id["space"] == opened["space"]
-    assert get_by_camelcase_id["space"] == opened["space"]
+    for action, result in read_results.items():
+        normalized_action = action.lower()
+        assert result["ok"] is True
+        assert result["action"] == normalized_action
+        assert result["space"] == opened["space"]
+        assert "progress_event" not in result
+        assert "prompt_preflight" not in result
+        assert "autonomy_policy" not in result
+        read_compaction = result["output_compaction"]
+        read_compaction_text = read_compaction["text"].lower()
+        assert read_compaction["tool"] == "capy-spaces-tool-action"
+        assert read_compaction["command"] == normalized_action
+        assert read_compaction["metadata_only"] is True
+        assert read_compaction["redaction_status"] in {"metadata_only", "redacted"}
+        assert f"space_action: {normalized_action}" in read_compaction_text
+        assert "space_id: source-open-lab" in read_compaction_text
+        assert "widget_count: 1" in read_compaction_text
+        assert "space:source-open-lab" in json.dumps(read_compaction).lower()
     assert "stored()" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized

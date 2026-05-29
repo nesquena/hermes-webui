@@ -6996,6 +6996,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_space_id(data))
         space = read_space_detail(space_id)
         response: dict[str, Any] = {"ok": True, "action": name, "space": space}
+        autonomy_policy: dict[str, Any] | None = None
+        progress_event: dict[str, Any] | None = None
         if name in {"space.spaces.open", "space.spaces.openspace"}:
             prompt_preflight = _space_browser_navigation_required_prompt_preflight_receipt(name)
             autonomy_policy = _space_browser_navigation_action_policy_receipt(name)
@@ -7003,13 +7005,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             response["prompt_preflight"] = prompt_preflight
             response["autonomy_policy"] = autonomy_policy
             response["progress_event"] = progress_event
-            response["output_compaction"] = _space_tool_action_output_compaction_receipt(
-                action=name,
-                space_id=space_id,
-                widget_count=len(space.get("widgets") or []),
-                autonomy_policy=autonomy_policy,
-                progress_event=progress_event,
-            )
+        response["output_compaction"] = _space_tool_action_output_compaction_receipt(
+            action=name,
+            space_id=space_id,
+            widget_count=len(space.get("widgets") or []),
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+        )
         return response
     if name in {"space.spaces.reloadcurrentspace", "space.spaces.reloadspace"}:
         space_id = validate_space_id(_space_tool_current_id(data))
