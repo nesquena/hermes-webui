@@ -20,6 +20,8 @@ Recent safe adapter progress:
 
 Recently landed:
 
+- Source-style Space revision/history list tool responses now include metadata-only required prompt-preflight and autonomy-policy receipts, and their compaction evidence carries the preflight/model-route summary without exposing renderer/source/API-auth/script/secret request markers.
+
 - Recovery-module repair-event list tool responses now include metadata-only prompt-preflight and autonomy-policy receipts beside existing compaction evidence, matching whole-Space repair-event list safety envelopes without exposing raw repair prompts, renderer/source/API-auth fields, scripts, bearer strings, or secret-looking fixture values.
 
 - Native widget upsert safety-receipt responses now include metadata-only compaction evidence for `upsert_widget(..., include_safety_receipts=True)`, keeping direct helper receipt parity with route/source-style widget mutation helpers without exposing renderer/source/API-auth/script/secret fixture fields.

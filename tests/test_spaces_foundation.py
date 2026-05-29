@@ -10935,6 +10935,68 @@ def test_space_tool_adapter_revision_list_accepts_camelcase_space_id_and_rejects
     assert "secret_value_do_not_leak" not in str(positional_exc_info.value).lower()
 
 
+def test_revision_history_tool_responses_include_metadata_only_recovery_policy_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "revision-history-policy-lab", "name": "Revision History Policy Lab"})
+    spaces.update_space(created["space_id"], {"name": "Revision History Policy Lab Updated"})
+
+    listed = spaces.run_space_tool(
+        "space.revisions",
+        {
+            "space_id": created["space_id"],
+            "limit": 5,
+            "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    current_listed = spaces.run_space_tool(
+        "space.current.history",
+        {
+            "activeSpaceId": created["space_id"],
+            "limit": 5,
+            "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps({"listed": listed, "current_listed": current_listed}, sort_keys=True).lower()
+
+    for result, action in (
+        (listed, "space.revisions"),
+        (current_listed, "space.current.history"),
+    ):
+        assert result["ok"] is True
+        assert result["action"] == action
+        assert result["revisions"]
+        assert result["prompt_preflight"]["available"] is True
+        assert result["prompt_preflight"]["action"] == action
+        assert result["prompt_preflight"]["boundary"] == "recovery_action"
+        assert result["prompt_preflight"]["status"] == "required"
+        assert result["prompt_preflight"]["metadata_only"] is True
+        assert result["prompt_preflight"]["raw_prompt_stored"] is False
+        assert result["prompt_preflight"]["local_only"] is True
+
+        assert result["autonomy_policy"]["action"] == action
+        assert result["autonomy_policy"]["approval_required"] is True
+        assert result["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+        assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+        assert result["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+        assert result["autonomy_policy"]["metadata_only"] is True
+        assert result["autonomy_policy"]["local_only"] is True
+
+        compaction = result["output_compaction"]
+        assert compaction["metadata_only"] is True
+        assert "prompt_preflight_status: required" in compaction["text"]
+        assert f"autonomy_action: {action}" in compaction["text"]
+        assert "model_route_hint: hint:reasoning" in compaction["text"]
+
+    assert current_listed["active_space_id"] == created["space_id"]
+    assert listed["space_id"] == created["space_id"]
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_space_detail_includes_shared_data_slots_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "shared-detail-lab", "name": "Shared Detail Lab"})

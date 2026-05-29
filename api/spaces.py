@@ -7782,15 +7782,20 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             )
             space_id = validate_space_id(_space_tool_space_id(data))
         revisions = list_revision_events(space_id, data.get("limit", 20))
+        prompt_preflight = _recovery_required_prompt_preflight_receipt(name)
+        autonomy_policy = _recovery_toggle_action_policy_receipt(name)
         result = {
             "ok": True,
             "action": name,
             "revisions": revisions,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 revision_event_ids=[str(event.get("event_id") or "") for event in revisions if isinstance(event, dict)],
                 include_widget_count=False,
+                autonomy_policy=autonomy_policy,
             ),
         }
         if is_current:
