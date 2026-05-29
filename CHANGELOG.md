@@ -3,6 +3,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- Background tasks started with `terminal(notify_on_complete=true)` now wake the WebUI agent turn server-side, so the wakeup fires even when no browser tab is open. Closed-tab parity with CLI / Telegram / gateway hosts. (#2968)
+- New `bg_task_complete` SSE event with trimmed `{session_id, task_id, completed_at, summary?, event_id}` payload and per-emit `event_id`. The legacy `process_complete` event name is dual-emitted with the same `event_id` for one PR cycle so in-flight WebUI builds keep working, then removed by #2971. (#2968, #2971)
+- WebUI surfaces a small toast on background task completion, suppressed when the user is already focused on the target session. (#2971, #2979)
+- New `GET /api/session/stream` per-session SSE channel for live-view of server-initiated wakeup turns; the browser's chat-stream renderer is reused (no second renderer). (#2968, #2971)
+- New `POST /api/bg-task-complete-ack` diagnostic endpoint accepts `task_id` (canonical) and `process_id` (transitional alias; alias responses include a `Deprecation` header). (#2971, #2979)
+
+### Changed
+
+- WebUI subscribes to `bg_task_complete`; the legacy `process_complete` listener is removed and the browser no longer re-POSTs `wakeup_prompt` (wakeup is server-driven). Dedupe uses a 60s TTL ring buffer keyed `(session_id, event_id)`. (#2971)
+- `POST /api/process-complete-ack` is replaced by `/api/bg-task-complete-ack`; the legacy path returns HTTP 410 with `X-Replaced-By: /api/bg-task-complete-ack`. Wired ahead of the CSRF gate so stale tabs see a discoverable hard error instead of a silent 403/404. (#2968)
+
+### Fixed
+
+- Cross-session `notify_on_complete` wakeup no longer misroutes between concurrent WebUI sessions. Per-turn session identity is bound to a `contextvars.ContextVar` (`gateway.session_context` + `tools.approval`) inside the turn worker thread so concurrent background spawns inherit task/thread-local identity instead of racing on a process-global env slot, with a completion-time owner cross-check as defense-in-depth. (#2968)
+- Fast (sub-teardown) background tasks completing while the WebUI session is technically still in its turn-teardown window now have their wakeup persisted in a deferred-wakeup map and drained at the turn's active→idle transition, so autonomous agent loops no longer lose the wakeup. (#2968)
+- Server-initiated wakeup turn now renders live in an open tab by fanning a `server_turn_started` frame onto the per-session live-view channel; no more "needs manual refresh" after a server-driven wakeup. (#2968)
+- SSE handlers now arm a 20s socket write deadline once per connection so a slow/backgrounded tab whose recv window fills no longer pins its HTTP worker thread indefinitely, applied uniformly to the 6 long-lived SSE endpoints (chat-stream, terminal, gateway, approval, clarify, session). (#2968)
+- Focused background-task completion viewers still emit `/api/bg-task-complete-ack` for server cleanup/diagnostics while keeping the focused-session toast suppressed. (#2979)
+
 ## [v0.51.157] — 2026-05-28 — Release EC (stage-batch39 — 5-PR mixed-risk cleanup: gateway prefill forward + prefill budget + compressed-continuation sidebar + browser-transcript memory guidance + reasoning max parity)
 
 ### Added
