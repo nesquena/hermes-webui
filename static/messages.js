@@ -2236,31 +2236,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
       }
-      // Fix #3018: preserve client-side _turnUsage/_turnDuration/_turnTps/_gatewayRouting
-      // across S.messages replacement from server data (which lacks these ephemeral props).
-      function _preserveClientTurnState(oldMsgs,newMsgs){
-        if(!Array.isArray(oldMsgs)||!Array.isArray(newMsgs)) return;
-        const _props=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting'];
-        for(let i=oldMsgs.length-1;i>=0;i--){
-          const o=oldMsgs[i];
-          if(o&&o.role==='assistant'&&o._turnUsage){
-            for(const n of newMsgs){
-              if(n&&n.role==='assistant'&&n.id===o.id){
-                for(const p of _props){ if(o[p]!==undefined) n[p]=o[p]; }
-                return;
-              }
-            }
-            // Fallback: attach to last assistant message if id match fails
-            for(let j=newMsgs.length-1;j>=0;j--){
-              if(newMsgs[j]&&newMsgs[j].role==='assistant'){
-                for(const p of _props){ if(o[p]!==undefined) newMsgs[j][p]=o[p]; }
-                return;
-              }
-            }
-          }
-        }
-      }
-
       // Fetch latest session from server to get accurate message list (includes cancel status)
       // This ensures messages stay in sync with server, fixing race condition where local
       // "*Task cancelled.*" message gets lost when done event overwrites S.messages
@@ -2292,6 +2267,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
+    }
+  }
+
+  // Fix #3018: preserve client-side _turnUsage/_turnDuration/_turnTps/_gatewayRouting
+  // across S.messages replacement from server data (which lacks these ephemeral props).
+  // WebUI assistant messages don't carry a stable .id from the server, so we match
+  // the last assistant message with _turnUsage in oldMsgs to the last assistant in newMsgs.
+  function _preserveClientTurnState(oldMsgs,newMsgs){
+    if(!Array.isArray(oldMsgs)||!Array.isArray(newMsgs)) return;
+    const _props=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting'];
+    for(let i=oldMsgs.length-1;i>=0;i--){
+      const o=oldMsgs[i];
+      if(o&&o.role==='assistant'&&o._turnUsage){
+        for(let j=newMsgs.length-1;j>=0;j--){
+          if(newMsgs[j]&&newMsgs[j].role==='assistant'){
+            for(const p of _props){ if(o[p]!==undefined) newMsgs[j][p]=o[p]; }
+            return;
+          }
+        }
+      }
     }
   }
 
