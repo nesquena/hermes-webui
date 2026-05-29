@@ -9395,6 +9395,18 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
     assert event_list["events"][0]["widget_id"] == "research-card"
     assert event_list["events"][0]["event_name"] == "agent.prompt"
     assert event_list["events"][0]["payload_summary"] == {}
+    assert event_list["output_compaction"]["tool"] == "capy-spaces-widget-event"
+    assert event_list["output_compaction"]["command"] == "space.widget.events"
+    assert event_list["output_compaction"]["metadata_only"] is True
+    assert event_list["output_compaction"]["redaction_status"] in {"metadata_only", "redacted"}
+    assert f"space_id: {created['space_id']}" in event_list["output_compaction"]["text"]
+    assert "widget_id: research-card" in event_list["output_compaction"]["text"]
+    assert "event_count: 1" in event_list["output_compaction"]["text"]
+    assert all(
+        line.startswith(("action: ", "space_id: ", "event_count: ", "widget_id: ", "event_"))
+        for line in event_list["output_compaction"]["text"].splitlines()
+    )
+    assert "raw_prompt" not in event_list["output_compaction"]["text"].lower()
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
@@ -9446,6 +9458,16 @@ def test_space_tool_adapter_supports_camelcase_current_widget_event_aliases_meta
     assert events["events"][0]["event_name"] == "agent.prompt"
     assert events["events"][0]["payload_summary"] == {}
     assert events["events"][0]["prompt_preview"] == "[REDACTED]"
+    assert events["output_compaction"]["tool"] == "capy-spaces-widget-event"
+    assert events["output_compaction"]["command"] == "space.current.widget.events"
+    assert events["output_compaction"]["metadata_only"] is True
+    assert f"active_space_id: {created['space_id']}" in events["output_compaction"]["text"]
+    assert "event_count: 1" in events["output_compaction"]["text"]
+    assert all(
+        line.startswith(("action: ", "space_id: ", "event_count: ", "widget_id: ", "active_space_id: ", "event_"))
+        for line in events["output_compaction"]["text"].splitlines()
+    )
+    assert "raw_prompt" not in events["output_compaction"]["text"].lower()
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized

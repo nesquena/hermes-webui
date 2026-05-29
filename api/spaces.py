@@ -8234,11 +8234,19 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         elif positional_widget_id:
             widget_id_raw = positional_widget_id
         widget_id = validate_widget_id(widget_id_raw) if widget_id_raw else None
+        events = list_widget_events(space_id, widget_id, data.get("limit", 20))
         return {
             "ok": True,
             "action": name,
             "active_space_id": space_id,
-            "events": list_widget_events(space_id, widget_id, data.get("limit", 20)),
+            "events": events,
+            "output_compaction": _widget_events_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_id=widget_id,
+                events=events,
+                active_space_id=space_id if is_current_widget_events else None,
+            ),
         }
     if name in {"widget.event", "space.widget.event", "space.current.widget.event"}:
         args = data.get("args")
@@ -11376,6 +11384,12 @@ _SAFE_WIDGET_EVENT_ACTIONS = frozenset(
         "widget.event",
         "space.widget.event",
         "space.current.widget.event",
+        "widget.events",
+        "widget.event.list",
+        "space.widget.events",
+        "space.widget.event.list",
+        "space.current.widget.events",
+        "space.current.widget.event.list",
         "widget.reload",
         "widget.refresh",
         "space.widget.reload",
@@ -11813,6 +11827,59 @@ def _widget_event_output_compaction_receipt(
         command=safe_action,
         max_chars=1200,
     )
+
+
+def _widget_events_output_compaction_receipt(
+    *,
+    action: str,
+    space_id: str,
+    events: list[dict[str, Any]],
+    widget_id: str | None = None,
+    active_space_id: str | None = None,
+) -> dict[str, Any]:
+    """Return metadata-only compaction evidence for widget event list responses."""
+    from api.capy_compaction import compact_output
+
+    safe_action = _safe_widget_event_action(action, default="space.widget.events")
+    safe_space_id = _context_value(space_id, 120) or "redacted-space"
+    safe_widget_id = _context_value(widget_id, 120) if widget_id else ""
+    safe_active_space_id = _context_value(active_space_id, 120) if active_space_id else ""
+    safe_events = events if isinstance(events, list) else []
+    lines = [
+        f"action: {safe_action}",
+        f"space_id: {safe_space_id}",
+        f"event_count: {len(safe_events)}",
+    ]
+    if safe_widget_id:
+        lines.append(f"widget_id: {safe_widget_id}")
+    if safe_active_space_id:
+        lines.append(f"active_space_id: {safe_active_space_id}")
+    for index, event in enumerate(safe_events[:20], start=1):
+        if not isinstance(event, dict):
+            continue
+        raw_event_id = _context_value(event.get("event_id"), 120)
+        safe_event_id = raw_event_id if _event_id_is_safe(raw_event_id) else "[REDACTED]"
+        safe_event_name = _widget_event_label_summary(event.get("event_name"), 120) or "widget.event"
+        safe_status = _context_value(event.get("status") or "queued", 40) or "queued"
+        lines.append(f"event_{index}: id={safe_event_id} name={safe_event_name} status={safe_status}")
+
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-widget-event",
+        command=safe_action,
+        max_chars=850,
+        artifact_handles=[
+            {
+                "kind": "space",
+                "handle": f"space:{safe_space_id}",
+                "label": f"space:{safe_space_id}",
+            }
+        ],
+    )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
 
 
 
