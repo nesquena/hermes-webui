@@ -166,8 +166,8 @@ class TestPWARoutes:
         assert "__WEBUI_VERSION__" in block, (
             "sw.js route must replace __WEBUI_VERSION__ with the current WEBUI_VERSION"
         )
-        assert "WEBUI_VERSION" in block, (
-            "sw.js route must import and use WEBUI_VERSION for cache busting"
+        assert "_webui_asset_version_token" in block, (
+            "sw.js route must use the asset version token for cache busting"
         )
 
     def test_sw_route_url_encodes_cache_version(self):
@@ -175,7 +175,7 @@ class TestPWARoutes:
         idx = src.find('"/sw.js"')
         assert idx != -1, "routes.py must handle /sw.js"
         block = src[idx:idx + 1200]
-        assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
+        assert "quote(_webui_asset_version_token(), safe=\"\")" in block, (
             "sw.js route must URL-encode the injected cache version so unusual git tags "
             "cannot break the JavaScript string literal"
         )
@@ -349,10 +349,22 @@ class TestIndexHtmlIntegration:
             idx = src.find('parsed.path.startswith("/session/")')
         assert idx != -1, "routes.py must handle /, /index.html, and /session/<id>"
         block = src[idx:idx + 800]
-        assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
+        assert "quote(_webui_asset_version_token(), safe=\"\")" in block, (
             "index route must URL-encode the cache-busting version token before "
             "injecting it into script src attributes and service worker registration"
         )
+
+    def test_asset_version_token_includes_static_mtime(self):
+        src = ROUTES.read_text(encoding="utf-8")
+        idx = src.find("def _webui_asset_version_token")
+        assert idx != -1, "routes.py must define an asset-version token helper"
+        block = src[idx:idx + 900]
+        assert "WEBUI_VERSION" in block
+        assert "st_mtime_ns" in block, (
+            "asset-version token must include static file mtimes so local frontend "
+            "hotfixes invalidate mobile/PWA caches without a package version bump"
+        )
+        assert "style.css" in block and "ui.js" in block and "sw.js" in block
 
     def test_index_sw_registration_uses_relative_path(self):
         """Regression: service worker registration MUST stay relative (no leading slash).
