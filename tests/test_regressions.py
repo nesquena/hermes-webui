@@ -633,8 +633,8 @@ def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
     inflight_block = src[inflight_idx:inflight_idx+1200]
 
-    assert "await _ensureMessagesLoaded(sid" in inflight_block, (
-        "returning to an active stream should load the persisted transcript before adding the live tail"
+    assert "await _loadFullTranscript(sid" in inflight_block, (
+        "returning to an active stream should load the full persisted transcript before merging the live tail"
     )
     assert "_mergeInflightTailMessages(S.messages,inflightMessages)" in inflight_block, (
         "INFLIGHT messages should be merged as a tail, not replace the full transcript"

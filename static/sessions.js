@@ -701,7 +701,7 @@ async function loadSession(sid){
     S.messages=[];
     S.toolCalls=[];
     try {
-      await _ensureMessagesLoaded(sid, {fullTranscript: true});
+      await _loadFullTranscript(sid);
     } catch(e) {
       S.messages=inflightMessages;
     }
@@ -1294,17 +1294,25 @@ let _messagesTruncated = false;
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
 
-async function _ensureMessagesLoaded(sid, opts) {
-  // Already have messages? (e.g. from INFLIGHT restore path, already set)
+// Fetch and populate S.messages for a session.  Two entry points:
+//   _ensureMessagesLoaded  — tail window (30 msgs), for normal cold loads.
+//   _loadFullTranscript    — no limit, for INFLIGHT merge where the complete
+//                            history is needed to splice with the live stream
+//                            without truncation ambiguity (#3043).
+
+async function _loadFullTranscript(sid) {
+  return _fetchAndPopulateMessages(sid, '');
+}
+
+async function _ensureMessagesLoaded(sid) {
+  return _fetchAndPopulateMessages(sid, `&msg_limit=${_INITIAL_MSG_LIMIT}`);
+}
+
+async function _fetchAndPopulateMessages(sid, limitParam) {
   if (S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
     return;
   }
-  // Fetch session messages with a tail window for fast initial load.
-  // When fullTranscript is requested (INFLIGHT merge path), skip msg_limit
-  // so the server returns the complete message array — this eliminates
-  // truncation ambiguity that causes message splicing errors (#3043).
-  const limit = (opts && opts.fullTranscript) ? '' : `&msg_limit=${_INITIAL_MSG_LIMIT}`;
-  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${limit}`);
+  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${limitParam}`);
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
   _messagesTruncated = !!data.session._messages_truncated;
