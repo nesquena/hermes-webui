@@ -14,10 +14,32 @@ proceeds with a sensible default rather than crashing.
 
 from __future__ import annotations
 
+import io
+import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 REPO = Path(__file__).resolve().parents[1]
 ROUTES_PY = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
+
+
+class _FakeHandler:
+    def __init__(self):
+        self.status = None
+        self.headers = {}
+        self.wfile = io.BytesIO()
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.headers[key] = value
+
+    def end_headers(self):
+        pass
+
+    def json_body(self):
+        return json.loads(self.wfile.getvalue().decode("utf-8"))
 
 
 def _extract_handler(name: str) -> str:
@@ -272,6 +294,99 @@ def test_merge_cli_sidebar_metadata_keeps_larger_sidecar_message_count():
     )
 
     assert merged["message_count"] == 535
+
+
+def test_webui_state_projection_dedupes_by_lineage_root():
+    """WebUI-origin state.db projections should not be additive non-WebUI rows."""
+    import api.routes as routes
+
+    represented = {"root_sid"}
+    state_projection = {
+        "session_id": "tip_sid",
+        "source_tag": "webui",
+        "raw_source": "webui",
+        "session_source": "webui",
+        "_lineage_root_id": "root_sid",
+        "_lineage_tip_id": "tip_sid",
+    }
+
+    assert routes._is_duplicate_webui_state_projection(state_projection, represented) is True
+
+
+def test_external_state_projection_not_deduped_by_webui_source_guard():
+    """The WebUI-source guard must not hide real external conversations."""
+    import api.routes as routes
+
+    represented = {"root_sid"}
+    external_projection = {
+        "session_id": "tip_sid",
+        "source_tag": "telegram",
+        "raw_source": "telegram",
+        "session_source": "messaging",
+        "_lineage_root_id": "root_sid",
+        "_lineage_tip_id": "tip_sid",
+    }
+
+    assert routes._is_duplicate_webui_state_projection(external_projection, represented) is False
+
+
+def test_sessions_endpoint_suppresses_duplicate_webui_state_projection(monkeypatch):
+    """The /api/sessions merge should not add WebUI state.db lineage duplicates."""
+    import api.profiles as profiles
+    import api.routes as routes
+
+    monkeypatch.setattr(routes, "_reconcile_stale_stream_state_for_session_rows", lambda _sessions: False)
+    monkeypatch.setattr(routes, "load_settings", lambda: {"show_cli_sessions": True})
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+
+    webui_row = {
+        "session_id": "visible_tip",
+        "title": "Long Conversation",
+        "profile": "default",
+        "updated_at": 20,
+        "last_message_at": 20,
+        "source_tag": "webui",
+        "raw_source": "webui",
+        "session_source": "webui",
+        "_lineage_root_id": "root_sid",
+        "_lineage_tip_id": "visible_tip",
+    }
+    duplicate_webui_projection = {
+        "session_id": "state_projection_tip",
+        "title": "Long Conversation",
+        "profile": "default",
+        "updated_at": 30,
+        "last_message_at": 30,
+        "source_tag": "webui",
+        "raw_source": "webui",
+        "session_source": "webui",
+        "_lineage_root_id": "root_sid",
+        "_lineage_tip_id": "state_projection_tip",
+    }
+    external_projection = {
+        "session_id": "telegram_tip",
+        "title": "External Thread",
+        "profile": "default",
+        "updated_at": 10,
+        "last_message_at": 10,
+        "source_tag": "telegram",
+        "raw_source": "telegram",
+        "session_source": "messaging",
+        "_lineage_root_id": "root_sid",
+        "_lineage_tip_id": "telegram_tip",
+    }
+
+    monkeypatch.setattr(routes, "all_sessions", lambda diag=None: [webui_row])
+    monkeypatch.setattr(routes, "get_cli_sessions", lambda: [duplicate_webui_projection, external_projection])
+
+    handler = _FakeHandler()
+    routes.handle_get(handler, urlparse("http://example.com/api/sessions"))
+
+    assert handler.status == 200
+    session_ids = [row["session_id"] for row in handler.json_body()["sessions"]]
+    assert "visible_tip" in session_ids
+    assert "state_projection_tip" not in session_ids
+    assert "telegram_tip" in session_ids
 
 
 def test_messaging_session_loader_prefers_longer_sidecar_transcript():

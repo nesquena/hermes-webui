@@ -125,7 +125,7 @@ def handle_upload(handler):
         dest.write_bytes(file_bytes)
         mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
         return j(handler, {
-            'filename': safe_name,
+            'filename': dest.name,
             'path': str(dest),
             'size': dest.stat().st_size,
             'mime': mime,

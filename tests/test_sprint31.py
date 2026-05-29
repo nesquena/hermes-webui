@@ -29,17 +29,17 @@ class TestWriteEndpointToConfig:
         assert cfg["model"]["base_url"] == "http://localhost:11434"
 
     def test_writes_api_key(self, tmp_path):
+        """api_key-only calls are now a no-op — keys belong in .env, not config.yaml."""
         from api.profiles import _write_endpoint_to_config
-        _write_endpoint_to_config(tmp_path, api_key="sk-local-test")
-        cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
-        assert cfg["model"]["api_key"] == "sk-local-test"
+        _write_endpoint_to_config(tmp_path, api_key="***")
+        assert not (tmp_path / "config.yaml").exists()
 
     def test_writes_both(self, tmp_path):
         from api.profiles import _write_endpoint_to_config
         _write_endpoint_to_config(tmp_path, base_url="http://localhost:8080", api_key="mykey")
         cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
         assert cfg["model"]["base_url"] == "http://localhost:8080"
-        assert cfg["model"]["api_key"] == "mykey"
+        assert "api_key" not in cfg["model"]
 
     def test_merges_with_existing_config(self, tmp_path):
         """Does not clobber other top-level config keys."""

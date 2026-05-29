@@ -66,6 +66,39 @@ def test_messaging_merge_helper_dedupes_equivalent_timestamp_formats():
     assert [m["content"] for m in merged] == ["hi", "same answer"]
 
 
+def test_messaging_merge_preserves_longer_sidecar_order_when_timestamps_collapse():
+    """A repaired messaging sidecar can preserve order but lose subsecond timestamps.
+
+    Re-sorting those messages by ``(timestamp, role, content)`` groups assistant
+    and tool rows before user rows, making the WebUI look like replies vanished.
+    """
+    session = SimpleNamespace(
+        messages=[
+            {"role": "assistant", "content": "prior answer", "timestamp": 100.0},
+            {"role": "user", "content": "first prompt", "timestamp": 101.0},
+            {"role": "assistant", "content": "first answer", "timestamp": 101.0},
+            {"role": "user", "content": "second prompt", "timestamp": 101.0},
+            {"role": "assistant", "content": "second answer", "timestamp": 101.0},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "first prompt", "timestamp": 101.1},
+        {"role": "assistant", "content": "first answer", "timestamp": 101.2},
+        {"role": "user", "content": "second prompt", "timestamp": 101.3},
+        {"role": "assistant", "content": "second answer", "timestamp": 101.4},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m["content"] for m in merged] == [
+        "prior answer",
+        "first prompt",
+        "first answer",
+        "second prompt",
+        "second answer",
+    ]
+
+
 def test_branch_handler_uses_merged_messaging_messages_for_keep_count():
     branch_idx = ROUTES_PY.index('parsed.path == "/api/session/branch":')
     block = ROUTES_PY[branch_idx : branch_idx + 2600]

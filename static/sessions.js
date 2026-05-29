@@ -455,6 +455,8 @@ async function newSession(flash, options={}){
   _newSessionInFlight=(async()=>{
     updateQueueBadge();
     S.toolCalls=[];
+    _messagesTruncated=false;
+    _oldestIdx=0;
     clearLiveToolCards();
     // One-shot profile-switch workspace: applied to the first new session after a profile
     // switch, then cleared.  Use a dedicated flag so S._profileDefaultWorkspace (the
@@ -616,8 +618,8 @@ async function loadSession(sid){
         // always clear persisted session, strip /session/{id} from URL, and
         // rethrow so boot can deterministically fall through to empty-state.
         if(!currentSid){
-          localStorage.removeItem('hermes-webui-session');
-          try{ history.replaceState(null,'','/'); }catch(_){ }
+          try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+          try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
           if (_loadingSessionId === sid) _loadingSessionId = null;
           throw e;
         }
@@ -1671,6 +1673,12 @@ function _sessionIdFromLocation(){
     return qs.get('session')||qs.get('session_id')||null;
   }catch(_e){return null;}
 }
+function _appRootPath(){
+  try{
+    const base = new URL(document.baseURI||window.location.origin+'/', window.location.origin);
+    return base.pathname || '/';
+  }catch(_e){return '/';}
+}
 function _sessionUrlForSid(sid){
   const encoded=encodeURIComponent(sid);
   let base;
@@ -1679,6 +1687,7 @@ function _sessionUrlForSid(sid){
   try{
     const current=new URL(window.location.href);
     current.searchParams.delete('session');
+    current.searchParams.delete('session_id');
     base.search=current.searchParams.toString();
     base.hash=current.hash;
   }catch(_e){}
@@ -2278,8 +2287,8 @@ async function renderSessionList(opts={}){
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const allProfilesQS = _showAllProfiles ? '?all_profiles=1' : '';
     const [sessData, projData] = await Promise.all([
-      api('/api/sessions' + allProfilesQS),
-      api('/api/projects' + allProfilesQS),
+      api('/api/sessions' + allProfilesQS,{timeoutToast:false}),
+      api('/api/projects' + allProfilesQS,{timeoutToast:false}),
     ]);
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
@@ -2352,7 +2361,7 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
   _activeSessionExternalRefreshInFlight = true;
   try{
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false});
     if(!data || !data.session) return;
     if(!S.session || S.session.session_id !== sid) return;
     if(S.busy || S.activeStreamId) return;
@@ -3285,7 +3294,9 @@ function renderSessionListFromCache(){
   // in _profiles_match, and a strict-equality client filter would reject those
   // rows incorrectly. So we trust the wire data and skip the redundant client
   // filter entirely.
-  const profileFiltered=sourceFiltered;
+  const profileFiltered=sourceFiltered.filter(s=>
+    !s.default_hidden||(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)
+  );
   // Filter by active project. NO_PROJECT_FILTER sentinel asks for sessions
   // with no project_id; otherwise filter to the matching project_id, or
   // pass through when no filter is active.

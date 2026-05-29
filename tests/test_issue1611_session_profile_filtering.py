@@ -134,10 +134,10 @@ def test_static_sessions_js_uses_all_profiles_query_when_toggle_on():
     assert "_showAllProfiles ? '?all_profiles=1' : ''" in src, (
         "Expected fetch path to flip on the toggle state"
     )
-    assert "api('/api/sessions' + allProfilesQS)" in src, (
+    assert "api('/api/sessions' + allProfilesQS,{timeoutToast:false})" in src, (
         "Expected /api/sessions fetch to use the variant query"
     )
-    assert "api('/api/projects' + allProfilesQS)" in src, (
+    assert "api('/api/projects' + allProfilesQS,{timeoutToast:false})" in src, (
         "Expected /api/projects fetch to use the variant query"
     )
 
