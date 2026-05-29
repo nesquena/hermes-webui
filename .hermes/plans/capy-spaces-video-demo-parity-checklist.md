@@ -20,6 +20,8 @@ Recent safe adapter progress:
 
 Recently landed:
 
+- Native widget upsert safety-receipt responses now include metadata-only compaction evidence for `upsert_widget(..., include_safety_receipts=True)`, keeping direct helper receipt parity with route/source-style widget mutation helpers without exposing renderer/source/API-auth/script/secret fixture fields.
+
 - Central Capy policy now recognizes `browser_navigation` as a first-class protected prompt-preflight boundary, aligning product policy status and direct preflight classification with the already-implemented Spaces open/reload navigation receipts.
 - OpenHuman-inspired context-layer MVPs now exist as metadata-only Capy Spaces surfaces:
   - Memory/source surfaces: local Memory Tree canonicalization/search/status, source registry/freshness counts, safe source-refresh worker with HTML/plain/Markdown, RSS/Atom, JSON Feed, and allow-listed GitHub issue/PR API metadata extraction, product-home manual and scheduled refresh receipts, local knowledge source registration, and automatic Space artifact ingestion at manifest/revision/rollback/repair/widget-event/visual-QA boundaries.

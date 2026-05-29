@@ -961,6 +961,11 @@ def test_native_widget_mutations_can_return_metadata_only_safety_receipts(monkey
     assert upserted["autonomy_policy"]["model_route_hint"] == "hint:fast"
     assert upserted["progress_event"]["event_type"] == "tool.completed"
     assert upserted["progress_event"]["run_id"] == f"widget.upsert:{created['space_id']}"
+    assert upserted["output_compaction"]["command"] == "space.widget.upsert"
+    assert upserted["output_compaction"]["metadata_only"] is True
+    assert upserted["output_compaction"]["redaction_status"] == "metadata_only"
+    assert f"space_id: {created['space_id']}" in upserted["output_compaction"]["text"]
+    assert f"progress_run_id: widget.upsert:{created['space_id']}" in upserted["output_compaction"]["text"]
 
     assert patched["prompt_preflight"]["boundary"] == "creator_commit"
     assert patched["autonomy_policy"]["action"] == "space.widget.patch"

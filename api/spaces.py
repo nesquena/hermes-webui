@@ -9493,10 +9493,20 @@ def upsert_widget(
         }
     if include_safety_receipts:
         result["prompt_preflight"] = prompt_preflight_receipt
-        result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="widget.upsert")
-        result["autonomy_policy"] = _space_widget_mutation_action_policy_receipt(
+        progress_event = _record_space_tool_progress_event(sid, run_prefix="widget.upsert")
+        autonomy_policy = _space_widget_mutation_action_policy_receipt(
             "space.widget.upsert",
             prompt_preflight_receipt,
+        )
+        result["progress_event"] = progress_event
+        result["autonomy_policy"] = autonomy_policy
+        result["output_compaction"] = _space_tool_action_output_compaction_receipt(
+            action="space.widget.upsert",
+            space_id=sid,
+            widget_count=1,
+            revision_event_id=result.get("revision_event_id"),
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
         )
     return result
 

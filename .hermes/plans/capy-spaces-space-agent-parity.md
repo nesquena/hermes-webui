@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): compact native widget upsert receipts`
+  - Added RED/GREEN backend coverage proving `upsert_widget(..., include_safety_receipts=True)` returns metadata-only `output_compaction` evidence beside prompt-preflight, autonomy-policy, and structured progress receipts.
+  - The receipt is reconstructed only from allow-listed action, Space id, widget count, revision handle, policy/model-route status, and progress run metadata while omitting renderer/source/API-auth fields, scripts, bearer strings, and secret-looking fixture values.
+
 - `feat(spaces): receipt local runtime no-op events`
   - Added RED/GREEN backend coverage proving `capy:ready` / `capy:resize` local widget runtime no-ops remain non-queued and omit widget event ids while returning metadata-only progress and output-compaction receipts.
   - Bounded long valid Space/widget ids into safe progress run ids and preserved hostile payload/prompt redaction, so local runtime handshakes can appear in progress/receipt evidence without persisting widget event payloads, renderer/source/API-auth fields, scripts, bearer strings, or secret-looking fixture values.
