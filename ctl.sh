@@ -24,6 +24,15 @@ EOF
 
 ensure_home() {
   mkdir -p "${HERMES_HOME}" "${DEFAULT_STATE_DIR}"
+  chmod 700 "${HERMES_HOME}" "${DEFAULT_STATE_DIR}" 2>/dev/null || true
+}
+
+secure_private_file() {
+  local target="$1"
+  [[ -n "${target}" ]] || return 0
+  mkdir -p "$(dirname "${target}")"
+  chmod 700 "$(dirname "${target}")" 2>/dev/null || true
+  [[ -e "${target}" ]] && chmod 600 "${target}" 2>/dev/null || true
 }
 
 _load_repo_dotenv_preserving_env() {
@@ -202,6 +211,7 @@ start_cmd() {
   _load_repo_dotenv_preserving_env
   export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-${DEFAULT_STATE_DIR}}"
   mkdir -p "${HERMES_WEBUI_STATE_DIR}"
+  chmod 700 "${HERMES_WEBUI_STATE_DIR}" 2>/dev/null || true
   _parse_launch_binding "$@"
   _build_bootstrap_args "$@"
   export HERMES_WEBUI_HOST="${CTL_HOST}"
@@ -217,6 +227,7 @@ start_cmd() {
   local python_exe pid
   python_exe="$(_find_python)"
   : >> "${LOG_FILE}"
+  secure_private_file "${LOG_FILE}"
   (
     cd "${REPO_ROOT}"
     trap '' HUP
@@ -226,7 +237,9 @@ start_cmd() {
   pid=$!
 
   printf '%s\n' "${pid}" > "${PID_FILE}"
+  secure_private_file "${PID_FILE}"
   _write_state "${pid}" "${CTL_HOST}" "${CTL_PORT}" "${python_exe}"
+  secure_private_file "${STATE_FILE}"
   sleep 0.15
   if ! _is_alive "${pid}"; then
     echo "[ctl] Hermes WebUI failed to stay running. Log: ${LOG_FILE}" >&2

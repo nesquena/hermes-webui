@@ -7021,7 +7021,10 @@ def _serve_static(handler, parsed):
     if use_gzip:
         handler.send_header("Content-Encoding", "gzip")
     handler.end_headers()
-    handler.wfile.write(body)
+    try:
+        handler.wfile.write(body)
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        return True
     return True
 
 

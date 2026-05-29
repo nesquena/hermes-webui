@@ -464,3 +464,14 @@ def test_fix_credential_permissions_skips_correct_files(tmp_path, monkeypatch):
 
     import stat
     assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+
+
+def test_ctl_start_hardens_sensitive_runtime_files():
+    """ctl.sh startup must tighten log/pid/state files to owner-only mode."""
+    ctl_src = (pathlib.Path(__file__).parent.parent / "ctl.sh").read_text(encoding="utf-8")
+
+    assert 'secure_private_file()' in ctl_src
+    assert 'secure_private_file "${LOG_FILE}"' in ctl_src
+    assert 'secure_private_file "${PID_FILE}"' in ctl_src
+    assert 'secure_private_file "${STATE_FILE}"' in ctl_src
+    assert 'chmod 700 "${HERMES_HOME}" "${DEFAULT_STATE_DIR}"' in ctl_src

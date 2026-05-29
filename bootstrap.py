@@ -63,7 +63,12 @@ def _load_repo_dotenv() -> None:
                 os.environ[k] = v
     except Exception as exc:
         import sys as _sys
-        print(f"[bootstrap] Warning: could not load .env — {exc}", file=_sys.stderr)
+        rendered = str(exc)
+        for key in ("HERMES_WEBUI_PASSWORD", "HERMES_API_PASSWORD"):
+            value = os.getenv(key)
+            if value:
+                rendered = rendered.replace(value, "[REDACTED]")
+        print(f"[bootstrap] Warning: could not load .env — {rendered}", file=_sys.stderr)
 
 
 # Side effect: loads REPO_ROOT/.env into os.environ on import.
@@ -76,9 +81,36 @@ DEFAULT_PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 # Set HERMES_WEBUI_SKIP_ONBOARDING=1 to bypass the first-run wizard when
 # the environment is already fully configured (e.g. managed hosting).
 
+_SENSITIVE_ENV_KEYS = (
+    "HERMES_WEBUI_PASSWORD",
+    "HERMES_API_PASSWORD",
+)
+
+
+def _redact_sensitive_text(text: object) -> str:
+    rendered = str(text)
+    for key in _SENSITIVE_ENV_KEYS:
+        value = os.getenv(key)
+        if value:
+            rendered = rendered.replace(value, "[REDACTED]")
+    return rendered
+
+
+def _secure_private_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    try:
+        if path.exists():
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
+
 
 def info(msg: str) -> None:
-    print(f"[bootstrap] {msg}", flush=True)
+    print(f"[bootstrap] {_redact_sensitive_text(msg)}", flush=True)
 
 
 def is_wsl() -> bool:
@@ -453,9 +485,11 @@ def main() -> int:
     # Default (legacy) path: spawn the server as a detached child, probe
     # /health, then return. Suitable for an interactive `bash start.sh` run.
     log_path = state_dir / f"bootstrap-{args.port}.log"
+    _secure_private_file(log_path)
 
     info(f"Starting Hermes Web UI on http://{args.host}:{args.port}")
     with log_path.open("ab") as log_file:
+        _secure_private_file(log_path)
         proc = subprocess.Popen(
             [python_exe, server_path],
             cwd=server_cwd,

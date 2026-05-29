@@ -453,3 +453,43 @@ class TestForegroundExecutabilityGuard:
             bs.main()
         # execv must NOT have been called when the guard fires
         assert len(execv_calls) == 0
+
+
+class TestBootstrapSecurityHardening:
+
+    def test_info_redacts_webui_password(self, import_bootstrap, monkeypatch, capsys):
+        monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "super-secret-password")
+
+        import_bootstrap.info("Password: super-secret-password")
+
+        captured = capsys.readouterr()
+        assert "super-secret-password" not in captured.out
+        assert "[REDACTED]" in captured.out
+
+    def test_default_path_creates_private_bootstrap_log(self, import_bootstrap, monkeypatch, tmp_path, clean_env):
+        bs = import_bootstrap
+        monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
+        monkeypatch.setattr(bs, "discover_agent_dir", lambda: tmp_path / "agent")
+        monkeypatch.setattr(bs, "hermes_command_exists", lambda: True)
+        monkeypatch.setattr(bs, "discover_launcher_python", lambda *a: "/usr/bin/python3")
+        monkeypatch.setattr(bs, "ensure_python_has_webui_deps", lambda *a, **kw: a[0])
+        monkeypatch.setattr(bs, "wait_for_health", lambda *a, **kw: True)
+        monkeypatch.setattr(bs, "open_browser", lambda *a, **kw: None)
+        monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path / "state"))
+        (tmp_path / "agent").mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--no-browser"])
+
+        class FakePopen:
+            pid = 12345
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+        monkeypatch.setattr(subprocess, "Popen", FakePopen)
+
+        rc = bs.main()
+
+        log_path = tmp_path / "state" / f"bootstrap-{bs.DEFAULT_PORT}.log"
+        assert rc == 0
+        assert log_path.exists()
+        assert log_path.stat().st_mode & 0o777 == 0o600
