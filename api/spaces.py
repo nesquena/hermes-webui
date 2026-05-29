@@ -7779,7 +7779,18 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 _space_tool_arg(data, 0),
             )
             space_id = validate_space_id(_space_tool_space_id(data))
-        result = {"ok": True, "action": name, "revisions": list_revision_events(space_id, data.get("limit", 20))}
+        revisions = list_revision_events(space_id, data.get("limit", 20))
+        result = {
+            "ok": True,
+            "action": name,
+            "revisions": revisions,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                revision_event_ids=[str(event.get("event_id") or "") for event in revisions if isinstance(event, dict)],
+                include_widget_count=False,
+            ),
+        }
         if is_current:
             result["active_space_id"] = space_id
         else:

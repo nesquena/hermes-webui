@@ -10704,6 +10704,10 @@ def test_space_tool_adapter_current_revisions_and_rollback_use_active_space_meta
     assert revisions["action"] == "space.current.revisions"
     assert revisions["active_space_id"] == created["space_id"]
     assert revisions["revisions"][0]["event_type"] == "widget.patched"
+    assert revisions["output_compaction"]["metadata_only"] is True
+    assert revisions["output_compaction"]["redaction_status"] in {"metadata_only", "redacted"}
+    assert "space:current-rollback-lab" in json.dumps(revisions["output_compaction"])
+    assert f"revision:{original['revision_event_id']}" in json.dumps(revisions["output_compaction"])
     assert restored["ok"] is True
     assert restored["action"] == "space.current.rollback"
     assert restored["space"]["widgets"][0]["title"] == "Original summary"
@@ -10765,6 +10769,10 @@ def test_space_tool_adapter_revision_list_accepts_camelcase_space_id_and_rejects
     assert listed["action"] == "space.revisions"
     assert listed["space_id"] == target["space_id"]
     assert [event["event_type"] for event in listed["revisions"][:2]] == ["widget.patched", "widget.created"]
+    assert listed["output_compaction"]["metadata_only"] is True
+    assert listed["output_compaction"]["redaction_status"] in {"metadata_only", "redacted"}
+    assert "space:revision-list-camel" in json.dumps(listed["output_compaction"])
+    assert "revision:" in json.dumps(listed["output_compaction"])
     assert "revisionlistleak" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
