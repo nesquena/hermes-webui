@@ -3933,6 +3933,7 @@ def _run_agent_streaming(
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and event not in ('cancel', 'error'):
             return
+        event_id = None
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
@@ -3950,7 +3951,7 @@ def _run_agent_streaming(
             except Exception:
                 logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
         try:
-            q.put_nowait((event, data))
+            q.put_nowait((event, data, event_id))
         except Exception:
             logger.debug("Failed to put event to queue")
 

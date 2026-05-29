@@ -202,6 +202,7 @@ def _run_gateway_chat_streaming(
     def put_gateway_event(event, data):
         if cancel_event.is_set() and event not in ("cancel", "error", "apperror"):
             return
+        event_id = None
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
@@ -211,7 +212,7 @@ def _run_gateway_chat_streaming(
             except Exception:
                 logger.debug("Failed to append gateway event %s for stream %s", event, stream_id, exc_info=True)
         try:
-            q.put_nowait((event, data))
+            q.put_nowait((event, data, event_id))
         except Exception:
             logger.debug("Failed to put gateway event to queue")
 

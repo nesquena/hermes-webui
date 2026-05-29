@@ -7186,14 +7186,55 @@ def _parse_run_journal_after_seq(qs: dict) -> int | None:
         return 0
 
 
-def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
+def _parse_stream_event_id_parts(event_id):
+    raw = str(event_id or "").strip()
+    if not raw:
+        return None, None
+
+    run_id = None
+    if ":" in raw:
+        run_id, tail = raw.rsplit(":", 1)
+        run_id = run_id.strip() or None
+    else:
+        tail = raw
+
+    try:
+        return run_id, max(0, int(tail))
+    except (TypeError, ValueError):
+        return run_id, None
+
+
+def _parse_stream_event_seq(event_id) -> int | None:
+    return _parse_stream_event_id_parts(event_id)[1]
+
+
+def _stream_queue_item_parts(item) -> tuple[str, object, str | None]:
+    if isinstance(item, tuple):
+        if len(item) >= 3:
+            return item[0], item[1], (str(item[2]) if item[2] else None)
+        if len(item) >= 2:
+            return item[0], item[1], None
+    return "message", item, None
+
+
+def _replay_run_journal(
+    handler,
+    stream_id: str,
+    after_seq: int | None,
+    *,
+    max_seq: int | None = None,
+    emit_stale_interrupted: bool = True,
+) -> bool:
     summary = find_run_summary(stream_id)
     if not summary:
         return False
+    read_kwargs = {"after_seq": after_seq}
+    if max_seq is not None:
+        read_kwargs["max_seq"] = max_seq
     journal = read_run_events(
         str(summary.get("session_id") or ""),
         stream_id,
-        after_seq=after_seq,
+        **read_kwargs,
     )
     for entry in journal.get("events") or []:
         _sse_with_id(
@@ -7202,7 +7243,7 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
             entry.get("payload"),
             entry.get("event_id"),
         )
-    if not summary.get("terminal"):
+    if emit_stale_interrupted and not summary.get("terminal"):
         stale = stale_interrupted_event(
             str(summary.get("session_id") or ""),
             stream_id,
@@ -7211,6 +7252,19 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
         if stale:
             _sse_with_id(handler, stale["event"], stale["payload"], stale["event_id"])
     return True
+
+
+def _run_journal_terminal_at_or_before(stream_id: str, max_seq: int | None) -> bool:
+    if max_seq is None:
+        return False
+    summary = find_run_summary(stream_id)
+    if not summary or not summary.get("terminal"):
+        return False
+    read_kwargs = {"after_seq": None}
+    if max_seq is not None:
+        read_kwargs["max_seq"] = max_seq
+    journal = read_run_events(str(summary.get("session_id") or ""), stream_id, **read_kwargs)
+    return any(bool(entry.get("terminal")) for entry in journal.get("events") or [])
 
 
 def _handle_sse_stream(handler, parsed):
@@ -7235,7 +7289,16 @@ def _handle_sse_stream(handler, parsed):
         except _CLIENT_DISCONNECT_ERRORS:
             pass
         return True
+    active_replay = qs.get("replay", [""])[0] == "1"
     subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
+    replay_cutoff_seq = None
+    replay_cutoff_run_id = None
+    if hasattr(stream, "subscribe_with_snapshot"):
+        subscriber, snapshot = stream.subscribe_with_snapshot()
+        if active_replay:
+            replay_cutoff_run_id, replay_cutoff_seq = _parse_stream_event_id_parts(
+                (snapshot or {}).get("last_event_id")
+            )
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
@@ -7243,18 +7306,38 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("Connection", "close")
     handler.end_headers()
     try:
+        if active_replay:
+            replayed = _replay_run_journal(
+                handler,
+                stream_id,
+                _parse_run_journal_after_seq(qs),
+                max_seq=replay_cutoff_seq,
+                emit_stale_interrupted=False,
+            )
+            if not replayed:
+                replay_cutoff_seq = None
+            elif _run_journal_terminal_at_or_before(stream_id, replay_cutoff_seq):
+                return True
         while True:
             try:
-                event, data = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
                 handler.wfile.write(b": heartbeat\n\n")
                 handler.wfile.flush()
                 continue
-            # Stage-364: emit `id:` from STREAM_LAST_EVENT_ID side-channel so
-            # the frontend's `_lastRunJournalSeq` cursor advances during live
-            # streaming. Without this, mid-stream error→replay would arrive
-            # with after_seq=0 and double-render every journaled event.
-            event_id = STREAM_LAST_EVENT_ID.get(stream_id)
+            event, data, event_id = _stream_queue_item_parts(item)
+            if active_replay and replay_cutoff_seq is not None:
+                item_run_id, item_seq = _parse_stream_event_id_parts(event_id)
+                if item_seq is not None:
+                    same_run = (
+                        replay_cutoff_run_id is None
+                        or item_run_id is None
+                        or item_run_id == replay_cutoff_run_id
+                    )
+                    if same_run and item_seq <= replay_cutoff_seq:
+                        continue
+            if not event_id:
+                event_id = STREAM_LAST_EVENT_ID.get(stream_id)
             if event_id:
                 _sse_with_id(handler, event, data, event_id)
             else:

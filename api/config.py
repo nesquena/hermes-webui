@@ -4587,7 +4587,27 @@ class StreamChannel:
     def __init__(self):
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue] = []
-        self._offline_buffer: list[tuple[str, object]] = []
+        self._offline_buffer: list[tuple[str, object, str | None]] = []
+
+    def _normalize_offline_item(self, item):
+        if isinstance(item, tuple):
+            if len(item) >= 3:
+                return item[0], item[1], (str(item[2]) if item[2] else None)
+            if len(item) >= 2:
+                return item[0], item[1], None
+        return str(item), None, None
+
+    def subscribe_with_snapshot(self) -> tuple[queue.Queue, dict[str, object]]:
+        q: queue.Queue = queue.Queue()
+        with self._lock:
+            for item in self._offline_buffer:
+                q.put_nowait(item)
+            last_event_id = self._offline_buffer[-1][2] if self._offline_buffer else None
+            self._subscribers.append(q)
+        return q, {
+            "last_event_id": last_event_id,
+            "offline_buffered_events": len(self._offline_buffer),
+        }
 
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue()
@@ -4609,8 +4629,9 @@ class StreamChannel:
             except ValueError:
                 pass
 
-    def put_nowait(self, item: tuple[str, object]) -> None:
+    def put_nowait(self, item: tuple[str, object, str | None] | tuple[str, object]) -> None:
         with self._lock:
+            item = self._normalize_offline_item(item)
             subscribers = list(self._subscribers)
             if not subscribers:
                 self._offline_buffer.append(item)
