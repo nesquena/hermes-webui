@@ -60,30 +60,79 @@ def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CH
     return sanitized
 
 
+def _restart_blocker_snapshot() -> dict:
+    """Return active chat work that should block a self-restart."""
+    with STREAMS_LOCK:
+        stream_ids = [str(k) for k in STREAMS.keys()]
+    run_ids: list[str] = []
+    try:
+        from api import config as _config
+        active_runs = getattr(_config, 'ACTIVE_RUNS', {})
+        active_runs_lock = getattr(_config, 'ACTIVE_RUNS_LOCK', None)
+        if active_runs_lock is not None:
+            with active_runs_lock:
+                run_ids = [str(k) for k in active_runs.keys()]
+        else:
+            run_ids = [str(k) for k in active_runs.keys()]
+    except Exception:
+        run_ids = []
+    return {
+        'active_streams': len(stream_ids),
+        'active_runs': len(run_ids),
+        'blocking_stream_ids': stream_ids[:10],
+        'blocking_run_ids': run_ids[:10],
+        'restart_blocked': bool(stream_ids or run_ids),
+    }
+
+
 def _active_stream_count() -> int:
     """Return the current in-memory chat stream count.
 
-    Self-update schedules an in-process re-exec after git pull/reset.  That is
-    restart-equivalent for live streams, even when systemd does not see a unit
-    restart.  Refuse update/force-update while a stream exists so a browser
-    update click cannot recreate the pending-message loss class fixed in #1543.
+    Kept for compatibility with older tests/helpers; restart safety should use
+    ``_restart_blocker_snapshot()`` so detached worker runs also block updates.
     """
-    with STREAMS_LOCK:
-        return len(STREAMS)
+    return int(_restart_blocker_snapshot().get('active_streams') or 0)
 
 
-def _restart_blocked_response(target: str, active_streams: int) -> dict:
-    plural = "s" if active_streams != 1 else ""
+def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict:
+    if isinstance(blocker_snapshot, int):
+        blocker_snapshot = {
+            'active_streams': blocker_snapshot,
+            'active_runs': 0,
+            'blocking_stream_ids': [],
+            'blocking_run_ids': [],
+            'restart_blocked': bool(blocker_snapshot),
+        }
+    active_streams = int(blocker_snapshot.get('active_streams') or 0)
+    active_runs = int(blocker_snapshot.get('active_runs') or 0)
+    parts = []
+    if active_streams:
+        parts.append(f"{active_streams} active chat stream{'s' if active_streams != 1 else ''}")
+    if active_runs:
+        parts.append(f"{active_runs} active agent run{'s' if active_runs != 1 else ''}")
+    detail = ' and '.join(parts) or 'active chat work'
     return {
         'ok': False,
         'message': (
-            f'Cannot update {target} while {active_streams} active chat stream{plural} '
-            'is running. Wait for the response to finish, then retry the update.'
+            f'Cannot update {target} while {detail} is running. '
+            'Wait for the response to finish, then retry the update.'
         ),
         'target': target,
         'restart_blocked': True,
         'active_streams': active_streams,
+        'active_runs': active_runs,
+        'blocking_stream_ids': blocker_snapshot.get('blocking_stream_ids') or [],
+        'blocking_run_ids': blocker_snapshot.get('blocking_run_ids') or [],
     }
+
+
+def _wait_until_restart_safe(poll_seconds: float = 2.0) -> dict:
+    """Wait for active work to finish before self-reexec."""
+    snapshot = _restart_blocker_snapshot()
+    while snapshot.get('restart_blocked'):
+        time.sleep(max(0.1, poll_seconds))
+        snapshot = _restart_blocker_snapshot()
+    return snapshot
 
 
 def _run_git(args, cwd, timeout=10):
@@ -928,6 +977,7 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # Threads die when execv replaces the process image, so the lock is
         # released atomically by the kernel.
         with _apply_lock:
+            _wait_until_restart_safe()
             try:
                 os.execv(sys.executable, [sys.executable] + sys.argv)
             except Exception:
@@ -950,9 +1000,9 @@ def apply_force_update(target: str) -> dict:
     response with ``conflict: True`` or ``diverged: True`` and the user
     has confirmed they want to discard local changes.
     """
-    active_streams = _active_stream_count()
-    if active_streams:
-        return _restart_blocked_response(target, active_streams)
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response(target, blocker_snapshot)
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
@@ -1002,9 +1052,9 @@ def apply_force_update(target: str) -> dict:
 
 def apply_update(target):
     """Stash, pull --ff-only, pop for the given target repo."""
-    active_streams = _active_stream_count()
-    if active_streams:
-        return _restart_blocked_response(target, active_streams)
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response(target, blocker_snapshot)
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
