@@ -7886,7 +7886,24 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery",
         "space.admin.recovery.snapshot",
     }:
-        return {"ok": True, "action": name, "recovery": recovery_snapshot()}
+        prompt_preflight = _recovery_required_prompt_preflight_receipt(name)
+        autonomy_policy = _recovery_toggle_action_policy_receipt(name)
+        progress_event = _record_space_tool_progress_event("recovery", run_prefix="recovery.snapshot")
+        return {
+            "ok": True,
+            "action": name,
+            "recovery": recovery_snapshot(),
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id="recovery",
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+                include_widget_count=False,
+            ),
+        }
     if name in {
         "space.recovery.repair_space",
         "space.recovery.repair",
@@ -12223,6 +12240,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "path.helper",
         "repair",
         "recovery.space.repair",
+        "recovery.snapshot",
         "recovery.widget.repair",
         "recovery.module.repair",
         "layout.rearrange",
