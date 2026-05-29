@@ -1673,7 +1673,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         tc={name:d.name||'tool', preview:d.preview||'', args:d.args||{}, snippet:'', done:true};
         inflight.toolCalls.push(tc);
       }
-      tc.preview=d.preview||tc.preview||'';
+      // Route result to .snippet (detail) instead of overwriting .preview
+      // (header).  During streaming .preview already holds the last progress
+      // text — replacing it with the same content caused header/detail
+      // duplication.  Fallback: if no progress events were sent, use the
+      // result as preview so the header is not blank.
+      if(d.preview){
+        tc.snippet=tc.snippet||d.preview;
+        if(!tc.preview) tc.preview=d.preview;
+      }
       tc.args=d.args||tc.args||{};
       tc.done=true;
       tc.is_error=!!d.is_error;

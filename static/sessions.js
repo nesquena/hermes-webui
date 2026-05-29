@@ -142,6 +142,9 @@ function _setSessionViewedCount(sid, messageCount = 0) {
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
   counts[sid] = next;
   _saveSessionViewedCounts();
+  // If the viewed count is now current, any prior completion-unread marker is
+  // stale — clear it so _hasUnreadForSession doesn't short-circuit (#3020).
+  _clearSessionCompletionUnread(sid);
 }
 
 function _getSessionCompletionUnread() {
@@ -407,8 +410,13 @@ function _markPollingCompletionUnreadTransitions(sessions) {
       )
     );
     const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);
-    if ((completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) && !_isSessionActivelyViewedForList(sid)) {
-      _markSessionCompletionUnread(sid, s.message_count);
+    if (completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) {
+      if (!_isSessionActivelyViewedForList(sid)) {
+        _markSessionCompletionUnread(sid, s.message_count);
+      } else {
+        // Sync viewed count so we don't flag stale unread on tab switch (#3020)
+        _setSessionViewedCount(sid, messageCount);
+      }
     }
     _sessionStreamingById.set(sid, isStreaming);
     if (isStreaming) {
