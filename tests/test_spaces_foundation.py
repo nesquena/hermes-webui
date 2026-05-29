@@ -16840,6 +16840,14 @@ def test_module_repair_events_tool_response_includes_metadata_only_output_compac
     assert listed["ok"] is True
     assert listed["action"] == "space.recovery.module_repair_events"
     assert listed["module_id"] == "module-repair-events-compaction"
+    assert listed["prompt_preflight"]["boundary"] == "space_repair_prompt"
+    assert listed["prompt_preflight"]["status"] == "required"
+    assert listed["prompt_preflight"]["metadata_only"] is True
+    assert listed["prompt_preflight"]["raw_prompt_stored"] is False
+    assert listed["autonomy_policy"]["action"] == "space.recovery.module_repair_events"
+    assert listed["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert listed["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+    assert listed["autonomy_policy"]["metadata_only"] is True
     assert listed["events"][0]["event_id"] == queued["event_id"]
     assert listed["events"][0]["prompt_preflight"]["boundary"] == "space_repair_prompt"
     assert listed["events"][0]["prompt_preflight"]["status"] == "pass"

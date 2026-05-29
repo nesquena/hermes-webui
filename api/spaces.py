@@ -8135,11 +8135,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     }:
         module_id = validate_module_id(_space_tool_module_id(data))
         events = list_recovery_module_repair_events(module_id, data.get("limit", 20))
+        prompt_preflight = _space_repair_required_prompt_preflight_receipt(name)
+        autonomy_policy = _space_repair_action_policy_receipt(name, prompt_preflight)
         return {
             "ok": True,
             "action": name,
             "module_id": module_id,
             "events": events,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
             "output_compaction": _module_repair_events_output_compaction(
                 action=name,
                 module_id=module_id,
