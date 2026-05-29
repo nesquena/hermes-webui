@@ -9382,6 +9382,18 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
         "space.widget.read",
         {"space_id": created["space_id"], "widget_id": "research-card", "renderer": "<script>ignore()</script>"},
     )
+    generic_listed = spaces.run_space_tool(
+        "widget.list",
+        {"space_id": created["space_id"], "renderer": "<script>ignore()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+    )
+    generic_read = spaces.run_space_tool(
+        "widget.read",
+        {"space_id": created["space_id"], "widget_id": "research-card", "source": "SECRET_SOURCE_DO_NOT_LEAK"},
+    )
+    generic_get = spaces.run_space_tool(
+        "widget.get",
+        {"space_id": created["space_id"], "id": "research-card", "html": "<img src=x onerror=steal()>"},
+    )
     patched = spaces.run_space_tool(
         "space.current.widget.patch",
         {
@@ -9409,7 +9421,18 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
         "space.widget.events",
         {"space_id": created["space_id"], "widget_id": "research-card", "limit": 5},
     )
-    serialized = json.dumps({"listed": listed, "read": read, "patched": patched, "queued": queued, "event_list": event_list}).lower()
+    serialized = json.dumps(
+        {
+            "listed": listed,
+            "read": read,
+            "generic_listed": generic_listed,
+            "generic_read": generic_read,
+            "generic_get": generic_get,
+            "patched": patched,
+            "queued": queued,
+            "event_list": event_list,
+        }
+    ).lower()
 
     assert listed["ok"] is True
     assert listed["action"] == "space.widget.list"
@@ -9418,6 +9441,28 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
     assert read["ok"] is True
     assert read["widget"]["id"] == "research-card"
     assert read["output_compaction"]["metadata_only"] is True
+    assert generic_listed["ok"] is True
+    assert generic_listed["action"] == "widget.list"
+    assert generic_listed["widgets"][0]["id"] == "research-card"
+    assert generic_listed["output_compaction"]["command"] == "widget.list"
+    assert generic_listed["output_compaction"]["metadata_only"] is True
+    assert generic_listed["output_compaction"]["redaction_status"] == "metadata_only"
+    assert f"space_id: {created['space_id']}" in generic_listed["output_compaction"]["text"]
+    assert "widget_count: 1" in generic_listed["output_compaction"]["text"]
+    assert generic_read["ok"] is True
+    assert generic_read["action"] == "widget.read"
+    assert generic_read["widget"]["id"] == "research-card"
+    assert generic_read["output_compaction"]["command"] == "widget.read"
+    assert generic_read["output_compaction"]["metadata_only"] is True
+    assert generic_read["output_compaction"]["redaction_status"] == "metadata_only"
+    assert "widget_count: 1" in generic_read["output_compaction"]["text"]
+    assert generic_get["ok"] is True
+    assert generic_get["action"] == "widget.get"
+    assert generic_get["widget"]["id"] == "research-card"
+    assert generic_get["output_compaction"]["command"] == "widget.get"
+    assert generic_get["output_compaction"]["metadata_only"] is True
+    assert generic_get["output_compaction"]["redaction_status"] == "metadata_only"
+    assert "widget_count: 1" in generic_get["output_compaction"]["text"]
     assert patched["widget"]["title"] == "Research Patched"
     assert patched["widget"]["layout"] == {"x": 4, "y": 5, "w": 8, "h": 5, "minimized": False}
     assert queued["queued"] is True

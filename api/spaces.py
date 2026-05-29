@@ -8142,11 +8142,30 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         }
     if name == "widget.list":
         space_id = validate_space_id(data.get("space_id"))
-        return {"ok": True, "action": name, "widgets": list_widgets(space_id)}
+        widgets = list_widgets(space_id)
+        return {
+            "ok": True,
+            "action": name,
+            "widgets": widgets,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=len(widgets),
+            ),
+        }
     if name in {"widget.read", "widget.get"}:
         space_id = validate_space_id(data.get("space_id"))
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
-        return {"ok": True, "action": name, "widget": read_widget_detail(space_id, widget_id)}
+        return {
+            "ok": True,
+            "action": name,
+            "widget": read_widget_detail(space_id, widget_id),
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=1,
+            ),
+        }
     if name in {"widget.patch", "space.widget.patch", "space.current.widget.patch"}:
         is_current_widget_patch = name == "space.current.widget.patch"
         if not is_current_widget_patch:
