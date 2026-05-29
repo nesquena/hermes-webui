@@ -892,7 +892,10 @@ function _isReadOnlySession(session) {
 }
 
 function _sourceKeyForSession(session) {
-  return (session && (session.raw_source || session.source_tag || session.source || '') || '').toLowerCase();
+  // raw_source / source_tag carry the specific platform (telegram, discord, cli, etc.)
+  // for WebUI-native sessions these are null, so fall back to 'webui'
+  if (!session) return 'unknown';
+  return (session.raw_source || session.source_tag || session.source || 'webui').toLowerCase();
 }
 
 function _isCliSession(session) {
@@ -915,11 +918,13 @@ function _isCliSession(session) {
 
 function _sessionSourceLabel(filter, count) {
   const n = Number(count) || 0;
-  return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
+  if (filter === '') return `All sessions (${n})`;
+  const label = filter.charAt(0).toUpperCase() + filter.slice(1);
+  return `${label} (${n})`;
 }
 
 function _setSessionSourceFilter(filter) {
-  const next = filter === 'cli' ? 'cli' : 'webui';
+  const next = filter || '';
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
@@ -932,8 +937,13 @@ function _setSessionSourceFilter(filter) {
 function _restoreSessionSourceFilter() {
   try {
     const raw = localStorage.getItem('hermes-session-source-filter');
-    if (raw === 'cli' || raw === 'webui') _sessionSourceFilter = raw;
-  } catch (_e) {}
+    if (raw === 'cli' || raw === 'webui') {
+      _sessionSourceFilter = raw;
+      localStorage.removeItem('hermes-session-source-filter');
+      return;
+    }
+    _sessionSourceFilter = raw || '';
+  } catch (_e) { _sessionSourceFilter = ''; }
 }
 
 function _normalizeMessageForCliImportComparison(message) {
@@ -1581,7 +1591,7 @@ const NO_PROJECT_FILTER = '__none__';
 let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FILTER = unassigned only)
 let _showAllProfiles = false;  // false = filter to active profile only
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
-let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
+let _sessionSourceFilter = '';  // empty = show all sources
 _restoreSessionSourceFilter();
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
@@ -3270,14 +3280,21 @@ function renderSessionListFromCache(){
     (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0)
   );
-  const webuiSessionCount = withMessages.filter(s=>!_isCliSession(s)).length;
-  const cliSessionCount = withMessages.filter(s=>_isCliSession(s)).length;
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
-    _sessionSourceFilter='webui';
+  // Compute source counts from current sessions
+  const sourceCounts = {};
+  const sourceKeys = [];
+  for (const s of withMessages) {
+    const sk = _sourceKeyForSession(s) || 'unknown';
+    if (!sourceCounts[sk]) { sourceCounts[sk] = 0; sourceKeys.push(sk); }
+    sourceCounts[sk]++;
   }
-  const sourceFiltered = _sessionSourceFilter==='cli'
-    ? withMessages.filter(s=>_isCliSession(s))
-    : withMessages.filter(s=>!_isCliSession(s));
+  // Auto-reset filter if selected source has no sessions
+  if (_sessionSourceFilter && !sourceCounts[_sessionSourceFilter]) {
+    _sessionSourceFilter = '';
+  }
+  const sourceFiltered = _sessionSourceFilter
+    ? withMessages.filter(s => _sourceKeyForSession(s) === _sessionSourceFilter)
+    : withMessages;
   // The server is authoritative for profile scoping (#1611): it filters by
   // active profile when no query param is set, and returns the aggregate when
   // we send ?all_profiles=1. The renamed-root cross-alias (a row tagged
@@ -3325,11 +3342,21 @@ function renderSessionListFromCache(){
   list.appendChild(batchBar);
   if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';_renderBatchActionBar();}
   else{batchBar.style.display='none';}
-  if(window._showCliSessions || cliSessionCount>0){
+  if(sourceKeys.length > 0){
     const sourceTabs=document.createElement('div');
     sourceTabs.className='session-source-tabs';
-    for(const filter of ['webui','cli']){
-      const count=filter==='cli'?cliSessionCount:webuiSessionCount;
+    // "All" tab first
+    const allCount = sourceKeys.reduce((sum, k) => sum + (sourceCounts[k] || 0), 0);
+    const allBtn=document.createElement('button');
+    allBtn.type='button';
+    allBtn.className='session-source-tab'+(_sessionSourceFilter===''?' active':'');
+    allBtn.textContent=_sessionSourceLabel('', allCount);
+    allBtn.setAttribute('aria-pressed', _sessionSourceFilter===''?'true':'false');
+    allBtn.onclick=()=>_setSessionSourceFilter('');
+    sourceTabs.appendChild(allBtn);
+    // Per-source tabs (sorted alphabetically)
+    sourceKeys.sort().forEach(filter => {
+      const count=sourceCounts[filter] || 0;
       const btn=document.createElement('button');
       btn.type='button';
       btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
@@ -3337,7 +3364,7 @@ function renderSessionListFromCache(){
       btn.setAttribute('aria-pressed', _sessionSourceFilter===filter?'true':'false');
       btn.onclick=()=>_setSessionSourceFilter(filter);
       sourceTabs.appendChild(btn);
-    }
+    });
     list.appendChild(sourceTabs);
   }
   // Project filter bar — show when there are real projects OR there are
@@ -3421,11 +3448,11 @@ function renderSessionListFromCache(){
     toggle.onclick=()=>{_showArchived=!_showArchived;renderSessionListFromCache();};
     list.appendChild(toggle);
   }
-  // Empty state for active project filter
-  if(_sessionSourceFilter==='cli'&&sessions.length===0){
+  // Empty state for active source filter
+  if(_sessionSourceFilter && sessions.length===0){
     const empty=document.createElement('div');
     empty.className='session-empty-note';
-    empty.textContent=window._showCliSessions?'No CLI sessions found.':'Enable Show agent sessions in Settings to list CLI sessions here.';
+    empty.textContent='No ' + _sessionSourceFilter + ' sessions found.';
     list.appendChild(empty);
   } else if(_activeProject&&sessions.length===0){
     const empty=document.createElement('div');
