@@ -2236,6 +2236,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
       }
+      // Fix #3018: preserve client-side _turnUsage/_turnDuration/_turnTps/_gatewayRouting
+      // across S.messages replacement from server data (which lacks these ephemeral props).
+      function _preserveClientTurnState(oldMsgs,newMsgs){
+        if(!Array.isArray(oldMsgs)||!Array.isArray(newMsgs)) return;
+        const _props=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting'];
+        for(let i=oldMsgs.length-1;i>=0;i--){
+          const o=oldMsgs[i];
+          if(o&&o.role==='assistant'&&o._turnUsage){
+            for(const n of newMsgs){
+              if(n&&n.role==='assistant'&&n.id===o.id){
+                for(const p of _props){ if(o[p]!==undefined) n[p]=o[p]; }
+                return;
+              }
+            }
+            // Fallback: attach to last assistant message if id match fails
+            for(let j=newMsgs.length-1;j>=0;j--){
+              if(newMsgs[j]&&newMsgs[j].role==='assistant'){
+                for(const p of _props){ if(o[p]!==undefined) newMsgs[j][p]=o[p]; }
+                return;
+              }
+            }
+          }
+        }
+      }
+
       // Fetch latest session from server to get accurate message list (includes cancel status)
       // This ensures messages stay in sync with server, fixing race condition where local
       // "*Task cancelled.*" message gets lost when done event overwrites S.messages
@@ -2243,8 +2268,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         try{
           const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
           if(data&&data.session&&S.session&&S.session.session_id===activeSid){
+            const _oldMsgs=S.messages;
             S.session=data.session;
             S.messages=(data.session.messages||[]).filter(m=>m&&m.role);
+            _preserveClientTurnState(_oldMsgs,S.messages);
             clearLiveToolCards();if(!assistantText)removeThinking();
             _markSessionViewed(activeSid, data.session.message_count ?? S.messages.length);
             renderMessages({preserveScroll:true});
@@ -2296,7 +2323,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(isActiveSession){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
+        const _oldMsgs=S.messages;
         S.session=session;S.messages=(session.messages||[]).filter(m=>m&&m.role);
+        _preserveClientTurnState(_oldMsgs,S.messages);
         if(S.session&&S.session.session_id){
           try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
