@@ -9821,10 +9821,21 @@ def patch_widget(
     }
     if include_safety_receipts:
         result["prompt_preflight"] = prompt_preflight_receipt
-        result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="widget.patch")
-        result["autonomy_policy"] = _space_widget_mutation_action_policy_receipt(
+        progress_event = _record_space_tool_progress_event(sid, run_prefix="widget.patch")
+        autonomy_policy = _space_widget_mutation_action_policy_receipt(
             "space.widget.patch",
             prompt_preflight_receipt,
+        )
+        result["progress_event"] = progress_event
+        result["autonomy_policy"] = autonomy_policy
+        result["output_compaction"] = _space_tool_action_output_compaction_receipt(
+            action="space.widget.patch",
+            space_id=sid,
+            widget_id=wid,
+            widget_count=1,
+            revision_event_id=result.get("revision_event_id"),
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
         )
     return result
 
@@ -9854,10 +9865,21 @@ def delete_widget(space_id: str, widget_id: str, *, include_safety_receipts: boo
     }
     if include_safety_receipts:
         result["prompt_preflight"] = prompt_preflight_receipt
-        result["progress_event"] = _record_space_tool_progress_event(sid, run_prefix="widget.delete")
-        result["autonomy_policy"] = _space_widget_mutation_action_policy_receipt(
+        progress_event = _record_space_tool_progress_event(sid, run_prefix="widget.delete")
+        autonomy_policy = _space_widget_mutation_action_policy_receipt(
             "space.widget.delete",
             prompt_preflight_receipt,
+        )
+        result["progress_event"] = progress_event
+        result["autonomy_policy"] = autonomy_policy
+        result["output_compaction"] = _space_tool_action_output_compaction_receipt(
+            action="space.widget.delete",
+            space_id=sid,
+            widget_id=wid,
+            widget_count=1,
+            revision_event_id=result.get("revision_event_id"),
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
         )
     return result
 

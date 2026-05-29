@@ -933,10 +933,13 @@ def test_native_widget_mutations_can_return_metadata_only_safety_receipts(monkey
             "kind": "markdown",
             "title": "Notes Card",
             "layout": {"x": 0, "y": 0, "w": 4, "h": 3},
-            "prompt": "metadata-only note prompt",
+            "prompt": "SECRET_PROMPT_DO_NOT_LEAK",
             "renderer": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "script": "console.log('SECRET_SCRIPT_DO_NOT_LEAK')",
             "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "api_auth": {"Authorization": "Bearer SECRET_BEARER_DO_NOT_LEAK"},
             "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "generate_body": "SECRET_GENERATE_BODY_DO_NOT_LEAK",
         },
         include_safety_receipts=True,
     )
@@ -945,9 +948,15 @@ def test_native_widget_mutations_can_return_metadata_only_safety_receipts(monkey
         "notes-card",
         {
             "title": "Renamed Notes",
-            "metadata": {"summary": "safe metadata", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            "metadata": {
+                "summary": "safe metadata",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                "api_auth": {"Authorization": "Bearer SECRET_BEARER_DO_NOT_LEAK"},
+            },
             "html": "<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+            "script": "console.log('SECRET_SCRIPT_DO_NOT_LEAK')",
             "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "generate_body": "SECRET_GENERATE_BODY_DO_NOT_LEAK",
         },
         include_safety_receipts=True,
     )
@@ -970,21 +979,39 @@ def test_native_widget_mutations_can_return_metadata_only_safety_receipts(monkey
     assert patched["prompt_preflight"]["boundary"] == "creator_commit"
     assert patched["autonomy_policy"]["action"] == "space.widget.patch"
     assert patched["progress_event"]["run_id"] == f"widget.patch:{created['space_id']}"
+    assert patched["output_compaction"]["command"] == "space.widget.patch"
+    assert patched["output_compaction"]["metadata_only"] is True
+    assert patched["output_compaction"]["redaction_status"] == "metadata_only"
+    assert f"space_id: {created['space_id']}" in patched["output_compaction"]["text"]
+    assert f"progress_run_id: widget.patch:{created['space_id']}" in patched["output_compaction"]["text"]
     assert patched["widget"]["title"] == "Renamed Notes"
 
     assert deleted["prompt_preflight"]["boundary"] == "creator_commit"
     assert deleted["autonomy_policy"]["action"] == "space.widget.delete"
     assert deleted["progress_event"]["run_id"] == f"widget.delete:{created['space_id']}"
+    assert deleted["output_compaction"]["command"] == "space.widget.delete"
+    assert deleted["output_compaction"]["metadata_only"] is True
+    assert deleted["output_compaction"]["redaction_status"] == "metadata_only"
+    assert f"space_id: {created['space_id']}" in deleted["output_compaction"]["text"]
+    assert f"progress_run_id: widget.delete:{created['space_id']}" in deleted["output_compaction"]["text"]
     assert deleted["deleted"] is True
 
     serialized = json.dumps({"upserted": upserted, "patched": patched, "deleted": deleted}).lower()
     assert "secret_value_do_not_leak" not in serialized
+    assert "secret_prompt_do_not_leak" not in serialized
+    assert "secret_script_do_not_leak" not in serialized
+    assert "secret_bearer_do_not_leak" not in serialized
+    assert "secret_generate_body_do_not_leak" not in serialized
     assert "secret_source_do_not_leak" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
     assert '"html":' not in serialized
+    assert '"script":' not in serialized
     assert '"source":' not in serialized
     assert "api_key" not in serialized
+    assert "api_auth" not in serialized
+    assert "bearer" not in serialized
+    assert "generate_body" not in serialized
 
 
 def test_native_widget_safety_receipts_preserve_generated_disabled_status_without_preflight_block(monkeypatch, tmp_path):
