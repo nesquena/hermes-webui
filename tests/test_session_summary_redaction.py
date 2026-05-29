@@ -21,30 +21,26 @@ def _get(path):
 
 
 def _write_session_with_secret_title():
-    from tests.conftest import TEST_STATE_DIR
+    from api.models import Session
+    from tests.conftest import TEST_WORKSPACE
 
     sid = "sec_summary_" + uuid.uuid4().hex[:8]
-    sessions_dir = TEST_STATE_DIR / "sessions"
-    sessions_dir.mkdir(parents=True, exist_ok=True)
     now = time.time()
-    (sessions_dir / f"{sid}.json").write_text(json.dumps({
-        "session_id": sid,
-        "title": f"session with {_FULL_SECRET}",
-        "workspace": "/tmp",
-        "model": "test",
-        "created_at": now,
-        "updated_at": now,
-        "pinned": False,
-        "archived": False,
-        "project_id": None,
-        "profile": "default",
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "estimated_cost": None,
-        "personality": None,
-        "messages": [],
-        "tool_calls": [],
-    }))
+    session = Session(
+        session_id=sid,
+        title=f"session with {_FULL_SECRET}",
+        workspace=str(TEST_WORKSPACE),
+        model="test",
+        created_at=now,
+        updated_at=now,
+        profile="default",
+        messages=[],
+        tool_calls=[],
+    )
+    # Save through the model layer so the sidebar index is updated just like a
+    # real session write. Direct sidecar writes are intentionally not visible to
+    # /api/sessions while an index exists.
+    session.save(touch_updated_at=False)
     return sid
 
 

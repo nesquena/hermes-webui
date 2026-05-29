@@ -16,6 +16,28 @@ def test_initial_msg_limit_skips_trailing_tool_only_rows():
     assert offset == 0
 
 
+def test_initial_msg_limit_skips_trailing_empty_partial_activity_rows():
+    messages = [
+        {"role": "user", "content": "today question", "timestamp": 200},
+        {"role": "assistant", "content": "today answer", "timestamp": 201},
+    ] + [
+        {
+            "role": "assistant",
+            "content": "",
+            "_partial": True,
+            "timestamp": 100,
+            "reasoning": f"old cancelled thinking {idx}",
+            "_partial_tool_calls": [{"name": "terminal", "done": True}],
+        }
+        for idx in range(40)
+    ]
+
+    window, offset = _message_window_for_display(messages, msg_limit=5)
+
+    assert [m["content"] for m in window] == ["today question", "today answer"]
+    assert offset == 0
+
+
 def test_msg_limit_keeps_raw_tail_when_it_has_renderable_rows():
     messages = [
         {"role": "user", "content": f"u{idx}"} if idx % 2 == 0 else {"role": "assistant", "content": f"a{idx}"}

@@ -58,6 +58,14 @@ your real `~/.hermes` unless you intentionally want to test real state. Use an
 isolated Hermes home and follow
 [`docs/onboarding-agent-checklist.md`](onboarding-agent-checklist.md) instead.
 
+> **Linux note**: run Compose as the user who owns the Hermes home. The command
+> `sudo docker compose up -d` can make Compose expand `${HOME}` as `/root`, so
+> the default `${HOME}/.hermes` bind mount becomes `/root/.hermes` instead of
+> your user's real Hermes directory. Prefer adding your user to the `docker group`
+> and running `docker compose up -d`; if you must preserve the caller environment
+> for a one-off root run, use `sudo -E docker compose up -d` and verify the
+> rendered mount with `docker compose config` first.
+
 ## Scheduled jobs and the gateway daemon
 
 **Symptom**: Cron jobs created in the Tasks panel never fire. System Settings shows the orange "Gateway not configured" pill, and the Tasks panel shows the same banner above the job list.

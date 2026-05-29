@@ -25,7 +25,7 @@ def test_dashboard_rail_item_sits_between_insights_and_settings_spacer():
 def test_dashboard_frontend_fetches_status_with_sixty_second_cache():
     assert "DASHBOARD_STATUS_TTL_MS=60000" in UI_JS
     assert "function refreshDashboardStatus" in UI_JS
-    assert "api('/api/dashboard/status')" in UI_JS
+    assert "api('/api/dashboard/status',{timeoutToast:false})" in UI_JS
     assert "setInterval(refreshDashboardStatus,DASHBOARD_STATUS_TTL_MS)" in UI_JS
     assert 'fetch("/api/dashboard/status"' not in UI_JS
     assert "fetch('/api/dashboard/status'" not in UI_JS

@@ -13,6 +13,7 @@ import os
 import queue
 import re
 import platform
+import shlex
 import shutil
 import socket
 import sqlite3
@@ -989,6 +990,7 @@ from api.helpers import (
     _redact_text,
 )
 from api.agent_health import build_agent_health_payload
+from api.gateway_chat import gateway_chat_config_status
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
 
@@ -1025,6 +1027,42 @@ def _clear_stale_stream_state(session) -> bool:
     with STREAMS_LOCK:
         stream_alive = stream_id in STREAMS
     if stream_alive:
+        return False
+    try:
+        from api import config as _live_config
+        with _live_config.ACTIVE_RUNS_LOCK:
+            worker_alive = stream_id in (_live_config.ACTIVE_RUNS or {})
+    except Exception:
+        worker_alive = False
+    if worker_alive:
+        logger.debug(
+            "_clear_stale_stream_state: stream %s for session %s missing SSE channel "
+            "but worker bookkeeping is still active; deferring stale cleanup",
+            stream_id,
+            getattr(session, "session_id", "?"),
+        )
+        return False
+    grace_seconds = 30.0
+    try:
+        from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
+        grace_seconds = float(_REPAIR_STALE_PENDING_GRACE_SECONDS)
+        pending_started_at = getattr(session, "pending_started_at", None)
+        pending_age = time.time() - float(pending_started_at) if pending_started_at else None
+    except Exception:
+        pending_age = None
+    if (
+        getattr(session, "pending_user_message", None)
+        and pending_age is not None
+        and pending_age < grace_seconds
+    ):
+        logger.debug(
+            "_clear_stale_stream_state: stream %s for session %s missing SSE channel "
+            "but pending turn is %.1fs old; waiting for %.1fs stale-repair grace",
+            stream_id,
+            getattr(session, "session_id", "?"),
+            pending_age,
+            grace_seconds,
+        )
         return False
 
     # ── #1558 P0 safety: if we were handed a metadata-only stub, reload the
@@ -1420,17 +1458,42 @@ def _send_no_content(handler, status: int = 204) -> bool:
     return True
 
 
+def _safe_content_length(handler, max_bytes: int) -> int:
+    raw_length = handler.headers.get("Content-Length", 0)
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError):
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f"Invalid Content-Length: {raw_length!r}")
+    if length < 0:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f"Invalid Content-Length: {length}")
+    if length > max_bytes:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise OverflowError(f"Request body too large ({length} bytes, max {max_bytes})")
+    return length
+
+
 def _read_csp_report_payload(handler):
     try:
-        length = int(handler.headers.get("Content-Length", 0))
-    except Exception:
-        length = 0
-    if length > _CSP_REPORT_MAX_BODY_BYTES:
+        length = _safe_content_length(handler, _CSP_REPORT_MAX_BODY_BYTES)
+    except OverflowError as exc:
         try:
             handler.rfile.read(_CSP_REPORT_MAX_BODY_BYTES)
         except Exception:
             pass
-        return {"discarded": "body_too_large", "bytes": length}
+        return {"discarded": "body_too_large", "error": str(exc)}
+    except ValueError as exc:
+        return {"discarded": "invalid_content_length", "error": str(exc)}
     raw = handler.rfile.read(length) if length else b"{}"
     try:
         return json.loads(raw.decode("utf-8"))
@@ -1513,23 +1576,15 @@ def _sanitize_client_event_payload(payload: dict | None) -> dict:
 
 def _read_client_event_payload(handler) -> dict:
     try:
-        length = int(handler.headers.get("Content-Length", 0))
-    except Exception:
-        length = 0
-    if length > _CLIENT_EVENT_MAX_BODY_BYTES:
+        length = _safe_content_length(handler, _CLIENT_EVENT_MAX_BODY_BYTES)
+    except OverflowError:
         try:
             handler.rfile.read(_CLIENT_EVENT_MAX_BODY_BYTES)
         except Exception:
             pass
-        # Do not leave unread request-body bytes on an HTTP/1.1 keep-alive
-        # socket. Draining an arbitrary oversized body can tie up a worker;
-        # closing the connection after the bounded read preserves framing for
-        # the next request without turning diagnostics into a slow-drain sink.
-        try:
-            handler.close_connection = True
-        except Exception:
-            pass
         return {"event": "discarded", "reason": "body_too_large"}
+    except ValueError:
+        return {"event": "invalid", "reason": "invalid_content_length"}
     raw = handler.rfile.read(length) if length else b"{}"
     try:
         decoded = raw.decode("utf-8")
@@ -2210,12 +2265,14 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     """Return true when a paginated window should include this transcript row.
 
     Tool result rows are rendered through their assistant anchor or hidden as raw
-    tool output. A tail page containing only tool rows makes the frontend set
-    ``S.messages`` to a non-empty array while the visible transcript and topbar
-    count stay empty. Anchor small tail windows on the newest non-tool row so
-    long sessions do not open to a blank chat with only transient metadata.
+    tool output. Empty partial activity rows can be preserved after cancellation
+    to keep thinking/tool details inspectable, but they are not reply text. A
+    tail page containing only transient metadata makes the frontend open to
+    collapsed activity while newer real replies sit behind "load older messages".
     """
     if not isinstance(message, dict):
+        return False
+    if _is_empty_partial_activity_message(message):
         return False
     role = str(message.get("role") or "").strip().lower()
     return bool(role and role != "tool")
@@ -2266,6 +2323,12 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     sidecar_messages = list(getattr(session, "messages", []) or [])
     if cli_messages:
         if sidecar_messages and sidecar_messages != cli_messages:
+            if len(sidecar_messages) >= len(cli_messages):
+                return merge_session_messages_append_only(
+                    sidecar_messages,
+                    cli_messages,
+                    truncation_watermark=getattr(session, "truncation_watermark", None),
+                )
             merged_messages = []
             seen_message_keys = set()
             for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
@@ -2437,6 +2500,43 @@ def _normalize_sidebar_source_flags(session: dict) -> dict:
     return normalized
 
 
+def _session_source_is_webui(session: dict) -> bool:
+    """Return True for state.db/sidebar rows that describe WebUI-origin sessions."""
+    if not isinstance(session, dict):
+        return False
+    for key in ("source_tag", "raw_source", "session_source", "source"):
+        if str(session.get(key) or "").strip().lower() == "webui":
+            return True
+    return False
+
+
+def _session_lineage_ids(session: dict) -> set[str]:
+    """Return known ids that identify one logical sidebar lineage."""
+    if not isinstance(session, dict):
+        return set()
+    ids: set[str] = set()
+    for key in ("session_id", "_lineage_root_id", "_lineage_tip_id"):
+        value = session.get(key)
+        if value:
+            ids.add(str(value))
+    return ids
+
+
+def _is_duplicate_webui_state_projection(session: dict, represented_webui_ids: set[str]) -> bool:
+    """Return True when a state.db row is only a duplicate WebUI-origin projection.
+
+    The "Show non-WebUI sessions" toggle should add external/agent-owned
+    conversations, not make WebUI compression continuations appear only when the
+    external-session bridge is enabled. WebUI-origin state.db rows are still
+    useful metadata sidecars, but if any id in their compression lineage is
+    already represented by WebUI session JSON, they should not be injected as an
+    additive external row.
+    """
+    if not _session_source_is_webui(session):
+        return False
+    return bool(_session_lineage_ids(session) & represented_webui_ids)
+
+
 CLI_VISIBLE_SESSION_CAP = 20
 
 
@@ -2594,6 +2694,7 @@ from api.models import (
     get_state_db_session_summary,
     merge_session_messages_append_only,
     _session_message_merge_key,
+    _is_empty_partial_activity_message,
     prune_session_from_index,
     ensure_cron_project,
     is_cron_session,
@@ -3998,7 +4099,10 @@ def handle_get(handler, parsed) -> bool:
         return _handle_health(handler, parsed)
 
     if parsed.path == "/api/health/agent":
-        return j(handler, build_agent_health_payload())
+        payload = build_agent_health_payload()
+        payload["gateway_chat"] = gateway_chat_config_status()
+        j(handler, payload)
+        return True
 
     if parsed.path == "/api/system/health":
         j(handler, build_system_health_payload())
@@ -4495,9 +4599,17 @@ def handle_get(handler, parsed) -> bool:
                 # Apply the same CLI visibility semantics to imported local copies so
                 # low-value imported artifacts do not leak into the sidebar.
                 webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
-                webui_ids = {s["session_id"] for s in webui_sessions}
+                represented_webui_ids = set()
+                for s in webui_sessions:
+                    represented_webui_ids.update(_session_lineage_ids(s))
                 from api.models import _hide_from_default_sidebar as _cron_hide
-                deduped_cli = [s for s in cli if s["session_id"] not in webui_ids and is_cli_session_row_visible(s) and not _cron_hide(s)]
+                deduped_cli = [
+                    s for s in cli
+                    if s["session_id"] not in represented_webui_ids
+                    and not _is_duplicate_webui_state_projection(s, represented_webui_ids)
+                    and is_cli_session_row_visible(s)
+                    and not _cron_hide(s)
+                ]
             else:
                 diag.stage("filter_webui_sessions")
                 webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
@@ -5139,6 +5251,11 @@ def handle_post(handler, parsed) -> bool:
         diag.stage("read_body")
     try:
         body = read_body(handler)
+    except ValueError as exc:
+        if diag:
+            diag.finish()
+        status = 413 if "too large" in str(exc).lower() else 400
+        return bad(handler, str(exc), status=status)
     except Exception:
         if diag:
             diag.finish()
@@ -6684,7 +6801,7 @@ def handle_post(handler, parsed) -> bool:
             set_auth_cookie,
             is_auth_enabled,
         )
-        from api.auth import _check_login_rate, _record_login_attempt
+        from api.auth import _check_login_rate, _record_login_attempt, _clear_login_attempts
 
         if not is_auth_enabled():
             return j(handler, {"ok": True, "message": "Auth not enabled"})
@@ -6699,6 +6816,7 @@ def handle_post(handler, parsed) -> bool:
         if not verify_password(password):
             _record_login_attempt(client_ip)
             return bad(handler, "Invalid password", 401)
+        _clear_login_attempts(client_ip)
         cookie_val = create_session()
         body = json.dumps({"ok": True}).encode()
         handler.send_response(200)
@@ -7624,6 +7742,62 @@ def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp
     return True
 
 
+_MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
+
+
+def _message_content_text(content) -> str:
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text") or ""))
+            else:
+                parts.append(str(part or ""))
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: set[str]) -> bool:
+    """Allow exact MEDIA:image paths already present in the requested session."""
+    sid = str(sid or "").strip()
+    if not sid:
+        return False
+    mime = MIME_MAP.get(target.suffix.lower(), "application/octet-stream")
+    if mime not in image_mimes:
+        return False
+    try:
+        target_resolved = target.resolve()
+    except Exception:
+        return False
+    try:
+        session = get_session(sid)
+    except Exception:
+        return False
+
+    for message in getattr(session, "messages", []) or []:
+        if not isinstance(message, dict):
+            continue
+        # Only honor MEDIA: tokens that the assistant/tool emitted. User-authored
+        # content cannot mint allow-list entries even if it contains a MEDIA:
+        # token — keeps the implicit threat model (assistant-emitted artifacts
+        # only) explicit.
+        role = str(message.get("role") or "").strip().lower()
+        if role == "user":
+            continue
+        text = _message_content_text(message.get("content"))
+        if "MEDIA:" not in text:
+            continue
+        for ref in _MEDIA_TOKEN_RE.findall(text):
+            if "://" in ref:
+                continue
+            try:
+                if Path(ref).expanduser().resolve() == target_resolved:
+                    return True
+            except Exception:
+                continue
+    return False
+
+
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
@@ -7695,12 +7869,21 @@ def _handle_media(handler, parsed):
                 except Exception:
                     pass
 
+    _INLINE_IMAGE_TYPES = {
+        "image/png", "image/jpeg", "image/gif", "image/webp",
+        "image/x-icon", "image/bmp",
+    }
     within_allowed = any(
         _os.path.commonpath([str(target), str(root)]) == str(root)
         for root in allowed_roots
         if root.exists()
     )
-    if not within_allowed:
+    session_media_allowed = _session_media_token_allows_image_path(
+        qs.get("session_id", [""])[0],
+        target,
+        _INLINE_IMAGE_TYPES,
+    )
+    if not within_allowed and not session_media_allowed:
         return bad(handler, "Path not in allowed location", 403)
 
     if not target.exists() or not target.is_file():
@@ -7713,10 +7896,6 @@ def _handle_media(handler, parsed):
     # Only serve safe media/PDF types inline when explicitly requested. HTML is
     # allowed inline only with a CSP sandbox so "open full page" can work without
     # granting same-origin access to the WebUI. SVG is always a download (XSS risk).
-    _INLINE_IMAGE_TYPES = {
-        "image/png", "image/jpeg", "image/gif", "image/webp",
-        "image/x-icon", "image/bmp",
-    }
     _INLINE_PREVIEW_TYPES = _INLINE_IMAGE_TYPES | {
         "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac",
         "audio/ogg", "audio/opus", "audio/flac",
@@ -13286,15 +13465,45 @@ _JOPLIN_AI_RECALL_NOTE_PRIORITY = [
 ]
 
 
-def _joplin_prefill_script_path() -> Path | None:
-    cfg = get_config()
-    path_value = cfg.get("prefill_messages_script") if isinstance(cfg, dict) else None
+def _script_path_from_config_value(path_value) -> Path | None:
+    """Return the likely recall script path from a string or argv-style hook."""
     if not path_value:
         return None
     try:
-        return Path(str(path_value)).expanduser()
+        if isinstance(path_value, (list, tuple)):
+            candidates = [str(part).strip() for part in path_value if str(part).strip()]
+        else:
+            raw = str(path_value).strip()
+            raw_path = Path(raw).expanduser()
+            if raw and raw_path.exists():
+                return raw_path
+            candidates = shlex.split(raw)
+        # Hooks commonly use either [python, /path/to/script.py] or the string
+        # form "python /path/to/script.py". Prefer the first script-like argument
+        # over the interpreter so AI-recent notes reflect the configured recall
+        # source rather than "python3".
+        for candidate in candidates:
+            if candidate.endswith((".py", ".sh", ".bash")):
+                return Path(candidate).expanduser()
+        if candidates:
+            return Path(candidates[-1]).expanduser()
+        return None
     except Exception:
         return None
+
+
+def _joplin_prefill_script_path() -> Path | None:
+    cfg = get_config()
+    if not isinstance(cfg, dict):
+        return None
+    # The browser notes drawer should mirror the WebUI-specific recall hook when
+    # configured. Fall back to the legacy generic session prefill script only for
+    # deployments that have not opted into WebUI dynamic recall.
+    return _script_path_from_config_value(
+        os.getenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", "")
+        or cfg.get("webui_prefill_messages_script")
+        or cfg.get("prefill_messages_script")
+    )
 
 
 def _joplin_recall_note_refs(script_path: Path | None = None) -> list[dict]:
