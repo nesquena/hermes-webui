@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Assistant messages can now render explicitly marked, sanitized HTML fragments for compact structured cards while fenced-code examples remain source-only.
+
+### Fixed
+
+- WebUI shell, login, and service-worker asset URLs now include static-file mtimes in their cache-busting token so local frontend hotfixes invalidate mobile/PWA caches without a package version bump.
+
 ## [v0.51.157] — 2026-05-28 — Release EC (stage-batch39 — 5-PR mixed-risk cleanup: gateway prefill forward + prefill budget + compressed-continuation sidebar + browser-transcript memory guidance + reasoning max parity)
 
 ### Added
