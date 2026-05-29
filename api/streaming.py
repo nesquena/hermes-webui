@@ -40,6 +40,7 @@ from api.config import (
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.metering import meter
+from api.tool_availability import build_tool_availability_context, tool_availability_prompt_lines
 from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
@@ -235,6 +236,11 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         value = str(raw).strip() if raw is not None else ""
         if value:
             lines.append(f"- {label}: {value}")
+    tool_availability = surface_context.get("tool_availability")
+    availability_lines = tool_availability_prompt_lines(tool_availability)
+    if availability_lines:
+        lines.append("Tool availability diagnostics:")
+        lines.extend(availability_lines)
     return "\n".join(lines)
 
 
@@ -4951,6 +4957,11 @@ def _run_agent_streaming(
             # (agent's own mechanism). This preserves any selected personality
             # while making long tool runs emit real user-visible interim text
             # through interim_assistant_callback instead of frontend guesses.
+            _tool_availability = build_tool_availability_context(
+                enabled_toolsets=_toolsets,
+                agent_tools=getattr(agent, 'tools', None),
+                cfg=_cfg,
+            )
             agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
                 _personality_prompt,
                 surface_context={
@@ -4958,6 +4969,7 @@ def _run_agent_streaming(
                     'session_id': session_id,
                     'profile': getattr(s, 'profile', None),
                     'workspace': s.workspace,
+                    'tool_availability': _tool_availability,
                 },
             )
             _pending_started_at = getattr(s, 'pending_started_at', None)

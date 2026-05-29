@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- WebUI now injects safe tool-availability diagnostics into browser chat context, so agents can explain when browser tools are enabled but filtered out by backend requirements instead of claiming WebUI/API sessions permanently lack browser access.
+
 ## [v0.51.157] — 2026-05-28 — Release EC (stage-batch39 — 5-PR mixed-risk cleanup: gateway prefill forward + prefill budget + compressed-continuation sidebar + browser-transcript memory guidance + reasoning max parity)
 
 ### Added
