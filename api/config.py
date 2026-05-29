@@ -4715,12 +4715,6 @@ class StreamChannel:
             return {
                 "subscriber_count": len(self._subscribers),
                 "offline_buffered_events": len(self._offline_buffer),
-                "offline_buffered_event_ids": [
-                    event_id
-                    for event_id in self._offline_buffer_event_ids
-                    if event_id
-                ],
-                "last_event_id": self._last_event_id,
             }
 
 
