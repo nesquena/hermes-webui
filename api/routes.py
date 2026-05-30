@@ -212,6 +212,43 @@ def _worktree_retained_payload_for_session_id(sid: str) -> dict:
         return {}
 
 
+def _get_disabled_skill_names_for_profile() -> set:
+    """Read disabled skill names from the active profile's config.yaml.
+
+    Unlike ``tools.skills_tool._get_disabled_skill_names`` which reads from
+    the process-global ``HERMES_HOME``, this uses ``_get_config_path()`` which
+    resolves against the WebUI's active profile.  Checks
+    ``skills.platform_disabled.webui`` first, falling back to
+    ``skills.disabled``.
+    """
+    config_path = _get_config_path()
+    if not config_path.exists():
+        return set()
+    try:
+        cfg = _load_yaml_config_file(config_path)
+    except Exception:
+        return set()
+    if not isinstance(cfg, dict):
+        return set()
+    skills_cfg = cfg.get("skills")
+    if not isinstance(skills_cfg, dict):
+        return set()
+    # Check platform_disabled.webui first (mirrors agent platform resolution)
+    platform_disabled = skills_cfg.get("platform_disabled")
+    if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
+        return _normalize_disabled_set(platform_disabled["webui"])
+    return _normalize_disabled_set(skills_cfg.get("disabled"))
+
+
+def _normalize_disabled_set(values) -> set:
+    """Normalize a YAML disabled list into a set of stripped strings."""
+    if values is None:
+        return set()
+    if isinstance(values, str):
+        values = [values]
+    return {str(v).strip() for v in values if str(v).strip()}
+
+
 def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
     """List skills using an explicit local skills directory.
 
@@ -223,7 +260,6 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     from tools.skills_tool import (
         MAX_DESCRIPTION_LENGTH,
         _EXCLUDED_SKILL_DIRS,
-        _get_disabled_skill_names,
         _parse_frontmatter,
         _sort_skills,
         skill_matches_platform,
@@ -240,7 +276,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
 
     all_skills = []
     seen_names: set[str] = set()
-    disabled = _get_disabled_skill_names()
+    disabled = _get_disabled_skill_names_for_profile()
     search_dirs = _active_skill_search_dirs(skills_dir)
 
     for scan_dir in search_dirs:
