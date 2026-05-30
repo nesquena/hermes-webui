@@ -2129,6 +2129,10 @@ def _lookup_cli_session_metadata(session_id: str) -> dict:
 
 
 def _messaging_session_identity(session: dict, raw_source: str) -> str:
+    sid = _safe_first(session.get("session_id"))
+    if sid and _is_pre_compression_continuation_row(session):
+        return f"{raw_source}|session_id:{sid}"
+
     metadata = _lookup_gateway_session_identity(session.get("session_id"))
     session_key = _safe_first(
         metadata.get("session_key"),
@@ -2163,7 +2167,27 @@ def _messaging_session_identity(session: dict, raw_source: str) -> str:
 
     if identity_parts:
         return f"{raw_source}|" + "|".join(identity_parts)
+
     return raw_source
+
+
+def _is_pre_compression_snapshot_id(session_id: str) -> bool:
+    sid = _safe_first(session_id)
+    if not sid or not all(c in "0123456789abcdefghijklmnopqrstuvwxyz_" for c in sid):
+        return False
+    try:
+        path = SESSION_DIR / f"{sid}.json"
+        if not path.exists():
+            return False
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return bool(data.get("pre_compression_snapshot"))
+    except Exception:
+        return False
+
+
+def _is_pre_compression_continuation_row(session: dict) -> bool:
+    parent_sid = _safe_first(session.get("parent_session_id"))
+    return bool(parent_sid and _is_pre_compression_snapshot_id(parent_sid))
 
 
 def _session_messaging_raw_source(session: dict) -> str:
@@ -2227,9 +2251,14 @@ def _should_hide_stale_messaging_session(
         return True
 
     if not _has_durable_messaging_identity(session):
+        if _is_pre_compression_continuation_row(session):
+            return False
+        parent_sid = _safe_first(session.get("parent_session_id"))
+        if parent_sid and parent_sid in active_gateway_session_ids:
+            return True
         return True
 
-    if session.get("parent_session_id"):
+    if session.get("parent_session_id") and not _is_pre_compression_continuation_row(session):
         return True
 
     message_count = _numeric_count(session.get("message_count"))
@@ -2763,6 +2792,91 @@ from api.models import (
     is_cron_session,
     is_safe_session_id,
 )
+
+
+def _pre_compression_continuation_session_id(session) -> str | None:
+    """Return the newest visible descendant for a hidden compression snapshot.
+
+    Mobile browsers can miss the final SSE `done` handoff while backgrounded.
+    On reload they may request the archived pre-compression session id from the
+    stale URL/localStorage. The old snapshot is intentionally hidden from the
+    sidebar, so expose a lightweight recovery hint when a child continuation
+    exists either in memory or on disk. Follow bounded snapshot-to-snapshot hops
+    so repeated compression still lands on the latest visible continuation.
+    """
+    if not getattr(session, "pre_compression_snapshot", False):
+        return None
+    sid = _safe_first(getattr(session, "session_id", None))
+    if not sid:
+        return None
+
+    def _child_rows() -> list:
+        rows = []
+        seen_ids = set()
+        try:
+            with LOCK:
+                memory_sessions = list(SESSIONS.values())
+            for child in memory_sessions:
+                child_sid = _safe_first(getattr(child, "session_id", None))
+                if not child_sid or child_sid in seen_ids:
+                    continue
+                seen_ids.add(child_sid)
+                rows.append(child)
+        except Exception:
+            pass
+        try:
+            for path in SESSION_DIR.glob("*.json"):
+                if path.name.startswith("_"):
+                    continue
+                child_sid = path.stem
+                if not child_sid or child_sid in seen_ids:
+                    continue
+                child = Session.load_metadata_only(child_sid)
+                if child:
+                    seen_ids.add(child_sid)
+                    rows.append(child)
+        except Exception:
+            pass
+        return rows
+
+    children_by_parent: dict[str, list] = {}
+    for child in _child_rows():
+        parent_sid = _safe_first(getattr(child, "parent_session_id", None))
+        child_sid = _safe_first(getattr(child, "session_id", None))
+        if not parent_sid or not child_sid or child_sid == sid:
+            continue
+        children_by_parent.setdefault(parent_sid, []).append(child)
+
+    candidates = []
+    frontier = [sid]
+    seen = {sid}
+    for _ in range(20):
+        if not frontier:
+            break
+        parent_sid = frontier.pop(0)
+        for child in children_by_parent.get(parent_sid, []):
+            child_sid = _safe_first(getattr(child, "session_id", None))
+            if not child_sid or child_sid in seen:
+                continue
+            seen.add(child_sid)
+            if getattr(child, "pre_compression_snapshot", False):
+                frontier.append(child_sid)
+            else:
+                candidates.append(child)
+
+    if not candidates:
+        return None
+    latest = max(
+        candidates,
+        key=lambda child: float(
+            _safe_first(
+                getattr(child, "updated_at", None),
+                getattr(child, "created_at", None),
+                0,
+            ) or 0
+        ),
+    )
+    return getattr(latest, "session_id", None) or None
 from api.workspace import (
     load_workspaces,
     save_workspaces,
@@ -4627,6 +4741,9 @@ def handle_get(handler, parsed) -> bool:
                     float(raw.get("updated_at") or 0),
                     _merged_last_message_at,
                 )
+            continuation_sid = _pre_compression_continuation_session_id(s)
+            if continuation_sid:
+                raw["continuation_session_id"] = continuation_sid
             if cli_meta and _is_messaging_session_record(cli_meta):
                 raw = _merge_cli_sidebar_metadata(raw, cli_meta)
                 # ``message_count`` in /api/session is the display coordinate
