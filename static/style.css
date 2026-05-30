@@ -4056,11 +4056,15 @@ main.main > #mainPlugin{display:none;}
 #mainSettings .settings-field > div[style*="color: var(--muted)"]{font-size:12px;color:var(--muted);line-height:1.5;}
 
 .model-advanced-row{
-  position:relative;
-  display:block;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 34px;
+  gap:8px;
+  align-items:center;
 }
 .model-advanced-row #settingsModel{
-  padding-right:48px!important;
+  width:100%!important;
+  min-width:0;
+  box-sizing:border-box;
 }
 .model-advanced-btn{
   width:32px;
@@ -4068,10 +4072,6 @@ main.main > #mainPlugin{display:none;}
   display:flex;
   align-items:center;
   justify-content:center;
-  position:absolute;
-  right:8px;
-  top:50%;
-  transform:translateY(-50%);
   border-radius:8px;
   border:1px solid var(--border);
   background:var(--input-bg);
