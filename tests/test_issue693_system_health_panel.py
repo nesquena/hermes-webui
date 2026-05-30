@@ -108,11 +108,23 @@ def test_system_health_route_registered_and_auth_gated(monkeypatch):
     assert '"/api/system/health"' not in AUTH_PY, "system metrics must not be public"
 
     monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "test-password")
+    from api import auth as _auth
     from api.auth import check_auth
 
+    # The password hash is cached process-wide (PBKDF2 is ~1s). A prior test may
+    # have populated the cache with "no password" (None), so the env var we just
+    # set would be ignored on the fast path. Invalidate before AND after so this
+    # test sees its own password and doesn't leak the test-password cache to the
+    # next test — required for order-independence under sharded/random runs.
+    _auth._invalidate_password_hash_cache()
+
     handler = _FakeHandler()
-    assert check_auth(handler, SimpleNamespace(path="/api/system/health", query="")) is False
-    assert handler.status in (302, 401)
+    try:
+        assert check_auth(handler, SimpleNamespace(path="/api/system/health", query="")) is False
+        assert handler.status in (302, 401)
+    finally:
+        monkeypatch.delenv("HERMES_WEBUI_PASSWORD", raising=False)
+        _auth._invalidate_password_hash_cache()
 
 
 def test_system_health_route_returns_only_sanitized_payload(monkeypatch):
