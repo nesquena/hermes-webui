@@ -2896,6 +2896,12 @@ main.main.showing-logs > #mainLogs{display:flex;}
 #mainSettings .settings-field > div[style*="color:var(--muted)"],
 #mainSettings .settings-field > div[style*="color: var(--muted)"]{font-size:12px;color:var(--muted);line-height:1.5;}
 
+.model-advanced-row{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 34px;
+  gap:8px;
+  align-items:center;
+}
 .model-advanced-btn{
   width:32px;
   height:32px;

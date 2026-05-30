@@ -7398,7 +7398,22 @@ function _openAuxAdvancedOptions(taskKey,cfg){
 }
 
 function _bindMainAdvancedOptionsButton(){
- const btn=$('mainAdvancedBtn');
+ const modelSel=$('settingsModel');
+ let btn=$('mainAdvancedBtn');
+ if(!btn&&modelSel){
+  const parent=modelSel.parentElement;
+  let row=parent&&parent.classList&&parent.classList.contains('model-advanced-row')?parent:null;
+  if(!row){
+   row=document.createElement('div');
+   row.className='model-advanced-row';
+   parent.insertBefore(row,modelSel);
+   row.appendChild(modelSel);
+  }
+  btn=document.createElement('button');
+  btn.type='button';
+  btn.id='mainAdvancedBtn';
+  row.appendChild(btn);
+ }
  if(!btn) return;
  btn.classList.add('model-advanced-btn');
  if(!btn.querySelector('svg')&&typeof li==='function') btn.innerHTML=li('settings',15);
