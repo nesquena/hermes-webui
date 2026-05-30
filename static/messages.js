@@ -1706,14 +1706,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('approval',e=>{
       const d=JSON.parse(e.data);
       showApprovalForSession(activeSid, d, 1);
-      playNotificationSound();
+      playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
       sendBrowserNotification('Approval required',d.description||'Tool approval needed');
     });
 
     source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
       showClarifyForSession(activeSid, d);
-      playNotificationSound();
+      playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
       sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed');
     });
 
@@ -3330,6 +3330,43 @@ function playNotificationSound(){
     osc.start(ctx.currentTime);osc.stop(ctx.currentTime+0.3);
     osc.onended=()=>ctx.close();
   }catch(e){console.warn('Notification sound failed:',e);}
+}
+
+
+function _attentionSoundKey(sid,kind,count){
+  const safeSid=String(sid||'');
+  const safeKind=String(kind||'attention');
+  const safeCount=Math.max(1,Number(count)||1);
+  return `${safeSid}:${safeKind}:${safeCount}`;
+}
+
+function playAttentionSound(key){
+  if(!window._soundEnabled) return;
+  const nowMs=Date.now();
+  if(window._lastAttentionSoundAt&&nowMs-window._lastAttentionSoundAt<900) return;
+  const dedupeKey=key?String(key):'';
+  if(dedupeKey){
+    const seen=window._attentionSoundSeenKeys instanceof Map?window._attentionSoundSeenKeys:new Map();
+    window._attentionSoundSeenKeys=seen;
+    for(const [seenKey,seenAt] of seen){
+      if(nowMs-Number(seenAt||0)>300000) seen.delete(seenKey);
+    }
+    if(seen.has(dedupeKey)) return;
+    seen.set(dedupeKey,nowMs);
+  }
+  window._lastAttentionSoundAt=nowMs;
+  try{
+    const ctx=new (window.AudioContext||window.webkitAudioContext)();
+    const osc=ctx.createOscillator();
+    const gain=ctx.createGain();
+    osc.connect(gain);gain.connect(ctx.destination);
+    osc.type='sine';osc.frequency.setValueAtTime(880,ctx.currentTime);
+    osc.frequency.setValueAtTime(660,ctx.currentTime+0.075);
+    gain.gain.setValueAtTime(0.24,ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01,ctx.currentTime+0.24);
+    osc.start(ctx.currentTime);osc.stop(ctx.currentTime+0.24);
+    osc.onended=()=>ctx.close();
+  }catch(e){console.warn('Attention sound failed:',e);}
 }
 
 function sendBrowserNotification(title,body){
