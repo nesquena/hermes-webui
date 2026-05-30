@@ -1,3 +1,45 @@
+  @font-face {
+    font-family: "DreamIT Roboto";
+    src: url("fonts/dreamit/roboto-regular.ttf") format("truetype");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "DreamIT Roboto";
+    src: url("fonts/dreamit/roboto-medium.ttf") format("truetype");
+    font-weight: 500;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "DreamIT Roboto";
+    src: url("fonts/dreamit/roboto-bold.ttf") format("truetype");
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "DreamIT Open Sans";
+    src: url("fonts/dreamit/open-sans-regular.ttf") format("truetype");
+    font-weight: 400;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "DreamIT Open Sans";
+    src: url("fonts/dreamit/open-sans-semibold.ttf") format("truetype");
+    font-weight: 600;
+    font-style: normal;
+    font-display: swap;
+  }
+  @font-face {
+    font-family: "DreamIT Open Sans";
+    src: url("fonts/dreamit/open-sans-bold.ttf") format("truetype");
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+  }
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   /* ── Light mode (default) — warm gold-tinted palette from Hermes brand ── */
   :root {
@@ -13,7 +55,7 @@
     --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;
     --font-size-xs:11px;--font-size-sm:12px;--font-size-md:14px;
     --file-tree-toggle-width:10px;
-    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    --font-ui:"DreamIT Roboto","DreamIT Open Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
     --surface-subtle:rgba(0,0,0,.025);--surface-subtle-hover:rgba(0,0,0,.045);
     --border-subtle:rgba(0,0,0,.08);--border-muted:rgba(0,0,0,.12);
     font-family:var(--font-ui);font-size:14px;line-height:1.6;
@@ -282,7 +324,7 @@
     --accent-hover:#3A6E9A;--accent-bg:rgba(70,130,180,0.06);--accent-bg-strong:rgba(70,130,180,0.12);--accent-text:#2C5F88;
     --error:#C62828;--success:#3D8B40;--warning:#E68A00;--info:#4682B4;
     --radius-sm:1px;--radius-md:2px;--radius-card:2px;--radius-lg:4px;
-    --font-ui:"SF Mono","Roboto Mono","Courier New",monospace;
+    --font-ui:"DreamIT Roboto","DreamIT Open Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
     --surface-subtle:rgba(0,0,0,.025);--surface-subtle-hover:rgba(0,0,0,.045);
     --border-subtle:rgba(0,0,0,.08);--border-muted:rgba(0,0,0,.12);
     font-family:var(--font-ui);font-size:14.5px;line-height:1.7;
@@ -439,7 +481,7 @@
     --input-bg:#ffffff;--hover-bg:#f5f5f5;--code-bg:#fafafa;--code-inline-bg:#f5f5f5;--code-text:#111111;--pre-text:#111111;
     --error:#e5484d;--success:#007a45;--warning:#b45309;--info:#0070f3;
     --radius-sm:4px;--radius-md:6px;--radius-card:8px;--radius-lg:10px;
-    --font-ui:"Geist","Geist Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    --font-ui:"DreamIT Roboto","DreamIT Open Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
   }
   :root.dark[data-skin="geist-contrast"]{
     color-scheme:dark;
@@ -1016,10 +1058,14 @@
   @keyframes spin{to{transform:rotate(360deg);}}
   .session-item.new-flash{animation:newflash 1.4s ease-out forwards;}
   .session-item.session-list-flip-enter{animation:sessionListFlipIn .28s cubic-bezier(.2,.8,.2,1) backwards;transform-origin:center top;}
-  /* Collapsible date group headers */
-  .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 10px 4px;cursor:pointer;user-select:none;opacity:.8;transition:opacity .15s;}
-  .session-date-header:hover{opacity:1;}
+  /* Collapsible date group cards */
+  .session-date-group{margin:8px 8px 12px;padding:4px;border:1px solid var(--border);border-radius:12px;background:color-mix(in srgb,var(--surface) 72%,transparent);box-shadow:0 1px 2px rgba(0,0,0,.04);}
+  .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:7px 8px 6px;margin:-1px -1px 4px;border-radius:10px 10px 8px 8px;background:color-mix(in srgb,var(--surface-subtle) 80%,transparent);border-bottom:1px solid color-mix(in srgb,var(--border) 70%,transparent);cursor:pointer;user-select:none;opacity:.86;transition:opacity .15s,background .15s;}
+  .session-date-header:hover{opacity:1;background:color-mix(in srgb,var(--hover-bg) 72%,transparent);}
   .session-date-header.pinned{color:var(--accent);}
+  .session-date-count{margin-left:auto;min-width:18px;padding:1px 6px;border-radius:999px;background:var(--hover-bg);color:var(--muted);font-size:10px;font-weight:700;line-height:1.45;text-align:center;letter-spacing:0;text-transform:none;}
+  .session-date-body{display:flex;flex-direction:column;gap:2px;}
+  .session-date-body .session-item{margin-bottom:0;}
 
   /* ── Batch select mode ── */
   .session-select-toggle{font-size:11px;padding:6px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.6;transition:opacity .15s;user-select:none;margin-top:4px;border-radius:6px;}
@@ -3944,6 +3990,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
 }
 .thinking-card.open .thinking-card-body { max-height: 260px; overflow-y: auto; opacity: 1; padding: 8px 12px; border-top-color: var(--accent-bg-strong); }
 .thinking-card-body pre { font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; word-break: break-word; margin: 0; }
+.thinking-card-body pre strong.thinking-heading { color: var(--text); font-weight: 700; }
 
 /* ── Tool cards: tighter chrome to match quieter thinking card ── */
 .tool-card { border-radius: 8px; margin-top: 3px; margin-bottom: 3px; }

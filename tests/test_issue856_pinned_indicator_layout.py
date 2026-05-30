@@ -148,6 +148,33 @@ def test_date_group_caret_expanded_down_collapsed_right():
     assert ".session-date-caret.collapsed{transform:rotate(-90deg);}" in STYLE_CSS
 
 
+def test_date_groups_render_as_cards_with_count_pills():
+    assert "wrapper.className='session-date-group';" in SESSIONS_JS
+    assert "count.className='session-date-count';" in SESSIONS_JS
+    assert "count.textContent=String(g.items.length);" in SESSIONS_JS
+    assert "conversation${g.items.length===1?'':'s'}" in SESSIONS_JS
+    assert "hdr.appendChild(caret);hdr.appendChild(label);hdr.appendChild(count);" in SESSIONS_JS
+
+    group_block = STYLE_CSS[
+        STYLE_CSS.find(".session-date-group{"):
+        STYLE_CSS.find(".session-date-header{")
+    ]
+    assert "border:1px solid var(--border);" in group_block
+    assert "border-radius:12px;" in group_block
+    assert "background:color-mix" in group_block
+
+    count_block = STYLE_CSS[
+        STYLE_CSS.find(".session-date-count{"):
+        STYLE_CSS.find(".session-date-body{")
+    ]
+    assert "margin-left:auto;" in count_block
+    assert "border-radius:999px;" in count_block
+    assert "background:var(--hover-bg);" in count_block
+
+    assert ".session-date-body{display:flex;flex-direction:column;gap:2px;}" in STYLE_CSS
+    assert ".session-date-body .session-item{margin-bottom:0;}" in STYLE_CSS
+
+
 def test_apperror_path_calls_render_session_list():
     """apperror handler must call renderSessionList() to clear the streaming indicator
     immediately rather than waiting for the 5s streaming poll interval."""

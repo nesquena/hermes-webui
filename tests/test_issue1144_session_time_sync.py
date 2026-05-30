@@ -106,6 +106,7 @@ def _run_time_case(script_body: str, tz: str = "UTC") -> dict:
           session_time_hours_ago: (n) => `${{n}}h`,
           session_time_days_ago: (n) => `${{n}}d`,
           session_time_last_week: '1w',
+          session_time_bucket_recent: 'Recent',
           session_time_bucket_today: 'Today',
           session_time_bucket_yesterday: 'Yesterday',
           session_time_bucket_this_week: 'This week',
@@ -116,6 +117,7 @@ def _run_time_case(script_body: str, tz: str = "UTC") -> dict:
           const val = translations[key];
           return typeof val === 'function' ? val(...args) : val;
         }}
+        const SESSION_RECENT_WINDOW_MS = 3 * 60 * 60 * 1000;
         {functions}
         {script_body}
         """
@@ -225,7 +227,7 @@ def test_relative_time_uses_server_clock():
     # Without compensation, client thinks this session is 8h5m ago.
     # With compensation, it correctly shows "5m".
     assert result["relative"] == "5m"
-    assert result["bucket"] == "Today"
+    assert result["bucket"] == "Recent"
 
 
 def test_session_bucket_uses_server_clock():
@@ -241,7 +243,7 @@ def test_session_bucket_uses_server_clock():
         // Simulate server 8 hours ahead of client
         _serverTimeDelta = -8 * 3600 * 1000;
         const serverNow = _serverNowMs();
-        // Session created 2 hours ago in server time → should be Today
+        // Session created 2 hours ago in server time → should be Recent
         const twoHoursAgo = serverNow - 2 * 3600 * 1000;
         // Session created 26 hours ago → should be Yesterday
         const yesterday = serverNow - 26 * 3600 * 1000;
@@ -252,7 +254,7 @@ def test_session_bucket_uses_server_clock():
         }));
         """
     )
-    assert result["todayBucket"] == "Today"
+    assert result["todayBucket"] == "Recent"
     assert result["yesterdayBucket"] == "Yesterday"
     assert result["todayRelative"] == "2h"
 
@@ -272,7 +274,7 @@ def test_explicit_now_param_overrides_server_clock():
     )
     # Explicit now should be used, not server clock
     assert result["relative"] == "2h"
-    assert result["bucket"] == "Today"
+    assert result["bucket"] == "Recent"
 
 
 # ---------------------------------------------------------------------------

@@ -2918,6 +2918,17 @@ function _sanitizeThinkingDisplayText(text){
   return stripped.trim();
 }
 
+function _renderThinkingDisplayHtml(text){
+  const clean=_sanitizeThinkingDisplayText(text);
+  // Thinking content is intentionally not run through the full markdown renderer:
+  // reasoning streams can be long, partial, and contain arbitrary model text.
+  // Escape everything first, then restore only the narrow heading-like shape the
+  // models commonly emit inside thinking cards: a whole line wrapped in **...**.
+  return esc(clean).replace(/(^|\n)\*\*([^*\n]{1,120})\*\*(?=\n|$)/g,(_,lead,heading)=>{
+    return lead+'<strong class="thinking-heading">'+heading+'</strong>';
+  });
+}
+
 function _stripVisibleAssistantEchoFromThinking(thinkingText, visibleText){
   let out=String(thinkingText||'');
   const visible=String(visibleText||'');
@@ -5403,7 +5414,7 @@ function _thinkingCardHtml(text, open){
   const clean=_sanitizeThinkingDisplayText(text);
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
   const classes=`thinking-card${open?' open':''}`;
-  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${_renderThinkingDisplayHtml(clean)}</pre></div></div>`;
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
@@ -7875,7 +7886,7 @@ function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
   const openClass=isSimplifiedToolCalling()?'':' open';
   return (clean&&String(clean).trim())
-    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
+    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${_renderThinkingDisplayHtml(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function _renderThinkingInto(row,text=''){
@@ -7887,7 +7898,7 @@ function _renderThinkingInto(row,text=''){
   }
   const pre=row.querySelector('.thinking-card-body pre');
   if(pre){
-    pre.textContent=clean;
+    pre.innerHTML=_renderThinkingDisplayHtml(clean);
     return;
   }
   row.innerHTML=_thinkingMarkup(text);

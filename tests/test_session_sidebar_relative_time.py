@@ -46,6 +46,7 @@ def _run_session_time_case(script_body: str) -> dict:
           session_time_hours_ago: (n) => `${{n}}h`,
           session_time_days_ago: (n) => `${{n}}d`,
           session_time_last_week: '1w',
+          session_time_bucket_recent: 'Recent',
           session_time_bucket_today: 'Today',
           session_time_bucket_yesterday: 'Yesterday',
           session_time_bucket_this_week: 'This week',
@@ -56,6 +57,7 @@ def _run_session_time_case(script_body: str) -> dict:
           const val = translations[key];
           return typeof val === 'function' ? val(...args) : val;
         }}
+        const SESSION_RECENT_WINDOW_MS = 3 * 60 * 60 * 1000;
         {functions}
         {script_body}
         """
@@ -121,20 +123,23 @@ def test_relative_time_uses_calendar_boundaries_and_year_for_old_sessions():
     assert "2024" in result["oldDate"]
 
 
-def test_relative_time_today_bucket():
-    """Session from 2 hours ago should bucket as 'Today'."""
+def test_relative_time_recent_bucket_precedes_today_bucket():
+    """Sessions within 3 hours bucket as Recent; older same-day sessions stay Today."""
     result = _run_session_time_case(
         """
         const now = Date.UTC(2026, 3, 15, 14, 0, 0);
         const twoHoursAgo = now - 2 * 60 * 60 * 1000;
+        const fourHoursAgo = now - 4 * 60 * 60 * 1000;
         process.stdout.write(JSON.stringify({
           relative: _formatRelativeSessionTime(twoHoursAgo, now),
-          bucket: _sessionTimeBucketLabel(twoHoursAgo, now),
+          recentBucket: _sessionTimeBucketLabel(twoHoursAgo, now),
+          todayBucket: _sessionTimeBucketLabel(fourHoursAgo, now),
         }));
         """
     )
     assert result["relative"] == "2h"
-    assert result["bucket"] == "Today"
+    assert result["recentBucket"] == "Recent"
+    assert result["todayBucket"] == "Today"
 
 
 def test_relative_time_handles_just_now_and_dst_safe_yesterday_boundary():
@@ -162,6 +167,7 @@ def test_relative_time_strings_are_localized_in_english_and_spanish_bundles():
         "session_time_hours_ago",
         "session_time_days_ago",
         "session_time_last_week",
+        "session_time_bucket_recent",
         "session_time_bucket_today",
         "session_time_bucket_yesterday",
         "session_time_bucket_this_week",

@@ -97,6 +97,7 @@ function _clearComposerDraft(sid) {
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
+const SESSION_RECENT_WINDOW_MS = 3 * 60 * 60 * 1000;
 let _sessionViewedCounts = null;
 let _sessionCompletionUnread = null;
 let _sessionObservedStreaming = null;
@@ -1801,6 +1802,12 @@ function _sessionUrlForSid(sid){
   }catch(_e){}
   return base.pathname+base.search+base.hash;
 }
+function _openSessionInNewTab(sid){
+  if(!sid) return;
+  const url=_sessionUrlForSid(sid);
+  if(!url) return;
+  window.open(url,'_blank','noopener');
+}
 function _setActiveSessionUrl(sid){
   if(typeof window==='undefined'||!window.history||!sid) return;
   const next=_sessionUrlForSid(sid);
@@ -2950,6 +2957,7 @@ function _formatRelativeSessionTime(timestampMs, nowMs) {
 function _sessionTimeBucketLabel(timestampMs, nowMs) {
   if (!timestampMs) return t('session_time_bucket_older');
   nowMs = nowMs || _serverNowMs();
+  if (Math.max(0, nowMs - timestampMs) <= SESSION_RECENT_WINDOW_MS) return t('session_time_bucket_recent');
   const {startOfToday, startOfYesterday, startOfWeek, startOfLastWeek} = _sessionCalendarBoundaries(nowMs);
   if (timestampMs >= startOfToday) return t('session_time_bucket_today');
   if (timestampMs >= startOfYesterday) return t('session_time_bucket_yesterday');
@@ -3700,7 +3708,11 @@ function renderSessionListFromCache(){
     caret.textContent='\u25BE'; // down when expanded; rotated right when collapsed
     const label=document.createElement('span');
     label.textContent=g.label;
-    hdr.appendChild(caret);hdr.appendChild(label);
+    const count=document.createElement('span');
+    count.className='session-date-count';
+    count.textContent=String(g.items.length);
+    count.setAttribute('aria-label',`${g.items.length} conversation${g.items.length===1?'':'s'}`);
+    hdr.appendChild(caret);hdr.appendChild(label);hdr.appendChild(count);
     const body=document.createElement('div');
     body.className='session-date-body';
     const isGroupCollapsed=Boolean(_groupCollapsed[g.label]);
@@ -4083,6 +4095,8 @@ function renderSessionListFromCache(){
     // double-click path on this element still calls startRename() directly.
     el._startRename = startRename;
     el.dataset.sid = s.session_id;
+    el.setAttribute('role','link');
+    el.title='Middle-click or Ctrl/Cmd-click to open in a new tab';
 
     // (Project dot is appended above, between title and timestamp, so it
     // sits outside the truncating title span and stays visible.)
@@ -4326,7 +4340,7 @@ function renderSessionListFromCache(){
         _clearDragTimer=setTimeout(()=>{_settleSessionSwipePaint();_clearDragTimer=null;},50);
       }
     };
-    const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{
+    const _finishSessionGesture=(clientX,clientY,target,pointerType,sourceEvent=null)=>{
       const wasDragging=_gestureState==='dragging'||_swipeTracking;
       _clearLongPressTimer();
       if(_renamingSid){_gestureState='idle';return false;}
@@ -4341,6 +4355,14 @@ function renderSessionListFromCache(){
         return true;
       }
       if(target&&target.closest&&target.closest('.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment')) return false;
+      if(pointerType==='mouse'&&sourceEvent&&(sourceEvent.ctrlKey||sourceEvent.metaKey)){
+        clearTimeout(_tapTimer);
+        _tapTimer=null;
+        _lastTapTime=0;
+        _gestureState='idle';
+        _openSessionInNewTab(s.session_id);
+        return true;
+      }
       if(_sessionSelectMode){if(!readOnly)toggleSessionSelect(s.session_id);return true;}
       if(wasDragging){
         clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
@@ -4408,7 +4430,20 @@ function renderSessionListFromCache(){
     el.onpointerup=(e)=>{
       if(e.pointerType==='touch') return;
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
-      if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) e.stopPropagation();
+      if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType,e)) e.stopPropagation();
+    };
+    el.onauxclick=(e)=>{
+      if(e.button!==1) return;
+      if(_renamingSid) return;
+      if(actions&&actions.contains(e.target)) return;
+      if(e.target&&e.target.closest&&e.target.closest('.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      clearTimeout(_tapTimer);
+      _tapTimer=null;
+      _lastTapTime=0;
+      _clearPointerDragState();
+      _openSessionInNewTab(s.session_id);
     };
     // Add ondblclick for more reliable double-click detection
     el.ondblclick=(e)=>{
@@ -4436,7 +4471,7 @@ function renderSessionListFromCache(){
     el.addEventListener('touchend',(e)=>{
       const touch=e.changedTouches&&e.changedTouches[0];
       if(!touch) return;
-      if(_finishSessionGesture(touch.clientX,touch.clientY,e.target,'touch')) e.stopPropagation();
+      if(_finishSessionGesture(touch.clientX,touch.clientY,e.target,'touch',e)) e.stopPropagation();
     },{passive:true});
     return el;
   }
