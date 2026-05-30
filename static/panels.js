@@ -6680,6 +6680,7 @@ async function loadSettingsPanel(){
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
     }
     // Auxiliary models — load task assignments and provider/model options
+    _bindMainAdvancedOptionsButton();
     _loadAuxiliaryModels();
     // Send key preference
     const sendKeySel=$('settingsSendKey');
@@ -7999,6 +8000,7 @@ const _AUX_TASK_SLOTS=[
 
 let _auxProviders=[];       // cached provider list from /api/models
 let _auxOriginalConfig=null; // snapshot of initial config for dirty detection
+let _mainAdvancedConfig=null; // current advanced config for the default chat model
 
 function _auxSelectStyle(){
  return 'width:100%;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;box-sizing:border-box';
@@ -8127,13 +8129,14 @@ function _auxAdvancedInputHtml(id,label,value,desc,type='text',extraAttrs='',ext
 }
 
 function _openAuxAdvancedOptions(taskKey,cfg){
- const slot=_AUX_TASK_SLOTS.find(s=>s.key===taskKey)||{key:taskKey,nameKey:'',descKey:''};
+ const isMain=taskKey==='__main__';
+ const slot=isMain?{key:taskKey,nameKey:'settings_label_model',descKey:'settings_desc_model'}:(_AUX_TASK_SLOTS.find(s=>s.key===taskKey)||{key:taskKey,nameKey:'',descKey:''});
  const overlay=_ensureAuxAdvancedModal();
  overlay.dataset.task=taskKey;
  const title=$('auxAdvancedTitle'),sub=$('auxAdvancedSubtitle'),body=$('auxAdvancedBody');
  const slotName=t(slot.nameKey)||slot.key;
- if(title) title.textContent=(t('settings_aux_advanced_title')||'{task} options').replace('{task}',slotName);
- if(sub) sub.textContent=t('settings_aux_advanced_subtitle')||'Advanced config for auxiliary.';
+ if(title) title.textContent=isMain?(t('settings_main_advanced_title')||'Main model options'):((t('settings_aux_advanced_title')||'{task} options').replace('{task}',slotName));
+ if(sub) sub.textContent=isMain?(t('settings_main_advanced_subtitle')||'Advanced config for the default chat model.'):(t('settings_aux_advanced_subtitle')||'Advanced config for auxiliary.');
  const extraBody=cfg&&cfg.extra_body&&typeof cfg.extra_body==='object'&&Object.keys(cfg.extra_body).length?JSON.stringify(cfg.extra_body,null,2):'';
  const apiKeyHint=cfg&&cfg.api_key_set?(t('settings_aux_advanced_api_key_set_hint')||'API key is set. Leave blank to keep it, or use clear to remove it.'):(t('settings_aux_advanced_api_key_empty_hint')||'Leave blank to use provider/default credentials.');
  if(body){
@@ -8155,8 +8158,8 @@ function _openAuxAdvancedOptions(taskKey,cfg){
     try{extra=JSON.parse(extraText);}catch(e){if(typeof showToast==='function') showToast(t('settings_aux_advanced_extra_body_invalid_json')||'Extra body must be valid JSON');return;}
     if(!extra||Array.isArray(extra)||typeof extra!=='object'){if(typeof showToast==='function') showToast(t('settings_aux_advanced_extra_body_object_required')||'Extra body must be a JSON object');return;}
    }
-   const provSel=$('aux-prov-'+taskKey),modelSel=$('aux-model-'+taskKey);
-   const provider=provSel?provSel.value:((cfg&&cfg.provider)||'auto');
+   const provSel=isMain?null:$('aux-prov-'+taskKey),modelSel=isMain?$('settingsModel'):$('aux-model-'+taskKey);
+   const provider=isMain?((cfg&&cfg.provider)||''):(provSel?provSel.value:((cfg&&cfg.provider)||'auto'));
    const model=modelSel&&modelSel.value!=='__custom__'?(modelSel.value||''):((cfg&&cfg.model)||'');
    const advanced={
     base_url:$('auxAdvancedBaseUrl')?.value||'',
@@ -8168,17 +8171,31 @@ function _openAuxAdvancedOptions(taskKey,cfg){
     api_key_clear:!!($('auxAdvancedApiKeyClear')&&$('auxAdvancedApiKeyClear').checked),
    };
    try{
-    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:'auxiliary',task:taskKey,provider,model,advanced})});
-    if(typeof showToast==='function') showToast(t('settings_aux_advanced_saved')||'Auxiliary options saved');
+    await api('/api/model/set',{method:'POST',body:JSON.stringify({scope:isMain?'main':'auxiliary',task:isMain?'':taskKey,provider,model,advanced})});
+    if(typeof showToast==='function') showToast(isMain?(t('settings_main_advanced_saved')||'Main model options saved'):(t('settings_aux_advanced_saved')||'Auxiliary options saved'));
     overlay.style.display='none';
     _loadAuxiliaryModels();
    }catch(e){
-    if(typeof showToast==='function') showToast(t('settings_aux_advanced_save_failed')||'Failed to save auxiliary options');
+    if(typeof showToast==='function') showToast(isMain?(t('settings_main_advanced_save_failed')||'Failed to save main model options'):(t('settings_aux_advanced_save_failed')||'Failed to save auxiliary options'));
    }
   };
  }
  overlay.style.display='flex';
  setTimeout(()=>$('auxAdvancedBaseUrl')?.focus(),0);
+}
+
+function _bindMainAdvancedOptionsButton(){
+ const btn=$('mainAdvancedBtn');
+ if(!btn) return;
+ const title=t('settings_aux_advanced_button_title')||'Advanced options';
+ btn.title=title;
+ btn.setAttribute('aria-label',t('settings_main_advanced_button_aria')||'Advanced options for main model');
+ btn.disabled=_mainAdvancedConfig===null;
+ btn.style.opacity=btn.disabled?'.55':'1';
+ btn.style.cursor=btn.disabled?'not-allowed':'pointer';
+ if(btn._bound) return;
+ btn._bound=true;
+ btn.addEventListener('click',()=>{if(_mainAdvancedConfig!==null)_openAuxAdvancedOptions('__main__',_mainAdvancedConfig||{});});
 }
 
 async function _loadAuxiliaryModels(){
@@ -8200,6 +8217,8 @@ async function _loadAuxiliaryModels(){
  name:g.provider,
  models:g.models.map(m=>m.id),
  }));
+ _mainAdvancedConfig=(auxData&&auxData.main)||_mainAdvancedConfig||{};
+ _bindMainAdvancedOptionsButton();
  const tasks=(auxData&&auxData.tasks)||[];
   // Build a quick lookup: taskKey → {provider, model}
   const taskMap={};
