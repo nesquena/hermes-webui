@@ -473,6 +473,32 @@ class TestAuxiliaryModelsBackend:
         assert "reasoning_effort: none" in text
         assert "DUMMY_KEY_DO_NOT_PRINT" in text
 
+    def test_set_auxiliary_model_custom_provider_keeps_advanced_base_url_override(self, monkeypatch, tmp_path):
+        """Per-slot advanced base_url must win over custom-provider resolved defaults."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("auxiliary:\n  vision:\n    provider: auto\n    model: ''\n", encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(
+            config,
+            "resolve_model_provider",
+            lambda model: (model, "custom:lab", "https://resolved.invalid/v1"),
+        )
+
+        result = config.set_auxiliary_model(
+            "vision",
+            "custom:lab",
+            "local/model",
+            advanced={"base_url": "https://override.invalid/v1/"},
+        )
+
+        assert result["ok"] is True
+        text = config_path.read_text(encoding="utf-8")
+        assert "https://override.invalid/v1" in text
+        assert "https://resolved.invalid/v1" not in text
+
     def test_set_auxiliary_model_clears_empty_extra_body(self, monkeypatch, tmp_path):
         """Blank extra_body from the modal should remove config noise instead of writing {}."""
         from api import config

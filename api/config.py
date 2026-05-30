@@ -2856,12 +2856,6 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 slot_cfg = {}
             slot_cfg["provider"] = provider or "auto"
             slot_cfg["model"] = model or ""
-            if advanced is not None:
-                try:
-                    _apply_advanced_model_options(slot_cfg, advanced)
-                except ValueError as exc:
-                    msg = str(exc).replace("advanced model options", "advanced auxiliary options")
-                    raise ValueError(msg) from exc
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 try:
                     _, _, resolved_base_url = resolve_model_provider(model)
@@ -2869,6 +2863,12 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                         slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
                 except Exception:
                     pass
+            if advanced is not None:
+                try:
+                    _apply_advanced_model_options(slot_cfg, advanced)
+                except ValueError as exc:
+                    msg = str(exc).replace("advanced model options", "advanced auxiliary options")
+                    raise ValueError(msg) from exc
             aux_cfg[task] = slot_cfg
             config_data["auxiliary"] = aux_cfg
 

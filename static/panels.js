@@ -7845,10 +7845,25 @@ function _bindMainAdvancedOptionsButton(){
    btn.id='mainAdvancedBtn';
   }
   if(btn.parentElement!==row) row.appendChild(btn);
+  row.style.cssText='display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:8px;align-items:center';
+  modelSel.style.width='100%';
+  modelSel.style.minWidth='0';
+  modelSel.style.boxSizing='border-box';
  }
  if(!btn) return;
  btn.classList.add('model-advanced-btn');
  if(!btn.querySelector('svg')&&typeof li==='function') btn.innerHTML=li('settings',15);
+ btn.style.position='';
+ btn.style.right='';
+ btn.style.top='';
+ btn.style.transform='';
+ btn.style.width='32px';
+ btn.style.height='32px';
+ btn.style.display='flex';
+ btn.style.alignItems='center';
+ btn.style.justifyContent='center';
+ btn.style.flex='0 0 32px';
+ btn.style.boxSizing='border-box';
  const title=t('settings_aux_advanced_button_title')||'Advanced options';
  btn.title=title;
  btn.setAttribute('aria-label',t('settings_main_advanced_button_aria')||'Advanced options for main model');
