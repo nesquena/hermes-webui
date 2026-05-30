@@ -2035,6 +2035,11 @@ def _resolve_context_length_for_session_model(
         _cfg_for_cl = _get_config_for_cl()
         _cfg_ctx_len_load = None
         _cfg_custom_providers_load = None
+        _base_url_for_lookup = ""
+        _explicit_provider_for_lookup = ""
+        if model_for_lookup.startswith("@") and ":" in model_for_lookup:
+            _explicit_provider_for_lookup = model_for_lookup[1:].split(":", 1)[0].strip().lower()
+        _bare_model_for_lookup = model_for_lookup.rsplit(":", 1)[1].strip() if _explicit_provider_for_lookup else model_for_lookup
         try:
             _model_cfg_load = _cfg_for_cl.get('model', {}) if isinstance(_cfg_for_cl, dict) else {}
             if isinstance(_model_cfg_load, dict):
@@ -2046,15 +2051,40 @@ def _resolve_context_length_for_session_model(
                             _cfg_ctx_len_load = _parsed_load
                     except (TypeError, ValueError):
                         pass
-            _raw_cp_load = _cfg_for_cl.get('custom_providers') if isinstance(_cfg_for_cl, dict) else None
-            if isinstance(_raw_cp_load, list):
-                _cfg_custom_providers_load = _raw_cp_load
+            try:
+                _compat_mod_load = __import__('hermes_cli.config', fromlist=['get_compatible_custom_providers'])
+                _compatible_cp_load = _compat_mod_load.get_compatible_custom_providers(_cfg_for_cl)
+                if _compatible_cp_load:
+                    _cfg_custom_providers_load = _compatible_cp_load
+                    _provider_target = (_explicit_provider_for_lookup or str(provider or "")).strip().lower()
+                    for _entry in _compatible_cp_load:
+                        if not isinstance(_entry, dict):
+                            continue
+                        _entry_names = {
+                            str(_entry.get("name") or "").strip().lower(),
+                            str(_entry.get("provider_key") or "").strip().lower(),
+                            "custom:" + str(_entry.get("name") or "").strip().lower(),
+                            "custom:" + str(_entry.get("provider_key") or "").strip().lower(),
+                        }
+                        _models = _entry.get("models")
+                        _has_model = isinstance(_models, dict) and _bare_model_for_lookup in _models
+                        if (_provider_target and _provider_target in _entry_names) or (not _provider_target and _has_model):
+                            _candidate_base = str(_entry.get("base_url") or "").strip()
+                            if _candidate_base:
+                                _base_url_for_lookup = _candidate_base
+                                break
+            except Exception:
+                pass
+            if _cfg_custom_providers_load is None:
+                _raw_cp_load = _cfg_for_cl.get('custom_providers') if isinstance(_cfg_for_cl, dict) else None
+                if isinstance(_raw_cp_load, list):
+                    _cfg_custom_providers_load = _raw_cp_load
         except Exception:
             pass
         try:
             return _get_cl(
-                model_for_lookup,
-                "",
+                _bare_model_for_lookup,
+                _base_url_for_lookup,
                 config_context_length=_cfg_ctx_len_load,
                 provider=provider or "",
                 custom_providers=_cfg_custom_providers_load,

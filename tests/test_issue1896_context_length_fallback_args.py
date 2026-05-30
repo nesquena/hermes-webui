@@ -175,6 +175,12 @@ def test_cfg_custom_providers_resolved_from_cfg_dict():
         "_cfg_custom_providers must be sourced from `_cfg.get('custom_providers')` "
         "(per-profile config) so profile-scoped custom_providers entries work."
     )
+    assert "get_compatible_custom_providers" in STREAMING_PY, (
+        "_cfg_custom_providers must include the compatibility view of "
+        "providers.<id>.models, not only legacy custom_providers[]. Otherwise "
+        "WebUI's providers-list dict entries lose context_length metadata and "
+        "GPT-5.5 falls through to the generic 1.05M hardcoded default."
+    )
     assert "_cfg.get('model', {})" in STREAMING_PY, (
         "_cfg_ctx_len must be sourced from `_cfg.get('model', {}).get('context_length')` "
         "(per-profile config) so profile-scoped model.context_length overrides work."
@@ -226,8 +232,61 @@ def test_routes_session_load_fallback_passes_config_overrides():
         "session-load fallback in api/routes.py must pass custom_providers= "
         "so the per-model override path applies. See #1896."
     )
+    assert "get_compatible_custom_providers" in helper, (
+        "session-load fallback must build custom_providers via "
+        "get_compatible_custom_providers(_cfg) so providers.<id>.models "
+        "metadata is honoured."
+    )
+    assert "_base_url_for_lookup" in helper, (
+        "session-load fallback must pass the matched provider base_url into "
+        "get_model_context_length; custom/provider per-model metadata is keyed "
+        "by both model and base_url."
+    )
     # Legacy fallback for older hermes-agent builds that pre-date the kwargs.
     assert "except TypeError:" in helper, (
         "session-load fallback must catch TypeError to support older "
         "hermes-agent builds without the new kwargs."
     )
+
+
+def test_routes_resolver_uses_providers_model_metadata(monkeypatch):
+    """Functional guard for Jamie's LiteLLM WebUI display bug.
+
+    The WebUI config stores picker models under providers.<id>.models as a
+    list of dicts. Session-load context display must use that metadata; if it
+    falls through to agent.model_metadata's generic hardcoded GPT-5.5 default,
+    gpt-5.5-fast incorrectly displays as ~1.1M instead of the provider's 272K.
+    """
+    import api.config as config_mod
+    import api.routes as routes
+
+    cfg = {
+        "model": {"default": "codex/gpt-5.5-fast", "provider": "litellm-responses"},
+        "providers": {
+            "litellm-responses": {
+                "api": "https://llm.dreamit.au/v1",
+                "name": "litellm-responses",
+                "transport": "codex_responses",
+                "models": [
+                    {
+                        "id": "@litellm-responses:codex/gpt-5.4-fast",
+                        "label": "Codex GPT-5.4 Fast [1m]",
+                        "context_length": 1_050_000,
+                    },
+                    {
+                        "id": "@litellm-responses:codex/gpt-5.5-fast",
+                        "label": "Codex GPT-5.5 Fast [272k]",
+                        "context_length": 272_000,
+                    },
+                ],
+            }
+        },
+    }
+    monkeypatch.setattr(config_mod, "get_config", lambda: cfg)
+
+    assert routes._resolve_context_length_for_session_model(
+        "@litellm-responses:codex/gpt-5.5-fast", "litellm-responses"
+    ) == 272_000
+    assert routes._resolve_context_length_for_session_model(
+        "@litellm-responses:codex/gpt-5.4-fast", "litellm-responses"
+    ) == 1_050_000

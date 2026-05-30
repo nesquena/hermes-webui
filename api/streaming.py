@@ -5692,9 +5692,17 @@ def _run_agent_streaming(
                                         # Invalid config — let the resolver fall
                                         # through to provider/registry probing.
                                         pass
-                            _raw_cp = _cfg.get('custom_providers') if isinstance(_cfg, dict) else None
-                            if isinstance(_raw_cp, list):
-                                _cfg_custom_providers = _raw_cp
+                            try:
+                                _compat_mod = __import__('hermes_cli.config', fromlist=['get_compatible_custom_providers'])
+                                _compatible_cp = _compat_mod.get_compatible_custom_providers(_cfg)
+                                if _compatible_cp:
+                                    _cfg_custom_providers = _compatible_cp
+                            except Exception:
+                                pass
+                            if _cfg_custom_providers is None:
+                                _raw_cp = _cfg.get('custom_providers') if isinstance(_cfg, dict) else None
+                                if isinstance(_raw_cp, list):
+                                    _cfg_custom_providers = _raw_cp
                         except Exception:
                             pass
                         _resolved_cl = get_model_context_length(
@@ -5882,9 +5890,17 @@ def _run_agent_streaming(
                                         _cfg_ctx_len = _parsed_cfg_ctx
                                 except (TypeError, ValueError):
                                     pass
-                        _raw_cp = _cfg.get('custom_providers') if isinstance(_cfg, dict) else None
-                        if isinstance(_raw_cp, list):
-                            _cfg_custom_providers = _raw_cp
+                        try:
+                            _compat_mod = __import__('hermes_cli.config', fromlist=['get_compatible_custom_providers'])
+                            _compatible_cp = _compat_mod.get_compatible_custom_providers(_cfg)
+                            if _compatible_cp:
+                                _cfg_custom_providers = _compatible_cp
+                        except Exception:
+                            pass
+                        if _cfg_custom_providers is None:
+                            _raw_cp = _cfg.get('custom_providers') if isinstance(_cfg, dict) else None
+                            if isinstance(_raw_cp, list):
+                                _cfg_custom_providers = _raw_cp
                     except Exception:
                         pass
                     try:
