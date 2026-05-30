@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, unquote
 from api.helpers import bad, j
 
 BOARD_COLUMNS = ["triage", "todo", "ready", "running", "blocked", "done"]
+AUTOMATION_LEVELS = {"manual", "assisted", "active", "autonomous"}
 _TASK_PREFIX = "/api/kanban/tasks/"
 
 
@@ -704,6 +705,38 @@ def _board_meta_dict(meta):
     return out
 
 
+def _normalize_automation_level(value):
+    """Validate the optional board-level automation preset."""
+    if value is None:
+        return None
+    normed = str(value).strip().lower()
+    if not normed:
+        return None
+    if normed not in AUTOMATION_LEVELS:
+        allowed = ", ".join(sorted(AUTOMATION_LEVELS))
+        raise ValueError(f"automation_level must be one of: {allowed}")
+    return normed
+
+
+def _persist_board_extra_metadata(slug, **updates):
+    """Persist custom board metadata keys not covered by hermes-cli's
+    write_board_metadata() signature."""
+    kb = _kb()
+    meta = dict(kb.read_board_metadata(slug) or {})
+    meta.update({key: value for key, value in updates.items() if value is not None})
+    meta.pop("db_path", None)
+    if hasattr(kb, "board_metadata_path"):
+        path = kb.board_metadata_path(slug)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    elif hasattr(kb, "boards") and isinstance(kb.boards, dict):
+        existing = dict(kb.boards.get(slug, {}))
+        existing.update(meta)
+        kb.boards[slug] = existing
+        meta = existing
+    return meta
+
+
 def _board_counts_for_slug(slug):
     """Per-status task counts for a board, used to populate the board
     switcher with a live "12 tasks" badge. Mirrors the agent dashboard's
@@ -774,8 +807,9 @@ def _create_board_payload(body):
     """POST /api/kanban/boards — create a new board.
 
     Body fields: ``slug`` (required), ``name``, ``description``, ``icon``,
-    ``color``, ``switch`` (bool — set as active after creation, default false).
-    Idempotent on slug — repeating returns the existing board metadata.
+    ``color``, ``automation_level``, ``switch`` (bool — set as active after
+    creation, default false). Idempotent on slug — repeating returns the
+    existing board metadata.
     """
     kb = _kb()
     if not isinstance(body, dict):
@@ -783,6 +817,7 @@ def _create_board_payload(body):
     slug = str(body.get("slug") or "").strip()
     if not slug:
         raise ValueError("slug is required")
+    automation_level = _normalize_automation_level(body.get("automation_level"))
     try:
         meta = kb.create_board(
             slug,
@@ -793,6 +828,8 @@ def _create_board_payload(body):
         )
     except (ValueError, AttributeError) as exc:
         raise ValueError(str(exc)) from exc
+    if automation_level is not None:
+        meta = _persist_board_extra_metadata(meta["slug"], automation_level=automation_level)
     if body.get("switch"):
         try:
             kb.set_current_board(meta["slug"])
@@ -810,8 +847,8 @@ def _update_board_payload(slug, body):
 
     The slug itself is immutable (changing it would mean moving the on-disk
     directory and re-pointing every saved active-board cookie). Only
-    ``name``, ``description``, ``icon``, ``color``, and ``archived`` are
-    mutable here; the slug travels in the URL path.
+    ``name``, ``description``, ``icon``, ``color``, ``automation_level``, and
+    ``archived`` are mutable here; the slug travels in the URL path.
     """
     kb = _kb()
     if not isinstance(body, dict):
@@ -823,6 +860,7 @@ def _update_board_payload(slug, body):
     if not normed or not kb.board_exists(normed):
         raise LookupError(f"board {slug!r} does not exist")
     archived = body.get("archived")
+    automation_level = _normalize_automation_level(body.get("automation_level"))
     if isinstance(archived, str):
         archived = archived.strip().lower() in {"1", "true", "yes", "on"}
     meta = kb.write_board_metadata(
@@ -833,6 +871,8 @@ def _update_board_payload(slug, body):
         color=body.get("color"),
         archived=archived if isinstance(archived, bool) else None,
     )
+    if automation_level is not None:
+        meta = _persist_board_extra_metadata(normed, automation_level=automation_level)
     return {"board": _board_meta_dict(meta), "read_only": False}
 
 

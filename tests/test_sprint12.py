@@ -3,6 +3,7 @@ Sprint 12 Tests: settings panel, session pinning, session import, SSE reconnect.
 """
 import json, pathlib, urllib.error, urllib.request, urllib.parse
 
+from api import models
 from tests._pytest_port import BASE, TEST_DEFAULT_MODEL
 
 
@@ -141,6 +142,77 @@ def test_pinned_persists_on_reload():
         d, _ = get(f"/api/session?session_id={sid}")
         assert d['session']['pinned'] is True
     finally:
+        for sid in created:
+            post("/api/session/delete", {"session_id": sid})
+
+
+def _integration_hidden_precompression_snapshots_do_not_count_toward_pin_limit():
+    """Hidden pre-compression snapshots should not block pinning visible sessions."""
+    created = []
+    settings_before, _ = get("/api/settings")
+    sessions_before, _ = get("/api/sessions")
+    baseline_visible_pins = sum(
+        1 for session in sessions_before["sessions"]
+        if session.get("pinned") and not session.get("archived")
+    )
+    original_limit = settings_before.get("pinned_sessions_limit", 3)
+    post("/api/settings", {"pinned_sessions_limit": baseline_visible_pins + 3})
+    try:
+        for idx in range(2):
+            sid = make_session(created)
+            post("/api/session/rename", {"session_id": sid, "title": f"Visible Pin {idx}"})
+            d, status = post("/api/session/pin", {"session_id": sid, "pinned": True})
+            assert status == 200, d
+
+        hidden_sid = make_session(created)
+        post("/api/session/rename", {"session_id": hidden_sid, "title": "Hidden Snapshot Pin"})
+        d, status = post("/api/session/pin", {"session_id": hidden_sid, "pinned": True})
+        assert status == 200, d
+
+        continuation_payload, status = post(
+            "/api/session/import",
+            {
+                "title": "Visible Continuation",
+                "messages": [{"role": "user", "content": "continuation"}],
+                "model": "test/continuation",
+            },
+        )
+        assert status == 200, continuation_payload
+        continuation_sid = continuation_payload["session"]["session_id"]
+        created.append(continuation_sid)
+        continuation_path = pathlib.Path(models.SESSION_DIR) / f"{continuation_sid}.json"
+        continuation_payload = json.loads(continuation_path.read_text(encoding="utf-8"))
+        continuation_payload["parent_session_id"] = hidden_sid
+        continuation_payload["title"] = "Visible Continuation"
+        continuation_path.write_text(json.dumps(continuation_payload), encoding="utf-8")
+        with models.LOCK:
+            continuation_live = models.SESSIONS.get(continuation_sid)
+            if continuation_live is not None:
+                continuation_live.parent_session_id = hidden_sid
+                continuation_live.title = "Visible Continuation"
+        continuation = models.Session.load(continuation_sid)
+        assert continuation is not None
+        models._write_session_index(updates=[continuation])
+
+        session_path = pathlib.Path(models.SESSION_DIR) / f"{hidden_sid}.json"
+        payload = json.loads(session_path.read_text(encoding="utf-8"))
+        payload["pre_compression_snapshot"] = True
+        session_path.write_text(json.dumps(payload), encoding="utf-8")
+        with models.LOCK:
+            live = models.SESSIONS.get(hidden_sid)
+            if live is not None:
+                live.pre_compression_snapshot = True
+        snapshot = models.Session.load(hidden_sid)
+        assert snapshot is not None
+        models._write_session_index(updates=[snapshot])
+
+        fourth_sid = make_session(created)
+        post("/api/session/rename", {"session_id": fourth_sid, "title": "Fourth Visible Pin"})
+        d, status = post("/api/session/pin", {"session_id": fourth_sid, "pinned": True})
+        assert status == 200, d
+        assert d["session"]["pinned"] is True
+    finally:
+        post("/api/settings", {"pinned_sessions_limit": original_limit})
         for sid in created:
             post("/api/session/delete", {"session_id": sid})
 

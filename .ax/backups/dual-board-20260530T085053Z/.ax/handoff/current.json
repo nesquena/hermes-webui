@@ -1,0 +1,318 @@
+{
+  "updated_at": "2026-05-30T08:41:11Z",
+  "branch": "fix/webui-refresh-scroll-and-persistence",
+  "commit": "ffce1c64",
+  "board": {
+    "slug": "pux-import-e2e-1780010472",
+    "display_name": "Project OS — import/resume 운영",
+    "legacy_boards": [
+      {
+        "slug": "pux-realuse-1779920104039",
+        "display_name": "Legacy — Project OS realuse (old workstream)"
+      }
+    ],
+    "ready_priority_order": [
+      "t_8dcfd135"
+    ],
+    "queue_freeze": {
+      "active": true,
+      "reason": "The frozen three-card proof chain remains in force. The first two proof gates are already closed, and t_8dcfd135 is still the first still-open queue card. Queue-freeze follow-up cards stay blocked until that first proof gate closes, and side-lane review handoffs do not thaw that order.",
+      "immediate_queue": [
+        "t_5bdf7695",
+        "t_f145cc08",
+        "t_8dcfd135"
+      ],
+      "still_blocked_pending_replan": [
+        "t_a4c1c8c8",
+        "t_3017cbac",
+        "t_efb7ae49"
+      ]
+    },
+    "deferred_tracks": [
+      "t_132c99ea",
+      "t_59d4d6e5",
+      "t_358df935",
+      "t_ea52a3f4",
+      "t_2e9300e6",
+      "t_03fb9d7e",
+      "t_a982118d"
+    ],
+    "repo_corroboration": "Canonical board truth still reads triage 0 / todo 16 / ready 1 / running 0 / blocked 17 / done 20, and t_8dcfd135 remains the first still-open frozen proof gate. Separate side lane t_07b00ab9 is still blocked again under a review-required handoff, so it does not thaw or outrank the frozen queue. This browser-proof review tick reopened the shipped Kanban surface on http://127.0.0.1:8787 and it now lands directly on the intended proof board pux-rootseed-proof-1780110594 with no console/js errors and 2 visible cards. Live DOM still shows ready child t_95e2b59e plus done root t_3a5eaf3b, but the root card text on that same shipped surface still carries older anchor copy ('This card anchors the recovered Project OS workflow...' / 'Scope: keep execution bounded...') rather than the newer reference-only seed wording now enforced in source.",
+    "implementation_lane_note": "No blocker-owned product edit landed in the latest carried implementation truth. The meaningful movement in this review/browser-proof tick is verification-only: the shipped proof surface no longer first opens the wrong board, but the visible root artifact on the intended proof board still shows stale older anchor wording even while the source guard remains green in carried continuity.",
+    "blocker_resolver_note": "At 2026-05-30T08:17:09Z the blocker-resolver re-checked blocked tasks and did not restore any new card. t_07b00ab9 has already consumed its safe retry and is now blocked again under a review-required handoff; queue-freeze cards and other review-required cards remain intentionally blocked."
+  },
+  "current_phase": "Governor-first pilot remains active on the same first blocker. t_8dcfd135 still owns the frozen proof queue. Fresh browser proof now shows the shipped Kanban surface opening directly on the intended proof target board rather than first drifting to the wrong proof board, and the proof-board seeded shape is visibly present there with no console/js errors. But the visible done root artifact still carries stale older anchor wording, so the acceptance gate remains open on the same card: provenance/output semantics are still not closure, and the current proof-board artifact must not be mistaken for the newer reference-only seed contract already present in source.",
+  "goal_summary": "Keep Project OS moving one proof gate at a time in the canonical repo: preserve the already-closed browser/runtime proofs, keep the active queue fixed on t_8dcfd135, allow only safe machine-resumable side-lane restores, and require one clean proof-board result showing the shipped Recover path lands on the intended proof board and produces the same board-local seed/output shape (done root + ready child) without manual backfill.",
+  "completed_slices": [
+    {
+      "task_id": "t_3ce742e0",
+      "summary": "Operator-safe cron/kanban summary workaround remains the continuity fallback until broader execution-surface work is intentionally resumed."
+    },
+    {
+      "task_id": "t_d288a08e",
+      "summary": "Design intake remains board-done; its conclusions stay normalized into canonical planning docs without reopening broad implementation scope."
+    },
+    {
+      "task_id": "t_5bdf7695",
+      "summary": "Closed after live browser re-check on the canonical board: selectedTask synced on the actual board card, the Project drawer showed current proof state, and Open evidence thread reopened settled proof session fb91c0da2339 instead of stale/empty linkage."
+    },
+    {
+      "task_id": "t_f145cc08",
+      "summary": "Closed after refreshed-runtime same-thread proof on canonical session bb949ce03e0b: temp job 1b3aaa85ca9b stored non-null WebUI origin metadata, manual run returned SAME_THREAD_OK_2026-05-29T23:50:09Z, and the originating WebUI thread grew from message_count 0 to 1 with a cron_delivery assistant message before the temp job was deleted."
+    }
+  ],
+  "pending_slices": [
+    {
+      "task_id": "t_8dcfd135",
+      "summary": "Immediate queue 3/3 and still the first still-open proof card. Same-board Recover history and updated prompt delivery are already proven. Fresh browser proof on the shipped surface now opens directly on the intended proof target board pux-rootseed-proof-1780110594 with no console/js errors and 2 visible tasks: done root t_3a5eaf3b plus ready child t_95e2b59e. But the visible root card text on that same board still uses older anchor copy instead of the newer reference-only wording now pinned in source.",
+      "remaining_gate": "The blocker is narrower than 'board shape missing' and no longer primarily about wrong-proof-board drift on this shipped browser path. The intended proof board is now visibly opening and already shows the expected done-root + ready-child shape live. The still-open split is that the existing proof-board root artifact text remains stale older anchor wording, so current board output must not yet be treated as final reference-only provenance. The next blocker-owned acceptance gap remains: prove that shipped Recover/import-resume itself creates or refreshes the intended-board shape with the correct reference-only root semantics, rather than relying on manual/operator backfill or stale older board output wording."
+    },
+    {
+      "task_id": "t_07b00ab9",
+      "summary": "This side lane already consumed its safe machine-resumable retry and is now blocked again under a review-required handoff. Its direct parent t_ea2d2ec2 is done, but the latest retry produced review material rather than a still-runnable lane.",
+      "remaining_gate": "Keep it blocked until human review resolves the intake-affordance patch handoff. This side lane does not thaw or outrank the frozen proof queue on t_8dcfd135."
+    },
+    {
+      "task_id": "t_c0fd0069",
+      "summary": "Separate notebook-load runtime-enforcement side lane is no longer running. Live board truth has already settled it back to blocked under a review-required handoff, so keep it out of the ready queue until that review resolves."
+    },
+    {
+      "task_id": "t_eaa653bb",
+      "summary": "Separate workspace/profile runtime-enforcement side lane remains blocked by review-required handoff and does not thaw or outrank the frozen import/resume proof queue."
+    },
+    {
+      "task_id": "t_836ee0f9",
+      "summary": "Still blocked by review-required handoff after the earlier restore attempt; keep it blocked until human review resolves the scoped toolset/skill-breadth patch."
+    },
+    {
+      "task_id": "t_1d0000a3",
+      "summary": "Still blocked by review-required handoff after the earlier restore attempt. This separate automation-level backend change does not thaw or outrank the frozen proof queue on t_8dcfd135."
+    },
+    {
+      "task_id": "t_a4c1c8c8",
+      "summary": "Still blocked by queue-freeze. Do not promote automatically while t_8dcfd135 remains the first open proof gate."
+    },
+    {
+      "task_id": "t_3017cbac",
+      "summary": "Still blocked by queue-freeze. Execution-feed MVP stays out of the active queue until the immediate proof chain closes."
+    },
+    {
+      "task_id": "t_efb7ae49",
+      "summary": "Still blocked by queue-freeze. Seamless execution-surface design is not auto-promoted by this blocker-focused tick."
+    },
+    {
+      "task_id": "t_132c99ea",
+      "summary": "Backlog-reconcile/reference work only. The reconcile cron remains paused during governor-first pilot."
+    },
+    {
+      "task_id": "t_a982118d",
+      "summary": "Todo/reference umbrella only. Its child tracks should be resumed intentionally from artifacts and owned files, not from umbrella momentum."
+    }
+  ],
+  "owned_area": {
+    "t_f145cc08": [
+      "api/routes.py",
+      "static/panels.js",
+      "tests/test_cron_origin_delivery.py"
+    ],
+    "t_8dcfd135": [
+      "extensions/project-os/project-os-extension.js",
+      "static/panels.js",
+      "tests/test_profile_switch_ux.py",
+      "tests/test_project_os_extension_regressions.py"
+    ],
+    "t_07b00ab9": [
+      "extensions/project-os/project-os-extension.js",
+      "static/panels.js",
+      "tests/test_project_os_extension_regressions.py"
+    ],
+    "t_c0fd0069": [
+      "api/runtime_contract.py",
+      "api/routes.py",
+      "api/streaming.py",
+      "tests/test_project_narrow_runtime_contract.py"
+    ],
+    "t_eaa653bb": [
+      "api/runtime_contract.py",
+      "api/routes.py",
+      "api/streaming.py",
+      "tests/test_project_narrow_runtime_contract.py"
+    ],
+    "t_836ee0f9": [
+      "api/runtime_contract.py",
+      "api/routes.py",
+      "tests/test_project_narrow_runtime_contract.py"
+    ],
+    "t_1d0000a3": [
+      "api/routes.py",
+      "api/models.py",
+      "static/panels.js"
+    ]
+  },
+  "verify_commands": [
+    {
+      "command": "git status --short --branch && git rev-parse HEAD && git rev-parse --abbrev-ref HEAD",
+      "result": "Canonical repo truth still sits on branch fix/webui-refresh-scroll-and-persistence at commit ffce1c64 with the same dirty working tree. This review/browser-proof tick made no new blocker-owned product edit; it synchronized continuity around fresh browser proof plus carried source-green continuity only."
+    },
+    {
+      "command": "hermes kanban --board pux-import-e2e-1780010472 stats && hermes kanban --board pux-import-e2e-1780010472 list",
+      "result": "Fresh canonical board truth remains triage 0 / todo 16 / ready 1 / running 0 / blocked 17 / done 20. t_8dcfd135 is still the first open frozen proof gate, and side lane t_07b00ab9 remains blocked under a review-required handoff without thawing the frozen queue."
+    },
+    {
+      "command": "hermes kanban --board pux-rootseed-proof-1780110594 stats && hermes kanban --board pux-rootseed-proof-1780110594 list && hermes kanban --board pux-rootseed-proof-1780110594 show t_3a5eaf3b && hermes kanban --board pux-rootseed-proof-1780110594 show t_95e2b59e",
+      "result": "Backend board truth for the real proof target still shows done root t_3a5eaf3b plus ready child t_95e2b59e on pux-rootseed-proof-1780110594, but direct show now confirms the existing root task body still carries older anchor copy ('This card anchors the recovered Project OS workflow...' / 'Scope: keep execution bounded...') instead of the newer reference-only seed wording enforced in source."
+    },
+    {
+      "command": "live browser proof on http://127.0.0.1:8787 Kanban board switcher + DOM inspection + console check",
+      "result": "Reran this tick on http://127.0.0.1:8787: the shipped Kanban surface opened directly on 'Project OS root-seed clean proof' (slug pux-rootseed-proof-1780110594) with no console/js errors, and live DOM showed 2 visible tasks on that same proof board: ready child t_95e2b59e plus done root t_3a5eaf3b. The root card still displayed [project-os.workflow-seed:v1], 'Seed: root', and the older anchor copy ('A-phase is complete. This card anchors the recovered Project OS workflow on the current board.' / 'Scope: keep execution bounded to the next repo-local slices rather than expanding into a roadmap dump.'). This is fresh browser-proof progress: wrong-board drift did not recur in this rerun, but the proof-board root semantics/output are still stale and provenance remains open."
+    },
+    {
+      "command": "/Users/parantoux/.hermes/hermes-agent/venv/bin/python -m pytest -q tests/test_project_os_extension_regressions.py -k 'import_prompt or workflow_root_seed or runtime_payload_only_assigns_ready_seed_cards'",
+      "result": "Latest canonical source-guard result is carried from the prior implementation tick: 3 passed, 28 deselected, 1 warning. This review/browser-proof tick did not rerun the source guard, so the blocker remains acceptance/provenance-side rather than source-red in the latest carried repo truth."
+    }
+  ],
+  "cross_session_drift_warning": "Do not report this state as closure for t_8dcfd135 or as broad queue unblocking. The new live facts are no longer 'proof board empty' and, in this browser rerun, not even 'wrong proof board first'; the intended proof board opened directly and still rendered the root/child pair with no console errors. The still-open warning is narrower: the visible proof-board root artifact text remains stale older anchor copy, so future resumes must not silently treat the current shipped board output as already matching the newer reference-only seed contract enforced in source.",
+  "next_live_qa_gate": "Stay governor-first on t_8dcfd135. Keep the frozen queue intact. The next bounded live/product step remains blocker-local: prove that shipped Recover/import-resume itself creates or refreshes the intended proof-board done-root + ready-child shape with the correct reference-only root semantics, without operator backfill or stale older root-card wording.",
+  "extension_input_guardrails": {
+    "date": "2026-05-30T05:23:44Z",
+    "owner": "project-os extension / native composer interop",
+    "root_cause": "The Project OS extension capture-phase global slash shortcut intercepted native textarea input because the guard used (!inEditable || !insideExtension).",
+    "do_not_repeat": [
+      "Do not widen document-level slash shortcuts to steal keys from any editable element.",
+      "Do not reintroduce insideExtension-based shortcut gating for the native Message Hermes textarea.",
+      "Do not change slash interception without keeping native textarea typed '/' and '?' working on phone and laptop."
+    ],
+    "required_guards": [
+      "extensions/project-os/project-os-extension.js keeps the global slash shortcut gated by !inEditable.",
+      "static/boot.js keeps native composer beforeinput and keydown fallback slash insertion.",
+      "extensions/project-os/project-os-extension.js keeps explicit composer slash/question insertion and mobile paste/composition interaction guards."
+    ],
+    "verification": {
+      "command": "pytest -q tests/test_project_os_extension_regressions.py tests/test_project_os_native_composer_interop_regression.py tests/test_native_composer_slash_input_regression.py tests/test_extension_hooks.py",
+      "result": "39 passed, 1 warning",
+      "user_qa": "Typed '/' and '?' now work on both phone and laptop; paste also works on both."
+    },
+    "tests": [
+      "tests/test_project_os_extension_regressions.py",
+      "tests/test_project_os_native_composer_interop_regression.py",
+      "tests/test_native_composer_slash_input_regression.py",
+      "tests/test_extension_hooks.py"
+    ]
+  },
+  "automation": {
+    "blocker_resolver": {
+      "job_id": "d33e72d3837a",
+      "name": "project-os-blocker-resolver-10m",
+      "schedule": "*/10 * * * *",
+      "deliver": "local",
+      "mode": "agent replan-first restore loop",
+      "policy_doc": "docs/project-os/BLOCKER-RESOLVER.md",
+      "restore_policy": "restore at most one safe machine-resumable blocked card per tick; keep queue-freeze and human-review blockers intact",
+      "last_restore": {
+        "task_id": "t_07b00ab9",
+        "at": "2026-05-30T08:06:13Z",
+        "reason": "oldest safe machine-resumable blocked side lane with direct parent t_ea2d2ec2 already done; restored without thawing the frozen import/resume proof queue"
+      }
+    },
+    "active_loops": [
+      {
+        "job_id": "53516fb4688e",
+        "name": "project-os-nextstep-dev-codex-5m",
+        "cadence": "*/5 * * * *",
+        "role": "implementation lane",
+        "deliver": "local",
+        "focus": "bounded code/product slices on the current canonical gate"
+      },
+      {
+        "job_id": "800f2afd9497",
+        "name": "project-os-nextstep-review-5m",
+        "cadence": "2-59/5 * * * *",
+        "role": "review lane",
+        "deliver": "local",
+        "focus": "verify canonical truth and reject drift before queue movement"
+      },
+      {
+        "job_id": "9c35d4d42233",
+        "name": "project-os-browser-proof-10m",
+        "cadence": "*/10 * * * *",
+        "role": "browser-proof lane",
+        "deliver": "local",
+        "focus": "rerun shipped browser proof on the current gate and compare visible board/runtime evidence"
+      },
+      {
+        "job_id": "854787d11186",
+        "name": "project-os-auto-resume-20m",
+        "cadence": "*/10 * * * *",
+        "role": "auto-resume watchdog",
+        "deliver": "local",
+        "focus": "quietly re-kick stalled execution when safe without thawing the frozen queue"
+      },
+      {
+        "job_id": "d33e72d3837a",
+        "name": "project-os-blocker-resolver-10m",
+        "cadence": "*/10 * * * *",
+        "role": "replan-first blocker resolver",
+        "deliver": "local",
+        "focus": "restore at most one safe machine-resumable blocked card per tick and keep hard holds intact"
+      },
+      {
+        "job_id": "e74aa7d2af3d",
+        "name": "project-os-stall-watchdog-15m",
+        "cadence": "*/10 * * * *",
+        "role": "external stall watchdog",
+        "deliver": "discord:#hermes-report",
+        "focus": "surface meaningful idle/stall alerts outside the main WebUI thread"
+      }
+    ],
+    "change_authority_policy": {
+      "mode": "aggressive-with-purpose-guardrails",
+      "summary": "Automation may apply even larger changes without pausing first when they remain inside the originally agreed Project OS purpose and UX flow.",
+      "must_hold": [
+        "Do not violate the original Project OS purpose.",
+        "Do not violate the originally agreed UX flow.",
+        "Do not introduce a shadow truth layer or separate goal engine.",
+        "When purpose/UX fit becomes ambiguous mid-course, stop broadening and bring that branch back for explicit discussion."
+      ],
+      "planning_rule": "Concretize purpose and UX flow early via grilling or a goal-wizard style planning step, then let automation move aggressively inside that envelope."
+    },
+    "product_goal": {
+      "top_level_purpose": "Build an automated organization that can run multiple projects/cards broadly in parallel.",
+      "current_tactic": "Governor-first / first-open-gate discipline remains the current execution tactic for the active proof chain.",
+      "tension_to_manage": "Do not let near-term gate discipline collapse into a single-project-only product direction."
+    }
+  },
+  "active_gate": {
+    "task_id": "t_8dcfd135",
+    "title": "가드레일 — decomposer가 루트 seed를 실행 태스크로 오해하지 않기",
+    "class": "proof-gate",
+    "status": "ready",
+    "queue_freeze": true,
+    "human_decision_required": false,
+    "machine_resumable": true,
+    "canonical_sources": [
+      ".ax/handoff/current.json",
+      ".ax/handoff/current.md",
+      "docs/project-os/STATUS.md",
+      "live kanban board",
+      "live runtime/browser evidence"
+    ],
+    "acceptance": [
+      "shipped Recover/import-resume reaches the intended proof board pux-rootseed-proof-1780110594",
+      "the intended board shape is created or refreshed automatically as done root t_3a5eaf3b plus ready child t_95e2b59e",
+      "board-write provenance is isolated from manual/operator backfill or mixed continuity sessions",
+      "the proof-board root artifact is refreshed to the current reference-only seed wording rather than older anchor copy"
+    ],
+    "current_gap": "The shipped surface now opens the intended proof board directly, but the visible proof-board root artifact still carries stale older anchor wording and automatic Recover provenance remains unproven.",
+    "next_bounded_actions": [
+      "keep all loops biased to t_8dcfd135 until the acceptance evidence above closes",
+      "prefer live shipped Recover/import-resume proof over broad queue movement",
+      "treat queue-freeze and review-required side lanes as hard holds during this gate"
+    ],
+    "do_not_broaden": [
+      "queue-frozen follow-up cards",
+      "review-required side lanes",
+      "unrelated /health activity",
+      "manual proof-board reseeding unless contradictory evidence appears"
+    ]
+  }
+}

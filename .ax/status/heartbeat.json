@@ -1,0 +1,23 @@
+{
+  "updated_at": "2026-05-30T15:27:43Z",
+  "board": "pux-import-e2e-1780010472",
+  "repo_root": "/Users/parantoux/Andy/workspace/hermes-webui",
+  "heartbeat": "Browser-proof tick delivered verification-only confidence: the canonical New board modal still exposes Automation level plus Manual / Assisted / Active / Autonomous with a clean console, and t_12f63a64 remains blocked only on missing end-to-end create/scaffold proof across all four automation levels. The latest source guard is carried from prior continuity, while current /health activity belongs to unrelated session 20260530_184531_d90098.",
+  "verification": {
+    "canonical_board": "2026-05-30T15:27:43Z hermes kanban --board pux-import-e2e-1780010472 stats => triage 0 / todo 12 / ready 0 / running 0 / blocked 7 / done 35.",
+    "active_gate": "2026-05-30T15:27:43Z hermes kanban --board pux-import-e2e-1780010472 show t_12f63a64 => status blocked; latest summary 'Iteration budget exhausted (60/60) — task could not complete within the allowed iterations'.",
+    "runtime_health": "2026-05-30T15:27:43Z curl -sS http://127.0.0.1:8787/health + /api/session?session_id=20260530_184531_d90098 => /health active_runs 1 / active_streams 1, narrowed to unrelated session 20260530_184531_d90098 (작동 확인과 Hermes/WebUI 상태) with active_stream_id 821c3e6323e7496d88e29fc69823a38d and pending_user_message present.",
+    "source_guard": "Latest canonical source guard result carried from prior continuity, not rerun this tick: pytest tests/test_kanban_bridge.py tests/test_kanban_ui_static.py -q => 90 passed, 1 warning.",
+    "browser_selector_surface": "Fresh browser proof reran this tick: the canonical board switcher stayed on Project OS — import/resume 운영, New board still exposed Automation level with Manual / Assisted / Active / Autonomous, and the browser console stayed clean."
+  },
+  "board_truth_mode": "dual",
+  "canonical_backlog_board_id": "pux-import-e2e-1780010472",
+  "active_proof_board_id": "pux-rootseed-proof-1780110594",
+  "recover_board_id": "pux-recover-proof-1780128844",
+  "current_browser_board_id": "pux-import-e2e-1780010472",
+  "heartbeat_scope": "browser-proof-t_12f63a64-selector-modal-rerun-unrelated-runtime",
+  "branch": "fix/webui-refresh-scroll-and-persistence",
+  "commit": "ffce1c64",
+  "summary": "Verification-only progress this tick: fresh browser proof reran the selector modal surface on the canonical board, while the latest selector source guard is only carried from continuity. Current /health activity narrowed to unrelated session 20260530_184531_d90098, so the remaining gate is still fresh per-level create-and-scaffold proof for t_12f63a64.",
+  "active_focus": "browser-gate-t_12f63a64"
+}

@@ -221,6 +221,10 @@ function _artifactCandidatesFromToolCall(tc){
 }
 
 function collectSessionArtifacts(){
+  return _collectArtifactsFromSessionData({messages:S.messages, toolCalls:S.toolCalls});
+}
+
+function _collectArtifactsFromSessionData(data){
   const items = [];
   const seen = new Set();
   const push = (path, source) => {
@@ -228,14 +232,246 @@ function collectSessionArtifacts(){
     if(!path || seen.has(path)) return;
     seen.add(path); items.push({path, source});
   };
-  for(const tc of (S.toolCalls || [])){
+  const toolCalls = data && Array.isArray(data.toolCalls) ? data.toolCalls : [];
+  const messages = data && Array.isArray(data.messages) ? data.messages : [];
+  for(const tc of toolCalls){
     for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
   }
-  for(const msg of (S.messages || [])){
+  for(const msg of messages){
     const text = msg && (msg.content || msg.text || msg.message || '');
     for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
   }
   return items.slice(0, 50);
+}
+
+const _subagentTransparencyDetailCache = new Map();
+const _subagentTransparencyPending = new Map();
+
+function _activeSessionSubagentRows(){
+  const current = S && S.session ? S.session : null;
+  if(!current || !current.session_id) return [];
+  const rows = (typeof _allSessions !== 'undefined' && Array.isArray(_allSessions)) ? _allSessions : [];
+  const currentSid = String(current.session_id || '');
+  const lineageRoot = String(current._lineage_root_id || current._parent_lineage_root_id || currentSid || '');
+  const seen = new Set();
+  const out = [];
+  const push = (row) => {
+    const sid = String(row && row.session_id || '').trim();
+    if(!sid || sid === currentSid || seen.has(sid)) return;
+    seen.add(sid);
+    out.push({...row});
+  };
+  const currentRow = rows.find(row=>row && row.session_id === currentSid);
+  const attachedChildren = current._child_sessions || (currentRow && currentRow._child_sessions) || [];
+  for(const row of attachedChildren) push(row);
+  for(const row of rows){
+    if(!row || row.relationship_type !== 'child_session') continue;
+    const parentSid = String(row.parent_session_id || '');
+    const parentRoot = String(row._parent_lineage_root_id || '');
+    if(parentSid === currentSid || (lineageRoot && parentRoot === lineageRoot)) push(row);
+  }
+  return out.sort((a,b)=>{
+    const aTime = Number(a.updated_at || a.last_message_at || a.started_at || 0);
+    const bTime = Number(b.updated_at || b.last_message_at || b.started_at || 0);
+    return bTime - aTime;
+  });
+}
+
+function _formatRelativeTimestamp(ts){
+  const seconds = Number(ts || 0);
+  if(!seconds) return '';
+  const delta = Math.max(0, Math.round(Date.now()/1000 - seconds));
+  if(delta < 5) return 'just now';
+  if(delta < 60) return `${delta}s ago`;
+  if(delta < 3600) return `${Math.floor(delta/60)}m ago`;
+  if(delta < 86400) return `${Math.floor(delta/3600)}h ago`;
+  return `${Math.floor(delta/86400)}d ago`;
+}
+
+function _subagentStateForRow(row){
+  if(!row) return {label:'Idle', tone:'idle'};
+  if(row.pending_user_message) return {label:'Queued', tone:'queued'};
+  if(row.is_streaming || row.active_stream_id) return {label:'Running', tone:'running'};
+  return {label:'Idle', tone:'idle'};
+}
+
+function _latestAssistantMetrics(messages){
+  const list = Array.isArray(messages) ? messages : [];
+  for(let i=list.length-1;i>=0;i--){
+    const msg = list[i];
+    if(!msg || msg.role !== 'assistant') continue;
+    const usage = msg._turnUsage || {};
+    return {
+      inputTokens: Number(usage.input_tokens || 0),
+      outputTokens: Number(usage.output_tokens || 0),
+      cacheReadTokens: Number(usage.cache_read_tokens || 0),
+      cacheWriteTokens: Number(usage.cache_write_tokens || 0),
+      estimatedCost: Number(usage.estimated_cost || 0),
+      duration: typeof msg._turnDuration === 'number' ? msg._turnDuration : null,
+      tps: typeof msg._turnTps === 'number' ? msg._turnTps : null,
+    };
+  }
+  return null;
+}
+
+function _subagentMetricsFromDetail(detail){
+  const session = detail && detail.session ? detail.session : null;
+  const latest = _latestAssistantMetrics(session && session.messages);
+  return {
+    inputTokens: Number(session && session.input_tokens || 0),
+    outputTokens: Number(session && session.output_tokens || 0),
+    estimatedCost: Number(session && session.estimated_cost || 0),
+    duration: latest && typeof latest.duration === 'number' ? latest.duration : null,
+    tps: latest && typeof latest.tps === 'number' ? latest.tps : null,
+    lastTurnInputTokens: latest && latest.inputTokens ? latest.inputTokens : 0,
+    lastTurnOutputTokens: latest && latest.outputTokens ? latest.outputTokens : 0,
+  };
+}
+
+function _subagentMetricPills(metrics){
+  if(!metrics) return [];
+  const pills = [];
+  pills.push({label:'Input', value:_formatNumber(metrics.inputTokens || 0)});
+  pills.push({label:'Output', value:_formatNumber(metrics.outputTokens || 0)});
+  if(metrics.duration) pills.push({label:'Last turn', value:_formatTurnDuration(metrics.duration)});
+  if(metrics.tps) pills.push({label:'Speed', value:`${metrics.tps.toFixed(1)} tps`});
+  if(metrics.lastTurnInputTokens || metrics.lastTurnOutputTokens){
+    pills.push({label:'Last usage', value:`${_formatNumber(metrics.lastTurnInputTokens || 0)} in · ${_formatNumber(metrics.lastTurnOutputTokens || 0)} out`});
+  }
+  if(metrics.estimatedCost) pills.push({label:'Cost', value:_formatCostUsd(metrics.estimatedCost)});
+  return pills;
+}
+
+function _subagentActivityFeed(detail){
+  const session = detail && detail.session ? detail.session : null;
+  const items = [];
+  const toolCalls = Array.isArray(session && session.tool_calls) ? session.tool_calls : [];
+  for(const tc of toolCalls){
+    const preview = String(tc && (tc.preview || tc.snippet || tc.result || tc.output || '') || '').trim();
+    items.push({
+      kind: tc && tc.is_error ? 'error' : 'tool',
+      label: `Tool · ${_toolDisplayName(tc || {})}`,
+      detail: preview,
+      ts: Number(tc && (tc._ts || tc.timestamp || 0) || 0),
+    });
+  }
+  const messages = Array.isArray(session && session.messages) ? session.messages : [];
+  for(const msg of messages){
+    if(!msg || (msg.role !== 'assistant' && msg.role !== 'user' && msg.role !== 'system')) continue;
+    const text = String(msg.content || msg.text || msg.message || '').trim();
+    if(!text) continue;
+    const kind = msg.role === 'assistant' ? 'assistant' : (msg.role === 'user' ? 'user' : 'system');
+    items.push({
+      kind,
+      label: `${msg.role === 'assistant' ? 'Assistant' : msg.role === 'user' ? 'User' : 'System'} message`,
+      detail: text,
+      ts: Number(msg._ts || msg.timestamp || 0),
+    });
+  }
+  return items
+    .sort((a,b)=>(a.ts||0)-(b.ts||0))
+    .slice(-10);
+}
+
+function _subagentActivityRowsHtml(items){
+  if(!items.length){
+    return '<div class="workspace-subagent-empty">No activity captured yet.</div>';
+  }
+  return items.map((item)=>{
+    const filter = item.kind === 'error' ? 'error' : (item.kind === 'tool' ? 'tool' : 'message');
+    const detail = String(item.detail || '').trim();
+    const shortDetail = detail.length > 160 ? `${detail.slice(0,157)}…` : detail;
+    return `<div class="workspace-subagent-log-row" data-subagent-log-kind="${esc(filter)}">`
+      + `<div class="workspace-subagent-log-label">${esc(item.label)}</div>`
+      + `<div class="workspace-subagent-log-detail">${esc(shortDetail || '—')}</div>`
+      + `<div class="workspace-subagent-log-time">${esc(_formatRelativeTimestamp(item.ts))}</div>`
+      + `</div>`;
+  }).join('');
+}
+
+async function _ensureSubagentTransparencyDetail(sessionId){
+  const sid = String(sessionId || '').trim();
+  if(!sid) return null;
+  if(_subagentTransparencyDetailCache.has(sid)) return _subagentTransparencyDetailCache.get(sid);
+  if(_subagentTransparencyPending.has(sid)) return _subagentTransparencyPending.get(sid);
+  const request = api(`/api/session?session_id=${encodeURIComponent(sid)}`)
+    .then((data)=>{
+      const detail = data && data.session ? data : null;
+      if(detail) _subagentTransparencyDetailCache.set(sid, detail);
+      return detail;
+    })
+    .catch(()=>null)
+    .finally(()=>{
+      _subagentTransparencyPending.delete(sid);
+    });
+  _subagentTransparencyPending.set(sid, request);
+  return request;
+}
+
+function _primeSubagentTransparencyDetails(rows, ownerSessionId){
+  for(const row of rows){
+    const sid = String(row && row.session_id || '').trim();
+    if(!sid || _subagentTransparencyDetailCache.has(sid) || _subagentTransparencyPending.has(sid)) continue;
+    void _ensureSubagentTransparencyDetail(sid).then(()=>{
+      if(S && S.session && S.session.session_id === ownerSessionId) renderSessionArtifacts();
+    });
+  }
+}
+
+function _renderSubagentTransparencySection(){
+  const ownerSessionId = S && S.session ? S.session.session_id : '';
+  const rows = _activeSessionSubagentRows();
+  if(!rows.length) return '';
+  _primeSubagentTransparencyDetails(rows, ownerSessionId);
+  const cards = rows.map((row)=>{
+    const sid = String(row.session_id || '');
+    const detail = _subagentTransparencyDetailCache.get(sid) || null;
+    const state = _subagentStateForRow(row);
+    const metrics = _subagentMetricsFromDetail(detail);
+    const metricPills = _subagentMetricPills(metrics);
+    const activity = detail ? _subagentActivityFeed(detail) : [];
+    const artifacts = detail ? _collectArtifactsFromSessionData({
+      messages: detail.session && detail.session.messages,
+      toolCalls: detail.session && detail.session.tool_calls,
+    }).slice(0,3) : [];
+    const relationshipNote = row._parent_segment_title
+      ? `Attached to ${row._parent_segment_title}`
+      : (row.parent_title ? `Child of ${row.parent_title}` : 'Subagent session');
+    const messageCount = Number(row.message_count || (detail && detail.session && Array.isArray(detail.session.messages) ? detail.session.messages.length : 0) || 0);
+    const openLabel = sid ? `<button type="button" class="workspace-subagent-open" onclick="switchSession('${esc(sid)}')">Open session</button>` : '';
+    return `<section class="workspace-subagent-card" data-subagent-session-id="${esc(sid)}">`
+      + `<div class="workspace-subagent-head">`
+      + `<div>`
+      + `<div class="workspace-subagent-title-row"><div class="workspace-subagent-title">${esc(row.title || sid)}</div><span class="workspace-subagent-state workspace-subagent-state-${esc(state.tone)}">${esc(state.label)}</span></div>`
+      + `<div class="workspace-subagent-meta">${esc(relationshipNote)} · ${esc(_formatRelativeTimestamp(row.updated_at || row.last_message_at || row.started_at))}</div>`
+      + `</div>`
+      + `${openLabel}`
+      + `</div>`
+      + `<div class="workspace-subagent-summary">${esc(_formatNumber(messageCount))} msgs · ${esc(_formatNumber(Number(row.input_tokens || metrics.inputTokens || 0) + Number(row.output_tokens || metrics.outputTokens || 0)))} tokens</div>`
+      + `${metricPills.length ? `<div class="workspace-subagent-metrics">${metricPills.map((pill)=>`<div class="workspace-subagent-metric"><span>${esc(pill.label)}</span><strong>${esc(pill.value)}</strong></div>`).join('')}</div>` : ''}`
+      + `<div class="workspace-subagent-log-filters" role="tablist" aria-label="Subagent log filters">`
+      + `<button type="button" class="workspace-subagent-log-filter active" data-subagent-log-filter="all" onclick="filterSubagentTransparencyLog(this)">All</button>`
+      + `<button type="button" class="workspace-subagent-log-filter" data-subagent-log-filter="tool" onclick="filterSubagentTransparencyLog(this)">Tools</button>`
+      + `<button type="button" class="workspace-subagent-log-filter" data-subagent-log-filter="message" onclick="filterSubagentTransparencyLog(this)">Messages</button>`
+      + `<button type="button" class="workspace-subagent-log-filter" data-subagent-log-filter="error" onclick="filterSubagentTransparencyLog(this)">Errors</button>`
+      + `</div>`
+      + `<div class="workspace-subagent-log">${detail ? _subagentActivityRowsHtml(activity) : '<div class="workspace-subagent-empty">Loading session details…</div>'}</div>`
+      + `${artifacts.length ? `<div class="workspace-subagent-artifacts"><div class="workspace-subagent-artifacts-label">Recent artifacts</div>${artifacts.map((item)=>`<button type="button" class="workspace-subagent-artifact" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)">${esc(item.path)}</button>`).join('')}</div>` : ''}`
+      + `</section>`;
+  }).join('');
+  return `<section class="workspace-subagent-section"><div class="workspace-subagent-section-head"><div class="workspace-subagent-section-title">Subagent transparency</div><div class="workspace-subagent-section-meta">${esc(String(rows.length))} session${rows.length===1?'':'s'}</div></div>${cards}</section>`;
+}
+
+function filterSubagentTransparencyLog(button){
+  if(!button) return;
+  const card = button.closest('.workspace-subagent-card');
+  if(!card) return;
+  const filter = String(button.dataset.subagentLogFilter || 'all');
+  card.querySelectorAll('.workspace-subagent-log-filter').forEach((node)=>node.classList.toggle('active', node === button));
+  card.querySelectorAll('.workspace-subagent-log-row').forEach((row)=>{
+    const kind = String(row.dataset.subagentLogKind || '');
+    row.hidden = !(filter === 'all' || kind === filter || (filter === 'message' && kind === 'message'));
+  });
 }
 
 function renderSessionArtifacts(){
@@ -243,16 +479,20 @@ function renderSessionArtifacts(){
   const count = $('workspaceArtifactsCount');
   if(!root) return;
   const items = collectSessionArtifacts();
+  const subagentSection = _renderSubagentTransparencySection();
   if(count) count.textContent = String(items.length);
   if(!S.session){
     root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
     return;
   }
-  if(!items.length){
+  if(!items.length && !subagentSection){
     root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
     return;
   }
-  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+  const artifactSection = items.length
+    ? `<section class="workspace-artifact-section"><div class="workspace-subagent-section-head"><div class="workspace-subagent-section-title">Session artifacts</div><div class="workspace-subagent-section-meta">${esc(String(items.length))}</div></div>${items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('')}</section>`
+    : '';
+  root.innerHTML = `${subagentSection}${artifactSection}`;
 }
 
 async function _workspacePathExists(path){

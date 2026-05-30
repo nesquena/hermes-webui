@@ -18,6 +18,9 @@ def test_active_session_external_refresh_uses_metadata_then_force_reload():
     assert "async function refreshActiveSessionIfExternallyUpdated(reason)" in SESSIONS_JS
     assert "messages=0&resolve_model=0" in SESSIONS_JS
     assert "remoteCount > localCount || remoteLast > localLast" in SESSIONS_JS
+    assert "const reconciledIdle = _reconcileActiveSessionIdleStateFromList([data.session]);" in SESSIONS_JS
+    assert "if(reconciledIdle){" in SESSIONS_JS
+    assert "renderSessionListFromCache()" in SESSIONS_JS
     assert "if(S.busy || S.activeStreamId) return;" in SESSIONS_JS
     assert "document.hidden" in SESSIONS_JS
 

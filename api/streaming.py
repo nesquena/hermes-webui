@@ -44,6 +44,12 @@ from api.run_journal import RunJournalWriter
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import get_state_db_session_messages, reconciled_state_db_messages_for_session
+from api.runtime_contract import (
+    clamp_workspace_to_contract,
+    enforce_pinned_profile,
+    get_project_narrow_prefill_policy,
+    is_project_narrow_mode,
+)
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -380,8 +386,28 @@ def _load_prefill_messages_script(config_data: dict) -> dict:
     return {"status": "loaded", "source": "script", "label": label, "messages": messages, "message_count": len(messages)}
 
 
+def _load_project_prefill_context(session, config_data: dict) -> dict:
+    contract = getattr(session, "runtime_contract", None)
+    contract = dict(contract) if isinstance(contract, dict) else {}
+    if contract.get("webui_prefill_messages_script"):
+        scoped_cfg = dict(config_data or {})
+        scoped_cfg["webui_prefill_messages_script"] = contract.get("webui_prefill_messages_script")
+        if contract.get("webui_prefill_messages_script_timeout") is not None:
+            scoped_cfg["webui_prefill_messages_script_timeout"] = contract.get("webui_prefill_messages_script_timeout")
+        return _load_prefill_messages_script(scoped_cfg)
+    if contract.get("prefill_messages_file"):
+        return _load_prefill_messages_file(
+            str(contract.get("prefill_messages_file") or ""),
+            source="project_file",
+            status="loaded",
+        )
+    return _prefill_not_configured()
+
+
 def _load_webui_prefill_context(
     config_data: Optional[dict] = None,
+    *,
+    session=None,
 ) -> dict:
     """Load configured WebUI session prefill messages.
 
@@ -391,6 +417,12 @@ def _load_webui_prefill_context(
     turn context without baking any one note provider into the WebUI.
     """
     cfg = config_data if isinstance(config_data, dict) else get_config()
+    if session is not None and is_project_narrow_mode(session):
+        policy = get_project_narrow_prefill_policy(session)
+        if policy == "disabled":
+            return _prefill_not_configured()
+        if policy == "project_only":
+            return _load_project_prefill_context(session, cfg)
     script_context = _load_prefill_messages_script(cfg)
     if script_context.get("status") != "not_configured":
         return script_context
@@ -2126,8 +2158,10 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             # pre-existing parent_session_id lineage.
             saved_sid = s.session_id
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
+            saved_pinned = bool(getattr(s, 'pinned', False))
             s.session_id = old_sid
             s.pre_compression_snapshot = True
+            s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
             # archived snapshot so the sidebar does not reopen the parent as
             # a permanently-running session while the child already holds the
@@ -2154,6 +2188,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             finally:
                 s.session_id = saved_sid
                 s.pre_compression_snapshot = saved_snapshot
+                s.pinned = saved_pinned
                 s.active_stream_id = saved_active_stream_id
                 s.pending_user_message = saved_pending_user_message
                 s.pending_attachments = saved_pending_attachments
@@ -2166,6 +2201,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         snapshot = Session.load(old_sid)
         if snapshot:
             snapshot.pre_compression_snapshot = True
+            snapshot.pinned = False
             # Stage-359 Opus SHOULD-FIX: clear runtime fields on the loaded
             # snapshot too. If the disk snapshot was last persisted while the
             # parent was live, it could carry a stale active_stream_id /
@@ -3767,7 +3803,12 @@ def _run_agent_streaming(
     try:
         s = get_session(session_id)
         update_active_run(stream_id, phase="running", session_id=session_id)
-        s.workspace = str(Path(workspace).expanduser().resolve())
+        try:
+            enforce_pinned_profile(s, getattr(s, 'profile', None))
+            s.workspace = clamp_workspace_to_contract(s, workspace, fallback_to_root=True)
+        except ValueError as e:
+            raise RuntimeError(str(e))
+        workspace = s.workspace
         s.model = model
         provider_context = (
             str(model_provider).strip().lower()
@@ -4326,7 +4367,15 @@ def _run_agent_streaming(
             # Read per-profile config at call time (not module-level snapshot)
             from api.config import get_config as _get_config
             _cfg = _get_config()
-            _prefill_context = _load_webui_prefill_context(_cfg)
+            _session_meta_for_prefill = None
+            try:
+                from api.models import Session, SESSION_DIR
+                _session_path = SESSION_DIR / f"{session_id}.json"
+                if _session_path.exists():
+                    _session_meta_for_prefill = Session.load_metadata_only(session_id)
+            except Exception as _prefill_session_err:
+                print(f"[webui] WARNING: failed to read session metadata for prefill policy in {session_id}: {_prefill_session_err}", flush=True)
+            _prefill_context = _load_webui_prefill_context(_cfg, session=_session_meta_for_prefill)
             _prefill_messages = _prefill_context.get('messages') or []
             put('context_status', {
                 'session_id': session_id,

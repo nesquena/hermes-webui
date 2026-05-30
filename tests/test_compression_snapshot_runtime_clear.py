@@ -9,6 +9,7 @@ class FakeSession:
         self.session_id = "new_session"
         self.parent_session_id = "original_parent"
         self.pre_compression_snapshot = False
+        self.pinned = True
         self.active_stream_id = "live-stream"
         self.pending_user_message = "current prompt"
         self.pending_attachments = [{"name": "file.txt"}]
@@ -21,6 +22,7 @@ class FakeSession:
             "session_id": self.session_id,
             "parent_session_id": self.parent_session_id,
             "pre_compression_snapshot": self.pre_compression_snapshot,
+            "pinned": self.pinned,
             "active_stream_id": self.active_stream_id,
             "pending_user_message": self.pending_user_message,
             "pending_attachments": list(self.pending_attachments),
@@ -43,6 +45,7 @@ def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring
         "session_id": "old_session",
         "parent_session_id": "original_parent",
         "pre_compression_snapshot": True,
+        "pinned": False,
         "active_stream_id": None,
         "pending_user_message": None,
         "pending_attachments": [],
@@ -52,6 +55,7 @@ def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring
     }
     assert session.session_id == "new_session"
     assert session.pre_compression_snapshot is False
+    assert session.pinned is True
     assert session.active_stream_id == "live-stream"
     assert session.pending_user_message == "current prompt"
     assert session.pending_attachments == [{"name": "file.txt"}]
@@ -59,6 +63,7 @@ def test_preserve_pre_compression_snapshot_clears_runtime_fields_while_restoring
 
     saved = json.loads((tmp_path / "old_session.json").read_text(encoding="utf-8"))
     assert saved["pre_compression_snapshot"] is True
+    assert saved["pinned"] is False
     assert saved["active_stream_id"] is None
     assert saved["pending_user_message"] is None
     assert saved["pending_attachments"] == []
@@ -77,6 +82,7 @@ def test_preserve_pre_compression_snapshot_load_and_mark_branch_clears_runtime_f
             {"role": "user", "content": "newer prompt already on disk"},
         ],
         "pre_compression_snapshot": True,
+        "pinned": True,
         "active_stream_id": "stale-stream",
         "pending_user_message": "stale prompt",
         "pending_attachments": [{"name": "stale.txt"}],
@@ -91,6 +97,7 @@ def test_preserve_pre_compression_snapshot_load_and_mark_branch_clears_runtime_f
     saved = json.loads((tmp_path / "old_session.json").read_text(encoding="utf-8"))
     assert saved["messages"] == old_payload["messages"]
     assert saved["pre_compression_snapshot"] is True
+    assert saved["pinned"] is False
     assert saved["active_stream_id"] is None
     assert saved["pending_user_message"] is None
     assert saved["pending_attachments"] == []

@@ -200,6 +200,82 @@ def test_joplin_recent_ai_notes_uses_configured_prefill_script(monkeypatch, tmp_
     assert all(note["used_reason"] == "automatic_recall" for note in notes)
 
 
+def test_joplin_recent_ai_notes_project_narrow_disabled_prefill_hides_global_recall_notes(monkeypatch, tmp_path):
+    from api import routes
+
+    global_script = tmp_path / "global_joplin_context.py"
+    global_script.write_text(
+        'CURRENT_CONTEXT_ID = "5ba9ab822c344115939205ca4e8eaec0"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(routes, "get_config", lambda: {"prefill_messages_script": str(global_script)})
+
+    session = type("SessionStub", (), {
+        "session_mode": "project_narrow",
+        "runtime_contract": {
+            "prefill_policy": "disabled",
+            "allowed_note_sources": ["joplin"],
+        },
+    })()
+
+    notes = routes._joplin_recent_ai_notes(limit=3, session=session)
+
+    assert notes == []
+
+
+def test_joplin_recent_ai_notes_project_only_uses_scoped_webui_prefill_script(monkeypatch, tmp_path):
+    from api import routes
+
+    global_script = tmp_path / "global_joplin_context.py"
+    global_script.write_text(
+        '\n'.join([
+            'CURRENT_CONTEXT_ID = "global-global-global1"',
+            'OPEN_ISSUES_ID = "global-global-global2"',
+        ]),
+        encoding="utf-8",
+    )
+    scoped_script = tmp_path / "scoped_joplin_context.py"
+    scoped_script.write_text(
+        '\n'.join([
+            'CURRENT_CONTEXT_ID = "5ba9ab822c344115939205ca4e8eaec0"',
+            'OPEN_ISSUES_ID = "623aeb6e55cb4aa39a0541f2ac09aa36"',
+        ]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(routes, "get_config", lambda: {"prefill_messages_script": str(global_script)})
+
+    fetched = []
+
+    def fake_get(path, params=None):
+        note_id = path.rsplit("/", 1)[-1]
+        fetched.append(note_id)
+        titles = {
+            "5ba9ab822c344115939205ca4e8eaec0": "Current Context",
+            "623aeb6e55cb4aa39a0541f2ac09aa36": "Open Issues",
+        }
+        assert note_id in titles
+        return {"id": note_id, "title": titles[note_id], "updated_time": 123, "parent_id": "folder"}
+
+    monkeypatch.setattr(routes, "_joplin_api_get", fake_get)
+
+    session = type("SessionStub", (), {
+        "session_mode": "project_narrow",
+        "runtime_contract": {
+            "prefill_policy": "project_only",
+            "allowed_note_sources": ["joplin"],
+            "webui_prefill_messages_script": ["python3", str(scoped_script)],
+        },
+    })()
+
+    notes = routes._joplin_recent_ai_notes(limit=2, session=session)
+
+    assert [note["title"] for note in notes] == ["Current Context", "Open Issues"]
+    assert fetched == [
+        "5ba9ab822c344115939205ca4e8eaec0",
+        "623aeb6e55cb4aa39a0541f2ac09aa36",
+    ]
+
+
 def test_external_notes_ui_uses_minimal_lucide_icons_for_ai_recent_notes():
     from pathlib import Path
 

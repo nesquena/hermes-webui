@@ -1,0 +1,211 @@
+{
+  "updated_at": "2026-05-30T15:27:43Z",
+  "branch": "fix/webui-refresh-scroll-and-persistence",
+  "commit": "ffce1c64",
+  "board": {
+    "slug": "pux-import-e2e-1780010472",
+    "display_name": "Project OS — import/resume 운영",
+    "ready_priority_order": [
+      "t_12f63a64"
+    ],
+    "queue_freeze": {
+      "active": true,
+      "reason": "Current canonical board truth is triage 0 / todo 12 / ready 0 / running 0 / blocked 7 / done 35. The first still-open acceptance card t_12f63a64 remains blocked, so the queue stays frozen on that same card until fresh browser/runtime create-and-scaffold proof lands.",
+      "immediate_queue": [
+        "t_12f63a64"
+      ],
+      "still_blocked_pending_replan": [
+        "t_12f63a64",
+        "t_7211b2c0",
+        "t_fb90f53b",
+        "t_18e096fa",
+        "t_b28e558f",
+        "t_de1c5738",
+        "t_5a68d11b"
+      ]
+    },
+    "deferred_tracks": [
+      "t_132c99ea",
+      "t_358df935",
+      "t_ea52a3f4",
+      "t_03fb9d7e",
+      "t_a982118d"
+    ],
+    "repo_corroboration": "Canonical board truth still reads triage 0 / todo 12 / ready 0 / running 0 / blocked 7 / done 35. The selector prerequisite t_8c5730c0 remains done, while the first acceptance card t_12f63a64 is still blocked and has not yet reached closure-quality live create/scaffold proof.",
+    "blocker_resolver_note": "This browser-proof tick did not release blocked work. It rechecked the first acceptance card on the live canonical board, confirmed the selector modal still exposes Automation level plus all four choices with a clean console, and verified that the only current /health activity belongs to unrelated session 20260530_184531_d90098 rather than blocker-local progress."
+  },
+  "current_phase": "Governor-first pilot remains focused on the first automation-level acceptance gate. The selector prerequisite is closed; the immediate gate is blocked card t_12f63a64 awaiting fresh end-to-end creation/scaffold proof.",
+  "goal_summary": "Keep Project OS continuity anchored to the canonical board while focusing only on t_12f63a64. Selector UI/payload persistence remains accepted in repo truth, and this browser-proof tick freshly re-proved the canonical selector surface on the live Kanban board: the New board modal still shows Automation level with Manual / Assisted / Active / Autonomous and the console stayed clean. The canonical board remains triage 0 / todo 12 / ready 0 / running 0 / blocked 7 / done 35, while /health now shows one unrelated active run on session 20260530_184531_d90098 (작동 확인과 Hermes/WebUI 상태) rather than fresh blocker-local create/scaffold movement. The remaining gap is still actual end-to-end project creation plus lane/cron scaffold proof across all four levels.",
+  "completed_slices": [
+    {
+      "task_id": "t_8c5730c0",
+      "summary": "Closed after parent verification: the shared board/project modal now exposes an automation-level selector, create/update payloads carry automation_level, board metadata persists validated values, and pytest tests/test_kanban_bridge.py tests/test_kanban_ui_static.py -q reran green (90 passed, 1 warning)."
+    },
+    {
+      "task_id": "t_5bdf7695",
+      "summary": "Closed after live browser re-check on the canonical board: selectedTask synced on the actual board card, the Project drawer showed current proof state, and Open evidence thread reopened settled proof session fb91c0da2339 instead of stale/empty linkage."
+    },
+    {
+      "task_id": "t_f145cc08",
+      "summary": "Closed after refreshed-runtime same-thread proof on canonical session bb949ce03e0b: temp job 1b3aaa85ca9b stored non-null WebUI origin metadata, manual run returned SAME_THREAD_OK_2026-05-29T23:50:09Z, and the originating WebUI thread grew from message_count 0 to 1 with a cron_delivery assistant message before the temp job was deleted."
+    },
+    {
+      "task_id": "t_8dcfd135",
+      "summary": "Closed after re-judging the card against its original acceptance: clean proof board still shows reference-only done root t_3a5eaf3b plus separate ready child t_95e2b59e, blocker-owned source guard reran green (4 passed), and fresh browser proof reopened directly on intended proof board with matching drawer context and clean console."
+    },
+    {
+      "task_id": "t_3017cbac",
+      "summary": "Closed on live canonical board truth as the first released post-proof follow-up."
+    },
+    {
+      "task_id": "t_efb7ae49",
+      "summary": "Closed after landing the canonical execution-surface MVP note."
+    },
+    {
+      "task_id": "t_84298b04",
+      "summary": "Closed after the browser/runtime evidence gate rendered end-to-end with clean console and live report linkage."
+    },
+    {
+      "task_id": "t_0bbe1695",
+      "summary": "Closed after live browser QA showed the Closeout stage and truthful blocker text in the Project drawer."
+    },
+    {
+      "task_id": "t_07b00ab9",
+      "summary": "Closed after live canonical-board verification of the shipped intake affordances."
+    },
+    {
+      "task_id": "t_2e9300e6",
+      "summary": "Closed after parent verification reran the key Project OS workflow regression slice and accepted the umbrella product-flow lane."
+    },
+    {
+      "task_id": "t_836ee0f9",
+      "summary": "Closed after review acceptance: runtime-contract hooks for allowed skills/toolsets stayed present and the targeted guard reran green at 43 passed, 1 warning."
+    },
+    {
+      "task_id": "t_c0fd0069",
+      "summary": "Closed after review acceptance: project-narrow note-source/session-scope hooks stayed present and the targeted note-source regression slice reran green."
+    },
+    {
+      "task_id": "t_eaa653bb",
+      "summary": "Closed after review acceptance: workspace/profile runtime-contract hooks including pinned-profile enforcement stayed present and the targeted runtime-contract slice reran green."
+    },
+    {
+      "task_id": "t_a047f119",
+      "summary": "Closed after review acceptance on live board truth; the subagent transparency UI implementation card is no longer blocked."
+    },
+    {
+      "task_id": "t_1d0000a3",
+      "summary": "Closed after review acceptance: automation_level-backed REST/MCP project scaffolding stayed green and the backend scaffolding lane moved forward to its UI follow-up."
+    },
+    {
+      "task_id": "t_59d4d6e5",
+      "summary": "Closed on live board truth after the integrated dedicated-session runtime-enforcement root lane completed: persisted project_narrow runtime-contract enforcement now covers creation, session mutation, chat start, legacy /api/chat, streaming bootstrap, skill discovery/load, and Notes-drawer recall scope."
+    }
+  ],
+  "pending_slices": [
+    {
+      "task_id": "t_12f63a64",
+      "summary": "Active first acceptance card remains blocked: verify end-to-end project creation with all four automation levels and confirm lane/cron scaffold presets.",
+      "remaining_gate": "This browser-proof tick freshly reran the canonical selector-modal surface and kept it green in the browser: the New board modal still shows Automation level with Manual / Assisted / Active / Autonomous and the console stayed clean. Latest canonical source-guard result is carried from prior continuity rather than rerun this tick, and /health activity now narrows to unrelated session 20260530_184531_d90098. Fresh create-and-scaffold proof across all four levels is still missing."
+    },
+    {
+      "task_id": "t_fb90f53b",
+      "summary": "Project-session goal integration design remains blocked after two immediate pid-not-alive crashes on the last restore attempt.",
+      "remaining_gate": "Investigate crash cause before any further restore attempt; blocker-resolver must not requeue it automatically."
+    },
+    {
+      "task_id": "t_7211b2c0",
+      "summary": "Playwright import/resume loop-test enhancement remains blocked with iteration-budget exhaustion under deferred harness work t_ea52a3f4.",
+      "remaining_gate": "Keep deferred/reference track frozen until explicit replan."
+    },
+    {
+      "task_id": "t_18e096fa",
+      "summary": "Subagent transparency UI design remains blocked with iteration-budget exhaustion under deferred/reference umbrella t_a982118d.",
+      "remaining_gate": "Keep deferred/reference track frozen until explicit replan."
+    },
+    {
+      "task_id": "t_b28e558f",
+      "summary": "Subagent transparency backend remains blocked with iteration-budget exhaustion under deferred/reference umbrella t_a982118d.",
+      "remaining_gate": "Keep deferred/reference track frozen until explicit replan."
+    },
+    {
+      "task_id": "t_de1c5738",
+      "summary": "Code execution cell UI remains blocked with iteration-budget exhaustion under deferred/reference umbrella t_a982118d.",
+      "remaining_gate": "Keep deferred/reference track frozen until explicit replan."
+    },
+    {
+      "task_id": "t_5a68d11b",
+      "summary": "AUTOPILOT backlog reconcile logic remains blocked with iteration-budget exhaustion under deferred/reference track t_132c99ea.",
+      "remaining_gate": "Keep deferred/reference track frozen until explicit replan."
+    }
+  ],
+  "verify_commands": [
+    {
+      "command": "git rev-parse --short HEAD && git rev-parse --abbrev-ref HEAD",
+      "result": "Canonical repo truth still sits on branch fix/webui-refresh-scroll-and-persistence at commit ffce1c64."
+    },
+    {
+      "command": "hermes kanban --board pux-import-e2e-1780010472 stats",
+      "result": "Fresh canonical board truth still reads triage 0 / todo 12 / ready 0 / running 0 / blocked 7 / done 35."
+    },
+    {
+      "command": "hermes kanban --board pux-import-e2e-1780010472 show t_12f63a64",
+      "result": "Confirmed the first still-open acceptance card remains blocked with 'Iteration budget exhausted (60/60) — task could not complete within the allowed iterations'."
+    },
+    {
+      "command": "curl -sS http://127.0.0.1:8787/health && curl -sS 'http://127.0.0.1:8787/api/session?session_id=20260530_184531_d90098'",
+      "result": "Current runtime activity is unrelated to t_12f63a64: /health reports active_runs 1 / active_streams 1, and the live run belongs to session 20260530_184531_d90098 (작동 확인과 Hermes/WebUI 상태) with active_stream_id 821c3e6323e7496d88e29fc69823a38d plus a pending user message."
+    },
+    {
+      "command": "pytest tests/test_kanban_bridge.py tests/test_kanban_ui_static.py -q",
+      "result": "Latest canonical source guard result is carried from prior continuity, not rerun this browser-proof tick: pytest tests/test_kanban_bridge.py tests/test_kanban_ui_static.py -q last stayed green at 90 passed, 1 warning."
+    },
+    {
+      "command": "browser proof: open Kanban on canonical board, open New board modal, inspect Automation level options and console",
+      "result": "Fresh browser proof reran this tick: the visible board switcher stayed on canonical Project OS — import/resume 운영, New board still exposed Automation level with Manual / Assisted / Active / Autonomous, and the browser console stayed clean."
+    }
+  ],
+  "cross_session_drift_warning": "Do not regress to stale stories: neither 't_12f63a64 is already running', nor 'the current active /health run belongs to the blocker', nor 'the selector source guard reran this tick'. Current truth is that this browser-proof tick freshly reran only the live selector modal surface, the latest source-guard result is carried from prior continuity, and the one active runtime session is unrelated chat session 20260530_184531_d90098 rather than blocker-local movement.",
+  "next_live_qa_gate": "Stay on t_12f63a64 only. Do not broaden into later blocked work. The next bounded acceptance gate is still one fresh end-to-end browser/runtime proof that Manual / Assisted / Active / Autonomous actually create the right board plus lane/cron scaffold and summary/delivery behavior.",
+  "automation": {
+    "blocker_resolver": {
+      "job_id": "d33e72d3837a",
+      "name": "project-os-blocker-resolver-10m",
+      "schedule": "*/10 * * * *",
+      "deliver": "local",
+      "mode": "agent replan-first restore loop",
+      "restore_policy": "restore at most one safe machine-resumable blocked card per tick; keep deferred/reference and crash-blocked cards intact; do not release anything while active running lanes already exist",
+      "last_restore": {
+        "task_id": "t_efb7ae49",
+        "at": "2026-05-30T11:45:55Z",
+        "reason": "original immediate proof queue plus first released follow-up were all closed on live board truth, so blocker-resolver released exactly one next queue-frozen follow-up"
+      },
+      "last_blocked_audit": {
+        "at": "2026-05-30T15:27:43Z",
+        "decision": "no-safe-restore",
+        "candidate_task_id": null,
+        "reason": "The first acceptance gate remains blocked; this browser-proof tick freshly re-proved the live selector modal surface, while /health activity narrowed to unrelated session 20260530_184531_d90098 instead of blocker-local create/scaffold closure."
+      }
+    }
+  },
+  "active_gate": {
+    "task_id": "t_12f63a64",
+    "title": "Verify end-to-end project creation with automation levels",
+    "class": "browser-proof-follow-up",
+    "status": "blocked",
+    "queue_freeze": true,
+    "human_decision_required": false,
+    "machine_resumable": false,
+    "current_gap": "The selector prerequisite remains closed and this browser-proof tick freshly re-proved the live selector modal surface, but the card is still blocked because no fresh end-to-end proof yet shows that project creation and scaffold presets work across all four automation levels. The only live runtime activity belongs to unrelated chat session 20260530_184531_d90098, so there is still no blocker-local create/scaffold movement beyond selector-surface verification.",
+    "next_bounded_actions": [
+      "re-enter bounded browser/runtime proof for each automation level",
+      "verify resulting lane/cron scaffold presets",
+      "verify summary destination plus delivery/suppression behavior only for t_12f63a64"
+    ],
+    "do_not_broaden": [
+      "later blocked deferred/reference-only tracks",
+      "crash-blocked t_fb90f53b",
+      "non-browser product work outside automation-level verification"
+    ]
+  }
+}

@@ -130,3 +130,4 @@ Related references:
 - [`docs/docker.md`](docker.md) — Docker compose setup, common failure modes, bind-mount migration.
 - [`docs/wsl-autostart.md`](wsl-autostart.md) — WSL2 auto-start at login on Windows.
 - [`docs/EXTENSIONS.md`](EXTENSIONS.md) — WebUI extension injection, security model, examples.
+- [`docs/project-os-harness-triage.md`](project-os-harness-triage.md) — how to distinguish Project OS harness drift from real product bugs, including false timeout, `stalled_running`, and root-seed/reference-only semantics.

@@ -12,6 +12,19 @@
 > Run: `pytest tests/ -v --timeout=60`
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
+>
+> Project OS extension/control-plane triage: when a run looks like a false timeout, stale running, or root-seed misclassification, use [`docs/project-os-harness-triage.md`](docs/project-os-harness-triage.md) before deciding whether the failure is harness drift or a real product bug. That guide links the live browser evidence back to `tests/test_project_os_extension_regressions.py` and `extensions/project-os/project-os-extension.js`.
+>
+> Project OS topology/assignment contract: when a task changes control-plane prompts, lane assignment rules, or phase-1 review routing, read [`docs/project-os-phase1-topology.md`](docs/project-os-phase1-topology.md) first so repo-side continuity stays aligned with the live `default/ops/builder` topology and the current builder/review boundaries.
+
+Dedicated Project session runtime-contract acceptance criteria:
+- Creating a `session_mode=project_narrow` session must persist one pinned profile plus one `runtime_contract.workspace_root`.
+- Chat start, goal kickoff, and legacy `/api/chat` execution must reject profile switches away from the persisted profile.
+- Implicit stale workspaces may recover back to `workspace_root`, but explicit workspace updates or chat requests outside that root must fail.
+- Streaming bootstrap and legacy `/api/chat` execution must set `HERMES_HOME`/tool runtime env from the pinned profile before agent/tool execution, then restore the previous process env after the turn.
+- `/api/session/update` and `/api/session/toolsets` must not widen workspace or tool access beyond the persisted contract.
+- Project-narrow sessions with the default/disabled prefill policy must not surface global AI-recall notebook/note suggestions in the Notes drawer.
+- Project-narrow sessions with `prefill_policy=project_only` may surface recent AI-recall notes only from the session-scoped `runtime_contract.webui_prefill_messages_script`; `notes/sources`, `notes/search`, and `notes/item` must stay within `runtime_contract.allowed_note_sources`.
 
 ---
 

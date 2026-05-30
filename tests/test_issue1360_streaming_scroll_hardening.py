@@ -51,8 +51,25 @@ def test_queue_pill_click_does_not_force_repin_during_streaming():
     fn = _extract_function(UI_JS, "_updateQueuePill")
     click_idx = fn.find("pill.onclick=()=>")
     assert click_idx != -1, "queue pill click handler not found"
-    click_block = fn[click_idx:click_idx + 700]
+    click_block = fn[click_idx:click_idx + 1200]
 
     assert "_syncQueueUiScroll();" in click_block
     assert "S.activeStreamId" not in click_block
     assert "scrollToBottom()" not in click_block
+
+
+
+def test_queue_pill_click_reapplies_queue_open_layout_before_focusing_card():
+    fn = _extract_function(UI_JS, "_updateQueuePill")
+    click_idx = fn.find("pill.onclick=()=>")
+    assert click_idx != -1, "queue pill click handler not found"
+    click_block = fn[click_idx:click_idx + 1400]
+
+    assert "const _msgs=document.getElementById('messages');" in click_block
+    assert "const _applyQueueLayout=()=>{" in click_block
+    assert "_msgs.classList.add('queue-open');" in click_block
+    assert "_msgs.style.setProperty('--queue-card-height', h+'px');" in click_block
+    assert click_block.find("_applyQueueLayout();") < click_block.find("firstFocusable.focus();"), (
+        "queue pill reopen must reserve transcript space before focusing the queue card, "
+        "otherwise the flyout can reopen under the composer and disappear from view."
+    )

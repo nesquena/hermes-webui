@@ -45,10 +45,16 @@ class TestQueueRestore:
         """sessions.js must restore queue state via the shared read helper in the idle-session load path."""
         assert "typeof _readPersistedSessionQueue==='function' ? _readPersistedSessionQueue(sid) : []" in sess_src
 
-    def test_restore_uses_timestamp_guard(self):
-        """Stale entries (created before last assistant response) must be dropped."""
-        assert '_queued_at' in sess_src
-        assert '_lastAsst' in sess_src
+    def test_restore_does_not_drop_valid_remaining_queue_by_last_assistant_timestamp(self):
+        """Reload restore must not delete still-pending queued turns just because another assistant turn finished."""
+        assert '_queued_at>_lastAsst' not in sess_src.replace(' ', '')
+        assert '_fresh=_entries.filter' not in sess_src.replace(' ', '')
+
+    def test_restore_normalizes_queue_entries_instead_of_timestamp_pruning_them(self):
+        """Restore should keep queue entries with text/files and normalize legacy shapes."""
+        assert ".filter(e=>e&&typeof e==='object')" in sess_src
+        assert "return {...e,text:_text,files:_files};" in sess_src
+        assert ".filter(e=>e.text||e.files.length);" in sess_src
 
     def test_restore_shows_toast(self):
         """User must see a toast notification when a queue is restored."""

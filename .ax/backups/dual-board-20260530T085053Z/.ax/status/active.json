@@ -1,0 +1,9 @@
+{
+  "updated_at": "2026-05-30T08:41:11Z",
+  "phase": "governor-first-pilot",
+  "board": "pux-import-e2e-1780010472",
+  "repo_root": "/Users/parantoux/Andy/workspace/hermes-webui",
+  "branch": "fix/webui-refresh-scroll-and-persistence",
+  "commit": "ffce1c64",
+  "focus": "Review/browser-proof lane stays on t_8dcfd135 as the first still-open proof gate. Automation is now explicitly pinned to a machine-readable active gate contract in .ax/handoff/current.json: queue-freeze remains active, human review blockers stay hard-held, and all active loops bias toward shipped Recover/import-resume proof on the intended board rather than broad queue movement. Fresh shipped-browser proof on http://127.0.0.1:8787 now opens directly on proof board pux-rootseed-proof-1780110594 with no console/js errors and 2 visible cards, but the visible root artifact still carries older anchor copy instead of the refreshed reference-only wording. Latest source-green result remains carried continuity (3 passed, 28 deselected, 1 warning). Change authority is now clarified: automation may take even larger bounded product steps without waiting first when they stay inside the already-agreed purpose and UX flow; ambiguous branches must be re-discussed."
+}

@@ -76,6 +76,20 @@ the current code and tests prove that model still applies.
 For UI or UX work, include before/after evidence, verify relevant responsive
 states, and prefer stable class/data hooks over one-off visual behavior.
 
+## Project OS control-plane and topology contracts
+
+- [`docs/project-os-harness-triage.md`](project-os-harness-triage.md): how to
+  distinguish Project OS harness drift from real product bugs for false timeout,
+  `stalled_running`, and root-seed/reference-only workflow semantics.
+- [`docs/project-os-phase1-topology.md`](project-os-phase1-topology.md): live
+  phase-1 topology, assignment rules, builder-lane boundaries, and review
+  routing for repo-side Project OS continuity updates.
+
+When a change touches Project OS control-plane prompts, continuity wording,
+lane assignment rules, or phase-1 boundaries, read the topology contract before
+editing so repo-side docs do not drift back to reserve-only builder language,
+invent a live reviewer profile, or route review work through the wrong lane.
+
 ## Choosing the relevant contract
 
 Before editing, identify which contract family the task exercises. This is a
@@ -167,12 +181,17 @@ does not match the touched subsystem.
 - [`docs/onboarding-agent-checklist.md`](onboarding-agent-checklist.md): safety
   rules for assistant-led install, reinstall, bootstrap, provider setup, local
   model setup, Docker onboarding, and WSL onboarding.
-- [`docs/docker.md`](docker.md): Docker compose setup, common failures, and
+- [`docs/docker.md`](docker.md): Docker compose setup, common failure modes, and
   bind-mount migration.
 - [`docs/troubleshooting.md`](troubleshooting.md): diagnostic flows for common
   failures.
 - [`docs/EXTENSIONS.md`](EXTENSIONS.md): administrator-controlled WebUI
   extension injection.
+- [`docs/project-os-harness-triage.md`](project-os-harness-triage.md): how to
+  distinguish Project OS harness drift from product bugs.
+- [`docs/project-os-phase1-topology.md`](project-os-phase1-topology.md): live
+  Project OS phase-1 topology, builder-lane ownership boundaries, and review
+  routing.
 
 ## Quick redline checklist
 

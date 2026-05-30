@@ -26,6 +26,7 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
+from api.runtime_contract import normalize_runtime_contract, normalize_session_mode
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
@@ -513,6 +514,8 @@ class Session:
                 worktree_repo_root=None,
                 worktree_created_at=None,
                 enabled_toolsets=None,
+                session_mode=None,
+                runtime_contract=None,
                 composer_draft=None,
                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
@@ -567,6 +570,8 @@ class Session:
         self.source_label = kwargs.get('source_label')
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
+        self.session_mode = normalize_session_mode(session_mode)
+        self.runtime_contract = normalize_runtime_contract(runtime_contract)
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
@@ -634,7 +639,7 @@ class Session:
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
-            'enabled_toolsets', 'composer_draft',
+            'enabled_toolsets', 'session_mode', 'runtime_contract', 'composer_draft',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['message_count'] = len(self.messages or [])
@@ -853,6 +858,8 @@ class Session:
             'source_label': self.source_label,
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
+            'session_mode': self.session_mode,
+            'runtime_contract': self.runtime_contract,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
@@ -2117,7 +2124,16 @@ def _profile_default_model_state(profile=None):
     return default_model or get_effective_default_model(), default_provider
 
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None, worktree_info=None):
+def new_session(
+    workspace=None,
+    model=None,
+    profile=None,
+    model_provider=None,
+    project_id=None,
+    worktree_info=None,
+    session_mode=None,
+    runtime_contract=None,
+):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -2170,13 +2186,15 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         worktree_branch=wt.get('branch') if wt else None,
         worktree_repo_root=wt.get('repo_root') if wt else None,
         worktree_created_at=wt.get('created_at') if wt else None,
+        session_mode=session_mode,
+        runtime_contract=runtime_contract,
     )
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
-    if wt:
+    if wt or s.session_mode:
         s.save()
     return s
 

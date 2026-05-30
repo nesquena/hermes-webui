@@ -1088,6 +1088,29 @@ $('msg').addEventListener('input',()=>{
     hideCmdDropdown();
   }
 });
+function _insertComposerTextAtCursor(input,text){
+  if(!input||typeof text!=='string'||!text)return false;
+  const start=Number.isFinite(input.selectionStart)?input.selectionStart:input.value.length;
+  const end=Number.isFinite(input.selectionEnd)?input.selectionEnd:input.value.length;
+  if(typeof input.setRangeText==='function'){
+    input.setRangeText(text,start,end,'end');
+  }else{
+    const before=input.value.slice(0,start);
+    const after=input.value.slice(end);
+    input.value=`${before}${text}${after}`;
+    const next=start+text.length;
+    input.setSelectionRange?.(next,next);
+  }
+  input.dispatchEvent(new Event('input',{bubbles:true}));
+  return true;
+}
+$('msg').addEventListener('beforeinput',e=>{
+  const text=typeof e.data==='string'?e.data:'';
+  if((text==='/'||text==='?')&&e.inputType==='insertText'){
+    e.preventDefault();
+    _insertComposerTextAtCursor($('msg'),text);
+  }
+});
 // Track IME composition for East Asian input. Safari fires the committing
 // keydown AFTER compositionend with isComposing=false, so we also keep a
 // manual flag and reset it on the next tick to swallow that trailing Enter.
@@ -1115,6 +1138,15 @@ function _isVirtualKeyboardLikelyOpen(){
   return window.innerHeight-vv.height>120;
 }
 $('msg').addEventListener('keydown',e=>{
+  const slashPressed=
+    (!e.shiftKey&&e.key==='/')||
+    (!e.shiftKey&&(e.key==='Unidentified'||e.key==='')&&e.code==='Slash')||
+    e.code==='NumpadDivide';
+  if(slashPressed&&!e.metaKey&&!e.ctrlKey&&!e.altKey){
+    e.preventDefault();
+    _insertComposerTextAtCursor($('msg'),'/');
+    return;
+  }
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
   const dropdownOpen=dd&&dd.classList.contains('open');

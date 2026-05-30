@@ -20,6 +20,7 @@ let _kanbanSuppressCardClickUntil = 0;
 let _kanbanEventSource = null;
 let _kanbanEventSourceFailures = 0;
 let _skillsData = null; // cached skills list
+let _skillsDataSessionId = null;
 let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
@@ -1065,6 +1066,7 @@ async function saveCronForm(){
   const deliver=delivEl?delivEl.value:'local';
   const profile=profileEl?profileEl.value:'';
   const toastNotifications=toastEl?!!toastEl.checked:true;
+  const activeSessionId = S.session&&S.session.session_id ? String(S.session.session_id).trim() : '';
   const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
@@ -1075,6 +1077,7 @@ async function saveCronForm(){
       if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       if (deliver) updates.deliver = deliver;
+      if (deliver === 'origin' && activeSessionId) updates.origin_session_id = activeSessionId;
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
       _editingCronId = null;
@@ -1089,6 +1092,7 @@ async function saveCronForm(){
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
+    if(deliver==='origin'&&activeSessionId)body.origin_session_id=activeSessionId;
     const res = await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
     _cronPreFormDetail = null;
     _cronIsDuplicate = false;
@@ -2882,6 +2886,7 @@ function openKanbanCreateBoard(){
   document.getElementById('kanbanBoardModalDesc').value = '';
   document.getElementById('kanbanBoardModalIcon').value = '';
   document.getElementById('kanbanBoardModalColor').value = '#7aa2ff';
+  document.getElementById('kanbanBoardModalAutomationLevel').value = 'assisted';
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
   if (_kanbanBoardModalFocusCleanup) {
@@ -2926,6 +2931,7 @@ function openKanbanRenameBoard(){
   document.getElementById('kanbanBoardModalDesc').value = meta.description || '';
   document.getElementById('kanbanBoardModalIcon').value = meta.icon || '';
   document.getElementById('kanbanBoardModalColor').value = meta.color || '#7aa2ff';
+  document.getElementById('kanbanBoardModalAutomationLevel').value = meta.automation_level || 'assisted';
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
   if (_kanbanBoardModalFocusCleanup) {
@@ -2960,6 +2966,7 @@ async function submitKanbanBoardModal(){
   const description = (document.getElementById('kanbanBoardModalDesc').value || '').trim();
   const icon = (document.getElementById('kanbanBoardModalIcon').value || '').trim();
   const color = (document.getElementById('kanbanBoardModalColor').value || '').trim();
+  const automationLevel = (document.getElementById('kanbanBoardModalAutomationLevel').value || '').trim();
   const submitBtn = document.getElementById('kanbanBoardModalSubmit');
   if (!name) {
     errEl.textContent = t('kanban_board_name_required') || 'Name is required';
@@ -2974,7 +2981,7 @@ async function submitKanbanBoardModal(){
     try {
       const res = await api('/api/kanban/boards', {
         method: 'POST',
-        body: JSON.stringify({slug: slugInput, name, description, icon, color, switch: true}),
+        body: JSON.stringify({slug: slugInput, name, description, icon, color, automation_level: automationLevel, switch: true}),
       });
       closeKanbanBoardModal();
       // Switch to the new board and reload
@@ -2998,7 +3005,7 @@ async function submitKanbanBoardModal(){
     try {
       await api('/api/kanban/boards/' + encodeURIComponent(slug), {
         method: 'PATCH',
-        body: JSON.stringify({name, description, icon, color}),
+        body: JSON.stringify({name, description, icon, color, automation_level: automationLevel}),
       });
       closeKanbanBoardModal();
       await loadKanbanBoards();  // refresh switcher label/icon
@@ -3514,13 +3521,31 @@ async function clearConversation() {
     showToast(t('conversation_cleared'));
   } catch(e) { setStatus(t('clear_failed') + e.message); }
 }
+let _notesSourcesDataSessionId = null;
+function _sessionScopedSkillsPath(basePath='/api/skills') {
+  const sid = S && S.session && S.session.session_id;
+  if (!sid) return basePath;
+  const sep = basePath.includes('?') ? '&' : '?';
+  return `${basePath}${sep}session_id=${encodeURIComponent(sid)}`;
+}
 
-// ── Skills panel ──
+function _sessionScopedNotesPath(basePath='/api/notes/sources') {
+  const sid = S && S.session && S.session.session_id;
+  if (!sid) return basePath;
+  const sep = basePath.includes('?') ? '&' : '?';
+  return `${basePath}${sep}session_id=${encodeURIComponent(sid)}`;
+}
+
 async function loadSkills() {
+  const activeSid = (S && S.session && S.session.session_id) || null;
+  if (_skillsDataSessionId !== activeSid) {
+    _skillsData = null;
+    _skillsDataSessionId = activeSid;
+  }
   if (_skillsData) { renderSkills(_skillsData); return; }
   const box = $('skillsList');
   try {
-    const data = await api('/api/skills');
+    const data = await api(_sessionScopedSkillsPath('/api/skills'));
     _skillsData = data.skills || [];
     // Prune collapsed state to only keep categories present in fresh data,
     // avoiding stale keys when categories are renamed or removed server-side.
@@ -3710,7 +3735,7 @@ async function openSkill(name, el) {
   _skillPreFormDetail = null;
   _editingSkillName = null;
   try {
-    const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
+    const data = await api(_sessionScopedSkillsPath(`/api/skills/content?name=${encodeURIComponent(name)}`));
     if (data && (data.success === false || data.error)) {
       const message = data.error || t('skill_load_failed');
       _renderSkillError(name, message);
@@ -3724,7 +3749,7 @@ async function openSkill(name, el) {
 
 async function openSkillFile(skillName, filePath) {
   try {
-    const data = await api(`/api/skills/content?name=${encodeURIComponent(skillName)}&file=${encodeURIComponent(filePath)}`);
+    const data = await api(_sessionScopedSkillsPath(`/api/skills/content?name=${encodeURIComponent(skillName)}&file=${encodeURIComponent(filePath)}`));
     if (data && data.error) {
       _renderSkillError(skillName, data.error);
       setStatus(t('skill_file_load_failed') + data.error);

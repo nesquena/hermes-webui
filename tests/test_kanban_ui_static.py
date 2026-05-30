@@ -909,10 +909,13 @@ def test_kanban_board_modal_markup_in_index():
         'id="kanbanBoardModalDesc"',
         'id="kanbanBoardModalIcon"',
         'id="kanbanBoardModalColor"',
+        'id="kanbanBoardModalAutomationLevel"',
         'id="kanbanBoardModalError"',
         'id="kanbanBoardModalSubmit"',
     ):
         assert sel in INDEX
+    for option in ('value="manual"', 'value="assisted"', 'value="active"', 'value="autonomous"'):
+        assert option in INDEX
     # Modal must be hidden by default
     assert 'id="kanbanBoardModal" hidden' in INDEX
 
@@ -960,6 +963,8 @@ def test_kanban_board_switcher_calls_correct_endpoints():
     bridge's multi-board contract."""
     # GET /boards
     assert "api('/api/kanban/boards'" in PANELS
+    assert "automation_level" in PANELS
+    assert "kanbanBoardModalAutomationLevel" in PANELS
     # POST /boards (create)
     assert "method: 'POST'" in PANELS
     # POST /boards/<slug>/switch

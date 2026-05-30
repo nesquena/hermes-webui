@@ -1007,6 +1007,43 @@ def test_handle_kanban_patch_routes_update_board(monkeypatch):
     assert captured[0]["board"]["name"] == "Renamed"
 
 
+def test_create_board_payload_persists_automation_level(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+
+    payload = bridge._create_board_payload(
+        {
+            "slug": "experiments",
+            "name": "Experiments",
+            "automation_level": "assisted",
+        }
+    )
+
+    assert payload["board"]["automation_level"] == "assisted"
+    assert bridge._kb().read_board_metadata("experiments")["automation_level"] == "assisted"
+
+
+def test_update_board_payload_persists_automation_level(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    bridge._create_board_payload({"slug": "experiments", "name": "Experiments"})
+
+    payload = bridge._update_board_payload("experiments", {"automation_level": "autonomous"})
+
+    assert payload["board"]["automation_level"] == "autonomous"
+    assert bridge._kb().read_board_metadata("experiments")["automation_level"] == "autonomous"
+
+
+def test_create_board_payload_rejects_unknown_automation_level(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+
+    try:
+        bridge._create_board_payload(
+            {"slug": "experiments", "name": "Experiments", "automation_level": "chaos"}
+        )
+        raise AssertionError("invalid automation_level must raise ValueError")
+    except ValueError as exc:
+        assert "automation_level" in str(exc)
+
+
 def test_board_param_isolates_task_writes_between_boards(monkeypatch):
     """Task created with board=A must not appear in board=B's task list.
     This is the core multi-board guarantee — without it the whole feature

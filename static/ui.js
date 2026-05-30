@@ -3757,7 +3757,10 @@ function _renderQueueChips(sid){
   if(!q.length){
     card.classList.remove('visible');
     const _msgs=document.getElementById('messages');
-    if(_msgs) _msgs.classList.remove('queue-open');
+    if(_msgs){
+      _msgs.classList.remove('queue-open');
+      _msgs.style.removeProperty('--queue-card-height');
+    }
     return;
   }
   // Respect user-collapsed state — don't reopen if user explicitly hid the card
@@ -3835,8 +3838,14 @@ function _renderQueueChips(sid){
     hideBtn.onclick=()=>{
       _queueCollapsed[sid]=true;
       card.classList.remove('visible');
+      const _msgs=document.getElementById('messages');
+      if(_msgs){
+        _msgs.classList.remove('queue-open');
+        _msgs.style.removeProperty('--queue-card-height');
+      }
       // Read live count at click time (not stale closure q)
       _updateQueuePill(sid,_getSessionQueue(sid,false).length);
+      _syncQueueUiScroll();
     };
     actions.appendChild(hideBtn);
     header.appendChild(lbl);
@@ -3956,9 +3965,20 @@ function _updateQueuePill(sid,count){
     pill.onclick=()=>{
       delete _queueCollapsed[sid];
       const c=document.getElementById('queueCard');
+      const _msgs=document.getElementById('messages');
+      const _applyQueueLayout=()=>{
+        if(!c||!_msgs||!c.classList.contains('visible')) return;
+        _msgs.classList.add('queue-open');
+        const h=c.getBoundingClientRect().height;
+        if(h>0) _msgs.style.setProperty('--queue-card-height', h+'px');
+        _syncQueueUiScroll();
+      };
       if(c){
         c.classList.add('visible');
+        _applyQueueLayout();
+        requestAnimationFrame(_applyQueueLayout);
         setTimeout(()=>{
+          _applyQueueLayout();
           const firstFocusable=c.querySelector('.queue-card-text, .queue-card-icon-btn');
           if(firstFocusable) firstFocusable.focus();
         }, 360);
@@ -3992,7 +4012,10 @@ function updateQueueBadge(sessionId){
       // Defer clear until after slide-out transition so content doesn't vanish mid-animation
       if(chips){const _chips=chips;const _card=card;setTimeout(()=>{if(!_card||!_card.classList.contains('visible'))_chips.innerHTML='';},360);}
       const _msgsEl=document.getElementById('messages');
-      if(_msgsEl) _msgsEl.classList.remove('queue-open');
+      if(_msgsEl){
+        _msgsEl.classList.remove('queue-open');
+        _msgsEl.style.removeProperty('--queue-card-height');
+      }
       _updateQueuePill(sid,0);
     }
   }
@@ -6506,9 +6529,9 @@ function renderMessages(options){
     const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const questionJumpTarget = questionRawIdxByAssistantRawIdx.get(rawIdx);
-    const questionJumpBtn = (!isUser&&!m._live&&typeof questionJumpTarget==='number'&&questionJumpTarget>=0)
-      ? _questionJumpButtonHtml(questionJumpTarget)
+    const _qJumpTarget=(!isUser&&!m._live)?questionRawIdxByAssistantRawIdx.get(rawIdx):undefined;
+    const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
+      ? _questionJumpButtonHtml(_qJumpTarget)
       : '';
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 

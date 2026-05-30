@@ -1,0 +1,15 @@
+{
+  "updated_at": "2026-05-30T15:27:43Z",
+  "phase": "governor-first-pilot",
+  "board": "pux-import-e2e-1780010472",
+  "repo_root": "/Users/parantoux/Andy/workspace/hermes-webui",
+  "branch": "fix/webui-refresh-scroll-and-persistence",
+  "commit": "ffce1c64",
+  "focus": "The selector prerequisite t_8c5730c0 remains closed. The active first browser/runtime gate is still t_12f63a64; this browser-proof tick freshly re-proved the live selector modal surface on the canonical board, while current /health activity narrowed to unrelated session 20260530_184531_d90098 rather than blocker-local create/scaffold progress. End-to-end create/scaffold acceptance is still open.",
+  "board_truth_mode": "dual",
+  "canonical_backlog_board_id": "pux-import-e2e-1780010472",
+  "active_proof_board_id": "pux-rootseed-proof-1780110594",
+  "recover_board_id": "pux-recover-proof-1780128844",
+  "current_browser_board_id": "pux-import-e2e-1780010472",
+  "active_focus": "browser-gate-t_12f63a64"
+}

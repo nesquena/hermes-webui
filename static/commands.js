@@ -709,7 +709,7 @@ async function cmdTheme(args){
 
 async function cmdSkills(args){
   try{
-    const data = await api('/api/skills');
+    const data = await api(_sessionScopedSkillsApiPath('/api/skills'));
     let skills = data.skills || [];
     if(args){
       const q = args.toLowerCase();
@@ -1273,6 +1273,13 @@ async function forkFromMessage(msgIdx){
 let _skillCommandCache=[];
 let _skillCommandLoadPromise=null;
 let _skillCommandCacheReady=false;
+let _skillCommandCacheSessionId=null;
+function _sessionScopedSkillsApiPath(basePath='/api/skills'){
+  const sid=S&&S.session&&S.session.session_id;
+  if(!sid)return basePath;
+  const sep=basePath.includes('?')?'&':'?';
+  return `${basePath}${sep}session_id=${encodeURIComponent(sid)}`;
+}
 function _skillCommandSlug(name){
   const raw=String(name||'').trim().toLowerCase();
   if(!raw)return'';
@@ -1286,11 +1293,17 @@ function _buildSkillCommandEntry(skill){
   return{name:slug,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
 }
 async function loadSkillCommands(force=false){
+  const activeSid=(S&&S.session&&S.session.session_id)||null;
+  if(_skillCommandCacheSessionId!==activeSid){
+    _skillCommandCache=[];
+    _skillCommandCacheReady=false;
+    _skillCommandCacheSessionId=activeSid;
+  }
   if(_skillCommandCacheReady&&!force)return _skillCommandCache;
   if(_skillCommandLoadPromise&&!force)return _skillCommandLoadPromise;
   _skillCommandLoadPromise=(async()=>{
     try{
-      const data=await api('/api/skills');
+      const data=await api(_sessionScopedSkillsApiPath('/api/skills'));
       const deduped=new Map();
       for(const skill of (data&&data.skills)||[]){const entry=_buildSkillCommandEntry(skill);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
       _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));

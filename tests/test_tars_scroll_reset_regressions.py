@@ -103,3 +103,48 @@ def test_preserve_scroll_restores_unpinned_viewport_after_dom_rebuild():
     assert "else _restoreMessageScrollSnapshot(scrollSnapshot)" in after_render
     assert "el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop))" in restore
     assert "_programmaticScroll=true" in restore
+
+
+def test_same_session_force_reload_preserves_transcript_scroll_on_render():
+    load_session = _function_body(SESSIONS_JS, "async function loadSession")
+
+    assert "const preserveTranscriptScroll = forceReload && currentSid===sid" in load_session, (
+        "same-session force reloads should flag transcript scroll preservation so external refreshes "
+        "do not snap a reader to the bottom"
+    )
+    assert "renderMessages({preserveScroll:preserveTranscriptScroll});" in load_session, (
+        "loadSession() should pass preserveScroll on same-session force reload renders instead of "
+        "reusing the default scrollToBottom path"
+    )
+
+
+def test_same_session_force_reload_keeps_loaded_transcript_window_instead_of_resetting_to_tail_30():
+    ensure_loaded = _function_body(SESSIONS_JS, "async function _ensureMessagesLoaded")
+    reload_limit = _function_body(SESSIONS_JS, "function _messageReloadLimitForSession")
+
+    assert "if (_messagesTruncated) return Math.max(_INITIAL_MSG_LIMIT, loadedCount);" in reload_limit, (
+        "same-session refreshes should preserve at least the currently loaded suffix width so a long "
+        "transcript does not collapse back to the default 30-message tail while the user is reading"
+    )
+    assert "return 0;" in reload_limit, (
+        "when the active session already has the full transcript loaded, force reloads should omit msg_limit "
+        "instead of silently truncating the chat again"
+    )
+    assert "const msgLimit = _messageReloadLimitForSession(sid)" in ensure_loaded, (
+        "_ensureMessagesLoaded() must consult the same-session reload helper before building the fetch URL"
+    )
+    assert "msg_limit=${msgLimit}" in ensure_loaded, (
+        "truncated long-session refreshes should reuse the loaded window width rather than hardcoding 30"
+    )
+    assert "messages=1&resolve_model=0`" in ensure_loaded, (
+        "fully loaded same-session refreshes should support the no-msg_limit path so the whole transcript stays available"
+    )
+
+
+def test_chat_refresh_polls_are_not_tuned_to_five_second_repaint_churn():
+    assert "const _streamingPollMs = 15000;" in SESSIONS_JS, (
+        "sidebar streaming poll should stay at 15s so normal chat use does not feel like a 5s refresh loop"
+    )
+    assert "const _activeSessionExternalRefreshMs = 20000;" in SESSIONS_JS, (
+        "active-session external refresh should stay at 20s so long transcripts are not repeatedly reloaded while reading"
+    )

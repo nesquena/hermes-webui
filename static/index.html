@@ -1440,6 +1440,15 @@
         <input type="color" id="kanbanBoardModalColor" value="#7aa2ff">
       </div>
     </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanBoardModalAutomationLevel">Automation level</label>
+      <select id="kanbanBoardModalAutomationLevel">
+        <option value="manual">Manual</option>
+        <option value="assisted" selected>Assisted</option>
+        <option value="active">Active</option>
+        <option value="autonomous">Autonomous</option>
+      </select>
+    </div>
     <div class="kanban-modal-error" id="kanbanBoardModalError" aria-live="polite"></div>
     <div class="kanban-modal-actions">
       <button type="button" class="btn secondary" onclick="closeKanbanBoardModal()" data-i18n="cancel">Cancel</button>

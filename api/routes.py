@@ -13,6 +13,7 @@ import os
 import queue
 import re
 import platform
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -31,6 +32,23 @@ from api.agent_sessions import (
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
+from api.runtime_contract import (
+    PROJECT_NARROW_SESSION_MODE,
+    build_project_narrow_runtime_contract,
+    clamp_workspace_to_contract,
+    enforce_pinned_profile,
+    enforce_toolset_contract,
+    filter_note_sources_for_contract,
+    filter_skill_summaries_for_contract,
+    get_project_narrow_allowed_note_sources,
+    get_project_narrow_allowed_skills,
+    get_project_narrow_prefill_policy,
+    get_project_narrow_toolsets,
+    is_allowed_note_source,
+    is_allowed_skill_name,
+    is_project_narrow_mode,
+    normalize_session_mode,
+)
 from api.session_events import (
     publish_session_list_changed,
     subscribe_session_events,
@@ -181,6 +199,33 @@ def _active_skill_search_dirs(skills_dir: Path) -> list[Path]:
     except Exception:
         pass
     return [p for p in dirs if p.exists()]
+
+
+def _runtime_contract_session_from_query(query: dict[str, list[str]]):
+    sid = str((query.get("session_id") or [""])[0] or "").strip()
+    if not sid:
+        return None
+    try:
+        return get_session(sid, metadata_only=True)
+    except KeyError:
+        return None
+    except Exception:
+        logger.debug("Failed to load runtime-contract session for %s", sid, exc_info=True)
+        return None
+
+
+def _runtime_contract_allowed_skills_for_query(query: dict[str, list[str]]) -> list[str]:
+    session = _runtime_contract_session_from_query(query)
+    if not session or not is_project_narrow_mode(session):
+        return []
+    return get_project_narrow_allowed_skills(session)
+
+
+def _runtime_contract_allowed_note_sources_for_query(query: dict[str, list[str]]) -> list[str]:
+    session = _runtime_contract_session_from_query(query)
+    if not session or not is_project_narrow_mode(session):
+        return []
+    return get_project_narrow_allowed_note_sources(session)
 
 
 def _worktree_retained_payload(session) -> dict:
@@ -620,6 +665,157 @@ def _cron_jobs_for_api(jobs) -> list[dict]:
     return [_cron_job_for_api(job) for job in (jobs or [])]
 
 
+def _webui_origin_session_id(origin: dict | None) -> str | None:
+    if not isinstance(origin, dict):
+        return None
+    platform = str(origin.get("platform") or "").strip().lower()
+    if platform != "webui":
+        return None
+    sid = str(origin.get("session_id") or origin.get("chat_id") or "").strip()
+    return sid if sid and is_safe_session_id(sid) else None
+
+
+def _is_webui_origin_delivery_job(job: dict | None) -> bool:
+    if not isinstance(job, dict):
+        return False
+    deliver = str(job.get("deliver") or "").strip().lower()
+    return deliver == "origin" and bool(_webui_origin_session_id(job.get("origin")))
+
+
+def _webui_origin_profile(origin: dict | None) -> str | None:
+    if not isinstance(origin, dict):
+        return None
+    profile = str(origin.get("profile") or "").strip()
+    return profile or None
+
+
+def _webui_origin_profile_error(session, origin: dict | None) -> str | None:
+    expected_profile = _webui_origin_profile(origin)
+    if not expected_profile:
+        return None
+    actual_profile = getattr(session, "profile", None)
+    if _profiles_match(actual_profile, expected_profile):
+        return None
+    return (
+        "webui origin session profile mismatch: "
+        f"expected {expected_profile}, found {actual_profile or 'default'}"
+    )
+
+
+def _load_webui_origin_session(origin: dict | None, *, metadata_only: bool):
+    sid = _webui_origin_session_id(origin)
+    if not sid:
+        raise KeyError("")
+    session = get_session(sid, metadata_only=metadata_only)
+    profile_error = _webui_origin_profile_error(session, origin)
+    if profile_error:
+        raise ValueError(profile_error)
+    return session
+
+
+def _webui_origin_from_body(handler, body: dict) -> dict | None:
+    """Return WebUI same-thread origin metadata when a request identifies one."""
+    raw_deliver = str(body.get("deliver") or "").strip().lower()
+    if raw_deliver and raw_deliver != "origin":
+        return None
+    raw_origin = body.get("origin") if isinstance(body.get("origin"), dict) else {}
+    explicit_origin = any(
+        body.get(key) for key in ("origin_session_id", "webui_session_id", "session_id")
+    ) or bool(raw_origin)
+    if not raw_deliver and not explicit_origin:
+        return None
+    sid = (
+        body.get("origin_session_id")
+        or body.get("webui_session_id")
+        or raw_origin.get("session_id")
+        or raw_origin.get("chat_id")
+        or body.get("session_id")
+    )
+    if not sid:
+        try:
+            ref = handler.headers.get("Referer", "") if handler and getattr(handler, "headers", None) else ""
+            if ref:
+                ref_url = urlsplit(ref)
+                qs_sid = parse_qs(ref_url.query).get("session_id", [""])[0]
+                path_match = re.search(r"/session/([^/?#]+)", ref_url.path or "")
+                sid = qs_sid or (path_match.group(1) if path_match else "")
+        except Exception:
+            sid = ""
+    sid = str(sid or "").strip()
+    if not sid:
+        return None
+    if not is_safe_session_id(sid):
+        raise ValueError("Invalid WebUI origin session_id")
+    profile = body.get("profile")
+    origin = {
+        "platform": "webui",
+        "chat_id": sid,
+        "session_id": sid,
+    }
+    if profile is not None:
+        origin["profile"] = str(profile)
+    try:
+        _load_webui_origin_session(origin, metadata_only=True)
+    except KeyError:
+        raise ValueError("WebUI origin session not found")
+    except ValueError as exc:
+        raise ValueError(str(exc))
+    return origin
+
+
+def _format_webui_cron_delivery(job: dict, content: str) -> str:
+    task_name = job.get("name") or job.get("id") or "cron job"
+    job_id = job.get("id", "")
+    return (
+        f"Cronjob Response: {task_name}\n"
+        f"(job_id: {job_id})\n"
+        f"-------------\n\n"
+        f"{content}\n\n"
+        f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
+    )
+
+
+def _deliver_webui_origin_result(job: dict, content: str, *, run_key: str | None = None) -> str | None:
+    """Append cron output to the originating WebUI session, if this is one."""
+    sid = _webui_origin_session_id(job.get("origin"))
+    if not sid:
+        return None
+    try:
+        session = _load_webui_origin_session(job.get("origin"), metadata_only=False)
+    except KeyError:
+        return f"webui origin session not found: {sid}"
+    except ValueError as exc:
+        return str(exc)
+    except Exception as exc:
+        logger.exception("Failed to load WebUI origin session %s for cron job %s", sid, job.get("id"))
+        return f"webui origin session load failed: {exc}"
+    try:
+        if run_key:
+            for message in getattr(session, "messages", []) or []:
+                if not isinstance(message, dict):
+                    continue
+                if (
+                    message.get("type") == "cron_delivery"
+                    and message.get("cron_job_id") == job.get("id")
+                    and message.get("cron_run_key") == run_key
+                ):
+                    return None
+        session.messages.append({
+            "role": "assistant",
+            "content": _format_webui_cron_delivery(job, content),
+            "timestamp": int(time.time()),
+            "type": "cron_delivery",
+            "cron_job_id": job.get("id"),
+            "cron_run_key": run_key,
+            "cron_origin": "webui",
+        })
+        session.save()
+        return None
+    except Exception as exc:
+        logger.exception("Failed to append cron delivery to WebUI session %s", sid)
+        return f"webui origin delivery failed: {exc}"
+
+
 def _available_cron_profile_names() -> set[str]:
     from api.profiles import list_profiles_api
 
@@ -823,7 +1019,9 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
                 should_deliver = False
 
             delivery_error = None
-            if should_deliver and _deliver_result is not None:
+            if should_deliver and _is_webui_origin_delivery_job(job):
+                delivery_error = _deliver_webui_origin_result(job, deliver_content)
+            elif should_deliver and _deliver_result is not None:
                 try:
                     delivery_error = _deliver_result(job, deliver_content)
                 except Exception as de:
@@ -2163,6 +2361,122 @@ def _tool_calls_for_message_window(tool_calls, start_idx: int, message_count: in
     return filtered
 
 
+def _state_db_path_for_profile(profile=None) -> Path:
+    if _profiles_match(profile, None):
+        return _active_state_db_path()
+    return _get_profile_home(profile) / "state.db"
+
+
+def _read_subagent_activity_sessions(session_id: str, *, profile=None) -> list[dict]:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    try:
+        report = read_session_lineage_report(_state_db_path_for_profile(profile), sid)
+    except Exception:
+        logger.debug("Failed to load subagent activity lineage for %s", sid, exc_info=True)
+        return []
+    children = report.get("children") if isinstance(report, dict) else []
+    if not isinstance(children, list):
+        return []
+    normalized = []
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        if not child.get("session_id"):
+            continue
+        normalized.append(copy.deepcopy(child))
+    normalized.sort(key=lambda item: (float(item.get("started_at") or 0), str(item.get("session_id") or "")))
+    return normalized
+
+
+def _delegate_task_result_counts(messages) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for message in messages or []:
+        if not isinstance(message, dict) or message.get("role") != "tool":
+            continue
+        if str(message.get("tool_name") or message.get("name") or "") != "delegate_task":
+            continue
+        tid = str(message.get("tool_call_id") or message.get("tool_use_id") or "").strip()
+        if not tid:
+            continue
+        count = 1
+        try:
+            payload = json.loads(message.get("content") or "{}")
+        except Exception:
+            payload = {}
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if isinstance(results, list) and results:
+            count = max(1, len(results))
+        counts[tid] = count
+    return counts
+
+
+def _augment_session_tool_calls_with_subagents(messages, tool_calls, *, session_id: str, profile=None) -> list[dict]:
+    base_calls = []
+    if _messages_include_tool_metadata(messages):
+        base_calls = _extract_tool_calls_from_messages(messages)
+    elif isinstance(tool_calls, list):
+        base_calls = [copy.deepcopy(tc) for tc in tool_calls if isinstance(tc, dict)]
+    else:
+        base_calls = []
+    base_calls = [tc for tc in base_calls if tc.get("name") != "subagent_progress"]
+    child_sessions = _read_subagent_activity_sessions(session_id, profile=profile)
+    if not child_sessions:
+        return base_calls
+    delegate_calls = [
+        tc for tc in base_calls
+        if isinstance(tc, dict)
+        and str(tc.get("name") or "") == "delegate_task"
+        and isinstance(tc.get("assistant_msg_idx"), int)
+        and not isinstance(tc.get("assistant_msg_idx"), bool)
+    ]
+    if not delegate_calls:
+        return base_calls
+    result_counts = _delegate_task_result_counts(messages)
+    extra_calls: list[dict] = []
+    child_idx = 0
+    for delegate_idx, delegate in enumerate(delegate_calls):
+        if child_idx >= len(child_sessions):
+            break
+        tid = str(delegate.get("tid") or "").strip()
+        expected = result_counts.get(tid, 1)
+        assigned = child_sessions[child_idx:child_idx + max(1, expected)]
+        if not assigned:
+            continue
+        child_idx += len(assigned)
+        for slot, child in enumerate(assigned, start=1):
+            child_sid = str(child.get("session_id") or "").strip()
+            title = str(child.get("title") or "").strip()
+            end_reason = str(child.get("end_reason") or "").strip()
+            active = bool(child.get("active"))
+            status_label = "Running" if active else "Completed"
+            preview = title or child_sid or f"subagent-{delegate_idx + 1}-{slot}"
+            detail_parts = [status_label]
+            if end_reason:
+                detail_parts.append(end_reason.replace("_", " "))
+            if child_sid:
+                detail_parts.append(f"session {child_sid}")
+            extra_calls.append({
+                "name": "subagent_progress",
+                "tid": f"subagent:{tid or delegate_idx}:{child_sid or slot}",
+                "assistant_msg_idx": delegate.get("assistant_msg_idx"),
+                "args": {
+                    "child_session_id": child_sid,
+                    "title": title,
+                    "active": active,
+                    "end_reason": end_reason or None,
+                },
+                "preview": preview,
+                "snippet": " · ".join(part for part in detail_parts if part),
+                "done": not active,
+                "child_session_id": child_sid,
+                "delegate_task_tid": tid or None,
+                "synthetic": True,
+            })
+    return base_calls + extra_calls
+
+
 def _message_counts_as_renderable_for_window(message) -> bool:
     """Return true when a paginated window should include this transcript row.
 
@@ -2538,10 +2852,12 @@ from api.models import (
     get_session,
     new_session,
     all_sessions,
+    _hide_from_default_sidebar,
     title_from,
     _write_session_index,
     SESSION_INDEX_FILE,
     _active_state_db_path,
+    _get_profile_home,
     load_projects,
     save_projects,
     import_cli_session,
@@ -2576,6 +2892,7 @@ from api.upload import handle_upload, handle_upload_extract, handle_transcribe
 from api.streaming import (
     _sse,
     _run_agent_streaming,
+    _extract_tool_calls_from_messages,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
 )
@@ -4248,15 +4565,23 @@ def handle_get(handler, parsed) -> bool:
                 and msg_limit is not None
                 and _messages_include_tool_metadata(_truncated_msgs)
             ):
-                # The browser ignores session-level tool_calls when the returned
-                # messages already carry per-message tool metadata. Avoid sending
-                # the full historical list with a small tail window.
+                # When the returned messages already carry their own tool metadata,
+                # rebuild the visible window's tool cards from those rows so the
+                # browser does not need hidden historical tool state to render the
+                # current tail.
                 _session_tool_calls = []
             elif _windowed_messages:
                 _session_tool_calls = _tool_calls_for_message_window(
                     _session_tool_calls,
                     _messages_offset,
                     len(_truncated_msgs),
+                )
+            if load_messages:
+                _session_tool_calls = _augment_session_tool_calls_with_subagents(
+                    _truncated_msgs,
+                    _session_tool_calls,
+                    session_id=s.session_id,
+                    profile=getattr(s, "profile", None),
                 )
             _merged_message_count = _summary_message_count if _summary_message_count is not None else len(_all_msgs)
             _merged_last_message_at = _summary_last_message_at if _summary_last_message_at is not None else 0
@@ -4364,7 +4689,12 @@ def handle_get(handler, parsed) -> bool:
                     "source_label": (cli_meta or {}).get("source_label"),
                     "read_only": bool((cli_meta or {}).get("read_only")),
                     "messages": msgs,
-                    "tool_calls": [],
+                    "tool_calls": _augment_session_tool_calls_with_subagents(
+                        msgs,
+                        [],
+                        session_id=sid,
+                        profile=(cli_meta or {}).get("profile"),
+                    ),
                 }
                 sess = _merge_cli_sidebar_metadata(sess, cli_meta)
                 return j(handler, {"session": redact_session_data(sess)})
@@ -4807,11 +5137,15 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/skills":
         qs = parse_qs(parsed.query)
         category = qs.get("category", [None])[0]
+        allowed_skills = _runtime_contract_allowed_skills_for_query(qs)
         data = _skills_list_from_dir(_active_skills_dir(), category=category)
-        return j(handler, {"skills": data.get("skills", [])})
+        skills = filter_skill_summaries_for_contract(data.get("skills", []), allowed_skills)
+        return j(handler, {"skills": skills})
 
     if parsed.path == "/api/skills/usage":
         from api.skill_usage import read_skill_usage
+        qs = parse_qs(parsed.query)
+        allowed_skills = _runtime_contract_allowed_skills_for_query(qs)
         raw = read_skill_usage(_active_skills_dir())
         # Pass through agent's format as-is; defensive coercion for fields
         usage = {}
@@ -4830,6 +5164,13 @@ def handle_get(handler, parsed) -> bool:
                     if meta_key not in usage[k]:
                         usage[k][meta_key] = v[meta_key]
         skills_data = _skills_list_from_dir(_active_skills_dir()).get("skills", [])
+        if allowed_skills:
+            usage = {
+                name: entry
+                for name, entry in usage.items()
+                if is_allowed_skill_name(allowed_skills, name)
+            }
+            skills_data = filter_skill_summaries_for_contract(skills_data, allowed_skills)
         skill_names = sorted({s["name"] for s in skills_data})
         total = sum(
             e.get("use_count", 0) + e.get("view_count", 0) + e.get("patch_count", 0)
@@ -4851,6 +5192,9 @@ def handle_get(handler, parsed) -> bool:
         name = qs.get("name", [""])[0]
         if not name:
             return j(handler, {"error": "name required"}, status=400)
+        allowed_skills = _runtime_contract_allowed_skills_for_query(qs)
+        if allowed_skills and not is_allowed_skill_name(allowed_skills, name):
+            return bad(handler, "Skill not available in this session", 403)
         file_path = qs.get("file", [""])[0]
         if file_path:
             # Serve a linked file from the skill directory
@@ -4976,7 +5320,7 @@ def handle_get(handler, parsed) -> bool:
         return _handle_mcp_tools_list(handler)
 
     if parsed.path == "/api/notes/sources":
-        return _handle_notes_sources_list(handler)
+        return _handle_notes_sources_list(handler, parsed)
     if parsed.path == "/api/notes/search":
         return _handle_notes_search(handler, parsed)
     if parsed.path == "/api/notes/item":
@@ -5095,6 +5439,8 @@ def handle_post(handler, parsed) -> bool:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
         except (TypeError, ValueError) as e:
             return bad(handler, str(e))
+        session_mode = normalize_session_mode(body.get("session_mode"))
+        runtime_contract = body.get("runtime_contract") if isinstance(body.get("runtime_contract"), dict) else None
         worktree_info = None
         worktree_requested = (
             body.get("worktree") is True
@@ -5140,7 +5486,24 @@ def handle_post(handler, parsed) -> bool:
             profile=body.get("profile") or None,
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
+            session_mode=session_mode,
+            runtime_contract=runtime_contract,
         )
+        if session_mode == PROJECT_NARROW_SESSION_MODE:
+            try:
+                s.runtime_contract = build_project_narrow_runtime_contract(
+                    s.runtime_contract,
+                    workspace_root=s.workspace,
+                    profile=s.profile,
+                )
+                narrow_toolsets = get_project_narrow_toolsets(s.runtime_contract)
+                if narrow_toolsets:
+                    s.enabled_toolsets = narrow_toolsets
+                s.save()
+            except ValueError as e:
+                with LOCK:
+                    SESSIONS.pop(s.session_id, None)
+                return bad(handler, str(e), status=400)
         if worktree_info:
             publish_session_list_changed("session_new")
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
@@ -5188,6 +5551,8 @@ def handle_post(handler, parsed) -> bool:
                 # re-derive on the next turn.
                 personality=session.personality,
                 enabled_toolsets=getattr(session, "enabled_toolsets", None),
+                session_mode=getattr(session, "session_mode", None),
+                runtime_contract=copy.deepcopy(getattr(session, "runtime_contract", None)),
                 context_length=getattr(session, "context_length", None),
                 threshold_tokens=getattr(session, "threshold_tokens", None),
                 created_at=time.time(),
@@ -5388,6 +5753,10 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        try:
+            toolsets = enforce_toolset_contract(s, toolsets)
+        except ValueError as e:
+            return bad(handler, str(e), status=400)
         with _get_session_agent_lock(sid):
             s.enabled_toolsets = toolsets
             s.save()
@@ -5461,9 +5830,14 @@ def handle_post(handler, parsed) -> bool:
         old_model = getattr(s, "model", None)
         old_provider = getattr(s, "model_provider", None)
         try:
-            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
+            new_ws = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
         except ValueError as e:
             return bad(handler, str(e))
+        if is_project_narrow_mode(s) and "profile" in body:
+            try:
+                enforce_pinned_profile(s, body.get("profile"))
+            except ValueError as e:
+                return bad(handler, str(e), status=400)
         with _get_session_agent_lock(body["session_id"]):
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
@@ -6247,7 +6621,11 @@ def handle_post(handler, parsed) -> bool:
             # so must run outside our own LOCK acquire below).
             persisted_pinned_ids = {
                 _session_field(existing, "session_id", None) for existing in all_sessions()
-                if _session_field(existing, "pinned", False) and not _session_field(existing, "archived", False)
+                if (
+                    _session_field(existing, "pinned", False)
+                    and not _session_field(existing, "archived", False)
+                    and not _hide_from_default_sidebar(existing)
+                )
             }
             with LOCK:
                 # Final authoritative count: merge persisted-pinned with the
@@ -6257,7 +6635,11 @@ def handle_post(handler, parsed) -> bool:
                 pinned_ids = set(persisted_pinned_ids)
                 pinned_ids.update(
                     sid for sid, existing in SESSIONS.items()
-                    if getattr(existing, "pinned", False) and not getattr(existing, "archived", False)
+                    if (
+                        getattr(existing, "pinned", False)
+                        and not getattr(existing, "archived", False)
+                        and not _hide_from_default_sidebar(existing.compact())
+                    )
                 )
                 pinned_ids.discard(body["session_id"])
                 pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)
@@ -7331,6 +7713,7 @@ def _handle_gateway_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     q = watcher.subscribe()
@@ -7363,6 +7746,7 @@ def _handle_session_events_stream(handler):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     q = subscribe_session_events()
@@ -7932,6 +8316,7 @@ def _handle_approval_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     from api.streaming import _sse
@@ -8032,6 +8417,7 @@ def _handle_clarify_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
+    handler.send_header('Connection', 'close')
     handler.end_headers()
 
     from api.streaming import _sse
@@ -9077,14 +9463,20 @@ def _handle_goal_command(handler, body):
                 return bad(handler, "invalid profile", 400)
         except ImportError:
             requested_profile = ""
+    try:
+        pinned_profile = enforce_pinned_profile(s, requested_profile)
+    except ValueError as e:
+        return bad(handler, str(e), status=400)
     if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
         has_persisted_turns = bool(
             getattr(s, "messages", None)
             or getattr(s, "context_messages", None)
             or getattr(s, "pending_user_message", None)
         )
-        if not has_persisted_turns:
+        if not has_persisted_turns and not is_project_narrow_mode(s):
             s.profile = requested_profile
+        else:
+            s.profile = pinned_profile or getattr(s, "profile", None)
 
     current_stream_id = getattr(s, "active_stream_id", None)
     stream_running = False
@@ -9114,7 +9506,7 @@ def _handle_goal_command(handler, body):
     previous_goal_state = None
     if will_kickoff:
         try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+            workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
         except ValueError as e:
             return bad(handler, str(e))
         requested_model = body.get("model") or s.model
@@ -9161,7 +9553,7 @@ def _handle_goal_command(handler, body):
     if kickoff_prompt:
         if workspace is None:
             try:
-                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+                workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
             except ValueError as e:
                 return bad(handler, str(e))
         if model is None:
@@ -9217,18 +9609,24 @@ def _handle_chat_start(handler, body, diag=None):
                     return bad(handler, "invalid profile", 400)
             except ImportError:
                 requested_profile = ""
+        try:
+            pinned_profile = enforce_pinned_profile(s, requested_profile)
+        except ValueError as e:
+            return bad(handler, str(e), status=400)
         if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
             has_persisted_turns = bool(
                 getattr(s, "messages", None)
                 or getattr(s, "context_messages", None)
                 or getattr(s, "pending_user_message", None)
             )
-            if not has_persisted_turns:
+            if not has_persisted_turns and not is_project_narrow_mode(s):
                 # Empty sessions are placeholders. If the user switches profiles
                 # before sending the first turn, run the placeholder under the
                 # currently-selected profile instead of the stale one stamped at
                 # creation time.
                 s.profile = requested_profile
+            else:
+                s.profile = pinned_profile or getattr(s, "profile", None)
         diag.stage("normalize_message") if diag else None
         msg = str(body.get("message", "")).strip()
         if not msg:
@@ -9321,6 +9719,8 @@ def _handle_chat_start(handler, body, diag=None):
 def _resolve_chat_workspace_with_recovery(s, requested_workspace) -> str:
     """Recover stale implicit session workspaces without hiding explicit errors."""
     explicit = requested_workspace not in (None, "")
+    if is_project_narrow_mode(s):
+        return clamp_workspace_to_contract(s, requested_workspace, fallback_to_root=not explicit)
     candidate = requested_workspace if explicit else getattr(s, "workspace", None)
     try:
         return str(resolve_trusted_workspace(candidate))
@@ -9372,10 +9772,38 @@ def _handle_chat_sync(handler, body):
     msg = str(body.get("message", "")).strip()
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
+    requested_profile = str(body.get("profile") or "").strip()
+    if requested_profile:
+        try:
+            from api.profiles import _PROFILE_ID_RE
+
+            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                return bad(handler, "invalid profile", 400)
+        except ImportError:
+            requested_profile = ""
     try:
-        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+        pinned_profile = enforce_pinned_profile(s, requested_profile)
+    except ValueError as e:
+        return bad(handler, str(e), status=400)
+    if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
+        has_persisted_turns = bool(
+            getattr(s, "messages", None)
+            or getattr(s, "context_messages", None)
+            or getattr(s, "pending_user_message", None)
+        )
+        if not has_persisted_turns and not is_project_narrow_mode(s):
+            s.profile = requested_profile
+        else:
+            s.profile = pinned_profile or getattr(s, "profile", None)
+    try:
+        workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
     except ValueError as e:
         return bad(handler, str(e))
+    old_profile_env = {}
+    old_hermes_home = None
+    old_session_id = None
+    old_session_platform = None
+    skill_home_snapshot = None
     with _get_session_agent_lock(s.session_id):
         s.workspace = workspace
         model, model_provider = _resolve_compatible_session_model_state(
@@ -9386,13 +9814,45 @@ def _handle_chat_sync(handler, body):
         s.model_provider = model_provider
     from api.streaming import _ENV_LOCK
 
+    try:
+        from api.profiles import (
+            get_hermes_home_for_profile,
+            get_profile_runtime_env,
+            patch_skill_home_modules,
+            snapshot_skill_home_modules,
+            restore_skill_home_modules,
+        )
+        _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
+        _profile_home = str(_profile_home_path)
+        _profile_runtime_env = get_profile_runtime_env(_profile_home_path)
+    except ImportError:
+        _profile_home = os.environ.get('HERMES_HOME', '')
+        _profile_runtime_env = {}
+        patch_skill_home_modules = None
+        snapshot_skill_home_modules = None
+        restore_skill_home_modules = None
+
     with _ENV_LOCK:
+        old_profile_env = {key: os.environ.get(key) for key in _profile_runtime_env}
         old_cwd = os.environ.get("TERMINAL_CWD")
-        os.environ["TERMINAL_CWD"] = str(workspace)
         old_exec_ask = os.environ.get("HERMES_EXEC_ASK")
         old_session_key = os.environ.get("HERMES_SESSION_KEY")
+        old_session_id = os.environ.get("HERMES_SESSION_ID")
+        old_session_platform = os.environ.get("HERMES_SESSION_PLATFORM")
+        old_hermes_home = os.environ.get("HERMES_HOME")
+        if _profile_runtime_env:
+            os.environ.update(_profile_runtime_env)
+        os.environ["TERMINAL_CWD"] = str(workspace)
         os.environ["HERMES_EXEC_ASK"] = "1"
         os.environ["HERMES_SESSION_KEY"] = s.session_id
+        os.environ["HERMES_SESSION_ID"] = s.session_id
+        os.environ["HERMES_SESSION_PLATFORM"] = "webui"
+        if _profile_home:
+            os.environ["HERMES_HOME"] = _profile_home
+            if snapshot_skill_home_modules is not None:
+                skill_home_snapshot = snapshot_skill_home_modules()
+            if patch_skill_home_modules is not None:
+                patch_skill_home_modules(Path(_profile_home))
     try:
         from run_agent import AIAgent
 
@@ -9478,6 +9938,11 @@ def _handle_chat_sync(handler, body):
             )
     finally:
         with _ENV_LOCK:
+            for key, previous in old_profile_env.items():
+                if previous is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = previous
             if old_cwd is None:
                 os.environ.pop("TERMINAL_CWD", None)
             else:
@@ -9490,6 +9955,20 @@ def _handle_chat_sync(handler, body):
                 os.environ.pop("HERMES_SESSION_KEY", None)
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
+            if old_session_id is None:
+                os.environ.pop("HERMES_SESSION_ID", None)
+            else:
+                os.environ["HERMES_SESSION_ID"] = old_session_id
+            if old_session_platform is None:
+                os.environ.pop("HERMES_SESSION_PLATFORM", None)
+            else:
+                os.environ["HERMES_SESSION_PLATFORM"] = old_session_platform
+            if old_hermes_home is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = old_hermes_home
+            if restore_skill_home_modules is not None and skill_home_snapshot is not None:
+                restore_skill_home_modules(skill_home_snapshot)
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
         _next_context_messages = _restore_reasoning_metadata(
@@ -9554,11 +10033,13 @@ def _handle_cron_create(handler, body):
 
         profile = _normalize_cron_profile_value(body.get("profile"))
         toast_notifications = body.get("toast_notifications") is not False
+        origin = _webui_origin_from_body(handler, body)
         job = create_job(
             prompt=body["prompt"],
             schedule=body["schedule"],
             name=body.get("name") or None,
             deliver=body.get("deliver") or "local",
+            origin=origin,
             skills=body.get("skills") or [],
             model=body.get("model") or None,
         )
@@ -9598,13 +10079,21 @@ def _handle_cron_update(handler, body):
 
     try:
         updates = {}
+        raw_deliver = str(body.get("deliver") or "").strip().lower()
+        origin = _webui_origin_from_body(handler, body)
         for k, v in body.items():
-            if k == "job_id":
+            if k in ("job_id", "origin_session_id", "webui_session_id", "session_id"):
+                continue
+            if k == "origin":
                 continue
             if k == "profile":
                 updates[k] = _normalize_cron_profile_value(v)
             elif v is not None:
                 updates[k] = v
+        if raw_deliver and raw_deliver != "origin":
+            updates["origin"] = None
+        elif origin is not None:
+            updates["origin"] = origin
     except ValueError as e:
         return bad(handler, str(e))
     job = update_job(body["job_id"], updates)
@@ -12716,8 +13205,11 @@ def _notes_sources_from_mcp_inventory(server_summaries: dict, tools: list[dict])
     return sources
 
 
-def _handle_notes_sources_list(handler):
+def _handle_notes_sources_list(handler, parsed=None):
     """List note/knowledge MCP sources for the WebUI Notes drawer."""
+    query = parse_qs((getattr(parsed, "query", "") or ""))
+    session = _runtime_contract_session_from_query(query)
+    allowed_sources = _runtime_contract_allowed_note_sources_for_query(query)
     cfg = get_config()
     if not _external_notes_sources_enabled(cfg):
         return j(handler, {
@@ -12742,14 +13234,21 @@ def _handle_notes_sources_list(handler):
     if not tools:
         tools = _mcp_tools_from_registry(server_summaries)
         source = "tool_registry" if tools else "none"
+    filtered_sources = filter_note_sources_for_contract(
+        _notes_sources_from_mcp_inventory(server_summaries, tools),
+        allowed_sources,
+    )
+    recent_ai_notes = _joplin_recent_ai_notes(limit=6, session=session)
+    if allowed_sources and not is_allowed_note_source(allowed_sources, "joplin"):
+        recent_ai_notes = []
     return j(handler, {
         "enabled": True,
-        "sources": _notes_sources_from_mcp_inventory(server_summaries, tools),
+        "sources": filtered_sources,
         "source": source,
         "inventory_scope": "already_known_runtime_only",
         "attach_supported": False,
         "automatic_recall_unchanged": True,
-        "recent_ai_notes": _joplin_recent_ai_notes(limit=6),
+        "recent_ai_notes": recent_ai_notes,
     })
 
 
@@ -12881,25 +13380,57 @@ _JOPLIN_AI_RECALL_NOTE_PRIORITY = [
 ]
 
 
-def _joplin_prefill_script_path() -> Path | None:
-    cfg = get_config()
-    path_value = cfg.get("prefill_messages_script") if isinstance(cfg, dict) else None
+def _prefill_script_path_from_value(path_value) -> Path | None:
     if not path_value:
         return None
-    try:
-        return Path(str(path_value)).expanduser()
-    except Exception:
+    if isinstance(path_value, (list, tuple)):
+        parts = [str(part).strip() for part in path_value if str(part).strip()]
+    else:
+        parts = shlex.split(str(path_value or ""))
+    if not parts:
         return None
+    for part in reversed(parts):
+        try:
+            candidate = Path(part).expanduser()
+        except Exception:
+            continue
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    if len(parts) == 1:
+        try:
+            return Path(parts[0]).expanduser()
+        except Exception:
+            return None
+    for part in reversed(parts[1:]):
+        lowered = str(part).lower()
+        if lowered.endswith((".py", ".sh", ".bash")):
+            try:
+                return Path(part).expanduser()
+            except Exception:
+                return None
+    return None
 
 
-def _joplin_recall_note_refs(script_path: Path | None = None) -> list[dict]:
+def _joplin_prefill_script_path(*, session=None) -> Path | None:
+    if session is not None and is_project_narrow_mode(session):
+        if get_project_narrow_prefill_policy(session) != "project_only":
+            return None
+        contract = getattr(session, "runtime_contract", None)
+        contract = dict(contract) if isinstance(contract, dict) else {}
+        return _prefill_script_path_from_value(contract.get("webui_prefill_messages_script"))
+    cfg = get_config()
+    path_value = cfg.get("prefill_messages_script") if isinstance(cfg, dict) else None
+    return _prefill_script_path_from_value(path_value)
+
+
+def _joplin_recall_note_refs(script_path: Path | None = None, *, session=None) -> list[dict]:
     """Find stable Joplin note IDs referenced by the configured recall script.
 
     This keeps the WebUI generic: it does not hard-code a user's note IDs, but
     can still surface the notes that the configured AI prefill/recall script is
     known to read for automatic context.
     """
-    script_path = script_path or _joplin_prefill_script_path()
+    script_path = script_path or _joplin_prefill_script_path(session=session)
     if not script_path or not script_path.exists() or not script_path.is_file():
         return []
     try:
@@ -12927,14 +13458,14 @@ def _joplin_recall_note_refs(script_path: Path | None = None) -> list[dict]:
     return refs
 
 
-def _joplin_recent_ai_notes(*, limit: int = 6) -> list[dict]:
+def _joplin_recent_ai_notes(*, limit: int = 6, session=None) -> list[dict]:
     """Return safe Joplin notes that the configured AI recall path recently uses."""
     try:
         limit = max(1, min(int(limit or 6), 20))
     except Exception:
         limit = 6
     notes = []
-    for ref in _joplin_recall_note_refs()[:limit]:
+    for ref in _joplin_recall_note_refs(session=session)[:limit]:
         try:
             data = _joplin_api_get(f"/notes/{ref['id']}", {
                 "fields": "id,title,parent_id,updated_time,user_updated_time,created_time",
@@ -12962,12 +13493,15 @@ def _handle_notes_search(handler, parsed):
     if not _external_notes_sources_enabled():
         return j(handler, {"source": "disabled", "results": [], "error": "External notes sources are disabled."}, status=404)
     query = parse_qs(parsed.query or "")
+    allowed_sources = _runtime_contract_allowed_note_sources_for_query(query)
     source = str(query.get("source", ["joplin"])[0] or "joplin").strip().lower()
     q = str(query.get("q", [""])[0] or "").strip()
     try:
         limit = int(query.get("limit", ["20"])[0] or 20)
     except Exception:
         limit = 20
+    if allowed_sources and not is_allowed_note_source(allowed_sources, source):
+        return j(handler, {"source": source, "results": [], "error": "Notes source not available in this session"}, status=403)
     if source != "joplin":
         return j(handler, {"source": source, "results": [], "error": "Search is currently implemented for Joplin sources only."}, status=400)
     try:
@@ -12980,8 +13514,11 @@ def _handle_notes_item(handler, parsed):
     if not _external_notes_sources_enabled():
         return j(handler, {"source": "disabled", "error": "External notes sources are disabled."}, status=404)
     query = parse_qs(parsed.query or "")
+    allowed_sources = _runtime_contract_allowed_note_sources_for_query(query)
     source = str(query.get("source", ["joplin"])[0] or "joplin").strip().lower()
     note_id = str(query.get("id", [""])[0] or "").strip()
+    if allowed_sources and not is_allowed_note_source(allowed_sources, source):
+        return j(handler, {"source": source, "error": "Notes source not available in this session"}, status=403)
     if source != "joplin":
         return j(handler, {"source": source, "error": "Preview is currently implemented for Joplin sources only."}, status=400)
     try:

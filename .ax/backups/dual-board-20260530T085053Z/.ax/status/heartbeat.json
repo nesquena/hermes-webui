@@ -1,0 +1,13 @@
+{
+  "updated_at": "2026-05-30T08:41:11Z",
+  "board": "pux-import-e2e-1780010472",
+  "repo_root": "/Users/parantoux/Andy/workspace/hermes-webui",
+  "heartbeat": "This review/browser-proof tick stayed on the same frozen blocker and made no blocker-owned product edit. Canonical board truth still reads triage 0 / todo 16 / ready 1 / running 0 / blocked 17 / done 20, with t_8dcfd135 still the first open frozen proof gate and side lane t_07b00ab9 still blocked under review-required handoff. Fresh shipped-browser proof this tick opened directly on proof board pux-rootseed-proof-1780110594 with no console/js errors and 2 visible cards: done root t_3a5eaf3b plus ready child t_95e2b59e. But the visible root card still carries older anchor copy instead of the newer reference-only seed wording now enforced in source. Latest blocker-owned source-guard result is carried from continuity (3 passed, 28 deselected, 1 warning); this is continuity / verification progress only, and shipped Recover provenance plus refreshed board output semantics are still open on the same card.",
+  "verification": {
+    "board_stats": "2026-05-30T08:38Z hermes kanban --board pux-import-e2e-1780010472 stats => triage 0 / todo 16 / ready 1 / running 0 / blocked 17 / done 20",
+    "main_gate": "2026-05-30T08:38Z hermes kanban --board pux-import-e2e-1780010472 list => t_8dcfd135 still the only ready card and still the first frozen proof gate",
+    "proof_board_backend": "2026-05-30T08:32Z hermes kanban --board pux-rootseed-proof-1780110594 stats/list/show => done root t_3a5eaf3b + ready child t_95e2b59e still exist on the intended proof board, but the root task body still carries older anchor copy ('This card anchors the recovered Project OS workflow...' / 'Scope: keep execution bounded...').",
+    "proof_gate": "Latest canonical blocker-owned source guard is carried from continuity, not rerun in this browser tick: /Users/parantoux/.hermes/hermes-agent/venv/bin/python -m pytest -q tests/test_project_os_extension_regressions.py -k 'import_prompt or workflow_root_seed or runtime_payload_only_assigns_ready_seed_cards' => 3 passed, 28 deselected, 1 warning.",
+    "browser_proof": "2026-05-30T08:38Z browser rerun on http://127.0.0.1:8787 opened directly on intended proof board pux-rootseed-proof-1780110594. Board switcher text matched 'Project OS root-seed clean proof', 2 visible cards rendered, live DOM still showed ready child t_95e2b59e plus done root t_3a5eaf3b with [project-os.workflow-seed:v1]/Seed: root, and browser console stayed clean. Wrong-board drift did not recur in this rerun, but the visible root card still shows older anchor copy rather than refreshed reference-only wording."
+  }
+}

@@ -49,6 +49,9 @@ def test_active_session_idle_reconcile_clears_stale_busy_and_inflight_state():
     assert "clearInflightState(sid)" in body, "persisted inflight cache must be cleared too"
     assert "_sessionStreamingById.set(sid, false)" in body, "observed active streaming state must be reset"
     assert "_forgetObservedStreamingSession(sid)" in body, "persisted observed streaming marker must be cleared"
+    assert "setComposerStatus('')" in body, "composer running text should clear when the server confirms idle"
+    assert "setStatus('')" in body, "top-level status text should clear when the server confirms idle"
+    assert "renderMessages({preserveScroll:true})" in body, "transcript should drop stale live UI without snapping the reader"
     assert "updateSendBtn()" in body, "composer controls must reflect the idle state after cleanup"
 
 

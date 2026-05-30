@@ -291,6 +291,10 @@ function _reconcileActiveSessionIdleStateFromList(serverRows) {
   }
   _sessionStreamingById.set(sid, false);
   _forgetObservedStreamingSession(sid);
+  if (changed&&typeof setComposerStatus==='function') setComposerStatus('');
+  if (changed&&typeof setStatus==='function') setStatus('');
+  if (changed&&typeof syncTopbar==='function') syncTopbar();
+  if (changed&&typeof renderMessages==='function') renderMessages({preserveScroll:true});
   if (changed&&typeof updateSendBtn==='function') updateSendBtn();
   return changed;
 }
@@ -563,6 +567,7 @@ async function loadSession(sid){
   }
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
+  const preserveTranscriptScroll = forceReload && currentSid===sid;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
@@ -713,7 +718,7 @@ async function loadSession(sid){
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
-    syncTopbar();renderMessages();
+    syncTopbar();renderMessages({preserveScroll:preserveTranscriptScroll});
     const restoredLiveTurn=typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
     if(!restoredLiveTurn){
       appendThinking();
@@ -759,19 +764,25 @@ async function loadSession(sid){
       try{
         const _storedQ=typeof _readPersistedSessionQueue==='function' ? _readPersistedSessionQueue(sid) : [];
         if(Array.isArray(_storedQ) && _storedQ.length){
-          const _entries=_storedQ;
-          const _lastMsg=S.messages.slice().reverse()
-            .find(m=>m&&m.role==='assistant');
-          const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
-          const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
-          if(_fresh.length){
-            SESSION_QUEUES[sid]=_fresh;
-            const _first=_fresh[0];
+          const _entries=_storedQ
+            .filter(e=>e&&typeof e==='object')
+            .map(e=>{
+              const _text=typeof e.text==='string'
+                ? e.text
+                : (typeof e.message==='string' ? e.message : (typeof e.content==='string' ? e.content : ''));
+              const _files=Array.isArray(e.files) ? e.files : [];
+              return {...e,text:_text,files:_files};
+            })
+            .filter(e=>e.text||e.files.length);
+          if(_entries.length){
+            SESSION_QUEUES[sid]=_entries;
+            if(typeof _persistSessionQueueStorage==='function') _persistSessionQueueStorage(sid,_entries);
+            const _first=_entries[0];
             const _msg=$&&$('msg');
             if(_msg&&_first.text&&!_msg.value){
               _msg.value=_first.text||'';
               if(typeof autoResize==='function') autoResize();
-              if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
+              if(typeof showToast==='function') showToast((_entries.length>1?`${_entries.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
             }
           } else if(typeof _removeSessionQueueStorage==='function') {
             _removeSessionQueueStorage(sid);
@@ -814,7 +825,7 @@ async function loadSession(sid){
       setStatus('');
       setComposerStatus('');
       updateQueueBadge(sid);
-      syncTopbar();renderMessages();
+      syncTopbar();renderMessages({preserveScroll:preserveTranscriptScroll});
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       const _dirP=loadDir('.');
       // Workspace refresh is guarded by session id inside loadDir(); do not
@@ -1295,13 +1306,29 @@ let _messagesTruncated = false;
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
 
+function _messageReloadLimitForSession(sid) {
+  if (!sid || !S.session || S.session.session_id !== sid) return _INITIAL_MSG_LIMIT;
+  const loadedCount = Array.isArray(S.messages) ? S.messages.filter(m => m && m.role).length : 0;
+  if (loadedCount <= 0) return _INITIAL_MSG_LIMIT;
+  // Same-session force reloads must not collapse a long transcript back to the
+  // default tail window while the user is reading earlier history. Preserve the
+  // currently loaded suffix width; if the full transcript was already loaded,
+  // omit msg_limit entirely so the refresh keeps the whole conversation.
+  if (_messagesTruncated) return Math.max(_INITIAL_MSG_LIMIT, loadedCount);
+  return 0;
+}
+
 async function _ensureMessagesLoaded(sid) {
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
     return;
   }
   // Fetch session messages with a tail window for fast initial load.
-  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${_INITIAL_MSG_LIMIT}`);
+  const msgLimit = _messageReloadLimitForSession(sid);
+  const url = msgLimit > 0
+    ? `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${msgLimit}`
+    : `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`;
+  const data = await api(url);
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
   _messagesTruncated = !!data.session._messages_truncated;
@@ -2359,6 +2386,11 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
     if(!data || !data.session) return;
     if(!S.session || S.session.session_id !== sid) return;
     if(S.busy || S.activeStreamId) return;
+    const reconciledIdle = _reconcileActiveSessionIdleStateFromList([data.session]);
+    if(reconciledIdle){
+      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+      return;
+    }
     const remoteCount = Number(data.session.message_count || 0);
     const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
     if(remoteCount > localCount || remoteLast > localLast){

@@ -137,6 +137,17 @@ class TestParallelizedFetches:
         assert "if(options&&options.awaitWorkspaceLoad) await dirLoad" in sessions_js
         assert "loadDir('.') is fire-and-forget while the workspace panel is closed" in sessions_js
 
+    def test_workspace_loader_has_single_top_level_declaration(self):
+        """panels.js must parse so boot.js can call loadWorkspaceList() during boot."""
+        assert self.JS.count("let _skillsData = null;") == 1, (
+            "Duplicate _skillsData declarations break panels.js parsing and make "
+            "loadWorkspaceList() unavailable during boot."
+        )
+        assert self.JS.count("let _skillsDataSessionId = null;") == 1, (
+            "Duplicate _skillsDataSessionId declarations break panels.js parsing and "
+            "make loadWorkspaceList() unavailable during boot."
+        )
+
 
 class TestSpinnerCss:
     """Verify the spinner CSS class is defined correctly."""
