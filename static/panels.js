@@ -7400,12 +7400,14 @@ function _openAuxAdvancedOptions(taskKey,cfg){
 function _bindMainAdvancedOptionsButton(){
  const btn=$('mainAdvancedBtn');
  if(!btn) return;
+ btn.classList.add('model-advanced-btn');
+ if(!btn.querySelector('svg')&&typeof li==='function') btn.innerHTML=li('settings',15);
  const title=t('settings_aux_advanced_button_title')||'Advanced options';
  btn.title=title;
  btn.setAttribute('aria-label',t('settings_main_advanced_button_aria')||'Advanced options for main model');
  btn.disabled=_mainAdvancedConfig===null;
- btn.style.opacity=btn.disabled?'.55':'1';
- btn.style.cursor=btn.disabled?'not-allowed':'pointer';
+ btn.style.opacity='';
+ btn.style.cursor='';
  if(btn._bound) return;
  btn._bound=true;
  btn.addEventListener('click',()=>{if(_mainAdvancedConfig!==null)_openAuxAdvancedOptions('__main__',_mainAdvancedConfig||{});});
@@ -7468,13 +7470,12 @@ async function _loadAuxiliaryModels(){
 
    const advancedBtn=document.createElement('button');
    advancedBtn.type='button';
-   advancedBtn.className='aux-advanced-btn';
+   advancedBtn.className='aux-advanced-btn model-advanced-btn';
    const advTitle=t('settings_aux_advanced_button_title')||'Advanced options';
    const slotName=t(slot.nameKey)||slot.key;
    advancedBtn.title=advTitle;
    advancedBtn.setAttribute('aria-label',(t('settings_aux_advanced_button_aria')||'Advanced options for {task}').replace('{task}',slotName));
-   advancedBtn.textContent='⚙';
-   advancedBtn.style.cssText='width:32px;height:32px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px;border:1px solid var(--border);background:var(--input-bg);color:var(--muted);cursor:pointer;font-size:14px;line-height:1';
+   advancedBtn.innerHTML=typeof li==='function'?li('settings',15):'⚙';
    advancedBtn.addEventListener('click',()=>_openAuxAdvancedOptions(slot.key,cfg));
    row.appendChild(advancedBtn);
 
