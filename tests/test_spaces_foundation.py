@@ -1691,6 +1691,68 @@ def test_space_tool_adapter_supports_source_camelcase_space_helpers(monkeypatch,
     assert "secret" not in serialized
 
 
+def test_space_collection_and_current_read_receipts_include_metadata_only_output_compaction(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "space-collection-compaction-lab", "name": "Space Collection Compaction Lab"})
+    spaces.create_space({"space_id": "space-collection-compaction-second", "name": "Second Collection Space"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-widget",
+            "kind": "html",
+            "title": "Unsafe Widget",
+            "renderer": "<script>stored()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "source": "SECRET_SOURCE",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "token": "bearer placeholder"},
+        },
+    )
+
+    listed = spaces.run_space_tool(
+        "space.spaces.listSpaces",
+        {"renderer": "<script>ignore()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+    )
+    items = spaces.run_space_tool("space.spaces.items", {"source": "SECRET_SOURCE", "token": "bearer placeholder"})
+    by_id = spaces.run_space_tool("space.spaces.byId", {"html": "<img src=x onerror=steal()>", "api_key": "***"})
+    current = spaces.run_space_tool(
+        "space.spaces.getCurrentSpace",
+        {"activeSpaceId": created["space_id"], "renderer": "<script>ignore()</script>", "api_key": "***"},
+    )
+    legacy_current = spaces.run_space_tool("space.current.get", {"active_space_id": created["space_id"], "token": "***"})
+
+    for response, expected_action in [
+        (listed, "space.spaces.listspaces"),
+        (items, "space.spaces.items"),
+        (by_id, "space.spaces.byid"),
+        (current, "space.spaces.getcurrentspace"),
+        (legacy_current, "space.current.get"),
+    ]:
+        compaction = response["output_compaction"]
+        assert compaction["metadata_only"] is True
+        assert compaction["redaction_status"] == "metadata_only"
+        assert compaction["command"] == expected_action
+        assert "metadata_only: true" in compaction["text"]
+
+    assert "space_count: 2" in listed["output_compaction"]["text"]
+    assert "space_count: 2" in items["output_compaction"]["text"]
+    assert "space_count: 2" in by_id["output_compaction"]["text"]
+    assert f"space_id: {created['space_id']}" in current["output_compaction"]["text"]
+    assert "widget_count: 1" in current["output_compaction"]["text"]
+    assert f"space_id: {created['space_id']}" in legacy_current["output_compaction"]["text"]
+    assert "widget_count: 1" in legacy_current["output_compaction"]["text"]
+
+    serialized = json.dumps({"listed": listed, "items": items, "by_id": by_id, "current": current, "legacy_current": legacy_current}).lower()
+    assert "stored()" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"source":' not in serialized
+    assert "api_key" not in serialized
+    assert "bearer" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_tool_adapter_supports_source_collection_property_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({

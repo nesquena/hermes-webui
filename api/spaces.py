@@ -1886,6 +1886,7 @@ def _space_tool_action_output_compaction_receipt(
     target_space_id: str | None = None,
     widget_id: str | None = None,
     widget_count: int | None = None,
+    space_count: int | None = None,
     revision_event_id: str | None = None,
     revision_event_ids: list[str] | None = None,
     autonomy_policy: dict[str, Any] | None = None,
@@ -1909,6 +1910,12 @@ def _space_tool_action_output_compaction_receipt(
         safe_widget_count = max(0, int(widget_count or 0))
     except (TypeError, ValueError):
         safe_widget_count = 0
+    safe_space_count: int | None = None
+    if space_count is not None:
+        try:
+            safe_space_count = max(0, int(space_count))
+        except (TypeError, ValueError):
+            safe_space_count = 0
 
     public_revision_event_ids: list[str] = []
     for candidate in [revision_event_id, *(revision_event_ids or [])]:
@@ -1932,6 +1939,8 @@ def _space_tool_action_output_compaction_receipt(
         lines.append(f"widget_id: {safe_widget_id}")
     if include_widget_count:
         lines.append(f"widget_count: {safe_widget_count}")
+    if safe_space_count is not None:
+        lines.append(f"space_count: {safe_space_count}")
     if public_revision_event_ids:
         if len(public_revision_event_ids) == 1:
             lines.append(f"revision_event_id: {public_revision_event_ids[0]}")
@@ -6695,9 +6704,29 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         }
 
     if name in {"space.list", "space.spaces", "space.spaces.list", "space.spaces.listspaces"}:
-        return {"ok": True, "action": name, "spaces": list_spaces()}
+        spaces = list_spaces()
+        return {
+            "ok": True,
+            "action": name,
+            "spaces": spaces,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_count=len(spaces),
+                include_widget_count=False,
+            ),
+        }
     if name in {"space.spaces.items", "space.spaces.all"}:
-        return {"ok": True, "action": name, "spaces": list_spaces()}
+        spaces = list_spaces()
+        return {
+            "ok": True,
+            "action": name,
+            "spaces": spaces,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_count=len(spaces),
+                include_widget_count=False,
+            ),
+        }
     if name == "space.spaces.widgetapiversion":
         return {
             "ok": True,
@@ -6707,7 +6736,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         }
     if name == "space.spaces.byid":
         spaces = list_spaces()
-        return {"ok": True, "action": name, "spaces_by_id": {space["space_id"]: space for space in spaces}}
+        return {
+            "ok": True,
+            "action": name,
+            "spaces_by_id": {space["space_id"]: space for space in spaces},
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_count=len(spaces),
+                include_widget_count=False,
+            ),
+        }
     if name in {"space.demo.list", "space.demo.runs"}:
         return {"ok": True, "action": name, "demos": list_space_demo_runs()}
     if name in {"space.demo.run", "space_demo_run"}:
@@ -6720,7 +6758,18 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if not current_id:
             return {"ok": True, "action": name, "active_space_id": None, "space": None}
         space_id = validate_space_id(current_id)
-        return {"ok": True, "action": name, "active_space_id": space_id, "space": read_space_detail(space_id)}
+        space = read_space_detail(space_id)
+        return {
+            "ok": True,
+            "action": name,
+            "active_space_id": space_id,
+            "space": space,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=len(space.get("widgets") or []),
+            ),
+        }
     if name == "space.spaces.currentid":
         current_id = _space_tool_current_id(data)
         space_id = validate_space_id(current_id) if current_id else None
