@@ -165,6 +165,15 @@ def test_fingerprinted_url_gets_immutable_cache(isolated_static):
     assert h.header("Cache-Control") == "public, max-age=31536000, immutable"
 
 
+def test_dirty_fingerprinted_url_gets_revalidating_cache(isolated_static):
+    """Local dirty builds are hot-patched, so they must not be immutable."""
+    from api import routes
+    _make_static_file(isolated_static, "ui.js", b"x" * 2000)
+
+    h = _serve(routes, "/static/ui.js", query="v=v0.51.161-dirty-abcdef123456")
+    assert h.header("Cache-Control") == "public, max-age=300, must-revalidate"
+
+
 def test_empty_fingerprint_value_gets_short_cache(isolated_static):
     """Only a non-empty version token is an immutable-cache fingerprint."""
     from api import routes

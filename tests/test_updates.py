@@ -4,6 +4,28 @@ from unittest.mock import MagicMock, patch
 import api.updates as updates
 
 
+def test_dirty_suffix_includes_tracked_file_fingerprint(tmp_path):
+    """Dirty hot-patch builds need unique asset URLs, not a stable -dirty token."""
+    (tmp_path / '.git').mkdir()
+    changed = tmp_path / 'static' / 'sessions.js'
+    changed.parent.mkdir()
+    changed.write_text('let msgs = [];\n', encoding='utf-8')
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['diff-index', '--quiet', 'HEAD', '--']:
+            return 'git exited with status 1', False
+        if args == ['status', '--porcelain', '--untracked-files=no']:
+            return ' M static/sessions.js', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        suffix = updates._dirty_suffix(tmp_path)
+
+    assert suffix.startswith('-dirty-')
+    assert suffix != '-dirty'
+    assert len(suffix.removeprefix('-dirty-')) == 12
+
+
 def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
     if args == ['fetch', 'origin', '--tags', '--force']:
         return 'would clobber existing tag v0.50.294', False

@@ -182,7 +182,15 @@ def _run_git(args, cwd, timeout=10):
 
 
 def _dirty_suffix(path: Path, timeout=1) -> str:
-    """Return a best-effort ``-dirty`` suffix without blocking version display."""
+    """Return a best-effort dirty suffix without blocking version display.
+
+    Dirty checkouts are common on Jamie's live WebUI because we hot-patch the
+    running tree. A plain ``-dirty`` suffix is not enough for frontend cache
+    busting: every local patch still renders the same ``?v=vX-dirty`` URLs, and
+    browsers may legitimately keep the old immutable JS. Include a short,
+    cheap fingerprint derived from tracked dirty files so each restarted
+    hot-patch build gets a fresh asset URL.
+    """
     out, ok = _run_git(['diff-index', '--quiet', 'HEAD', '--'], path, timeout=timeout)
     if ok:
         return ""
@@ -195,8 +203,40 @@ def _dirty_suffix(path: Path, timeout=1) -> str:
     # the dirty signal; real errors (timeouts, missing git) carry a different
     # diagnostic and correctly suppress the suffix.
     if not out or out.startswith('git exited with status '):
-        return "-dirty"
+        return f"-dirty-{_dirty_fingerprint(path, timeout=timeout)}"
     return ""
+
+
+def _dirty_fingerprint(path: Path, timeout=1) -> str:
+    """Return a short fingerprint for tracked dirty-file state.
+
+    Prefer filesystem metadata over full diff contents: it is fast, does not
+    risk logging secrets, and changes whenever a tracked hot-patched file is
+    rewritten. If git/status/stat inspection fails, fall back to process start
+    time so the URL still changes after a restart rather than reusing a stale
+    ``-dirty`` token forever.
+    """
+    parts: list[str] = []
+    out, ok = _run_git(['status', '--porcelain', '--untracked-files=no'], path, timeout=timeout)
+    if ok and out:
+        parts.append(out)
+        for line in out.splitlines()[:200]:
+            rel = line[3:].strip() if len(line) > 3 else ""
+            # Rename entries are formatted as "old -> new"; fingerprint the
+            # destination if present, otherwise the raw status line is enough.
+            if ' -> ' in rel:
+                rel = rel.rsplit(' -> ', 1)[1].strip()
+            if not rel:
+                continue
+            try:
+                st = (path / rel).stat()
+            except OSError:
+                parts.append(f"missing:{rel}")
+                continue
+            parts.append(f"{rel}:{st.st_size}:{st.st_mtime_ns}")
+    if not parts:
+        parts.append(str(int(time.time())))
+    return hashlib.sha256('\n'.join(parts).encode('utf-8')).hexdigest()[:12]
 
 
 def _describe_git_version(path: Path, *, timeout=5, dirty_timeout=1) -> str | None:

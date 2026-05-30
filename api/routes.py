@@ -7167,10 +7167,13 @@ def _serve_static(handler, parsed):
     # is safe to cache aggressively: any redeploy changes the URL.
     version_values = parse_qs(parsed.query, keep_blank_values=True).get("v", [""])
     has_fingerprint = bool(version_values[0])
-    cache_control = (
-        "public, max-age=31536000, immutable" if has_fingerprint
-        else "public, max-age=300"
-    )
+    is_dirty_fingerprint = "-dirty" in version_values[0]
+    if has_fingerprint and not is_dirty_fingerprint:
+        cache_control = "public, max-age=31536000, immutable"
+    elif has_fingerprint and is_dirty_fingerprint:
+        cache_control = "public, max-age=300, must-revalidate"
+    else:
+        cache_control = "public, max-age=300"
 
     # 304 short-circuit on conditional GET.
     if handler.headers.get("If-None-Match") == etag:
@@ -8032,7 +8035,7 @@ def _handle_media(handler, parsed):
     ) else "attachment"
     # _serve_file_bytes sends Content-Security-Policy when csp is set.
     csp = "sandbox allow-scripts" if html_inline_ok else None
-    return _serve_file_bytes(handler, target, mime, disposition, "private, max-age=3600", csp=csp)
+    return _serve_file_bytes(handler, target, mime, disposition, "no-cache, no-store, must-revalidate", csp=csp)
 
 
 def _file_raw_target(session, sid: str, rel: str) -> Path | None:
