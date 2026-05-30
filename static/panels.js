@@ -3193,6 +3193,32 @@ async function copyLogsAll() {
 }
 
 // ── Insights panel ──
+// Scope state for the WebUI/Global toggle. Persisted in localStorage so the
+// user's last choice survives a reload. Default 'webui' matches historical
+// behavior — anyone not actively running hermes-agent gateway elsewhere
+// should never see a regression.
+let _insightsScope = 'webui';
+let _insightsRequestSeq = 0;
+try {
+  const stored = localStorage.getItem('insightsScope');
+  if (stored === 'webui' || stored === 'global') _insightsScope = stored;
+} catch (_) { /* localStorage may be unavailable in private mode */ }
+
+function setInsightsScope(scope) {
+  if (scope !== 'webui' && scope !== 'global') return;
+  if (scope === _insightsScope) return;
+  _insightsScope = scope;
+  try { localStorage.setItem('insightsScope', scope); } catch (_) {}
+  // Visual sync of the toggle buttons before fetch so the click feels instant.
+  const buttons = document.querySelectorAll('#insightsScopeToggle .insights-scope-btn');
+  buttons.forEach(btn => {
+    const active = btn.dataset.scope === scope;
+    btn.classList.toggle('is-active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  });
+  void loadInsights();
+}
+
 async function loadInsights(animate) {
   const box = $('insightsContent');
   const refreshBtn = $('insightsRefreshBtn');
@@ -3202,22 +3228,71 @@ async function loadInsights(animate) {
     refreshBtn.disabled = true;
   }
   const period = ($('insightsPeriod') || {}).value || '30';
+  const scope = _insightsScope;
+  const requestSeq = ++_insightsRequestSeq;
   try {
     const [data, wikiStatus, skillUsage] = await Promise.all([
-      api(`/api/insights?days=${period}`),
+      api(`/api/insights?days=${period}&scope=${scope}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
       api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
     ]);
+    // If the user flipped the scope/period again while this request was in
+    // flight, ignore the stale response. This keeps every card/chart on the
+    // page synchronized to the most recent toggle state.
+    if (requestSeq !== _insightsRequestSeq) return;
+    _syncInsightsScopeUI(data);
     _renderInsights(data, box, wikiStatus, skillUsage);
     if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
     if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
+    // Mirror the success-path stale guard: an older failed request must not
+    // replace newer scope/period data with an error banner after the user has
+    // already toggled again.
+    if (requestSeq !== _insightsRequestSeq) return;
     box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
   } finally {
     if (animate && refreshBtn) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
+  }
+}
+
+// Reflect the *effective* scope returned by the server in the toggle UI.
+// When the user asked for 'global' but state.db was unreachable, the server
+// falls back to webui data and sets scope_available=false; we surface that
+// by disabling the Global button with an explanatory tooltip and snapping
+// the active state back to webui so the next refresh doesn't keep retrying.
+function _syncInsightsScopeUI(data) {
+  if (!data) return;
+  const effective = data.scope || 'webui';
+  const requested = data.scope_requested || effective;
+  const available = data.scope_available !== false;
+
+  if (effective !== _insightsScope) {
+    _insightsScope = effective;
+    try { localStorage.setItem('insightsScope', effective); } catch (_) {}
+  }
+
+  const buttons = document.querySelectorAll('#insightsScopeToggle .insights-scope-btn');
+  buttons.forEach(btn => {
+    const isGlobal = btn.dataset.scope === 'global';
+    const isActive = btn.dataset.scope === effective;
+    btn.classList.toggle('is-active', isActive);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    // Disable the Global button when state.db is unreachable so the user
+    // gets an honest signal rather than a silently-falling-back toggle.
+    if (isGlobal && !available) {
+      btn.disabled = true;
+      btn.title = t('insights_scope_global_unavailable');
+    } else {
+      btn.disabled = false;
+      btn.removeAttribute('title');
+    }
+  });
+  // Keep the underlying state.scope honest after a fallback.
+  if (requested === 'global' && !available && effective === 'webui') {
+    _insightsScope = 'webui';
   }
 }
 
@@ -3428,8 +3503,8 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   if (d.models && d.models.length) {
     modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table insights-model-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_sessions'))}</span><span>${esc(t('insights_model_tokens'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
       d.models.map(m => {
-        const share = Number(m.cost_share || m.token_share || m.session_share || 0);
-        const title = `${m.model} · ${fmtTokens(m.input_tokens)} ${t('insights_input_tokens')} · ${fmtTokens(m.output_tokens)} ${t('insights_output_tokens')}`;
+        const share = Number(m.token_share || 0);
+        const title = `${m.model} · ${fmtTokens(m.input_tokens)} ${t('insights_input_tokens')} · ${fmtTokens(m.cache_read_tokens || 0)} ${t('insights_cache_read_tokens')} · ${fmtTokens(m.cache_write_tokens || 0)} ${t('insights_cache_write_tokens')} · ${fmtTokens(m.output_tokens)} ${t('insights_output_tokens')}`;
         return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span><span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
       }).join('') +
       `</div></div>`;
@@ -3464,12 +3539,22 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   }
 
   // Token breakdown
+  const cacheReadTokens = Number(d.total_cache_read_tokens || 0);
+  const cacheWriteTokens = Number(d.total_cache_write_tokens || 0);
   const tokenCards = `
     <div class="insights-card">
       <div class="insights-card-title">${esc(t('insights_token_breakdown'))}</div>
       <div class="insights-token-row">
         <span class="insights-token-label">${esc(t('insights_input_tokens'))}</span>
         <span class="insights-token-value">${fmtTokens(d.total_input_tokens)}</span>
+      </div>
+      <div class="insights-token-row insights-token-subrow">
+        <span class="insights-token-label">${esc(t('insights_cache_read_tokens'))}</span>
+        <span class="insights-token-value">${fmtTokens(cacheReadTokens)}</span>
+      </div>
+      <div class="insights-token-row insights-token-subrow">
+        <span class="insights-token-label">${esc(t('insights_cache_write_tokens'))}</span>
+        <span class="insights-token-value">${fmtTokens(cacheWriteTokens)}</span>
       </div>
       <div class="insights-token-row">
         <span class="insights-token-label">${esc(t('insights_output_tokens'))}</span>
@@ -3488,6 +3573,7 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
     <div class="insights-grid">
       ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
     </div>
+    <div class="insights-scope-note">${esc(t('insights_scope_note'))}</div>
     ${dailyHtml}
     <div class="insights-row insights-usage-grid">
       ${tokenCards}

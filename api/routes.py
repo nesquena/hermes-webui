@@ -3398,8 +3398,142 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
     return True
 
 
+def _load_webui_index_entries(cutoff: float) -> list[dict]:
+    """Load WebUI-scoped session entries from _index.json.
+
+    Filters to entries created or updated within the calendar window.
+    Each entry follows the _index.json convention where ``input_tokens`` is
+    the full prompt total (cache reads + writes + new input) — i.e. it
+    already matches what providers bill as ``prompt_tokens``.
+    """
+    sessions_data: list[dict] = []
+    idx_path = SESSION_DIR / "_index.json"
+    if not idx_path.exists():
+        return sessions_data
+    try:
+        idx = json.loads(idx_path.read_text(encoding="utf-8"))
+    except Exception:
+        return sessions_data
+    for entry in idx:
+        created = entry.get("created_at", 0) or 0
+        updated = entry.get("updated_at", 0) or 0
+        if max(created, updated) < cutoff:
+            continue
+        sessions_data.append(entry)
+    return sessions_data
+
+
+def _hermes_state_db_path() -> "Path | None":
+    """Return path to the hermes-agent global state.db if discoverable."""
+    import os
+
+    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    if not home:
+        return None
+    return Path(home) / "state.db"
+
+
+def _load_global_state_db_entries(cutoff: float) -> "list[dict] | None":
+    """Load Hermes-global session entries from ``state.db`` for the
+    ``scope=global`` Insights view.
+
+    Returns ``None`` when the database is missing or unreadable, signalling
+    the caller to fall back to the WebUI-only path. Returns an empty list
+    when the database exists but has no qualifying rows (legitimate empty
+    result, not a fallback signal).
+
+    Each row is reshaped to match the ``_index.json`` convention so the
+    downstream aggregation needs no source-specific branching:
+
+    - ``input_tokens`` becomes the **full prompt total** (state.db stores
+      it as cache-subtracted "new only"; we add ``cache_read_tokens`` and
+      ``cache_write_tokens`` back so the value equals the provider's
+      ``prompt_tokens``).
+    - ``estimated_cost`` prefers ``actual_cost_usd`` and falls back to
+      ``estimated_cost_usd``.
+    - ``created_at`` / ``updated_at`` come from ``started_at`` /
+      ``ended_at`` (with ``started_at`` as updated fallback).
+    - window filtering uses the same "active in window" rule as WebUI
+      scope: started or ended/updated within the requested calendar range.
+
+    Connection is opened in SQLite read-only URI mode so we cannot
+    accidentally mutate the gateway's state store, with a short timeout
+    so a writer-locked db never stalls the dashboard request.
+    """
+    import sqlite3
+
+    db_path = _hermes_state_db_path()
+    if db_path is None or not db_path.exists():
+        return None
+
+    try:
+        uri = f"file:{db_path.as_posix()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=2.0, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        try:
+            cur = conn.execute(
+                """SELECT id, source, model, started_at, ended_at,
+                          message_count, input_tokens, output_tokens,
+                          cache_read_tokens, cache_write_tokens,
+                          estimated_cost_usd, actual_cost_usd
+                     FROM sessions
+                    WHERE MAX(started_at, COALESCE(ended_at, started_at)) >= ?""",
+                (cutoff,),
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+    entries: list[dict] = []
+    for row in rows:
+        new_input = int(row["input_tokens"] or 0)
+        cache_read = int(row["cache_read_tokens"] or 0)
+        cache_write = int(row["cache_write_tokens"] or 0)
+        full_prompt = new_input + cache_read + cache_write
+
+        actual = row["actual_cost_usd"]
+        if actual is not None:
+            cost = actual
+        else:
+            cost = row["estimated_cost_usd"] or 0.0
+
+        started = float(row["started_at"] or 0.0)
+        ended = row["ended_at"]
+        updated = float(ended) if ended is not None else started
+
+        entries.append({
+            "session_id": row["id"],
+            "source": row["source"] or "unknown",
+            "model": row["model"] or "unknown",
+            "created_at": started,
+            "updated_at": updated,
+            "message_count": int(row["message_count"] or 0),
+            "input_tokens": full_prompt,
+            "output_tokens": int(row["output_tokens"] or 0),
+            # Keep cache buckets as informational sub-components of the
+            # prompt/input total. They are NOT added again to total_tokens.
+            "cache_read_tokens": cache_read,
+            "cache_write_tokens": cache_write,
+            "estimated_cost": cost,
+        })
+    return entries
+
+
 def _handle_insights(handler, parsed) -> bool:
-    """Return usage analytics from local WebUI session data."""
+    """Return usage analytics with selectable scope.
+
+    Scopes:
+    - ``webui`` (default): only sessions started via the WebUI, sourced
+      from ``_index.json``. This is the historical behaviour and what
+      8787 users have been seeing.
+    - ``global``: every Hermes session (CLI, Discord, Telegram, cron,
+      kanban worker, delegate_task, WebUI, …) sourced from the
+      hermes-agent ``state.db``. Falls back to ``webui`` data when the
+      database is missing or unreadable; the response carries
+      ``scope_available=false`` so the UI can surface the fallback.
+    """
     import collections
     import time as _time
 
@@ -3408,6 +3542,10 @@ def _handle_insights(handler, parsed) -> bool:
         days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
     except (ValueError, TypeError):
         days = 30
+
+    requested_scope = (query.get("scope", ["webui"])[0] or "webui").strip().lower()
+    if requested_scope not in ("webui", "global"):
+        requested_scope = "webui"
 
     now = _time.time()
     today = _time.localtime(now)
@@ -3437,30 +3575,25 @@ def _handle_insights(handler, parsed) -> bool:
     def _session_usage_ts(session: dict) -> float:
         return session.get("updated_at", session.get("created_at", 0)) or session.get("created_at", 0) or 0
 
-    # Walk session index (fast, no full JSON parse)
-    sessions_data = []
-    idx_path = SESSION_DIR / "_index.json"
-    if idx_path.exists():
-        try:
-            idx = json.loads(idx_path.read_text(encoding="utf-8"))
-        except Exception:
-            idx = []
+    # Resolve effective scope + load matching session entries.
+    effective_scope = requested_scope
+    scope_available = True
+    if requested_scope == "global":
+        sessions_data = _load_global_state_db_entries(cutoff)
+        if sessions_data is None:
+            sessions_data = _load_webui_index_entries(cutoff)
+            effective_scope = "webui"
+            scope_available = False
     else:
-        idx = []
-
-    for entry in idx:
-        created = entry.get("created_at", 0) or 0
-        updated = entry.get("updated_at", 0) or 0
-        # Session is relevant if it was created or updated within the calendar window.
-        if max(created, updated) < cutoff:
-            continue
-        sessions_data.append(entry)
+        sessions_data = _load_webui_index_entries(cutoff)
 
     # Aggregate
     total_sessions = len(sessions_data)
     total_messages = 0
     total_input_tokens = 0
     total_output_tokens = 0
+    total_cache_read_tokens = 0
+    total_cache_write_tokens = 0
     total_cost = 0.0
     model_stats: dict[str, dict] = {}
     daily_tokens: dict[str, dict] = {}
@@ -3472,10 +3605,14 @@ def _handle_insights(handler, parsed) -> bool:
     for s in sessions_data:
         input_tokens = _safe_usage_int(s.get("input_tokens"))
         output_tokens = _safe_usage_int(s.get("output_tokens"))
+        cache_read_tokens = _safe_usage_int(s.get("cache_read_tokens"))
+        cache_write_tokens = _safe_usage_int(s.get("cache_write_tokens"))
         cost_value = _safe_cost_float(s.get("estimated_cost"))
         total_messages += _safe_usage_int(s.get("message_count"))
         total_input_tokens += input_tokens
         total_output_tokens += output_tokens
+        total_cache_read_tokens += cache_read_tokens
+        total_cache_write_tokens += cache_write_tokens
         total_cost += cost_value
 
         model = s.get("model") or "unknown"
@@ -3483,11 +3620,15 @@ def _handle_insights(handler, parsed) -> bool:
             "sessions": 0,
             "input_tokens": 0,
             "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
             "cost": 0.0,
         })
         bucket["sessions"] += 1
         bucket["input_tokens"] += input_tokens
         bucket["output_tokens"] += output_tokens
+        bucket["cache_read_tokens"] += cache_read_tokens
+        bucket["cache_write_tokens"] += cache_write_tokens
         bucket["cost"] += cost_value
 
         # Activity patterns
@@ -3499,11 +3640,15 @@ def _handle_insights(handler, parsed) -> bool:
                 daily_bucket = daily_tokens.setdefault(day_key, {
                     "input_tokens": 0,
                     "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
                     "sessions": 0,
                     "cost": 0.0,
                 })
                 daily_bucket["input_tokens"] += input_tokens
                 daily_bucket["output_tokens"] += output_tokens
+                daily_bucket["cache_read_tokens"] += cache_read_tokens
+                daily_bucket["cache_write_tokens"] += cache_write_tokens
                 daily_bucket["sessions"] += 1
                 daily_bucket["cost"] += cost_value
                 dow_activity[dt.tm_wday] += 1
@@ -3522,12 +3667,42 @@ def _handle_insights(handler, parsed) -> bool:
             "sessions": stats["sessions"],
             "input_tokens": stats["input_tokens"],
             "output_tokens": stats["output_tokens"],
+            "cache_read_tokens": stats["cache_read_tokens"],
+            "cache_write_tokens": stats["cache_write_tokens"],
             "total_tokens": row_total_tokens,
             "cost": row_cost,
-            "session_share": int(round((stats["sessions"] / total_sessions) * 100)) if total_sessions else 0,
-            "token_share": int(round((row_total_tokens / total_tokens) * 100)) if total_tokens else 0,
-            "cost_share": int(round((row_cost / total_cost) * 100)) if total_cost else 0,
+            "session_share": 0,
+            "token_share": 0,
+            "cost_share": 0,
         })
+
+    def _assign_integer_percent_share(rows: list[dict], value_key: str, share_key: str, total_value: float) -> None:
+        """Assign integer percentage shares that sum to exactly 100.
+
+        Plain round(row / total * 100) is easy but per-row rounding can sum to
+        99/101. Use largest-remainder allocation so the displayed model share
+        column has a coherent denominator.
+        """
+        if not rows or total_value <= 0:
+            for row in rows:
+                row[share_key] = 0
+            return
+        allocations = []
+        floor_sum = 0
+        for idx, row in enumerate(rows):
+            value = max(float(row.get(value_key) or 0), 0.0)
+            raw = (value / total_value) * 100
+            floor = int(raw)
+            floor_sum += floor
+            allocations.append((raw - floor, value, idx, floor))
+        remainder = max(0, 100 - floor_sum)
+        winners = {idx for _frac, _value, idx, _floor in sorted(allocations, key=lambda item: (-item[0], -item[1], item[2]))[:remainder]}
+        for _frac, _value, idx, floor in allocations:
+            rows[idx][share_key] = floor + (1 if idx in winners else 0)
+
+    _assign_integer_percent_share(models_breakdown, "sessions", "session_share", total_sessions)
+    _assign_integer_percent_share(models_breakdown, "total_tokens", "token_share", total_tokens)
+    _assign_integer_percent_share(models_breakdown, "cost", "cost_share", total_cost)
     models_breakdown.sort(key=lambda r: (-r["cost"], -r["sessions"], r["model"]))
 
     daily_series = []
@@ -3537,6 +3712,8 @@ def _handle_insights(handler, parsed) -> bool:
         bucket = daily_tokens.get(day_key, {
             "input_tokens": 0,
             "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
             "sessions": 0,
             "cost": 0.0,
         })
@@ -3544,6 +3721,8 @@ def _handle_insights(handler, parsed) -> bool:
             "date": day_key,
             "input_tokens": bucket["input_tokens"],
             "output_tokens": bucket["output_tokens"],
+            "cache_read_tokens": bucket["cache_read_tokens"],
+            "cache_write_tokens": bucket["cache_write_tokens"],
             "sessions": bucket["sessions"],
             "cost": round(bucket["cost"], 6),
         })
@@ -3557,10 +3736,19 @@ def _handle_insights(handler, parsed) -> bool:
 
     return j(handler, {
         "period_days": days,
+        # Effective scope reflects what was actually returned. When the user
+        # asked for ``global`` but state.db was unreachable, this stays
+        # ``webui`` and ``scope_available=false`` lets the UI surface the
+        # fallback (e.g. disable the Global toggle with an explanation).
+        "scope": effective_scope,
+        "scope_requested": requested_scope,
+        "scope_available": scope_available,
         "total_sessions": total_sessions,
         "total_messages": total_messages,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
+        "total_cache_read_tokens": total_cache_read_tokens,
+        "total_cache_write_tokens": total_cache_write_tokens,
         "total_tokens": total_tokens,
         "total_cost": round(total_cost, 6),
         "models": models_breakdown,

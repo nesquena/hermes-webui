@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Insights panel now has a **WebUI / Global** scope toggle. WebUI (default) keeps the historical view of sessions persisted by this WebUI's `_index.json`. Global aggregates every Hermes session — CLI, Discord, Telegram, cron, kanban worker, `delegate_task`, plus WebUI — by reading `~/.hermes/state.db` (the hermes-agent gateway's session store) in SQLite read-only URI mode. All tokens, costs, models, and daily/activity charts switch atomically with the toggle. The toggle persists across reloads via `localStorage`. When `state.db` is unreachable (fresh install, missing gateway, locked) the Global button auto-disables with a tooltip and the panel transparently falls back to WebUI data — `/api/insights` advertises this via `scope`, `scope_requested`, and `scope_available` so the UI never silently lies about what it's showing.
+- Global-scope token semantics match the WebUI scope: state.db's cache-subtracted `input_tokens` is summed back with `cache_read_tokens` and `cache_write_tokens` so the displayed "input" column equals provider `prompt_tokens`. This keeps the toggle's two views directly comparable and aligns with what providers actually bill.
+- New i18n keys `insights_scope_label`, `insights_scope_webui`, `insights_scope_global`, `insights_scope_global_unavailable`, and `insights_scope_note` shipped in all 11 locales.
+
 ## [v0.51.171] — 2026-05-30 — Release EQ (stage-batch53 — tool-output card badge + Neon opt-in skin)
 
 ### Added

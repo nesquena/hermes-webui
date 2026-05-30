@@ -768,6 +768,8 @@ const LOCALES = {
     insights_token_breakdown: 'Token Breakdown',
     insights_input_tokens: 'Input',
     insights_output_tokens: 'Output',
+    insights_cache_read_tokens: 'Cache Read',
+    insights_cache_write_tokens: 'Cache Write',
     insights_total: 'Total',
     insights_daily_tokens: 'Daily Tokens',
     insights_model_name: 'Model',
@@ -789,6 +791,12 @@ const LOCALES = {
     insights_skill_usage_col_views: 'Views',
     insights_skill_usage_col_share: 'Usage %',
     insights_skill_usage_col_patches: 'Patches',
+    insights_period_label: 'Period',
+    insights_scope_label: 'View',
+    insights_scope_webui: 'WebUI',
+    insights_scope_global: 'Global',
+    insights_scope_global_unavailable: 'Hermes global usage data is unavailable',
+    insights_scope_note: 'WebUI shows local session-index usage; Global shows cumulative Hermes usage for provider billing comparison.',
     workspace_desc: 'Add and switch workspaces for your sessions.',
     session_meta_messages: (n) => `${n} msg${n === 1 ? '' : 's'}`,
     session_meta_children: (n) => `${n} child${n === 1 ? '' : 'ren'}`,
@@ -2064,6 +2072,8 @@ const LOCALES = {
     insights_token_breakdown: 'Ripartizione Token',
     insights_input_tokens: 'Input',
     insights_output_tokens: 'Output',
+    insights_cache_read_tokens: 'Cache letto',
+    insights_cache_write_tokens: 'Cache scritto',
     insights_total: 'Totale',
     insights_daily_tokens: 'Token Giornalieri',
     insights_model_name: 'Modello',
@@ -2085,6 +2095,12 @@ const LOCALES = {
     insights_skill_usage_col_views: 'Visualizzazioni',
     insights_skill_usage_col_share: 'Utilizzo %',
     insights_skill_usage_col_patches: 'Patch',
+    insights_period_label: 'Periodo',
+    insights_scope_label: 'Vista',
+    insights_scope_webui: 'WebUI',
+    insights_scope_global: 'Globale',
+    insights_scope_global_unavailable: 'Dati globali Hermes non disponibili',
+    insights_scope_note: 'WebUI mostra l\'uso dell\'indice sessioni locale; Globale mostra l\'uso Hermes cumulativo per il confronto con la fatturazione del provider.',
     workspace_desc: 'Aggiungi e cambia workspace per le tue sessioni.',
     session_meta_messages: (n) => `${n} msg`,
     session_meta_children: (n) => `${n} figli${n === 1 ? 'o' : ''}`,
@@ -3362,6 +3378,8 @@ const LOCALES = {
     insights_token_breakdown: 'トークン内訳',
     insights_input_tokens: '入力',
     insights_output_tokens: '出力',
+    insights_cache_read_tokens: 'キャッシュ読込',
+    insights_cache_write_tokens: 'キャッシュ書込',
     insights_total: '合計',
     insights_daily_tokens: '日別トークン',
     insights_model_name: 'モデル',
@@ -3383,6 +3401,12 @@ const LOCALES = {
     insights_skill_usage_col_views: '閲覧数',
     insights_skill_usage_col_share: '使用率',
     insights_skill_usage_col_patches: 'パッチ',
+    insights_period_label: '期間',
+    insights_scope_label: '表示',
+    insights_scope_webui: 'WebUI',
+    insights_scope_global: '全体',
+    insights_scope_global_unavailable: 'Hermes 全体の利用データは利用できません',
+    insights_scope_note: 'WebUI はローカルのセッション索引用量を表示し、全体はプロバイダー請求との比較向けに Hermes の累積用量を表示します。',
     workspace_desc: 'セッション用のワークスペースを追加・切り替えします。',
     session_meta_messages: (n) => `${n} 件`,
     session_meta_children: (n) => `${n} 子`,
@@ -5115,11 +5139,19 @@ const LOCALES = {
     insights_skill_usage_col_views: 'Views',  // TODO: translate
     insights_skill_usage_col_share: 'Usage %',  // TODO: translate
     insights_skill_usage_col_patches: 'Patches',  // TODO: translate
+    insights_period_label: 'Период',
+    insights_scope_label: 'Вид',
+    insights_scope_webui: 'WebUI',
+    insights_scope_global: 'Глобально',
+    insights_scope_global_unavailable: 'Глобальные данные Hermes недоступны',
+    insights_scope_note: 'WebUI показывает локальное использование индекса сессий; Глобально показывает накопленное использование Hermes для сравнения с биллингом провайдера.',
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
     insights_models: 'Models',  // TODO: translate
     insights_no_cost: 'N/A',  // TODO: translate
     insights_output_tokens: 'Output',  // TODO: translate
+    insights_cache_read_tokens: 'Чтение кэша',
+    insights_cache_write_tokens: 'Запись кэша',
     insights_peak_hour: 'Peak: {hour}',  // TODO: translate
     insights_sessions: 'Sessions',  // TODO: translate
     insights_title: 'Usage Analytics',  // TODO: translate
@@ -6333,11 +6365,19 @@ const LOCALES = {
     insights_skill_usage_col_views: 'Views',  // TODO: translate
     insights_skill_usage_col_share: 'Usage %',  // TODO: translate
     insights_skill_usage_col_patches: 'Patches',  // TODO: translate
+    insights_period_label: 'Período',
+    insights_scope_label: 'Vista',
+    insights_scope_webui: 'WebUI',
+    insights_scope_global: 'Global',
+    insights_scope_global_unavailable: 'Datos globales de Hermes no disponibles',
+    insights_scope_note: 'WebUI muestra el uso del índice local de sesiones; Global muestra el uso acumulado de Hermes para compararlo con la facturación del proveedor.',
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
     insights_models: 'Models',  // TODO: translate
     insights_no_cost: 'N/A',  // TODO: translate
     insights_output_tokens: 'Output',  // TODO: translate
+    insights_cache_read_tokens: 'Lectura caché',
+    insights_cache_write_tokens: 'Escritura caché',
     insights_peak_hour: 'Peak: {hour}',  // TODO: translate
     insights_sessions: 'Sessions',  // TODO: translate
     insights_title: 'Usage Analytics',  // TODO: translate
@@ -7566,11 +7606,19 @@ const LOCALES = {
     insights_skill_usage_col_views: 'Views',  // TODO: translate
     insights_skill_usage_col_share: 'Usage %',  // TODO: translate
     insights_skill_usage_col_patches: 'Patches',  // TODO: translate
+    insights_period_label: 'Zeitraum',
+    insights_scope_label: 'Ansicht',
+    insights_scope_webui: 'WebUI',
+    insights_scope_global: 'Global',
+    insights_scope_global_unavailable: 'Hermes-Gesamtnutzungsdaten nicht verfügbar',
+    insights_scope_note: 'WebUI zeigt die lokale Sitzungsindex-Nutzung; Global zeigt die kumulierte Hermes-Nutzung zum Abgleich mit der Provider-Abrechnung.',
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
     insights_models: 'Models',  // TODO: translate
     insights_no_cost: 'N/A',  // TODO: translate
     insights_output_tokens: 'Output',  // TODO: translate
+    insights_cache_read_tokens: 'Cache gelesen',
+    insights_cache_write_tokens: 'Cache geschrieben',
     insights_peak_hour: 'Peak: {hour}',  // TODO: translate
     insights_sessions: 'Sessions',  // TODO: translate
     insights_title: 'Usage Analytics',  // TODO: translate
@@ -8792,11 +8840,19 @@ const LOCALES = {
     insights_skill_usage_col_views: '查看次数',
     insights_skill_usage_col_share: '使用占比',
     insights_skill_usage_col_patches: '补丁',
+    insights_period_label: '周期',
+    insights_scope_label: '视角',
+    insights_scope_webui: 'WebUI',
+    insights_scope_global: '全局',
+    insights_scope_global_unavailable: 'Hermes 全局用量数据不可用',
+    insights_scope_note: 'WebUI 显示本地会话索引用量；全局显示 Hermes 累计用量，更适合与 provider 后台对账。',
     insights_input_tokens: '输入',
     insights_messages: '消息',
     insights_models: '模型',
     insights_no_cost: 'N/A',
     insights_output_tokens: '输出',
+    insights_cache_read_tokens: '读取缓存',
+    insights_cache_write_tokens: '写入缓存',
     insights_peak_hour: '高峰：{hour}时',
     insights_sessions: '会话',
     insights_title: '使用分析',
@@ -10104,6 +10160,8 @@ const LOCALES = {
     insights_models: 'Models',  // TODO: translate
     insights_no_cost: 'N/A',  // TODO: translate
     insights_output_tokens: 'Output',  // TODO: translate
+    insights_cache_read_tokens: '读取缓存',
+    insights_cache_write_tokens: '写入缓存',
     insights_peak_hour: 'Peak: {hour}',  // TODO: translate
     insights_sessions: 'Sessions',  // TODO: translate
     insights_title: 'Usage Analytics',  // TODO: translate
@@ -11208,11 +11266,19 @@ const LOCALES = {
     insights_skill_usage_col_views: 'Views',  // TODO: translate
     insights_skill_usage_col_share: 'Usage %',  // TODO: translate
     insights_skill_usage_col_patches: 'Patches',  // TODO: translate
+    insights_period_label: 'Período',
+    insights_scope_label: 'Visão',
+    insights_scope_webui: 'WebUI',
+    insights_scope_global: 'Global',
+    insights_scope_global_unavailable: 'Dados globais Hermes indisponíveis',
+    insights_scope_note: 'WebUI mostra o uso do índice local de sessões; Global mostra o uso acumulado do Hermes para comparar com a cobrança do provedor.',
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
     insights_models: 'Models',  // TODO: translate
     insights_no_cost: 'N/A',  // TODO: translate
     insights_output_tokens: 'Output',  // TODO: translate
+    insights_cache_read_tokens: 'Cache lido',
+    insights_cache_write_tokens: 'Cache escrito',
     insights_peak_hour: 'Peak: {hour}',  // TODO: translate
     insights_sessions: 'Sessions',  // TODO: translate
     insights_title: 'Usage Analytics',  // TODO: translate
@@ -12494,11 +12560,19 @@ const LOCALES = {
     insights_skill_usage_col_views: 'Views',  // TODO: translate
     insights_skill_usage_col_share: 'Usage %',  // TODO: translate
     insights_skill_usage_col_patches: 'Patches',  // TODO: translate
+    insights_period_label: '기간',
+    insights_scope_label: '보기',
+    insights_scope_webui: 'WebUI',
+    insights_scope_global: '전체',
+    insights_scope_global_unavailable: 'Hermes 전체 사용 데이터를 사용할 수 없습니다',
+    insights_scope_note: 'WebUI는 로컬 세션 인덱스 사용량을 표시하고, 전체는 제공자 과금과 비교하기 위한 Hermes 누적 사용량을 표시합니다.',
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
     insights_models: 'Models',  // TODO: translate
     insights_no_cost: 'N/A',  // TODO: translate
     insights_output_tokens: 'Output',  // TODO: translate
+    insights_cache_read_tokens: '캐시 읽기',
+    insights_cache_write_tokens: '캐시 쓰기',
     insights_peak_hour: 'Peak: {hour}',  // TODO: translate
     insights_sessions: 'Sessions',  // TODO: translate
     insights_title: 'Usage Analytics',  // TODO: translate
@@ -13146,6 +13220,8 @@ const LOCALES = {
     insights_token_breakdown: 'Répartition des jetons',
     insights_input_tokens: 'Saisir',
     insights_output_tokens: 'Sortir',
+    insights_cache_read_tokens: 'Cache lu',
+    insights_cache_write_tokens: 'Cache écrit',
     insights_total: 'Total',
     insights_daily_tokens: 'Jetons quotidiens',
     insights_model_name: 'Modèle',
@@ -13167,6 +13243,12 @@ const LOCALES = {
     insights_skill_usage_col_views: 'Views',  // TODO: translate
     insights_skill_usage_col_share: 'Usage %',  // TODO: translate
     insights_skill_usage_col_patches: 'Patches',  // TODO: translate
+    insights_period_label: 'Période',
+    insights_scope_label: 'Vue',
+    insights_scope_webui: 'WebUI',
+    insights_scope_global: 'Global',
+    insights_scope_global_unavailable: 'Données globales Hermes indisponibles',
+    insights_scope_note: 'WebUI affiche l\'usage de l\'index local des sessions ; Global affiche l\'usage cumulé de Hermes pour le comparer à la facturation du fournisseur.',
     workspace_desc: 'Ajoutez et changez d\'espace de travail pour vos sessions.',
     session_lineage_segment_untitled: 'Segment sans titre',
     session_lineage_segment_open: 'Segment de lignée ouverte',
@@ -15013,11 +15095,19 @@ const LOCALES = {
     insights_skill_usage_col_views: 'Views',  // TODO: translate
     insights_skill_usage_col_share: 'Usage %',  // TODO: translate
     insights_skill_usage_col_patches: 'Patches',  // TODO: translate
+    insights_period_label: 'Dönem',
+    insights_scope_label: 'Görünüm',
+    insights_scope_webui: 'WebUI',
+    insights_scope_global: 'Genel',
+    insights_scope_global_unavailable: 'Hermes genel kullanım verisi mevcut değil',
+    insights_scope_note: 'WebUI yerel oturum dizini kullanımını gösterir; Genel, sağlayıcı faturalamasıyla karşılaştırmak için kümülatif Hermes kullanımını gösterir.',
     insights_input_tokens: 'Giriş',
     insights_messages: 'Mesajlar',
     insights_models: 'Modeller',
     insights_no_cost: 'Yok',
     insights_output_tokens: 'Çıkış',
+    insights_cache_read_tokens: 'Önbellek okuma',
+    insights_cache_write_tokens: 'Önbellek yazma',
     insights_peak_hour: 'Zirve: {hour}',
     insights_sessions: 'Oturumlar',
     insights_title: 'Kullanım analitiği',
