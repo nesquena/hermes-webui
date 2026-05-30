@@ -1060,10 +1060,15 @@ def test_session_model_display_resolver_is_read_only(monkeypatch):
     """Read-path model resolution must not mutate or save the session."""
     import api.routes as routes
 
+    # Accept **kwargs: the read-only display resolver now opts into the
+    # cache-only catalog via get_available_models(prefer_cache=True) so the
+    # hot GET /api/session path never triggers the cold live provider rebuild
+    # (multi-tab streaming interlock RCA). The stub must mirror the real
+    # signature; the contract under test here is read-only-ness, not arity.
     monkeypatch.setattr(
         routes,
         "get_available_models",
-        lambda: {
+        lambda **_kw: {
             "active_provider": "openai-codex",
             "default_model": "gpt-5.4-mini",
         },

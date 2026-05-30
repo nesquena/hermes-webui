@@ -15,6 +15,7 @@ import re
 import platform
 import shlex
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -50,6 +51,12 @@ _CLIENT_DISCONNECT_ERRORS = (
     ConnectionResetError,
     ConnectionAbortedError,
     TimeoutError,
+    # socket.timeout is an alias of TimeoutError on Python 3.10+, but listing it
+    # explicitly keeps coverage robust against platform/version variation and
+    # documents that the SSE write-deadline path (api.streaming._sse_set_write_deadline)
+    # surfaces blocked writes as socket.timeout exceptions that must be classified
+    # as ordinary client disconnects rather than 500-class errors.
+    socket.timeout,
     OSError,
 )
 
@@ -1042,6 +1049,7 @@ from api.config import (
     _save_yaml_config_file,
     reload_config,
     _cfg_lock,
+    PENDING_BG_TASK_COMPLETIONS,
 )
 from api.helpers import (
     require,
@@ -1789,6 +1797,8 @@ def _should_attach_codex_provider_context(model: str, raw_active_provider: str, 
 def _resolve_compatible_session_model_state(
     model_id: str | None,
     model_provider: str | None = None,
+    *,
+    prefer_cached_catalog: bool = False,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -1810,6 +1820,16 @@ def _resolve_compatible_session_model_state(
     OpenRouter ``/models``, LM Studio ``/models``, credential pool refresh) —
     those used to wedge the handler for >100s and trigger 502s on default-60s
     reverse proxies, even though the WebUI itself eventually responded.
+
+    ``prefer_cached_catalog=True`` (ours-original) makes the catalog lookup
+    non-blocking: it resolves from the warm/disk cache or a network-free
+    minimal catalog and NEVER triggers a live per-provider rebuild (the
+    Copilot token-exchange HTTPS call that hangs a server-initiated wakeup
+    turn — see rebase report §1/§3/model-resolve-hang). Human-initiated
+    chat/start leaves this False to keep full live discovery; a session that
+    already has a persisted model still resolves correctly because the
+    persisted model wins over the catalog and the catalog is only consulted
+    for the default-model backstop.
     """
     model = str(model_id or "").strip()
     requested_provider = _clean_session_model_provider(model_provider)
@@ -1826,7 +1846,14 @@ def _resolve_compatible_session_model_state(
         if not explicit_provider and not stale_codex_openai_slash_id:
             return model, requested_provider, False
 
-    catalog = get_available_models()
+    # Default (human chat/start) path calls get_available_models() with NO
+    # kwargs so it stays signature-compatible with the many tests that stub
+    # get_available_models as a zero-arg callable. Only the server-side wakeup
+    # path (prefer_cached_catalog=True) opts into the cache-only mode.
+    if prefer_cached_catalog:
+        catalog = get_available_models(prefer_cache=True)
+    else:
+        catalog = get_available_models()
     default_model = str(catalog.get("default_model") or DEFAULT_MODEL or "").strip()
     if not model:
         return default_model, requested_provider, bool(default_model)
@@ -2022,6 +2049,17 @@ def _resolve_effective_session_model_for_display(session) -> str:
     effective_model, _provider, _changed = _resolve_compatible_session_model_state(
         original_model or None,
         getattr(session, "model_provider", None),
+        # GET /api/session is a hot, side-effect-free per-tab/per-poll path.
+        # It must never pay the cold live provider-catalog rebuild (a
+        # botocore IMDS probe that cannot resolve on a non-AWS / WSL / corp
+        # network, plus anthropic/openrouter /models). That rebuild is
+        # un-cacheable here (auth.json fingerprint churn) so every cold call
+        # cost ~10s and, run concurrently across browser tabs, serialized on
+        # the models-cache lock and starved SSE/streaming -> BrokenPipe storm
+        # (#multi-tab-streaming-interlock). The persisted session model is
+        # authoritative; the catalog is only a default-model backstop, which
+        # the network-free minimal catalog already provides.
+        prefer_cached_catalog=True,
     )
     return effective_model or original_model
 
@@ -2030,6 +2068,11 @@ def _resolve_effective_session_model_provider_for_display(session) -> str | None
     _model, provider, _changed = _resolve_compatible_session_model_state(
         original_model or None,
         getattr(session, "model_provider", None),
+        # See _resolve_effective_session_model_for_display: same hot
+        # side-effect-free GET /api/session path; must not trigger the cold
+        # live rebuild. prefer_cached_catalog resolves from warm/disk cache
+        # or the network-free minimal catalog.
+        prefer_cached_catalog=True,
     )
     return provider
 
@@ -2782,6 +2825,7 @@ from api.workspace import (
 from api.upload import handle_upload, handle_upload_extract, handle_transcribe
 from api.streaming import (
     _sse,
+    _sse_set_write_deadline,
     _run_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
@@ -5358,6 +5402,37 @@ def handle_post(handler, parsed) -> bool:
         finally:
             if diag:
                 diag.finish()
+    # T1 deprecation alias for the legacy ack endpoint that the pre-rename
+    # WebUI used to POST to after handling ``process_complete``. The new
+    # canonical SSE event is ``bg_task_complete`` and the new ack endpoint
+    # will be ``/api/bg-task-complete-ack`` (introduced by PR (b), the WebUI
+    # half of the split). Until PR (b) lands we keep the old path responding
+    # with HTTP 410 Gone + ``X-Replaced-By`` so any stale tab posting under
+    # the old name fails loudly with a discoverable hint. The handler runs
+    # BEFORE the CSRF gate on purpose: an old tab will not carry a CSRF token
+    # for the deprecated path, and surfacing 410 (not 403) is the correct
+    # contract here.
+    if parsed.path == "/api/process-complete-ack":
+        if diag:
+            diag.stage("process_complete_ack_deprecated")
+        try:
+            j(
+                handler,
+                {
+                    "error": (
+                        "gone: /api/process-complete-ack was replaced by "
+                        "/api/bg-task-complete-ack as part of the "
+                        "process_complete -> bg_task_complete event rename"
+                    ),
+                    "replaced_by": "/api/bg-task-complete-ack",
+                },
+                status=410,
+                extra_headers={"X-Replaced-By": "/api/bg-task-complete-ack"},
+            )
+            return True
+        finally:
+            if diag:
+                diag.finish()
     # CSRF: reject cross-origin or tokenless authenticated browser requests.
     # /api/auth/login has no authenticated session token yet, and /api/csp-report
     # is intentionally unauthenticated for browser-generated violation reports.
@@ -7522,6 +7597,7 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
     handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
     try:
         while True:
             try:
@@ -7653,6 +7729,7 @@ def _handle_terminal_output(handler, parsed):
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
     handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
     try:
         while True:
             try:
@@ -7738,6 +7815,7 @@ def _handle_gateway_sse_stream(handler, parsed):
     # session list every ~1s. Letting the server close the socket
     # naturally after the stream ends is sufficient.
     handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     q = watcher.subscribe()
     try:
@@ -8411,6 +8489,7 @@ def _handle_approval_sse_stream(handler, parsed):
     handler.send_header('X-Accel-Buffering', 'no')
     handler.send_header('Connection', 'close')
     handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     from api.streaming import _sse
 
@@ -8512,6 +8591,7 @@ def _handle_clarify_sse_stream(handler, parsed):
     handler.send_header('X-Accel-Buffering', 'no')
     handler.send_header('Connection', 'close')
     handler.end_headers()
+    _sse_set_write_deadline(handler)  # Defect A: slow tab can't pin this thread
 
     from api.streaming import _sse
 
@@ -9416,6 +9496,16 @@ def _start_chat_stream_for_session(
         goal_related = True
         PENDING_GOAL_CONTINUATION.discard(s.session_id)
 
+    # process_complete wakeup (ours-original, Option B): if this session has a
+    # pending process_complete marker (set by api/background_process.py drain),
+    # discard it atomically here. Mirrors the goal_continue pattern (#1932).
+    # The marker is server-internal telemetry; the actual wakeup is delivered
+    # either server-side (Option Z) or via the PR #2279 next-turn drain.
+    process_completion_related = False
+    if s.session_id in PENDING_BG_TASK_COMPLETIONS:
+        PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+        process_completion_related = True
+
     stream_id = uuid.uuid4().hex
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
@@ -9536,6 +9626,111 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
     return "set"
 
 
+def start_session_turn(
+    session_id: str,
+    message: str,
+    *,
+    source: str = "process_wakeup",
+):
+    """Start a server-side agent turn for ``session_id`` with ``message``.
+
+    Option Z primary wakeup entrypoint. This is the minimal, HTTP-handler-free
+    core that ``/api/chat/start`` already reaches via ``_handle_chat_start`` →
+    ``_start_chat_stream_for_session``. The drain thread
+    (``api/background_process._process_one``) calls this directly with a
+    synthetic ``[IMPORTANT: …]`` wakeup_prompt so a background process can wake
+    the agent server-side with NO browser round-trip — exactly how CLI /
+    gateway self-wake from a ``notify_on_complete`` completion.
+
+    Contract:
+      - Resolves the session record (profile/workspace/model/model_provider are
+        already persisted on it; no user auth needed — same trust level as
+        gateway/cron starting a turn).
+      - Resolves workspace + model/provider through the SAME helpers
+        ``_handle_chat_start`` uses, so a process-wakeup turn is constructed
+        identically to a human-typed turn. If the session record has no model
+        persisted, ``_resolve_compatible_session_model_state`` falls back to the
+        configured default model/provider (documented in the impl report §1).
+      - Delegates to ``_start_chat_stream_for_session`` which spawns the agent
+        on a daemon worker thread (the drain thread NEVER blocks) and serializes
+        on the per-session agent lock + active-stream guard, so a concurrent
+        human ``/api/chat/start`` cannot double-start (one wins, the other gets
+        the existing 409 "session already has an active stream").
+
+    Returns the same dict ``_start_chat_stream_for_session`` returns, including
+    ``_status`` (200 on start, 409 when a turn is already active). On 409 the
+    caller must leave the ``PENDING_BG_TASK_COMPLETIONS`` marker in place so the
+    PR #2279 next-turn drain delivers the wakeup when the active turn ends.
+    """
+    msg = str(message or "").strip()
+    if not msg:
+        return {"error": "message is required", "_status": 400}
+    try:
+        s = get_session(session_id)
+    except KeyError:
+        return {"error": "Session not found", "_status": 404}
+
+    try:
+        workspace = _resolve_chat_workspace_with_recovery(s, None)
+    except ValueError as e:
+        return {"error": str(e), "_status": 400}
+
+    requested_model = s.model
+    requested_provider = getattr(s, "model_provider", None)
+    # Server-initiated wakeup (Option Z): resolve persisted model via the
+    # standard helper in cache-only mode so wakeups never trigger a cold
+    # catalog rebuild.
+    model, model_provider, normalized_model = _resolve_compatible_session_model_state(
+        requested_model,
+        requested_provider,
+        prefer_cached_catalog=True,
+    )
+    resp = _start_chat_stream_for_session(
+        s,
+        msg=msg,
+        attachments=[],
+        workspace=workspace,
+        model=model,
+        model_provider=model_provider,
+        normalized_model=normalized_model,
+    )
+
+    # ── Defect B: live-view of server-initiated turns ──────────────────────
+    # Option Z starts this turn server-side, so NO browser EventSource is
+    # attached to the new STREAMS[stream_id] (the browser only opens
+    # /api/chat/stream when IT POSTs /api/chat/start). An already-open tab
+    # would therefore see nothing until a manual refresh re-reads persisted
+    # state. Fix: fan a lightweight `server_turn_started` {stream_id} frame
+    # onto the persistent per-session live-view channel. messages.js handles
+    # it by attaching its EXISTING chat-stream renderer (attachLiveStream) to
+    # that stream_id — no second renderer, no chat/start POST.
+    #
+    # Idempotent with the closed-tab path: get_session_channel() is the
+    # NON-creating accessor, so when no tab is open this is a pure no-op and
+    # the server-side wakeup (the Option Z headline) is completely unaffected.
+    # If the user also has the per-turn chat-stream open, the frontend dedupes
+    # by stream_id so there is no double-render.
+    try:
+        status = int((resp or {}).get("_status", 200) or 200)
+        stream_id = (resp or {}).get("stream_id")
+        if status < 400 and stream_id:
+            from api.background_process import get_session_channel
+
+            ch = get_session_channel(session_id)
+            if ch is not None:
+                ch.emit(
+                    "server_turn_started",
+                    {
+                        "session_id": str(session_id),
+                        "stream_id": str(stream_id),
+                        "source": source,
+                    },
+                )
+    except Exception:
+        logger.debug(
+            "server_turn_started fan-out failed for session %s", session_id, exc_info=True
+        )
+    return resp
 def _handle_goal_command(handler, body):
     """Handle WebUI /goal command controls and optional kickoff stream."""
     try:
