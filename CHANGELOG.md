@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- OpenCode provider key lookup now honors the shared `OPENCODE_API_KEY` fallback for both Zen and Go runtime paths, matching model-picker detection when provider-specific keys are absent.
+
 ## [v0.51.163] — 2026-05-30 — Release EI (stage-batch45 — session duplicate/branch field propagation)
 
 ### Fixed
