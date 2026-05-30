@@ -55,7 +55,7 @@ class MockHandler:
 
 
 class TestSafeWrite(unittest.TestCase):
-    """Test _safe_write swallows client disconnect errors silently."""
+    """Test _safe_write swallows client disconnect errors without raising."""
 
     def _make_handler(self, end_headers_raises=None, write_raises=None):
         handler = MockHandler(
@@ -272,6 +272,119 @@ class TestServerDisconnectHandling(unittest.TestCase):
             _server_mod.check_auth = orig_check_auth
 
         # Should send 500 for real errors
+        handler.send_response.assert_called_once_with(500)
+
+    def test_do_get_skips_500_on_ssl_disconnect(self):
+        """SSL disconnect during route handling should not trigger 500."""
+        from server import Handler
+        handler = self._make_handler(route_raises=ssl.SSLError("[BAD_LENGTH]"))
+
+        def _fake_handle_get(self, parsed):
+            raise self._route_raises
+
+        import server as _server_mod
+        orig_handle_get = _server_mod.handle_get
+        _server_mod.handle_get = _fake_handle_get
+        try:
+            Handler.do_GET(handler)
+        finally:
+            _server_mod.handle_get = orig_handle_get
+
+        handler.send_response.assert_not_called()
+
+    def test_do_get_skips_500_on_timeout_disconnect(self):
+        """Timeout disconnect during route handling should not trigger 500."""
+        from server import Handler
+        handler = self._make_handler(route_raises=TimeoutError())
+
+        def _fake_handle_get(self, parsed):
+            raise self._route_raises
+
+        import server as _server_mod
+        orig_handle_get = _server_mod.handle_get
+        _server_mod.handle_get = _fake_handle_get
+        try:
+            Handler.do_GET(handler)
+        finally:
+            _server_mod.handle_get = orig_handle_get
+
+        handler.send_response.assert_not_called()
+
+
+class TestServer500ResponseSafety(unittest.TestCase):
+    """Test that 500-response failures are handled gracefully."""
+
+    def _make_handler(self, route_raises=None, json_write_raises=None):
+        """Build a Handler where the 500-response j() call may also fail."""
+        from server import Handler
+        handler = Handler.__new__(Handler)
+        handler.command = "GET"
+        handler.path = "/api/test"
+        handler._req_t0 = 0.0
+        handler.headers = {}
+        handler.wfile = MagicMock()
+        handler._json_write_raises = json_write_raises
+
+        def _raising_write(data):
+            if handler._json_write_raises:
+                raise handler._json_write_raises
+            return len(data)
+
+        handler.wfile.write = _raising_write
+        handler.send_response = MagicMock()
+        handler.send_header = MagicMock()
+        handler.end_headers = MagicMock()
+        handler._route_raises = route_raises
+        return handler
+
+    def test_500_response_survives_client_disconnect(self):
+        """If the 500-response itself hits a disconnect, don't crash."""
+        from server import Handler
+        handler = self._make_handler(
+            route_raises=ValueError("real bug"),
+            json_write_raises=BrokenPipeError(),
+        )
+
+        def _fake_handle_get(self, parsed):
+            raise self._route_raises
+
+        import server as _server_mod
+        orig_handle_get = _server_mod.handle_get
+        orig_check_auth = _server_mod.check_auth
+        _server_mod.handle_get = _fake_handle_get
+        _server_mod.check_auth = lambda h, p: True
+        try:
+            Handler.do_GET(handler)
+        finally:
+            _server_mod.handle_get = orig_handle_get
+            _server_mod.check_auth = orig_check_auth
+
+        # send_response WAS called (we tried to send 500), but write failed
+        handler.send_response.assert_called_once_with(500)
+
+    def test_500_response_logs_unexpected_failure(self):
+        """If the 500-response fails for a NON-disconnect reason, log it."""
+        from server import Handler
+        handler = self._make_handler(
+            route_raises=ValueError("real bug"),
+            json_write_raises=RuntimeError("json serializer exploded"),
+        )
+
+        def _fake_handle_get(self, parsed):
+            raise self._route_raises
+
+        import server as _server_mod
+        orig_handle_get = _server_mod.handle_get
+        orig_check_auth = _server_mod.check_auth
+        _server_mod.handle_get = _fake_handle_get
+        _server_mod.check_auth = lambda h, p: True
+        try:
+            Handler.do_GET(handler)
+        finally:
+            _server_mod.handle_get = orig_handle_get
+            _server_mod.check_auth = orig_check_auth
+
+        # send_response WAS called (we tried to send 500), but write failed
         handler.send_response.assert_called_once_with(500)
 
 

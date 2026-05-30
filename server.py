@@ -311,19 +311,22 @@ class Handler(BaseHTTPRequestHandler):
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        except _CLIENT_DISCONNECT_ERRORS:
             # The browser/client closed the socket while we were writing the
             # response. This is expected for probes, tab closes, and SSE
             # reconnect races; do not convert it into a misleading server 500.
             return
-        except Exception as e:
-            if isinstance(e, _CLIENT_DISCONNECT_ERRORS):
-                return
+        except Exception:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
-            except Exception:
+            except _CLIENT_DISCONNECT_ERRORS:
+                # Client disconnected while we were sending the 500 — nothing to do.
                 pass
+            except Exception:
+                # Unexpected failure while sending the error response itself.
+                # Log it so we know something is wrong with our error handler.
+                traceback.print_exc()
         finally:
             clear_request_profile()
 
@@ -347,19 +350,22 @@ class Handler(BaseHTTPRequestHandler):
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        except _CLIENT_DISCONNECT_ERRORS:
             # The browser/client closed the socket while we were writing the
             # response. This is expected for probes, tab closes, and SSE
             # reconnect races; do not convert it into a misleading server 500.
             return
-        except Exception as e:
-            if isinstance(e, _CLIENT_DISCONNECT_ERRORS):
-                return
+        except Exception:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
             try:
                 j(self, {'error': 'Internal server error'}, status=500)
-            except Exception:
+            except _CLIENT_DISCONNECT_ERRORS:
+                # Client disconnected while we were sending the 500 — nothing to do.
                 pass
+            except Exception:
+                # Unexpected failure while sending the error response itself.
+                # Log it so we know something is wrong with our error handler.
+                traceback.print_exc()
         finally:
             clear_request_profile()
 

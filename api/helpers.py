@@ -79,12 +79,22 @@ def _accepts_gzip(handler) -> bool:
 
 
 def _safe_write(handler, body: bytes) -> None:
-    """Write response body, silently ignoring client disconnect errors."""
+    """Write response body, ignoring expected client disconnect errors.
+
+    Logs disconnects at debug level so they are observable without
+    polluting stdout/stderr during normal operation (SSE reconnects,
+    tab closes, mobile network switches, etc.).
+    """
     try:
         handler.end_headers()
         handler.wfile.write(body)
-    except _CLIENT_DISCONNECT_ERRORS:
-        pass
+    except _CLIENT_DISCONNECT_ERRORS as exc:
+        import logging
+        logging.getLogger("hermes.webui").debug(
+            "Client disconnected mid-response (%s): %s",
+            type(exc).__name__,
+            getattr(handler, "path", "?"),
+        )
 
 
 def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
