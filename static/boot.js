@@ -541,7 +541,7 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
 
   function _stopMic(){
     if(!window._micActive) return;
-    if(recognition){
+    if(recognition && !_rawAudioMode){
       recognition.stop();
       return;
     }
