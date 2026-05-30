@@ -1,3 +1,6 @@
+// Early boot initialization that must run before any other code.
+// These run during script evaluation to handle server-stopped state
+// and cross-tab shutdown broadcasts as early as possible.
 (function(){
   // Clear stale stop-server flag on successful page load (server is reachable)
   try{localStorage.removeItem('hermes-webui-server-stopped');}catch(_){}
@@ -821,7 +824,48 @@ window._micPendingSend=window._micPendingSend||false;
         .trim();
     }
     if(!clean){ _startListening(); return; }
-
+    const engine=localStorage.getItem("hermes-tts-engine")||"browser";
+    if(engine==="edge"){
+      const voice=localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural";
+      const savedRate=parseFloat(localStorage.getItem("hermes-tts-rate"));
+      const savedPitch=parseFloat(localStorage.getItem("hermes-tts-pitch"));
+      let rate='', pitch='';
+      if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
+      if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
+      _ttsSpeaking=true;
+      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: clean, voice, rate, pitch})
+      })
+      .then(r => {
+        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
+        return r.blob();
+      })
+      .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => {
+          _ttsSpeaking=false;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+        };
+        audio.onerror = () => {
+          _ttsSpeaking=false;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        };
+        audio.play().catch(e => {
+          _ttsSpeaking=false;
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        });
+      })
+      .catch(() => {
+        _ttsSpeaking=false;
+        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      });
+      return;
+    }
     const utter=new SpeechSynthesisUtterance(clean);
 
     // Apply saved voice preferences
@@ -1843,7 +1887,6 @@ function applyBotName(){
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
 })().catch(e=>{
-  console.error('[hermes] boot failed', e);
   try{S._bootReady=true;}catch(_){}
   try{syncTopbar();}catch(_){}
   try{syncWorkspacePanelState();}catch(_){}

@@ -196,6 +196,7 @@ chown_home_hermeswebui() {
   # ownership alignment.
   find /home/hermeswebui \
     -path "/home/hermeswebui/.hermes/hermes-agent" -prune \
+    -o -name ".git" -prune \
     -o -exec chown -h "${WANTED_UID}:${WANTED_GID}" {} +
 }
 

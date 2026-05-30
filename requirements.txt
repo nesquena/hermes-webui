@@ -2,4 +2,5 @@
 # The server uses PyYAML plus cryptography for optional local passkey/WebAuthn support.
 # All heavy ML/agent deps live in the Hermes agent venv.
 pyyaml>=6.0
+edge-tts
 cryptography>=42.0

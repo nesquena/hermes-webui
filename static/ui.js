@@ -4249,6 +4249,8 @@ function _stripForTTS(text){
   text=text.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
   // Replace MEDIA: paths with a simple label
   text=text.replace(/MEDIA:[^\s]+/g,'a file');
+  // Strip emoji and emoticons
+  text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
   // Strip HTML tags that may leak through markdown
   text=text.replace(/<[^>]+>/g,' ');
   // Collapse whitespace
@@ -4258,18 +4260,13 @@ function _stripForTTS(text){
 
 let _ttsSpeaking=false;
 let _ttsCurrentUtterance=null;
+let _playingEdgeAudio=null;
 
 function speakMessage(btn){
-  if(!('speechSynthesis' in window)){
-    showToast(t('tts_not_supported')||'Speech synthesis not supported in this browser.');
-    return;
-  }
-  // If already speaking this message, stop
   if(btn&&btn.dataset.speaking==='1'){
     stopTTS();
     return;
   }
-  // Stop any current speech
   stopTTS();
 
   const row=btn?btn.closest('[data-raw-text]'):null;
@@ -4278,6 +4275,17 @@ function speakMessage(btn){
 
   const clean=_stripForTTS(text);
   if(!clean) return;
+
+  const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  if(engine==='edge'){
+    _playEdgeTts(clean, btn);
+    return;
+  }
+
+  if(!('speechSynthesis' in window)){
+    showToast(t('tts_not_supported')||'Speech synthesis not supported in this browser.');
+    return;
+  }
 
   const utter=new SpeechSynthesisUtterance(clean);
 
@@ -4305,9 +4313,43 @@ function speakMessage(btn){
   speechSynthesis.speak(utter);
 }
 
+function _playEdgeTts(text, btn){
+  const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
+  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+  let rateParam='', pitchParam='';
+  if(!isNaN(savedRate)){
+    const pct=Math.round((savedRate-1)*100);
+    const sign=pct>=0?'+':'';
+    rateParam='&rate='+encodeURIComponent(sign+pct+'%');
+  }
+  if(!isNaN(savedPitch)){
+    const hz=Math.round((savedPitch-1)*50);
+    const sign=hz>=0?'+':'';
+    pitchParam='&pitch='+encodeURIComponent(sign+hz+'Hz');
+  }
+  const url='/api/tts?text='+encodeURIComponent(text)+'&voice='+encodeURIComponent(voice)+rateParam+pitchParam;
+  if(btn) btn.dataset.speaking='1';
+  _ttsSpeaking=true;
+  const audio=new Audio(url);
+  _playingEdgeAudio=audio;
+  audio.onended=function(){_ttsSpeaking=false;_playingEdgeAudio=null;if(btn)btn.dataset.speaking='0';};
+  audio.onerror=function(){_ttsSpeaking=false;_playingEdgeAudio=null;if(btn)btn.dataset.speaking='0';};
+  audio.play().catch(function(e){
+    _ttsSpeaking=false;_playingEdgeAudio=null;
+    if(btn)btn.dataset.speaking='0';
+    showToast('Edge TTS error: '+e.message);
+  });
+}
+
 function stopTTS(){
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
+  }
+  // Stop Edge TTS audio
+  if(_playingEdgeAudio){
+    try{ _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0; }catch(_){}
+    _playingEdgeAudio=null;
   }
   _ttsSpeaking=false;
   _ttsCurrentUtterance=null;
@@ -4316,7 +4358,8 @@ function stopTTS(){
 }
 
 function autoReadLastAssistant(){
-  if(!('speechSynthesis' in window)) return;
+  const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  if(engine==='browser'&&!('speechSynthesis' in window)) return;
   const pref=localStorage.getItem('hermes-tts-auto-read');
   if(pref!=='true') return;
   // Find the last assistant message segment in the DOM
@@ -4327,7 +4370,10 @@ function autoReadLastAssistant(){
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
-
+  if(engine==='edge'){
+    _playEdgeTts(clean, null);
+    return;
+  }
   const utter=new SpeechSynthesisUtterance(clean);
   const savedVoice=localStorage.getItem('hermes-tts-voice');
   const voices=speechSynthesis.getVoices();
