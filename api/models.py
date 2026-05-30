@@ -2205,6 +2205,22 @@ def get_session(sid, metadata_only=False):
         if cached is not None:
             SESSIONS.move_to_end(sid)  # LRU: mark as recently used
     if cached is not None:
+        # Defensive cache ownership check: compression/continuation and recovery
+        # paths can temporarily juggle Session objects across lineage ids.  A
+        # stale object stored under the wrong key makes GET /api/session return
+        # a different transcript than the requested sid, which looks exactly
+        # like a disappeared session.  Evict instead of trusting the LRU.
+        if str(getattr(cached, 'session_id', '') or '') != str(sid):
+            logger.warning(
+                "evicting mismatched cached session: requested %s but cached object is %s",
+                sid,
+                getattr(cached, 'session_id', None),
+            )
+            with LOCK:
+                if SESSIONS.get(sid) is cached:
+                    SESSIONS.pop(sid, None)
+            cached = None
+    if cached is not None:
         if not metadata_only and _inactive_cache_tail_needs_disk_check(cached):
             try:
                 disk_session = Session.load(sid)

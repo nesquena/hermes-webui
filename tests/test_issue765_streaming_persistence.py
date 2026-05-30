@@ -465,14 +465,17 @@ class TestIssue765FollowupHardening:
         )
         fn_idx = src.find("def _run_background_title_update(")
         assert fn_idx != -1, "_run_background_title_update not found"
-        fn_block = src[fn_idx:fn_idx + 3200]
+        fn_block = src[fn_idx:fn_idx + 4200]
         assert "with LOCK:" in fn_block, (
             "_run_background_title_update must acquire LOCK before rebinding "
             "to canonical cached session instance"
         )
-        assert "s = SESSIONS.get(session_id, s)" in fn_block, (
-            "_run_background_title_update must rebind to canonical cached "
-            "session instance under LOCK"
+        assert "cached_session = SESSIONS.get(session_id)" in fn_block, (
+            "_run_background_title_update must read the cached session under LOCK"
+        )
+        assert "getattr(cached_session, 'session_id', None) == session_id" in fn_block, (
+            "_run_background_title_update must only rebind to a canonical cached "
+            "session instance whose id matches the requested session"
         )
 
     def test_cancel_stream_uses_agent_lock(self):

@@ -3339,6 +3339,40 @@ function _sessionTitleForForkParent(parentSid){
   return title;
 }
 
+function _sessionFullTitleTooltip(rawTitle, cleanTitle){
+  const fallback=String(cleanTitle||'Untitled').trim()||'Untitled';
+  const full=String(rawTitle||fallback).trim()||fallback;
+  if(full.startsWith('[SYSTEM:')) return fallback;
+  return full;
+}
+
+function _sessionForkTooltip(parentLabel){
+  const parent=String(parentLabel||'').trim()||'unknown parent';
+  // Preserve the localized "Forked from" base (the catalog key exists in all
+  // locales) rather than hardcoding English — the only regression risk in the
+  // tooltip rework was dropping t('forked_from') here.
+  const prefix=(typeof t==='function'?t('forked_from'):'Forked from');
+  return `${prefix}: ${parent}`;
+}
+
+function _sessionLineageBadgeTooltip(label, canExpand){
+  const base=String(label||'Prior turns').trim()||'Prior turns';
+  return canExpand
+    ? `${base} — earlier context turns are collapsed here. Click to show or hide them.`
+    : `${base} — earlier context turns are collapsed here.`;
+}
+
+function _sessionChildBadgeTooltip(label){
+  const base=String(label||'Child sessions').trim()||'Child sessions';
+  return `${base} — child conversations spawned from this session. Click to show or hide them.`;
+}
+
+function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
+  if(isStreaming) return 'Conversation is running';
+  if(hasUnread) return 'Unread completion';
+  return '';
+}
+
 function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
   const rows=(collapsedRows||[]).filter(s=>!_isChildSession(s)).map(s=>({...s}));
   const visibleBySid=new Map();
@@ -4054,7 +4088,7 @@ function renderSessionListFromCache(){
       branchInd.className='session-branch-indicator';
       branchInd.innerHTML=li('git-branch',12);
       const parentLabel=_sessionTitleForForkParent(s.parent_session_id)||_truncatedSessionId(s.parent_session_id);
-      branchInd.title=(typeof t==='function'?t('forked_from'):'Forked from')+' '+parentLabel;
+      branchInd.title=_sessionForkTooltip(parentLabel);
       titleRow.appendChild(branchInd);
     }
     const title=document.createElement('span');
@@ -4063,7 +4097,7 @@ function renderSessionListFromCache(){
     const titleMatched=Boolean(searchQueryRaw&&displayTitle.toLowerCase().includes(searchQueryRaw.toLowerCase()));
     if(titleMatched) _appendHighlightedText(title,displayTitle,searchQueryRaw,'session-search-hit');
     else title.textContent=displayTitle;
-    title.title=readOnly?'Read-only imported session':'Double-click to rename';
+    title.title=_sessionFullTitleTooltip(rawTitle,cleanTitle);
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
     const hasAttentionState=isStreaming||hasUnread||Boolean(attention);
@@ -4099,7 +4133,7 @@ function renderSessionListFromCache(){
       segmentCountEl.className='session-lineage-count'+(canExpandLineageSegments?' expandable':'');
       const segmentLabel=t('session_meta_segments', segmentCount);
       segmentCountEl.textContent=segmentLabel;
-      segmentCountEl.title=segmentLabel;
+      segmentCountEl.title=_sessionLineageBadgeTooltip(segmentLabel,canExpandLineageSegments);
       if(canExpandLineageSegments){
         segmentCountEl.setAttribute('role','button');
         segmentCountEl.setAttribute('tabindex','0');
@@ -4128,7 +4162,7 @@ function renderSessionListFromCache(){
       childCountEl.className='session-child-count';
       const childLabel=t('session_meta_children', childCount);
       childCountEl.textContent=childLabel;
-      childCountEl.title=childLabel;
+      childCountEl.title=_sessionChildBadgeTooltip(childLabel);
       ['pointerdown','pointerup','click'].forEach(ev=>childCountEl.addEventListener(ev,e=>e.stopPropagation()));
       childCountEl.onclick=(e)=>{
         e.stopPropagation();
@@ -4315,8 +4349,15 @@ function renderSessionListFromCache(){
     const state=document.createElement('span');
     const attentionDotClass=attention?(attention.kind==='approval'?' is-attention-approval':(attention.kind==='clarify'?' is-attention-clarify':' is-attention-generic')):'';
     state.className='session-attention-indicator session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''))+attentionDotClass;
-    if(attention&&attention.title) state.title=attention.title;
     state.setAttribute('aria-hidden','true');
+    // Tooltip precedence: a localized attention title (pending approval/clarify,
+    // from the attention-indicator feature) is more specific and actionable than
+    // the generic running/unread state tooltip, so it wins. Fall back to the state
+    // tooltip only when there is no attention title AND the state tooltip is
+    // non-empty — never blank an otherwise-meaningful tooltip.
+    const _stateTip=_sessionStateTooltip({isStreaming,hasUnread});
+    if(attention&&attention.title) state.title=attention.title;
+    else if(_stateTip) state.title=_stateTip;
     el.appendChild(state);
     // Single trigger button that opens a shared dropdown menu
     let actions=null;
