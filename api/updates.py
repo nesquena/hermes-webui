@@ -444,6 +444,20 @@ def _head_is_past_latest_tag(path, current_tag):
     return bool(ok and full_desc and full_desc != current_tag)
 
 
+def _head_contains_ref(path, ref):
+    """Return True when ``ref`` is an ancestor of HEAD.
+
+    Release-channel checks are tag-name based, but users tracking ``main`` can
+    be on a commit that already contains the newest published tag. In that case
+    a positive tag gap is not an available update; applying the tag would move
+    backwards or fail fast-forward. Use the commit graph to detect that state.
+    """
+    if not ref:
+        return False
+    _, ok = _run_git(['merge-base', '--is-ancestor', ref, 'HEAD'], path)
+    return bool(ok)
+
+
 def _select_apply_compare_ref(path):
     """Return the same remote ref family that the update check reports.
 
@@ -464,17 +478,20 @@ def _select_apply_compare_ref(path):
         latest_tag = tags[0]
         current_tag = _current_release_tag(path)
         behind = _release_gap(tags, current_tag, latest_tag)
-        # Mirror the check side exactly: only fall through when behind == 0
-        # AND HEAD has moved past its nearest tag (case A: bench between
-        # tagged releases). Otherwise the tag is correct — including the
-        # case where HEAD is on an older release tag with commits on top
-        # AND a newer tag exists (case D), where `behind > 0` means the
-        # user is genuinely behind the latest release and should advance
-        # to it. Pre-#2855 the apply path only consulted `latest_tag`
-        # without the `behind`/`current_tag` predicate, so case D fell
-        # through to `origin/<branch>` and the pull landed past the
-        # advertised tag. See #2846 + Opus pre-release review for #2855.
-        if not (behind == 0 and _head_is_past_latest_tag(path, current_tag)):
+        # Mirror the check side exactly: fall through to the branch comparison
+        # whenever the checkout has already moved past the release tag that the
+        # banner would otherwise advertise. The common case is behind == 0 and
+        # HEAD is past its nearest tag, but main-tracking checkouts can also
+        # have behind > 0 after fetching a newer tag that HEAD already contains
+        # (#3140). In both cases applying the tag would no-op, move backwards,
+        # or fail fast-forward; branch comparison is the truthful update path.
+        if (
+            behind == 0 and _head_is_past_latest_tag(path, current_tag)
+        ) or (
+            behind > 0 and _head_contains_ref(path, latest_tag)
+        ):
+            pass
+        else:
             return latest_tag
 
     upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
@@ -502,6 +519,14 @@ def _check_repo_release(path, name):
     # instead. The same predicate is used by _select_apply_compare_ref so the
     # check and apply sides cannot drift again. See #2653 (check), #2846 (apply).
     if behind == 0 and _head_is_past_latest_tag(path, current_tag):
+        return None
+
+    # Users tracking main can already contain the newest fetched release tag
+    # while their nearest reachable tag is older. A positive tag gap then means
+    # only "there is a newer tag name", not "HEAD is behind that tag" (#3140).
+    # Fall through to the branch check so the banner compares against the
+    # configured upstream instead of advertising a tag that cannot fast-forward.
+    if behind > 0 and _head_contains_ref(path, latest_tag):
         return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)

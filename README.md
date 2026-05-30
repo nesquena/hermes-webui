@@ -245,6 +245,8 @@ docker compose up -d
 # Open http://localhost:8787
 ```
 
+Run Compose as the user who owns your Hermes home. `sudo docker compose up -d` can make `${HOME}` expand to the root user's home, so Docker mounts the wrong `.hermes` directory instead of your real `~/.hermes` and the WebUI starts with `config.yaml (not found, using defaults)`. Prefer adding your user to the Docker group and running `docker compose up -d`; if you must use sudo, set absolute paths first, for example `HERMES_HOME=/home/you/.hermes HERMES_WORKSPACE=/home/you/workspace sudo -E docker compose up -d`, then verify with `docker compose config`.
+
 The container auto-detects your UID/GID from the mounted `~/.hermes` volume so files written by the agent stay readable by you on the host.
 
 To enable password protection (required if you expose the port outside `127.0.0.1`):
@@ -308,6 +310,8 @@ Both compose files use **named Docker volumes** by default, which solves the UID
 | `git: command not found` in chat | Two-container architectural limit (#681) | Use single-container or extend Dockerfile |
 | WebUI can't find agent source | `hermes-agent-src` volume misconfigured | Use the named volumes from compose files as-is |
 | Podman shared `.hermes` fails | Podman 3.4 `keep-id` limitation | Use Podman 4+ or single-container |
+| Host API at `localhost` fails from WebUI | Container `localhost` means the container, not your host (#3012) | Use `http://host.docker.internal:<port>` on Docker Desktop, or `http://host.containers.internal:<port>` on Podman |
+| WebUI can't see `~/.hermes` after `sudo docker compose` | `${HOME}` expanded to the root user's home (#3006) | Run Compose as your user, or pass absolute `HERMES_HOME`/`HERMES_WORKSPACE` with `sudo -E` |
 
 For the deep dive on each of these, see [`docs/docker.md`](docs/docker.md).
 

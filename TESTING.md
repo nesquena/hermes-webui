@@ -15,6 +15,37 @@
 
 ---
 
+## Static JS runtime lint (brick-class regression guard)
+
+Some JS bugs throw a `TypeError`/`ReferenceError` only when a specific function
+actually runs in the browser — `node --check` (lazy syntax check), source-presence
+tests, and even executing the file all miss them. Issue **#3162** was exactly this:
+a `const` binding reassigned inside `_ensureMessagesLoaded` bricked "load conversation
+messages" on every mobile message (v0.51.161–166).
+
+The guard is a curated, zero-false-positive ESLint config (`eslint.runtime-guard.config.mjs`)
+that runs ONLY runtime-error rules (`no-const-assign`, `no-import-assign`) over
+`static/**/*.js`. It is NOT a style linter and has no formatting rules.
+
+```bash
+# one-time dev setup (ESLint is a dev-only tool; the app stays pure Python + vanilla JS):
+npm install --no-save --before=<a-date-≥48h-ago> eslint   # package-age guard
+# run the guard:
+npm run lint:runtime
+# or directly:
+npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
+```
+
+`tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
+and **skips gracefully** (clear message) when it isn't — so environments without the
+node toolchain aren't blocked, while the release gate (which installs eslint) enforces it.
+
+To widen the guard, fix the pre-existing intentional hits first (as of 2026-05-30:
+`no-dupe-keys` ×92 i18n locale-fallback, `no-func-assign` ×2 panel override,
+`no-redeclare` ×1) then promote the rule into the config.
+
+---
+
 ## How to Use This Document
 
 Each test has:

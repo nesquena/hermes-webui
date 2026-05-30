@@ -558,6 +558,10 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
                 return '', True
             if args[0] == 'tag':
                 return 'v0.51.106\nv0.51.105\nv0.51.104', True
+            if args == ['describe', '--tags', '--abbrev=0']:
+                return 'v0.51.105', True
+            if args == ['merge-base', '--is-ancestor', 'v0.51.106', 'HEAD']:
+                return '', False
             if args[:2] == ['status', '--porcelain']:
                 return '', True
             if args[0] == 'pull':

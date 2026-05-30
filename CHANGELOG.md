@@ -8,6 +8,28 @@
 - Activity disclosures now have a Settings → Appearance option to expand the activity feed by default, while still honoring per-turn manual collapse/expand choices.
 - Live Activity waiting rows now explain the agent's current step instead of stopping at `Waiting on model`, including a prompt/context review hint before tools run and the latest tool-derived action while the model chooses the next step.
 
+### Fixed
+
+- Docker docs now explain host-localhost URLs (`host.docker.internal` / `host.containers.internal`) and the `sudo docker compose` `$HOME=/root` bind-mount pitfall for users whose WebUI cannot reach host APIs or see `~/.hermes` (#3012, #3006).
+- Skills panel disabled/enabled state and toggle writes now resolve `config.yaml` from the active WebUI profile instead of the process default Hermes home or startup config override (#3066).
+- Update checks no longer advertise a newer release tag when a main-tracking checkout already contains that tag; the banner now falls through to the branch comparison path instead of offering an update that cannot fast-forward (#3140).
+
+## [v0.51.168] — 2026-05-30 — Release EN (stage-batch50 — hotfix: mobile "Failed to load conversation messages")
+
+### Fixed
+
+- Fixed a `TypeError` in `_ensureMessagesLoaded` that surfaced as a "Failed to load conversation messages" toast on mobile after most messages: a `const msgs` binding was reassigned by the #3018 ephemeral-field carry-forward (introduced v0.51.161), which throws at runtime. Changed to `let`. Mobile triggered it most because SSE/visibility events fire the session-reload path more aggressively (#3162).
+
+### Added
+
+- Static JS runtime-error lint guard (`eslint.runtime-guard.config.mjs` + `tests/test_static_js_runtime_lint.py`): a curated, zero-false-positive ESLint check (`no-const-assign`, `no-import-assign`) over `static/**/*.js` that catches the brick-class of runtime errors `node --check` and source-presence tests miss. Runs in the test suite when ESLint is present and skips gracefully otherwise. See `TESTING.md` > "Static JS runtime lint".
+
+## [v0.51.167] — 2026-05-30 — Release EM (stage-batch49 — iOS-style swipe actions for touch devices + session-list FLIP reflow)
+
+### Added
+
+- Touch devices now support iOS-mail-style swipe actions on session rows: swipe left to reveal a Delete action, swipe right to reveal Archive (Restore for already-archived sessions). Swipe is gated to touch/coarse-pointer input, so desktop click, context-menu, and drag behavior are unchanged. Delete still routes through the existing confirmation dialog. The session list also gains FLIP-based reflow animation when rows are archived, deleted, or reordered, honoring `prefers-reduced-motion`.
+
 ## [v0.51.166] — 2026-05-30 — Release EL (stage-batch48 — shared OpenCode runtime key + cron project-chip sessions)
 
 ### Fixed
