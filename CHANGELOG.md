@@ -7,6 +7,16 @@
 
 - OpenCode provider key lookup now honors the shared `OPENCODE_API_KEY` fallback for both Zen and Go runtime paths, matching model-picker detection when provider-specific keys are absent.
 
+## [v0.51.164] — 2026-05-30 — Release EJ (stage-batch46 — passive performance hardening: refresh coalescing + draft-save dedup + activity placeholders + bounded restart-safety wait)
+
+### Fixed
+
+- Coalesced duplicate in-flight sidebar/project refreshes and suppressed overlapping approval/clarify fallback polls, reducing repeated passive requests while preserving latest-refresh-wins sidebar state.
+- Skipped duplicate composer-draft writes when the normalized autosave payload is unchanged, avoiding redundant full session JSON rewrites during debounced input/focus churn.
+- Refined empty Activity waiting placeholders to distinguish stream creation, first-token wait, post-tool model wait, and running-tool wait states.
+- Self-update restart safety now checks active agent runs as well as open SSE streams and waits for in-flight work before re-exec, avoiding update-triggered interruption when a run outlives its browser stream. The wait is bounded (300s) with a logged fallback to re-exec so a long-running or stuck agent run cannot soft-jam the self-update indefinitely.
+- Documented the WebUI prefill context budget in README and architecture notes so operators can keep new-browser-turn startup context compact.
+
 ## [v0.51.163] — 2026-05-30 — Release EI (stage-batch45 — session duplicate/branch field propagation)
 
 ### Fixed

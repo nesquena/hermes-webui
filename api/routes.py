@@ -5637,19 +5637,30 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        unchanged = False
         with _get_session_agent_lock(sid):
-            draft = getattr(s, "composer_draft", {}) or {}
+            current_draft = dict(getattr(s, "composer_draft", {}) or {})
+            next_draft = dict(current_draft)
             if text is not None:
-                draft["text"] = text
+                next_draft["text"] = text
             if files is not None:
-                draft["files"] = files
-            s.composer_draft = draft
-            # Draft persistence is not conversation activity. Touching updated_at
-            # here makes the active-session external-refresh poll force-reload the
-            # current chat every few seconds while the user is typing, and that
-            # delayed reload can restore an older draft over newer local input.
-            s.save(touch_updated_at=False, skip_index=True)
-        return j(handler, {"ok": True, "draft": s.composer_draft})
+                next_draft["files"] = files
+            if next_draft == current_draft:
+                unchanged = True
+                saved_draft = current_draft
+            else:
+                s.composer_draft = next_draft
+                # Draft persistence is not conversation activity. Touching updated_at
+                # here makes the active-session external-refresh poll force-reload the
+                # current chat every few seconds while the user is typing, and that
+                # delayed reload can restore an older draft over newer local input.
+                s.save(touch_updated_at=False, skip_index=True)
+                saved_draft = s.composer_draft
+        payload = {"ok": True, "draft": saved_draft}
+        if unchanged:
+            payload["unchanged"] = True
+        j(handler, payload)
+        return True
 
     if parsed.path == "/api/session/update":
         try:

@@ -158,9 +158,15 @@ a `messages` list, or plain text; plain text is wrapped as one `user` prefill
 message so dynamic recall text becomes ordinary context instead of an extra
 system instruction. If the hook must provide system-level guidance, emit JSON
 messages with an explicit `role: "system"` entry instead. Script output is capped
-at 256 KiB before parsing. The browser only receives a compact status event
-(`source`, `label`, message count, and redacted errors), never the prefill
-message bodies.
+at 256 KiB before parsing. Parsed prefill context is then bounded by
+`webui_prefill_context_max_chars` or `HERMES_WEBUI_PREFILL_CONTEXT_MAX_CHARS`
+(default: 12,000 characters; set to `0` to disable). When a dynamic script
+exceeds the budget and a compact static prefill file is configured, WebUI falls
+back to that file. If no compact fallback is available, WebUI injects a short
+retrieval instruction instead of sending the oversized note/body payload with
+every new browser turn. The browser only receives a compact status event
+(`source`, `label`, message count, compaction metadata, and redacted errors),
+never the prefill message bodies.
 
 ### Optional Gateway-backed browser chat
 
