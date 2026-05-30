@@ -6270,6 +6270,7 @@ function renderMessages(options){
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
+  } else {
   }
 
   const compressionState=_compressionStateForCurrentSession();
