@@ -1515,6 +1515,18 @@ async function _loadOlderMessages() {
     _messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);
     _messagesTruncated = !!responseSession._messages_truncated;
     _oldestIdx = responseSession._messages_offset || 0;
+    // Sync S.toolCalls with the expanded message set so renderMessages() uses
+    // fresh indices. For sessions where messages carry per-message tool_use data
+    // the server sends tool_calls=[]; clearing S.toolCalls here lets the
+    // renderMessages fallback rebuild them with correct rawIdx values from the
+    // updated S.messages. For older sessions with absolute-index session-level
+    // tool_calls the server sends the window-filtered list; adopt it directly.
+    const _loadedTc = (responseSession.tool_calls || []).filter(Boolean);
+    if (_loadedTc.length > 0) {
+      S.toolCalls = _loadedTc.map(tc => ({...tc, done: true}));
+    } else {
+      S.toolCalls = [];
+    }
     renderMessages({ preserveScroll: true });
     if (container) {
       // Prepending older messages must not teleport the reader. Preserve the
@@ -1586,6 +1598,16 @@ async function _ensureAllMessagesLoaded() {
     _oldestIdx = 0;
     if (S.session && S.session.session_id === sid) {
       S.session.message_count = Number(data.session.message_count || msgs.length);
+    }
+    // Loading all messages gives us absolute rawIdx=0..N, so server-side
+    // tool_calls (absolute indices, no windowing filter) are valid. Adopt
+    // them directly, or reset to [] for per-message-metadata sessions so
+    // the renderMessages fallback rebuilds with correct rawIdx values.
+    const _allTc = (data.session.tool_calls || []).filter(Boolean);
+    if (_allTc.length > 0) {
+      S.toolCalls = _allTc.map(tc => ({...tc, done: true}));
+    } else {
+      S.toolCalls = [];
     }
   } finally {
     _loadingOlder = false;
