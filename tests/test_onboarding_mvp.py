@@ -64,9 +64,16 @@ def clean_hermes_config_files():
     hermes_home = _server_hermes_home()
     for rel in ("config.yaml", ".env"):
         (hermes_home / rel).unlink(missing_ok=True)
+    # onboarding_completed lives in settings.json (not config.yaml/.env), so the
+    # unlinks above don't reset it. A prior test that completes onboarding would
+    # otherwise leak the flag and make tests asserting the pristine "incomplete"
+    # default fail under sharded/reordered runs. Reset it via the settings API
+    # (the source of truth the server reads) before AND after each test.
+    post("/api/settings", {"onboarding_completed": False})
     yield
     for rel in ("config.yaml", ".env"):
         (hermes_home / rel).unlink(missing_ok=True)
+    post("/api/settings", {"onboarding_completed": False})
 
 
 
