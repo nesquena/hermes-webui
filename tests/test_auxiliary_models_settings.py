@@ -75,10 +75,15 @@ class TestAuxiliaryModelsJS:
             )
 
     def test_advanced_options_button_and_modal_wiring(self):
-        """Each auxiliary row should expose gear-driven advanced config editing."""
+        """Each auxiliary row and the main model should expose gear-driven advanced config editing."""
         for marker in (
             "aux-advanced-btn",
+            "mainAdvancedBtn",
+            "_bindMainAdvancedOptionsButton",
             "_openAuxAdvancedOptions",
+            "_mainAdvancedConfig=null",
+            "btn.disabled=_mainAdvancedConfig===null",
+            "if(_mainAdvancedConfig!==null)",
             "auxAdvancedOverlay",
             "auxAdvancedBaseUrl",
             "auxAdvancedTimeout",
@@ -221,6 +226,11 @@ class TestAuxiliaryModelsI18n:
         "settings_aux_advanced_extra_body_object_required",
         "settings_aux_advanced_saved",
         "settings_aux_advanced_save_failed",
+        "settings_main_advanced_button_aria",
+        "settings_main_advanced_title",
+        "settings_main_advanced_subtitle",
+        "settings_main_advanced_saved",
+        "settings_main_advanced_save_failed",
         "settings_aux_task_vision",
         "settings_aux_task_vision_desc",
         "settings_aux_task_compression",
@@ -323,6 +333,35 @@ class TestAuxiliaryModelsBackend:
         assert vision["api_key_set"] is True
         assert "api_key" not in vision
 
+    def test_backend_surfaces_main_advanced_fields_without_api_key_value(self, monkeypatch):
+        """Main model advanced fields should be visible, but API keys remain write-only."""
+        from api import config
+
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "cfg", {
+            "model": {
+                "provider": "openai",
+                "default": "gpt-5.5",
+                "base_url": "https://example.invalid/v1",
+                "timeout": 42,
+                "download_timeout": 7,
+                "max_concurrency": 2,
+                "extra_body": {"reasoning_effort": "none"},
+                "api_key": "DUMMY_KEY_DO_NOT_RETURN",
+            },
+            "auxiliary": {},
+        })
+
+        data = config.get_auxiliary_models()
+        main = data["main"]
+        assert main["base_url"] == "https://example.invalid/v1"
+        assert main["timeout"] == 42
+        assert main["download_timeout"] == 7
+        assert main["max_concurrency"] == 2
+        assert main["extra_body"] == {"reasoning_effort": "none"}
+        assert main["api_key_set"] is True
+        assert "api_key" not in main
+
     def test_set_auxiliary_model_function_exists(self):
         """set_auxiliary_model() must exist in api/config.py."""
         assert "def set_auxiliary_model" in self.CONFIG_PY, (
@@ -365,6 +404,38 @@ class TestAuxiliaryModelsBackend:
             raise AssertionError("set_auxiliary_model accepted an unknown task")
 
         assert "arbitrary_key" not in config_path.read_text(encoding="utf-8")
+
+    def test_set_hermes_default_model_persists_advanced_options(self, monkeypatch, tmp_path):
+        """Main-model gear-modal payload should persist supported model options."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("model:\n  provider: openai\n  default: gpt-5.5\n", encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(config, "resolve_model_provider", lambda model: (model, "openai", None))
+
+        result = config.set_hermes_default_model(
+            "gpt-5.5",
+            advanced={
+                "base_url": "https://example.invalid/v1/",
+                "timeout": "45",
+                "download_timeout": "9",
+                "max_concurrency": "2",
+                "extra_body": {"reasoning_effort": "none"},
+                "api_key": "DUMMY_KEY_DO_NOT_PRINT",
+            },
+        )
+
+        assert result["ok"] is True
+        text = config_path.read_text(encoding="utf-8")
+        assert "https://example.invalid/v1" in text
+        assert "timeout: 45" in text
+        assert "download_timeout: 9" in text
+        assert "max_concurrency: 2" in text
+        assert "reasoning_effort: none" in text
+        assert "DUMMY_KEY_DO_NOT_PRINT" in text
 
     def test_set_auxiliary_model_persists_advanced_options(self, monkeypatch, tmp_path):
         """Gear-modal payload should persist supported per-slot options."""

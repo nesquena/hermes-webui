@@ -2609,7 +2609,64 @@ def set_reasoning_effort(effort: str) -> dict:
     return get_reasoning_status()
 
 
-def set_hermes_default_model(model_id: str) -> dict:
+def _public_advanced_model_options(model_cfg: dict) -> dict:
+    """Return write-only-safe advanced options from a model config block."""
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    return {
+        "base_url": str(model_cfg.get("base_url") or "").strip(),
+        "timeout": model_cfg.get("timeout", ""),
+        "download_timeout": model_cfg.get("download_timeout", ""),
+        "max_concurrency": model_cfg.get("max_concurrency", ""),
+        "extra_body": model_cfg.get("extra_body") if isinstance(model_cfg.get("extra_body"), dict) else {},
+        "api_key_set": bool(str(model_cfg.get("api_key") or "").strip()),
+    }
+
+
+def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> None:
+    """Apply supported advanced model options to a config block in-place."""
+    if advanced is None:
+        return
+    if not isinstance(advanced, dict):
+        raise ValueError("advanced model options must be an object")
+    if "base_url" in advanced:
+        base_url = str(advanced.get("base_url") or "").strip().rstrip("/")
+        if base_url:
+            model_cfg["base_url"] = base_url
+        else:
+            model_cfg.pop("base_url", None)
+    for field in ("timeout", "download_timeout", "max_concurrency"):
+        if field in advanced:
+            coerced = _coerce_optional_positive_int(advanced.get(field), field)
+            if coerced == "":
+                model_cfg.pop(field, None)
+            elif coerced is not None:
+                model_cfg[field] = coerced
+    if "extra_body" in advanced:
+        extra_body = advanced.get("extra_body")
+        if isinstance(extra_body, str):
+            text = extra_body.strip()
+            try:
+                extra_body = json.loads(text) if text else {}
+            except json.JSONDecodeError as exc:
+                raise ValueError("extra_body must be valid JSON") from exc
+        if extra_body in (None, ""):
+            model_cfg.pop("extra_body", None)
+        elif isinstance(extra_body, dict):
+            if extra_body:
+                model_cfg["extra_body"] = extra_body
+            else:
+                model_cfg.pop("extra_body", None)
+        else:
+            raise ValueError("extra_body must be a JSON object")
+    if advanced.get("api_key_clear"):
+        model_cfg["api_key"] = ""
+    api_key = str(advanced.get("api_key") or "").strip()
+    if api_key:
+        model_cfg["api_key"] = api_key
+
+
+def set_hermes_default_model(model_id: str, advanced: dict | None = None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
     if not selected_model:
@@ -2659,6 +2716,8 @@ def set_hermes_default_model(model_id: str) -> dict:
                 model_cfg["base_url"] = "https://api.openai.com/v1"
             elif not persisted_provider.startswith("custom:"):
                 model_cfg.pop("base_url", None)
+
+        _apply_advanced_model_options(model_cfg, advanced)
 
         config_data["model"] = model_cfg
         _save_yaml_config_file(config_path, config_data)
@@ -2734,7 +2793,11 @@ def get_auxiliary_models() -> dict:
 
     return {
         "tasks": tasks,
-        "main": {"provider": main_provider, "model": main_model},
+        "main": {
+            "provider": main_provider,
+            "model": main_model,
+            **_public_advanced_model_options(model_cfg),
+        },
     }
 
 
@@ -2794,40 +2857,11 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
             slot_cfg["provider"] = provider or "auto"
             slot_cfg["model"] = model or ""
             if advanced is not None:
-                if not isinstance(advanced, dict):
-                    raise ValueError("advanced auxiliary options must be an object")
-                if "base_url" in advanced:
-                    base_url = str(advanced.get("base_url") or "").strip().rstrip("/")
-                    if base_url:
-                        slot_cfg["base_url"] = base_url
-                    else:
-                        slot_cfg.pop("base_url", None)
-                for field in ("timeout", "download_timeout", "max_concurrency"):
-                    if field in advanced:
-                        coerced = _coerce_optional_positive_int(advanced.get(field), field)
-                        if coerced == "":
-                            slot_cfg.pop(field, None)
-                        elif coerced is not None:
-                            slot_cfg[field] = coerced
-                if "extra_body" in advanced:
-                    extra_body = advanced.get("extra_body")
-                    if isinstance(extra_body, str):
-                        text = extra_body.strip()
-                        extra_body = json.loads(text) if text else {}
-                    if extra_body in (None, ""):
-                        slot_cfg.pop("extra_body", None)
-                    elif isinstance(extra_body, dict):
-                        if extra_body:
-                            slot_cfg["extra_body"] = extra_body
-                        else:
-                            slot_cfg.pop("extra_body", None)
-                    else:
-                        raise ValueError("extra_body must be a JSON object")
-                if advanced.get("api_key_clear"):
-                    slot_cfg["api_key"] = ""
-                api_key = str(advanced.get("api_key") or "").strip()
-                if api_key:
-                    slot_cfg["api_key"] = api_key
+                try:
+                    _apply_advanced_model_options(slot_cfg, advanced)
+                except ValueError as exc:
+                    msg = str(exc).replace("advanced model options", "advanced auxiliary options")
+                    raise ValueError(msg) from exc
             if provider and (provider.startswith("custom:") or provider == "custom"):
                 try:
                     _, _, resolved_base_url = resolve_model_provider(model)
