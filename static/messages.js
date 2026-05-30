@@ -286,6 +286,12 @@ function applySessionTitleUpdate(sid, titleText, options={}){
   return true;
 }
 
+function _attachedFilesMarkerText(paths){
+  const clean=(paths||[]).map(p=>String(p||'').trim()).filter(Boolean);
+  if(!clean.length) return '';
+  return `[Attached files:\n${clean.join('\n')}\n]`;
+}
+
 async function send(){
   // Reject concurrent invocations early — before any await yields control.
   // If a send is already in-flight (e.g. queue drain), re-queue the message
@@ -456,9 +462,10 @@ async function send(){
 
   const uploadedNames=uploaded.map(u=>u.name||u);
   const uploadedPaths=uploaded.map(u=>u&&u.path?u.path:(u&&u.name?u.name:(u&&u.filename?u.filename:u)));
+  const attachedFilesMarker=_attachedFilesMarkerText(uploadedPaths);
   let msgText=text;
-  if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
-  else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
+  if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s).\n\n${attachedFilesMarker}`;
+  else if(uploaded.length)msgText=`${text}\n\n${attachedFilesMarker}`;
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
   $('msg').value='';autoResize();
