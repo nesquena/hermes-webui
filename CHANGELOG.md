@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Agent-side cron sessions imported from state.db now remain available to their assigned project chip as `default_hidden` rows instead of being filtered out before project reveal logic can see them.
+
 ## [v0.51.163] — 2026-05-30 — Release EI (stage-batch45 — session duplicate/branch field propagation)
 
 ### Fixed
