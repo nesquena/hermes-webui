@@ -574,9 +574,12 @@ def test_rfc_defines_slice4f_supervised_local_runner_client_gate():
     rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
 
     assert "#### Slice 4f: Supervised local runner client backend gate" in rfc
-    assert "Status as of 2026-05-28: client transport shipped behind `HERMES_WEBUI_RUNNER_BASE_URL`" in rfc
+    assert "Status as of 2026-05-28: client transport proposed in #3073 behind" in rfc
+    assert "it should be described as under review until a\nrelease PR actually ships it" in rfc
     assert "replace the bounded 501 path under the existing\nfeature flag" in rfc
     assert "durable runner-owned run id plus session-to-run lookup" in rfc
+    assert "the configured\nrunner must emit events that are already compatible with the browser SSE event\nnames/payloads" in rfc
+    assert "a later runner-owned normalization layer must translate\nHermes runtime families such as `token.delta`, `tool.started`, and `done`" in rfc
     assert "cancel as the first required live control" in rfc
     assert "501 path replaced only when configured" in rfc
     assert "Restart/reattach proves ownership moved" in rfc
