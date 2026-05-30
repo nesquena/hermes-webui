@@ -1,10 +1,62 @@
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
-SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+SESSIONS_JS_PATH = ROOT / "static" / "sessions.js"
+SESSIONS_JS = SESSIONS_JS_PATH.read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+
+
+def _extract_js_function(src: str, name: str) -> str:
+    marker = f"function {name}"
+    start = src.find(marker)
+    assert start >= 0, f"{name} not found"
+    brace = src.find("{", start)
+    assert brace > start, f"{name} body not found"
+    depth = 1
+    i = brace + 1
+    while depth and i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, f"{name} body did not close"
+    return src[start:i]
+
+
+def _run_session_search_helper(cases):
+    if NODE is None:
+        pytest.skip("node not on PATH")
+    driver = "\n".join(
+        [
+            "function _sessionDisplayTitle(s){return String((s&&s.title)||'');}",
+            _extract_js_function(SESSIONS_JS, "_sessionSearchAddIdCandidate"),
+            _extract_js_function(SESSIONS_JS, "_sessionSearchCleanUrlToken"),
+            _extract_js_function(SESSIONS_JS, "_sessionSearchSessionIdCandidates"),
+            _extract_js_function(SESSIONS_JS, "_sessionSearchDirectSessionMatches"),
+            _extract_js_function(SESSIONS_JS, "_sessionSearchDirectAndTitleMatches"),
+            _extract_js_function(SESSIONS_JS, "_sessionSearchMergeMatches"),
+            "const cases = JSON.parse(process.argv[1]);",
+            "const out = cases.map(c => ({candidates: _sessionSearchSessionIdCandidates(c.query), matches: _sessionSearchDirectSessionMatches(c.sessions, c.query).map(s => s.session_id), merged: _sessionSearchMergeMatches(c.sessions, c.query, c.content || []).map(s => s.session_id)}));",
+            "process.stdout.write(JSON.stringify(out));",
+        ]
+    )
+    result = subprocess.run(
+        [NODE, "-e", driver, json.dumps(cases)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
 
 
 def test_session_action_menu_has_copy_link_action():
@@ -74,3 +126,65 @@ def test_streaming_markdown_keeps_session_refs_internal():
     assert "session-link" in MESSAGES_JS
     assert "_smdLinkHref" in MESSAGES_JS
     assert "^(file|workspace|session)" in MESSAGES_JS
+
+
+def test_conversation_filter_extracts_session_ids_from_links_and_raw_ids():
+    sessions = [
+        {"session_id": "12f0ef3e1a62", "title": "Target"},
+        {"session_id": "abc(def)", "title": "Paren"},
+        {"session_id": "other", "title": "Other"},
+    ]
+    cases = [
+        {"query": "12f0ef3e1a62", "sessions": sessions},
+        {"query": "session://12f0ef3e1a62", "sessions": sessions},
+        {"query": "https://example.test/session/12f0ef3e1a62", "sessions": sessions},
+        {"query": "https://example.test/session/12f0ef3e1a62?foo=bar#chat", "sessions": sessions},
+        {"query": "/session/12f0ef3e1a62", "sessions": sessions},
+        {"query": "see https://example.test/session/12f0ef3e1a62).", "sessions": sessions},
+        {"query": "[Target](session://12f0ef3e1a62)", "sessions": sessions},
+        {"query": "[Target](https://example.test/session/12f0ef3e1a62)", "sessions": sessions},
+        {"query": "?session_id=12f0ef3e1a62", "sessions": sessions},
+        {"query": "https://example.test/session/abc%28def%29", "sessions": sessions},
+        {"query": "session://abc%28def%29", "sessions": sessions},
+    ]
+    out = _run_session_search_helper(cases)
+    assert [row["matches"] for row in out] == [
+        ["12f0ef3e1a62"],
+        ["12f0ef3e1a62"],
+        ["12f0ef3e1a62"],
+        ["12f0ef3e1a62"],
+        ["12f0ef3e1a62"],
+        ["12f0ef3e1a62"],
+        ["12f0ef3e1a62"],
+        ["12f0ef3e1a62"],
+        ["12f0ef3e1a62"],
+        ["abc(def)"],
+        ["abc(def)"],
+    ]
+
+
+def test_conversation_filter_merges_direct_title_and_content_matches_without_dropping_posted_ids():
+    sessions = [
+        {"session_id": "target-123", "title": "Unrelated target title"},
+        {"session_id": "title-hit", "title": "target-123 mentioned in title"},
+        {"session_id": "other", "title": "Other"},
+    ]
+    content = [
+        {"session_id": "target-123", "match_type": "content"},
+        {"session_id": "posted-elsewhere", "match_type": "content"},
+        {"session_id": "ignored-non-content", "match_type": "title"},
+    ]
+    out = _run_session_search_helper([
+        {"query": "target-123", "sessions": sessions, "content": content},
+    ])[0]
+    assert out["merged"] == ["target-123", "title-hit", "posted-elsewhere"]
+
+
+def test_conversation_filter_keeps_content_search_results_when_query_is_session_id():
+    assert "function _sessionSearchMergeMatches" in SESSIONS_JS
+    assert "function _sessionSearchDirectAndTitleMatches" in SESSIONS_JS
+    assert "const allMatched=_sessionSearchMergeMatches(_allSessions,searchQueryRaw,_contentSearchResults);" in SESSIONS_JS
+    assert "const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);" in SESSIONS_JS
+    assert "const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));" in SESSIONS_JS
+    assert "!directOrTitleIds.has(s.session_id)" in SESSIONS_JS
+    assert "api(`/api/sessions/search?q=${encodeURIComponent(requestedQ)}&content=1&depth=5`)" in SESSIONS_JS

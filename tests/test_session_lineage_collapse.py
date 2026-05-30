@@ -695,8 +695,9 @@ def test_sidebar_search_and_rows_use_read_only_display_title():
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
     assert "function _sessionDisplayTitle" in js
     assert "function _sessionTitleTags" in js
-    assert "_allSessions.filter(s=>_sessionDisplayTitle(s).toLowerCase().includes(q))" in js
-    assert "_allSessions.filter(s => _sessionDisplayTitle(s).toLowerCase().includes(q.toLowerCase()))" in js
+    assert "function _sessionSearchDirectAndTitleMatches" in js
+    assert "const titleMatches=(sessions||[]).filter(s=>_sessionDisplayTitle(s).toLowerCase().includes(q));" in js
+    assert "const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);" in js
     assert "const rawTitle=_sessionDisplayTitle(s);" in js
     assert "const tags=_sessionTitleTags(rawTitle);" in js
     assert "const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');" in js

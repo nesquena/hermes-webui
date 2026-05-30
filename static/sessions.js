@@ -2868,6 +2868,91 @@ function _sessionSearchContentPreview(session, query){
   return preview||'';
 }
 
+function _sessionSearchAddIdCandidate(candidates, seen, value){
+  const raw=String(value||'').trim();
+  if(!raw) return;
+  const add=(candidate)=>{
+    const sid=String(candidate||'').trim();
+    if(!sid||seen.has(sid)) return;
+    seen.add(sid);
+    candidates.push(sid);
+  };
+  add(raw);
+  try{add(decodeURIComponent(raw));}catch(_e){}
+}
+
+function _sessionSearchCleanUrlToken(token){
+  let value=String(token||'').trim();
+  value=value.replace(/[\],.;]+$/g,'');
+  while(value.endsWith(')')&&value.indexOf('(')<0) value=value.slice(0,-1);
+  return value;
+}
+
+function _sessionSearchSessionIdCandidates(query){
+  const source=String(query||'').trim();
+  const candidates=[];
+  const seen=new Set();
+  if(!source) return candidates;
+  _sessionSearchAddIdCandidate(candidates,seen,source);
+
+  const inspectUrl=(token)=>{
+    const cleaned=_sessionSearchCleanUrlToken(token);
+    if(!cleaned) return;
+    try{
+      const url=new URL(cleaned,'http://webui.local');
+      const parts=url.pathname.split('/').filter(Boolean);
+      const sessionIdx=parts.findIndex(p=>p.toLowerCase()==='session');
+      if(sessionIdx>=0&&parts[sessionIdx+1]) _sessionSearchAddIdCandidate(candidates,seen,parts[sessionIdx+1]);
+      for(const key of ['session_id','session','sid']){
+        const value=url.searchParams.get(key);
+        if(value) _sessionSearchAddIdCandidate(candidates,seen,value);
+      }
+    }catch(_e){}
+  };
+
+  const markdownLinkRe=/\]\(([^\s)]+)\)/g;
+  let match;
+  while((match=markdownLinkRe.exec(source))) inspectUrl(match[1]);
+
+  const sessionSchemeRe=/session:\/\/([^\s)>\]]+)/gi;
+  while((match=sessionSchemeRe.exec(source))) _sessionSearchAddIdCandidate(candidates,seen,match[1]);
+
+  const urlRe=/(?:https?:\/\/[^\s<>\]]+|\/session\/[^\s<>\]]+|\?[^\s<>\]]+)/gi;
+  while((match=urlRe.exec(source))) inspectUrl(match[0]);
+
+  const queryParamRe=/(?:^|[?&\s])(session_id|session|sid)=([^&#\s)]+)/gi;
+  while((match=queryParamRe.exec(source))) _sessionSearchAddIdCandidate(candidates,seen,match[2]);
+  return candidates;
+}
+
+function _sessionSearchDirectSessionMatches(sessions, query){
+  const candidates=_sessionSearchSessionIdCandidates(query);
+  if(!candidates.length) return [];
+  const candidateIds=new Set(candidates.map(s=>String(s)));
+  return (sessions||[]).filter(s=>s&&candidateIds.has(String(s.session_id||'')));
+}
+
+function _sessionSearchDirectAndTitleMatches(sessions, query){
+  const source=String(query||'').trim();
+  if(!source) return sessions||[];
+  const q=source.toLowerCase();
+  const titleMatches=(sessions||[]).filter(s=>_sessionDisplayTitle(s).toLowerCase().includes(q));
+  const directSessionMatches=_sessionSearchDirectSessionMatches(sessions,source);
+  const directSessionIds=new Set(directSessionMatches.map(s=>s.session_id));
+  return [...directSessionMatches,...titleMatches.filter(s=>!directSessionIds.has(s.session_id))];
+}
+
+function _sessionSearchMergeMatches(sessions, query, contentResults){
+  const source=String(query||'').trim();
+  if(!source) return sessions||[];
+  const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(sessions,source);
+  const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));
+  return [
+    ...directAndTitleMatches,
+    ...(contentResults||[]).filter(s=>s&&s.match_type==='content'&&!directOrTitleIds.has(s.session_id))
+  ];
+}
+
 function syncSessionSearchClear(){
   const input=$('sessionSearch');
   const clear=$('sessionSearchClear');
@@ -2905,8 +2990,9 @@ function filterSessions(){
       const data = await api(`/api/sessions/search?q=${encodeURIComponent(requestedQ)}&content=1&depth=5`);
       const currentQ = ($('sessionSearch').value || '').trim();
       if(currentQ!==requestedQ) return;
-      const titleIds = new Set(_allSessions.filter(s => _sessionDisplayTitle(s).toLowerCase().includes(q.toLowerCase())).map(s=>s.session_id));
-      _contentSearchResults = (data.sessions||[]).filter(s => s.match_type === 'content' && !titleIds.has(s.session_id));
+      const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);
+      const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));
+      _contentSearchResults = (data.sessions||[]).filter(s => s.match_type === 'content' && !directOrTitleIds.has(s.session_id));
       renderSessionListFromCache();
     } catch(e) { /* ignore */ }
   }, 350);
@@ -3504,10 +3590,10 @@ function renderSessionListFromCache(){
   const searchQueryRaw=($('sessionSearch').value||'').trim();
   const q=searchQueryRaw.toLowerCase();
   const activeSidForSidebar=_activeSessionIdForSidebar();
-  const titleMatches=q?_allSessions.filter(s=>_sessionDisplayTitle(s).toLowerCase().includes(q)):_allSessions;
-  // Merge content matches (deduped): content matches appended after title matches
-  const titleIds=new Set(titleMatches.map(s=>s.session_id));
-  const allMatched=q?[...titleMatches,..._contentSearchResults.filter(s=>!titleIds.has(s.session_id))]:titleMatches;
+  // Merge direct session-id/link matches, title matches, then content matches (deduped).
+  // Direct matches must not disable content search: if a user pasted the same
+  // session id into another conversation, that content hit should still appear.
+  const allMatched=_sessionSearchMergeMatches(_allSessions,searchQueryRaw,_contentSearchResults);
   // Never surface ephemeral 0-message sessions in the sidebar — they only become
   // real once the first message is sent. The server already filters them, but this
   // guard ensures a brand-new active session doesn't flash into the list while
