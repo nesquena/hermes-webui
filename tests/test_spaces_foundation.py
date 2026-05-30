@@ -17045,6 +17045,11 @@ def test_module_repair_events_tool_response_includes_metadata_only_output_compac
     assert listed["autonomy_policy"]["prompt_preflight_status"] == "required"
     assert listed["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
     assert listed["autonomy_policy"]["metadata_only"] is True
+    assert listed["progress_event"]["event_type"] == "tool.completed"
+    assert listed["progress_event"]["family"] == "tool"
+    assert listed["progress_event"]["space_id"] == "recovery-modules"
+    assert listed["progress_event"]["run_id"] == "recovery.module.repair_events:recovery-modules"
+    assert listed["progress_event"]["redaction_status"] == "metadata_only"
     assert listed["events"][0]["event_id"] == queued["event_id"]
     assert listed["events"][0]["prompt_preflight"]["boundary"] == "space_repair_prompt"
     assert listed["events"][0]["prompt_preflight"]["status"] == "pass"
@@ -17060,6 +17065,9 @@ def test_module_repair_events_tool_response_includes_metadata_only_output_compac
     assert "module_action: space.recovery.module_repair_events" in compaction["text"]
     assert "module_id: module-repair-events-compaction" in compaction["text"]
     assert "event_count: 1" in compaction["text"]
+    assert "prompt_preflight_status: required" in compaction["text"]
+    assert "policy_action: space.recovery.module_repair_events" in compaction["text"]
+    assert "progress_run_id: recovery.module.repair_events:recovery-modules" in compaction["text"]
     assert queued["event_id"] in compaction["text"]
     assert "source" not in serialized
     assert "renderer" not in serialized

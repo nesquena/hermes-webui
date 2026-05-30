@@ -8205,6 +8205,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         events = list_recovery_module_repair_events(module_id, data.get("limit", 20))
         prompt_preflight = _space_repair_required_prompt_preflight_receipt(name)
         autonomy_policy = _space_repair_action_policy_receipt(name, prompt_preflight)
+        progress_event = _record_space_tool_progress_event(
+            _RECOVERY_MODULE_PROGRESS_SPACE_ID,
+            run_prefix="recovery.module.repair_events",
+        )
         return {
             "ok": True,
             "action": name,
@@ -8212,10 +8216,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "events": events,
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
             "output_compaction": _module_repair_events_output_compaction(
                 action=name,
                 module_id=module_id,
                 events=events,
+                prompt_preflight=prompt_preflight,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
             ),
         }
     if name == "widget.list":
@@ -12450,6 +12458,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "recovery.snapshot",
         "recovery.widget.repair",
         "recovery.module.repair",
+        "recovery.module.repair_events",
         "layout.rearrange",
         "layout.reposition",
         "layout.toggle",
@@ -12654,6 +12663,9 @@ def _module_repair_events_output_compaction(
     action: str,
     module_id: str,
     events: list[dict[str, Any]],
+    prompt_preflight: dict[str, Any] | None = None,
+    autonomy_policy: dict[str, Any] | None = None,
+    progress_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build metadata-only compaction evidence for recovery-module repair event lists."""
     from api.capy_compaction import compact_output
@@ -12662,6 +12674,25 @@ def _module_repair_events_output_compaction(
     raw_module_id = _context_value(module_id, 120) or "unknown-module"
     safe_module_id = raw_module_id if _space_repair_text_summary(raw_module_id, 120) == raw_module_id else "metadata-only"
     safe_events = events if isinstance(events, list) else []
+    safe_prompt_status = _context_value(
+        (prompt_preflight or {}).get("status") if isinstance(prompt_preflight, dict) else None,
+        60,
+    )
+    safe_policy_action = _context_value(
+        (autonomy_policy or {}).get("action") if isinstance(autonomy_policy, dict) else None,
+        120,
+    )
+    raw_progress_run_id = _context_value(
+        (progress_event or {}).get("run_id") if isinstance(progress_event, dict) else None,
+        160,
+    )
+    safe_progress_run_id = (
+        raw_progress_run_id
+        if raw_progress_run_id
+        and re.fullmatch(r"[a-z0-9_.:-]{1,160}", raw_progress_run_id)
+        and not any(marker in raw_progress_run_id for marker in ("secret", "token", "renderer", "source", "script"))
+        else "metadata-only"
+    )
     lines = [
         "Capy Spaces recovery module repair events list metadata-only receipt",
         "metadata_only: true",
@@ -12670,6 +12701,12 @@ def _module_repair_events_output_compaction(
         f"module_id: {safe_module_id}",
         f"event_count: {len(safe_events)}",
     ]
+    if safe_prompt_status:
+        lines.append(f"prompt_preflight_status: {safe_prompt_status}")
+    if safe_policy_action:
+        lines.append(f"policy_action: {safe_policy_action}")
+    if safe_progress_run_id:
+        lines.append(f"progress_run_id: {safe_progress_run_id}")
     for index, event in enumerate(safe_events[:20], start=1):
         if not isinstance(event, dict):
             continue
