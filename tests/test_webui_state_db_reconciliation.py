@@ -396,6 +396,49 @@ def test_state_db_reconciliation_preserves_repeated_sidecar_rows(monkeypatch, tm
     assert handler.response_json["session"]["message_count"] == 3
 
 
+def test_state_db_reconciliation_does_not_append_late_state_replay_after_diverged_sidecar(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_reconcile_late_replay_after_divergence"
+    _install_test_session(
+        monkeypatch,
+        tmp_path,
+        sid,
+        [
+            {"role": "user", "content": "shared opening", "timestamp": 1000.0},
+            {"role": "assistant", "content": "shared answer", "timestamp": 1001.0},
+            # A restored/compressed WebUI sidecar can contain a later local
+            # transcript that no longer aligns with the beginning of state.db.
+            # It is the authoritative display transcript for this same sid.
+            {"role": "user", "content": "current visible tail", "timestamp": 1100.0},
+        ],
+    )
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {"role": "user", "content": "shared opening", "timestamp": 1000.0},
+            {"role": "assistant", "content": "shared answer", "timestamp": 1001.0},
+            # Late state rows after the divergence are older transcript replay,
+            # not a provable new tail. Timestamp alone must not append them.
+            {"role": "user", "content": "old replayed question", "timestamp": 1200.0},
+            {"role": "assistant", "content": "old replayed answer", "timestamp": 1201.0},
+        ],
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    assert [m["content"] for m in session["messages"]] == [
+        "shared opening",
+        "shared answer",
+        "current visible tail",
+    ]
+    assert session["message_count"] == 3
+
+
 def test_metadata_fast_path_reports_reconciled_state_db_count(monkeypatch, tmp_path):
     import api.routes as routes
 

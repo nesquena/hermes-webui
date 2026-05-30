@@ -3775,6 +3775,40 @@ def _has_visible_duplicate(visible_key: tuple, visible_keys: set[tuple]) -> bool
     return _matching_visible_duplicate(visible_key, visible_keys) is not None
 
 
+def _state_messages_have_provable_tail_after_sidecar(sidecar_messages: list, state_messages: list) -> bool:
+    """Return True when state.db can safely append rows after a sidecar transcript.
+
+    A WebUI sidecar is the authoritative display transcript for its session id.
+    state.db is allowed to extend it only when the sidecar can be aligned to the
+    state transcript as an already-observed segment. Timestamp ordering alone is
+    not proof: compaction/recovery can restamp old state rows later than the
+    sidecar and otherwise replay an old branch after the visible tail.
+    """
+    sidecar_messages = list(sidecar_messages or [])
+    state_messages = list(state_messages or [])
+    if not sidecar_messages or not state_messages:
+        return True
+
+    sidecar_keys = [_session_message_content_key(m) for m in sidecar_messages]
+    state_keys = [_session_message_content_key(m) for m in state_messages]
+    saw_overlap = False
+
+    for offset in range(len(sidecar_keys)):
+        sidecar_index = offset
+        for state_key in state_keys:
+            if state_key != sidecar_keys[sidecar_index]:
+                continue
+            saw_overlap = True
+            sidecar_index += 1
+            if sidecar_index == len(sidecar_keys):
+                return True
+
+    # If the stores share no recognizable content, treat state.db as a separate
+    # append source. If they partially overlap but state.db never reaches the
+    # current sidecar tail, rows after that divergence are an unproven replay.
+    return not saw_overlap
+
+
 def state_db_delta_after_context(sidecar_context: list, state_messages: list) -> list:
     """Return only state.db rows that are newer than model-facing context.
 
@@ -3870,6 +3904,10 @@ def merge_session_messages_append_only(
         sidecar_visible_sequence.append(visible_key)
         merged_messages.append(msg)
     sidecar_visible_lookup = _build_visible_duplicate_lookup(sidecar_visible_keys)
+    allow_state_tail_append = _state_messages_have_provable_tail_after_sidecar(
+        sidecar_messages,
+        state_messages,
+    )
     state_replay_idx = 0
     skipped_state_visible_counts = {}
     for msg in state_messages:
@@ -3939,6 +3977,8 @@ def merge_session_messages_append_only(
             continue
         if key[0] == "message_id":
             seen_message_keys.add(key)
+        if not allow_state_tail_append:
+            continue
         seen_content_keys.add(_session_message_content_key(msg))
         seen_visible_keys.add(visible_key)
         merged_messages.append(msg)

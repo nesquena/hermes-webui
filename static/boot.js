@@ -11,6 +11,7 @@
 async function cancelStream(){
   const streamId = S.activeStreamId;
   if(!streamId) return;
+  const sid = S.session ? S.session.session_id : null;
   try{
     await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
   }catch(e){/* cancel request failed - cleanup below still runs */}
@@ -19,6 +20,12 @@ async function cancelStream(){
   // closed it won't arrive — so we handle cleanup here as the guaranteed path.
   S.activeStreamId=null;
   setBusy(false);
+  // Clear INFLIGHT so stale live messages don't get merged on next session load
+  // (prevents message splicing errors after stop).
+  if(sid && typeof INFLIGHT!=='undefined' && INFLIGHT[sid]){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+  }
   if(typeof setComposerStatus==='function') setComposerStatus('');
   else setStatus('');
 }

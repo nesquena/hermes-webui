@@ -314,12 +314,18 @@ async function loadDir(path){
       }
       if(expanded.size>0)renderFileTree();
     }
-    if(typeof clearPreview==='function'){
+    // Only clear preview when switching to a different session's workspace.
+    // Same-session refreshes (e.g. background resume, external update poll)
+    // should preserve the user's open file preview and unsaved edits.
+    if(typeof clearPreview==='function' && sessionId!==_lastPreviewSessionId){
       if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview({keepPanelOpen:true});});
+        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok){clearPreview({keepPanelOpen:true});_lastPreviewSessionId=sessionId;}});
       }else{
         clearPreview({keepPanelOpen:true});
+        _lastPreviewSessionId=sessionId;
       }
+    }else if(!_lastPreviewSessionId){
+      _lastPreviewSessionId=sessionId;
     }
     // Fetch git info for workspace root (non-blocking)
     if(!path||path==='.') _refreshGitBadge();
@@ -407,6 +413,7 @@ function largeMarkdownPlainTextStatus(content){
 let _previewCurrentPath = '';  // relative path of currently previewed file
 let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
 let _previewDirty = false;     // true when edits are unsaved
+let _lastPreviewSessionId = '';  // tracks which session owns the current preview
 
 function showPreview(mode){
   // mode: 'code' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
