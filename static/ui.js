@@ -3306,9 +3306,26 @@ function renderMd(raw){
     }
     return href;
   }
+  function _isInternalSessionHref(raw){
+    const href=String(raw||'').trim();
+    if(/^session\/[^?#]+/i.test(href)) return true;
+    try{
+      const base=(typeof document!=='undefined'&&document.baseURI)||
+        (typeof window!=='undefined'&&window.location&&window.location.href)||
+        'http://localhost/';
+      const url=new URL(href,base);
+      const baseUrl=new URL(base,base);
+      if(url.origin!==baseUrl.origin) return false;
+      const basePath=baseUrl.pathname.replace(/(?:index\.html)?$/,'').replace(/\/[^/]*$/,'/');
+      const root=basePath.endsWith('/')?basePath:basePath+'/';
+      return url.pathname.startsWith(root+'session/')||url.pathname.startsWith('/session/');
+    }catch(_){
+      return false;
+    }
+  }
   function _markdownAnchor(label,rawUrl){
     const href=_markdownHref(rawUrl);
-    const internal=/^session:\/\//i.test(String(rawUrl||'')) || /^(?:\/[^?#]*)?\/session\/[^?#]+|^session\/[^?#]+/i.test(href);
+    const internal=/^session:\/\//i.test(String(rawUrl||'')) || _isInternalSessionHref(href);
     return `<a${internal?' class="session-link"':''} href="${href}"${internal?'':' target="_blank" rel="noopener"'}>${esc(label)}</a>`;
   }
   function _isSafeUrl(v, img){
@@ -3319,7 +3336,7 @@ function renderMd(raw){
     if(/^https?:\/\//i.test(raw)) return true;
     if(/^(mailto:|tel:)/i.test(raw)) return true;
     if(img && /^api\//i.test(raw)) return true;
-    if(!img && (/^api\//i.test(raw) || /^#/.test(raw) || /^session\//i.test(raw) || /^\/[^?#]*\/session\/[^?#]+/i.test(raw) || /^\/session\/[^?#]+/i.test(raw))) return true;
+    if(!img && (/^api\//i.test(raw) || /^#/.test(raw) || _isInternalSessionHref(raw))) return true;
     return false;
   }
   function _attrs(raw){
