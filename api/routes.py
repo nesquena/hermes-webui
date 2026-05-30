@@ -2530,6 +2530,29 @@ def _is_duplicate_webui_state_projection(session: dict, represented_webui_ids: s
     return bool(_session_lineage_ids(session) & represented_webui_ids)
 
 
+def _dedupe_cli_sidebar_sessions_for_api(cli: list[dict], represented_webui_ids: set[str]) -> list[dict]:
+    """Return CLI/state sidebar rows while preserving project-hidden cron rows.
+
+    Agent-side cron sessions come from state.db rather than the WebUI session
+    store. They should stay hidden from the default sidebar, but project-assigned
+    messageful rows must remain in the `/api/sessions` payload with
+    `default_hidden` so the matching project chip can reveal them (#3134).
+    """
+    from api.models import (
+        _hide_from_default_sidebar as _cron_hide,
+        _include_project_hidden_background_sidebar_sessions,
+    )
+
+    candidates = [
+        s for s in cli
+        if s["session_id"] not in represented_webui_ids
+        and not _is_duplicate_webui_state_projection(s, represented_webui_ids)
+        and is_cli_session_row_visible(s)
+    ]
+    visible = [s for s in candidates if not _cron_hide(s)]
+    return _include_project_hidden_background_sidebar_sessions(candidates, visible)
+
+
 CLI_VISIBLE_SESSION_CAP = 20
 
 
@@ -4625,14 +4648,7 @@ def handle_get(handler, parsed) -> bool:
                 represented_webui_ids = set()
                 for s in webui_sessions:
                     represented_webui_ids.update(_session_lineage_ids(s))
-                from api.models import _hide_from_default_sidebar as _cron_hide
-                deduped_cli = [
-                    s for s in cli
-                    if s["session_id"] not in represented_webui_ids
-                    and not _is_duplicate_webui_state_projection(s, represented_webui_ids)
-                    and is_cli_session_row_visible(s)
-                    and not _cron_hide(s)
-                ]
+                deduped_cli = _dedupe_cli_sidebar_sessions_for_api(cli, represented_webui_ids)
             else:
                 diag.stage("filter_webui_sessions")
                 webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
@@ -5637,19 +5653,30 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        unchanged = False
         with _get_session_agent_lock(sid):
-            draft = getattr(s, "composer_draft", {}) or {}
+            current_draft = dict(getattr(s, "composer_draft", {}) or {})
+            next_draft = dict(current_draft)
             if text is not None:
-                draft["text"] = text
+                next_draft["text"] = text
             if files is not None:
-                draft["files"] = files
-            s.composer_draft = draft
-            # Draft persistence is not conversation activity. Touching updated_at
-            # here makes the active-session external-refresh poll force-reload the
-            # current chat every few seconds while the user is typing, and that
-            # delayed reload can restore an older draft over newer local input.
-            s.save(touch_updated_at=False, skip_index=True)
-        return j(handler, {"ok": True, "draft": s.composer_draft})
+                next_draft["files"] = files
+            if next_draft == current_draft:
+                unchanged = True
+                saved_draft = current_draft
+            else:
+                s.composer_draft = next_draft
+                # Draft persistence is not conversation activity. Touching updated_at
+                # here makes the active-session external-refresh poll force-reload the
+                # current chat every few seconds while the user is typing, and that
+                # delayed reload can restore an older draft over newer local input.
+                s.save(touch_updated_at=False, skip_index=True)
+                saved_draft = s.composer_draft
+        payload = {"ok": True, "draft": saved_draft}
+        if unchanged:
+            payload["unchanged"] = True
+        j(handler, payload)
+        return True
 
     if parsed.path == "/api/session/update":
         try:
@@ -7643,7 +7670,14 @@ def _handle_gateway_sse_stream(handler, parsed):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'close')
+    # #3103: do NOT emit `Connection: close` on long-lived SSE streams.
+    # The python BaseHTTPServer worker only handles one request per
+    # connection anyway, but browsers (Chrome/Firefox) treat the close
+    # header as a hard signal that the EventSource lifecycle has ended
+    # and trigger an instant reconnect, producing a tight loop of
+    # connect/sessions_changed snapshot/disconnect that thrashes the
+    # session list every ~1s. Letting the server close the socket
+    # naturally after the stream ends is sufficient.
     handler.end_headers()
 
     q = watcher.subscribe()
@@ -7676,7 +7710,8 @@ def _handle_session_events_stream(handler):
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
     handler.send_header('Cache-Control', 'no-cache')
     handler.send_header('X-Accel-Buffering', 'no')
-    handler.send_header('Connection', 'close')
+    # #3103: see _handle_gateway_sse_stream — `Connection: close` causes
+    # EventSource reconnect storms in browsers on long-lived SSE.
     handler.end_headers()
 
     q = subscribe_session_events()

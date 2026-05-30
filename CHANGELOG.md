@@ -7,6 +7,29 @@
 
 - `runner-local` runtime adapter mode can now use an explicitly configured HTTP runner endpoint via `HERMES_WEBUI_RUNNER_BASE_URL`, replacing the bounded not-configured path only when the external runner boundary is configured and streaming configured runner events through the existing SSE route without WebUI-owned runner maps.
 
+## [v0.51.166] — 2026-05-30 — Release EL (stage-batch48 — shared OpenCode runtime key + cron project-chip sessions)
+
+### Fixed
+
+- OpenCode provider key lookup now honors the shared `OPENCODE_API_KEY` fallback for both Zen and Go runtime paths, matching model-picker detection when provider-specific keys are absent (#3145).
+- Agent-side cron sessions imported from state.db now remain available to their assigned project chip as `default_hidden` rows instead of being filtered out before project reveal logic can see them (#3134).
+
+## [v0.51.165] — 2026-05-30 — Release EK (stage-batch47 — stop EventSource reconnect storm on long-lived SSE streams)
+
+### Fixed
+
+- The session-events and gateway SSE streams no longer emit `Connection: close`, which browsers interpreted as a signal that the EventSource lifecycle had ended — triggering an instant reconnect loop that thrashed the session list roughly once per second and forced repeated re-renders / scroll-to-bottom (#3103, regression from the HTTP/1.1 keep-alive change in 598fd4ff). Finite responses that lack a `Content-Length` (e.g. the on-the-fly workspace ZIP download) keep `Connection: close` for unambiguous HTTP/1.1 message framing.
+
+## [v0.51.164] — 2026-05-30 — Release EJ (stage-batch46 — passive performance hardening: refresh coalescing + draft-save dedup + activity placeholders + bounded restart-safety wait)
+
+### Fixed
+
+- Coalesced duplicate in-flight sidebar/project refreshes and suppressed overlapping approval/clarify fallback polls, reducing repeated passive requests while preserving latest-refresh-wins sidebar state.
+- Skipped duplicate composer-draft writes when the normalized autosave payload is unchanged, avoiding redundant full session JSON rewrites during debounced input/focus churn.
+- Refined empty Activity waiting placeholders to distinguish stream creation, first-token wait, post-tool model wait, and running-tool wait states.
+- Self-update restart safety now checks active agent runs as well as open SSE streams and waits for in-flight work before re-exec, avoiding update-triggered interruption when a run outlives its browser stream. The wait is bounded (300s) with a logged fallback to re-exec so a long-running or stuck agent run cannot soft-jam the self-update indefinitely.
+- Documented the WebUI prefill context budget in README and architecture notes so operators can keep new-browser-turn startup context compact.
+
 ## [v0.51.163] — 2026-05-30 — Release EI (stage-batch45 — session duplicate/branch field propagation)
 
 ### Fixed

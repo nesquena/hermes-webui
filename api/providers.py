@@ -682,6 +682,12 @@ _PROVIDER_ENV_VAR_ALIASES: dict[str, tuple[str, ...]] = {
     # #1500 — agent runtime reads LM_API_KEY (canonical), but WebUI builds
     # ≤ v0.50.272 wrote LMSTUDIO_API_KEY into .env.  Keep reading both.
     "lmstudio": ("LMSTUDIO_API_KEY",),
+    # #3145 — provider detection treats OPENCODE_API_KEY as enabling both
+    # OpenCode Zen and OpenCode Go. The runtime-facing lookup must read the same
+    # shared bridge key after the provider-specific slot, otherwise Settings can
+    # show the groups as configured while chat fails the no-key path.
+    "opencode-zen": ("OPENCODE_API_KEY",),
+    "opencode-go": ("OPENCODE_API_KEY",),
 }
 
 # Providers that use OAuth or token flows — their credentials are managed
