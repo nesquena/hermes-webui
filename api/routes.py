@@ -212,6 +212,43 @@ def _worktree_retained_payload_for_session_id(sid: str) -> dict:
         return {}
 
 
+def _get_disabled_skill_names_for_profile() -> set:
+    """Read disabled skill names from the active profile's config.yaml.
+
+    Unlike ``tools.skills_tool._get_disabled_skill_names`` which reads from
+    the process-global ``HERMES_HOME``, this uses ``_get_config_path()`` which
+    resolves against the WebUI's active profile.  Checks
+    ``skills.platform_disabled.webui`` first, falling back to
+    ``skills.disabled``.
+    """
+    config_path = _get_config_path()
+    if not config_path.exists():
+        return set()
+    try:
+        cfg = _load_yaml_config_file(config_path)
+    except Exception:
+        return set()
+    if not isinstance(cfg, dict):
+        return set()
+    skills_cfg = cfg.get("skills")
+    if not isinstance(skills_cfg, dict):
+        return set()
+    # Check platform_disabled.webui first (mirrors agent platform resolution)
+    platform_disabled = skills_cfg.get("platform_disabled")
+    if isinstance(platform_disabled, dict) and "webui" in platform_disabled:
+        return _normalize_disabled_set(platform_disabled["webui"])
+    return _normalize_disabled_set(skills_cfg.get("disabled"))
+
+
+def _normalize_disabled_set(values) -> set:
+    """Normalize a YAML disabled list into a set of stripped strings."""
+    if values is None:
+        return set()
+    if isinstance(values, str):
+        values = [values]
+    return {str(v).strip() for v in values if str(v).strip()}
+
+
 def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
     """List skills using an explicit local skills directory.
 
@@ -223,7 +260,6 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     from tools.skills_tool import (
         MAX_DESCRIPTION_LENGTH,
         _EXCLUDED_SKILL_DIRS,
-        _get_disabled_skill_names,
         _parse_frontmatter,
         _sort_skills,
         skill_matches_platform,
@@ -240,7 +276,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
 
     all_skills = []
     seen_names: set[str] = set()
-    disabled = _get_disabled_skill_names()
+    disabled = _get_disabled_skill_names_for_profile()
     search_dirs = _active_skill_search_dirs(skills_dir)
 
     for scan_dir in search_dirs:
@@ -3852,8 +3888,39 @@ def _serve_shell_unavailable(handler, exc: Exception) -> bool:
     return True
 
 
+_SHUTDOWN_LOG_VALUE_RE = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def _shutdown_log_value(value, *, default: str = "unknown", max_len: int = 160) -> str:
+    """Return a bounded single-line value safe for shutdown diagnostics."""
+    if value is None:
+        return default
+    try:
+        text = str(value)
+    except Exception:
+        return default
+    text = _SHUTDOWN_LOG_VALUE_RE.sub("?", text).strip()
+    if not text:
+        return default
+    if len(text) > max_len:
+        text = f"{text[:max_len]}…"
+    return text
+
+
 def _handle_shutdown(handler) -> bool:
     """Shut down the WebUI server process."""
+    headers = getattr(handler, "headers", {})
+    ua = headers.get("User-Agent", "no-ua") if hasattr(headers, "get") else "no-ua"
+    remote = "unknown"
+    if getattr(handler, "client_address", None):
+        remote = getattr(handler, "client_address", ("unknown",))[0]
+    logger.info(
+        "[shutdown-request] remote=%s method=%s path=%s ua=%s",
+        _shutdown_log_value(remote),
+        _shutdown_log_value(getattr(handler, "command", None)),
+        _shutdown_log_value(getattr(handler, "path", None), max_len=240),
+        _shutdown_log_value(ua, default="no-ua", max_len=240),
+    )
     j(handler, {"status": "shutting_down"})
     import signal
     import threading
@@ -9648,7 +9715,13 @@ def _handle_chat_sync(handler, body):
                 "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present.\n\n"
-                f"{_WEBUI_PROGRESS_PROMPT}"
+                f"{_WEBUI_PROGRESS_PROMPT}\n\n"
+                "WebUI external-notes/durable-memory policy: Do not copy or dump this browser transcript "
+                "into external notes or durable memory by default. Write or update durable "
+                "notes only for explicit captures, durable preferences, decisions, blockers/open "
+                "issues, runbook-worthy workflows, or other clearly reusable signals; otherwise "
+                "leave external notes and durable memory unchanged. When you do write or update a durable note, briefly tell "
+                "the user what note or section changed so the write is reviewable."
             )
 
             _previous_messages = list(s.messages or [])

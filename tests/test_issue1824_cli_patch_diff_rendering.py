@@ -21,7 +21,7 @@ def test_cli_tool_result_diff_snippet_is_not_cut_to_200_chars():
         "if(_cliLooksLikePatchDiff(fullText))return_clipCliToolSnippet(fullText);"
         in COMPACT_UI
     )
-    assert "returnString(fullText||'').slice(0,200);" in COMPACT_UI
+    assert "returnString(fullText||'').slice(0,4000);" in COMPACT_UI
 
 
 def test_cli_tool_fallback_promotes_apply_patch_args_to_tool_card_snippet():

@@ -8,6 +8,30 @@
 - Activity disclosures now have a Settings → Appearance option to expand the activity feed by default, while still honoring per-turn manual collapse/expand choices.
 - Live Activity waiting rows now explain the agent's current step instead of stopping at `Waiting on model`, including a prompt/context review hint before tools run and the latest tool-derived action while the model chooses the next step.
 
+## [v0.51.160] — 2026-05-29 — Release EF (stage-batch42 — 3-PR low-risk cleanup: OpenCode shared-key detection + skills-panel profile-aware disabled read + session-index metadata refresh perf)
+
+### Fixed
+
+- Detect a shared `OPENCODE_API_KEY` as enabling both OpenCode Zen and OpenCode Go provider groups, matching Hermes Agent bridge environments that expose one OpenCode credential.
+- The skills panel now reads each skill's disabled state from the active WebUI profile's `config.yaml` (checking `skills.platform_disabled.webui` then falling back to `skills.disabled`) instead of the process-global `HERMES_HOME`, so non-default profiles show the correct enabled/disabled state and stay consistent with the skill-toggle write path.
+
+### Changed
+
+- WebUI session-sidebar metadata refresh is faster on large session directories: the persisted session-id listing is cached by directory mtime instead of re-globbing under the sessions lock on every `/api/sessions` poll, metadata-only loads skip the per-row session-index read when the sidecar already carries an authoritative `message_count`, and only runtime/lineage-shaped rows are overlaid with fuller sidecar metadata (historical transcripts are no longer scanned on every refresh).
+
+## [v0.51.159] — 2026-05-29 — Release EE (stage-batch41 — 5-PR low-risk cleanup: Gateway tool-progress forwarding + shutdown diagnostics + CLI snippet-limit parity + numpad-Enter submit + sync-chat notes guardrail)
+
+### Changed
+
+- WebUI's durable-notes guardrail now also applies to sync chat and explicitly asks agents to leave external notes and durable memory unchanged unless a turn contains an explicit capture or reusable durable signal; durable note writes should be summarized back to the user.
+
+### Fixed
+
+- Gateway-backed browser chat now forwards Hermes Gateway `hermes.tool.progress` SSE events into WebUI's live tool/activity stream, so Gateway runs no longer appear idle while server-side tools are running.
+- WebUI now logs structured shutdown diagnostics when the server exits or `/api/shutdown` is called, including active stream IDs to help diagnose interrupted turns after restarts.
+- The chat composer now treats the numeric keypad Enter key as a submit shortcut even when the send-key preference is set to Ctrl/Cmd+Enter, while preserving regular Enter-as-newline behavior in that mode.
+- The CLI tool-result snippet limit in the browser now matches the backend (`_TOOL_RESULT_SNIPPET_MAX = 4000`), so longer non-diff CLI tool output is no longer truncated to 200 characters before reaching the tool card.
+
 ## [v0.51.158] — 2026-05-29 — Release ED (stage-batch40 — 5-PR low-risk cleanup: numpad/keyboard composer fixes + Joplin search auth + provider-qualified model preservation + SSE fallback poll throttle + assistant-reply polish)
 
 ### Changed

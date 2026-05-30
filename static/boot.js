@@ -1127,6 +1127,9 @@ function _isVirtualKeyboardLikelyOpen(){
 function _hasFinePointerCoexisting(){
   try{ return matchMedia('(any-pointer:fine)').matches; }catch(_){ return false; }
 }
+function _isNumpadEnter(e){
+  return e.key==='Enter'&&(e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
+}
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -1151,12 +1154,13 @@ $('msg').addEventListener('keydown',e=>{
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
     if(_isImeEnter(e)){return;}
+    const isNumpadEnter=_isNumpadEnter(e);
     const _mobileDefault=matchMedia('(pointer:coarse)').matches
       &&!_hasFinePointerCoexisting()
       &&window._sendKey==='enter'
       &&_isVirtualKeyboardLikelyOpen();
     if(window._sendKey==='ctrl+enter'||_mobileDefault){
-      if(e.ctrlKey||e.metaKey){e.preventDefault();send();}
+      if(isNumpadEnter||e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
       if(!e.shiftKey){e.preventDefault();send();}
     }

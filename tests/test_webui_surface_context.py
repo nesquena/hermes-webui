@@ -20,6 +20,9 @@ def test_webui_ephemeral_prompt_includes_browser_surface_context():
     assert "Workspace: /tmp/example-workspace" in prompt
     assert "not the same live transcript as Telegram" in prompt
     assert "Do not copy or dump this browser transcript" in prompt
+    assert "Write to external notes or durable memory only" in prompt
+    assert "otherwise leave notes unchanged" in prompt
+    assert "what note/section changed" in prompt
     assert "explicit captures" in prompt
     assert "durable user preferences" in prompt
     assert "Do not include terse planning fragments" in prompt
