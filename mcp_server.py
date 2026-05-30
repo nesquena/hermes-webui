@@ -16,7 +16,8 @@ MCP config for Hermes Agent (add to config.yaml):
         command: /path/to/venv/bin/python3
         args: [/path/to/hermes-webui/mcp_server.py]
         env:
-          HERMES_WEBUI_PASSWORD: your_password
+          HERMES_WEBUI_STATE_DIR: /path/to/webui/state
+          HERMES_WEBUI_MCP_TOKEN_FILE: /path/to/webui/state/.mcp_token
 
 Profile override (optional):
         args: [/path/to/hermes-webui/mcp_server.py, --profile, myprofile]
@@ -126,12 +127,25 @@ def _api_password() -> str | None:
 
     settings.json stores only the bcrypt hash, which the login endpoint cannot
     accept — it calls verify_password(plaintext) against the stored hash. So
-    there's no usable fallback when the env var is unset; the MCP simply runs
-    in unauthenticated mode and any auth-protected mutation will fail clearly
-    with the server's 401 instead of silently sending an unusable hash.
+    there's no usable fallback when the env var is unset; the MCP falls back to
+    the local token-file header path and otherwise any auth-protected mutation
+    will fail clearly with the server's 401 instead of silently sending an
+    unusable hash.
     """
     pw = os.environ.get("HERMES_WEBUI_PASSWORD", "").strip()
     return pw or None
+
+
+def _api_mcp_token() -> str | None:
+    """Return the bundled WebUI MCP token from HERMES_WEBUI_MCP_TOKEN_FILE."""
+    token_file = os.environ.get("HERMES_WEBUI_MCP_TOKEN_FILE", "").strip()
+    if not token_file:
+        return None
+    try:
+        token = Path(token_file).read_text(encoding="utf-8").strip()
+        return token or None
+    except OSError:
+        return None
 
 
 def _api_auth() -> str | None:
@@ -167,13 +181,16 @@ def _api_auth() -> str | None:
 
 
 def _api_post(endpoint: str, body: dict) -> dict:
-    """POST to webui API with auth cookie. Returns parsed JSON response."""
+    """POST to webui API with MCP token or auth cookie. Returns parsed JSON response."""
     import urllib.request
     import urllib.error
 
-    cookie = _api_auth()
+    token = _api_mcp_token()
+    cookie = None if token else _api_auth()
     headers = {"Content-Type": "application/json"}
-    if cookie:
+    if token:
+        headers["X-Hermes-WebUI-MCP-Token"] = token
+    elif cookie:
         headers["Cookie"] = cookie
 
     try:
@@ -348,16 +365,16 @@ async def handle_delete_project(arguments: dict) -> list[TextContent]:
     # subsequent re-compact. Even calling Session.save() in-process would
     # not help because the WebUI's SESSIONS dict cache (a separate process)
     # still has the old project_id and overwrites our update on its next
-    # save. The HTTP API is the only cache-safe path; without auth we
-    # refuse and surface the limitation so the operator can act.
-    has_auth = bool(_api_password())
+    # The HTTP API is the only cache-safe path; without auth or the internal
+    # MCP token we refuse and surface the limitation so the operator can act.
+    has_auth = bool(_api_password() or _api_mcp_token())
     if not has_auth:
         return [TextContent(type="text", text=json.dumps({
             "ok": True,
             "deleted": proj["name"],
             "unassigned_sessions": 0,
-            "warning": "Set HERMES_WEBUI_PASSWORD to unassign sessions; "
-                       "without auth the session index cannot be safely "
+            "warning": "Set HERMES_WEBUI_PASSWORD or HERMES_WEBUI_MCP_TOKEN_FILE to unassign sessions; "
+                       "without API auth the session index cannot be safely "
                        "updated and direct filesystem writes would cause "
                        "index drift in a running WebUI.",
         }, ensure_ascii=False))]

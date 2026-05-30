@@ -13,6 +13,7 @@ import secrets
 import tempfile
 import threading
 import time
+from pathlib import Path
 
 from api.config import STATE_DIR, load_settings
 
@@ -56,8 +57,15 @@ PUBLIC_PATHS = frozenset({
 
 COOKIE_NAME = 'hermes_session'
 CSRF_HEADER_NAME = 'X-Hermes-CSRF-Token'
+MCP_TOKEN_HEADER_NAME = 'X-Hermes-WebUI-MCP-Token'
 
 _SESSIONS_FILE = STATE_DIR / '.sessions.json'
+_MCP_TOKEN_FILE = Path(os.getenv('HERMES_WEBUI_MCP_TOKEN_FILE', str(STATE_DIR / '.mcp_token')))
+_MCP_ALLOWED_PATHS = frozenset({
+    '/api/session/move',
+    '/api/session/rename',
+    '/api/projects/ensure-for-session',
+})
 
 
 def _load_sessions() -> dict[str, float]:
@@ -486,6 +494,29 @@ def parse_cookie(handler) -> str | None:
     return morsel.value if morsel else None
 
 
+def _read_mcp_token() -> str | None:
+    """Return the bundled WebUI MCP token from disk, if configured."""
+    try:
+        token = _MCP_TOKEN_FILE.read_text(encoding='utf-8').strip()
+        return token or None
+    except OSError:
+        return None
+
+
+
+def _verify_mcp_token(handler, parsed) -> bool:
+    """Return True when the request presents the internal MCP token.
+
+    The token is accepted only on the narrow cache-safe mutation routes used by
+    the bundled MCP server. It is not a general-purpose API bearer token.
+    """
+    if parsed.path not in _MCP_ALLOWED_PATHS:
+        return False
+    presented = handler.headers.get(MCP_TOKEN_HEADER_NAME, '').strip()
+    expected = _read_mcp_token()
+    return bool(presented and expected and hmac.compare_digest(presented, expected))
+
+
 def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
@@ -493,6 +524,9 @@ def check_auth(handler, parsed) -> bool:
         return True
     # Public paths don't require auth
     if parsed.path in PUBLIC_PATHS or parsed.path.startswith('/static/') or parsed.path.startswith('/session/static/'):
+        return True
+    # Bundled local MCP token is allowed only on a narrow mutation allowlist.
+    if _verify_mcp_token(handler, parsed):
         return True
     # Check session cookie
     cookie_val = parse_cookie(handler)

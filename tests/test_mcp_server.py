@@ -14,6 +14,7 @@ import sys
 import tempfile
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -622,6 +623,15 @@ class TestApiPassword:
         finally:
             os.environ.pop("HERMES_WEBUI_PASSWORD", None)
 
+    async def test_mcp_token_file_returned(self, tmp_path):
+        token_file = tmp_path / ".mcp_token"
+        token_file.write_text("tok_123", encoding="utf-8")
+        os.environ["HERMES_WEBUI_MCP_TOKEN_FILE"] = str(token_file)
+        try:
+            assert self.mod._api_mcp_token() == "tok_123"
+        finally:
+            os.environ.pop("HERMES_WEBUI_MCP_TOKEN_FILE", None)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  _profiles_match parity (mcp_server vs api.routes vs api.profiles)
@@ -783,8 +793,8 @@ import threading
 class _RecordingHandler(http.server.BaseHTTPRequestHandler):
     """Captures POST path + body, returns canned JSON. Class-level state is
     set by the fixture before each test so handlers can cross-reference."""
-    captured = None  # populated per-test as a list of (path, body, headers)
-    canned_response = None  # populated per-test: dict to be JSON-encoded
+    captured: list[dict[str, Any]] = []
+    canned_response: dict[str, Any] = {}
 
     def log_message(self, *args, **kwargs):  # noqa: D401 — silence stderr
         pass
@@ -800,6 +810,7 @@ class _RecordingHandler(http.server.BaseHTTPRequestHandler):
             "path": self.path,
             "body": body,
             "cookie": self.headers.get("Cookie"),
+            "mcp_token": self.headers.get("X-Hermes-WebUI-MCP-Token"),
             "content_type": self.headers.get("Content-Type"),
         })
         payload = json.dumps(type(self).canned_response or {}).encode("utf-8")
@@ -835,6 +846,7 @@ class TestApiWireFormat:
 
         # Disable auth so _api_post() does not attempt a real /api/auth/login.
         os.environ.pop("HERMES_WEBUI_PASSWORD", None)
+        os.environ.pop("HERMES_WEBUI_MCP_TOKEN_FILE", None)
 
         self.mod, self.profiles = _reimport_mcp()
         # Override AFTER import so the value sticks in the loaded module.
@@ -883,6 +895,28 @@ class TestApiWireFormat:
         assert result["session_id"] == "s1"
         assert result["project_id"] == pid
         assert result["method"] == "api"
+
+    async def test_move_session_uses_mcp_token_header_when_configured(self, tmp_path):
+        """The bundled MCP should prefer the local token header over cookie login."""
+        token_file = tmp_path / ".mcp_token"
+        token_file.write_text("tok_123", encoding="utf-8")
+        os.environ["HERMES_WEBUI_MCP_TOKEN_FILE"] = str(token_file)
+        try:
+            created = await _call(self.mod, "create_project", name="TokenMoveTarget")
+            pid = created["project_id"]
+            _RecordingHandler.canned_response = {
+                "ok": True,
+                "session": {"session_id": "s2", "title": "T2", "project_id": pid}
+            }
+            result = await _call(self.mod, "move_session", session_id="s2", project_id=pid)
+            assert len(_RecordingHandler.captured) == 1
+            req = _RecordingHandler.captured[0]
+            assert req["path"] == "/api/session/move"
+            assert req["mcp_token"] == "tok_123"
+            assert req["cookie"] is None
+            assert result["ok"] is True
+        finally:
+            os.environ.pop("HERMES_WEBUI_MCP_TOKEN_FILE", None)
 
     async def test_move_session_unassign_sends_null_project_id(self):
         """Passing project_id=None must serialize as JSON null (not omitted)."""
