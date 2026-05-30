@@ -2421,6 +2421,67 @@ def test_space_tool_adapter_widget_event_returns_metadata_only_compaction_receip
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_widget_event_list_returns_required_policy_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-event-list-policy-lab", "name": "Widget Event List Policy Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "agent-card", "kind": "markdown", "title": "Agent Card"})
+    queued = spaces.run_space_tool(
+        "space.current.widget.event",
+        {
+            "activeSpaceId": created["space_id"],
+            "widgetId": "agent-card",
+            "eventName": "agent.prompt",
+            "payload": {
+                "messageType": "capy:agent:prompt",
+                "kind": "safe-event-metadata",
+                "message": "Summarize private widget request must not leak.",
+                "renderer": "<script>steal()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "prompt": "Use only metadata receipts.",
+        },
+    )
+
+    listed = spaces.run_space_tool(
+        "space.current.widget.events",
+        {
+            "activeSpaceId": created["space_id"],
+            "widgetId": "agent-card",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "token": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps(listed, sort_keys=True).lower()
+
+    assert listed["ok"] is True
+    assert listed["action"] == "space.current.widget.events"
+    assert listed["active_space_id"] == created["space_id"]
+    assert listed["events"][0]["event_id"] == queued["event_id"]
+    assert listed["prompt_preflight"]["boundary"] == "widget_runtime_prompt"
+    assert listed["prompt_preflight"]["status"] == "required"
+    assert listed["prompt_preflight"]["metadata_only"] is True
+    assert listed["prompt_preflight"]["raw_prompt_stored"] is False
+    assert listed["autonomy_policy"]["action"] == "space.current.widget.events"
+    assert listed["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+    assert listed["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert listed["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+    assert listed["autonomy_policy"]["metadata_only"] is True
+    assert listed["output_compaction"]["command"] == "space.current.widget.events"
+    assert listed["output_compaction"]["metadata_only"] is True
+    for line in listed["output_compaction"]["text"].splitlines():
+        assert line.startswith(("action: ", "space_id: ", "event_count: ", "widget_id: ", "active_space_id: ", "event_"))
+    assert "summarize private widget request" not in serialized
+    assert "use only metadata receipts" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+
+
 def test_widget_event_payload_summary_omits_prompt_carriers_and_generated_bodies(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "widget-event-payload-safety-lab", "name": "Widget Event Payload Safety Lab"})

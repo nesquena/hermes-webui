@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): preflight widget event list receipts`
+  - Added RED/GREEN backend coverage proving widget-event list tool responses now include top-level metadata-only required prompt-preflight and autonomy-policy receipts beside safe event rows and regenerated output-compaction evidence.
+  - Kept inbox reads redacted and advisory-only: ignored request renderer/source/API-auth fields, scripts, tokens, secret-looking values, and persisted prompt-like event details are not exposed.
+
 - `feat(spaces): preflight revision history receipts`
   - Added RED/GREEN backend coverage proving source-style Space revision/history list tool responses now include top-level metadata-only required prompt-preflight and autonomy-policy receipts beside sanitized revision rows and compaction evidence.
   - Kept revision/history list responses redacted and advisory-only: ignored request renderer/source/API-auth fields, scripts, and secret-looking fixture values are not exposed.

@@ -8300,11 +8300,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             widget_id_raw = positional_widget_id
         widget_id = validate_widget_id(widget_id_raw) if widget_id_raw else None
         events = list_widget_events(space_id, widget_id, data.get("limit", 20))
-        return {
+        prompt_preflight = _widget_reload_required_prompt_preflight_receipt(name)
+        autonomy_policy = _widget_reload_action_policy_receipt(name, prompt_preflight)
+        response = {
             "ok": True,
             "action": name,
             "active_space_id": space_id,
             "events": events,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
             "output_compaction": _widget_events_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
@@ -8313,6 +8317,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 active_space_id=space_id if is_current_widget_events else None,
             ),
         }
+        return response
     if name in {"widget.event", "space.widget.event", "space.current.widget.event"}:
         args = data.get("args")
         positional_space_id = _space_tool_arg(data, 0) if isinstance(args, (list, tuple)) else ""
