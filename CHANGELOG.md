@@ -11,6 +11,17 @@
 - Self-update restart safety now checks active agent runs as well as open SSE streams and waits for in-flight work before re-exec, avoiding update-triggered interruption when a run outlives its browser stream.
 - Documented the WebUI prefill context budget in README and architecture notes so operators can keep new-browser-turn startup context compact.
 
+## [v0.51.160] — 2026-05-29 — Release EF (stage-batch42 — 3-PR low-risk cleanup: OpenCode shared-key detection + skills-panel profile-aware disabled read + session-index metadata refresh perf)
+
+### Fixed
+
+- Detect a shared `OPENCODE_API_KEY` as enabling both OpenCode Zen and OpenCode Go provider groups, matching Hermes Agent bridge environments that expose one OpenCode credential.
+- The skills panel now reads each skill's disabled state from the active WebUI profile's `config.yaml` (checking `skills.platform_disabled.webui` then falling back to `skills.disabled`) instead of the process-global `HERMES_HOME`, so non-default profiles show the correct enabled/disabled state and stay consistent with the skill-toggle write path.
+
+### Changed
+
+- WebUI session-sidebar metadata refresh is faster on large session directories: the persisted session-id listing is cached by directory mtime instead of re-globbing under the sessions lock on every `/api/sessions` poll, metadata-only loads skip the per-row session-index read when the sidecar already carries an authoritative `message_count`, and only runtime/lineage-shaped rows are overlaid with fuller sidecar metadata (historical transcripts are no longer scanned on every refresh).
+
 ## [v0.51.159] — 2026-05-29 — Release EE (stage-batch41 — 5-PR low-risk cleanup: Gateway tool-progress forwarding + shutdown diagnostics + CLI snippet-limit parity + numpad-Enter submit + sync-chat notes guardrail)
 
 ### Changed
