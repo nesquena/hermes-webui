@@ -100,7 +100,9 @@ def test_sidebar_cache_completion_handles_compression_session_rotation():
 
     assert "function _markSessionCompletedInList(session, previousSid = null)" in helper_block
     assert "const finalSid = session.session_id || previousSid;" in helper_block
-    assert "s.session_id === finalSid || s.session_id === previousSid" in helper_block
+    assert "const finalIdx = _allSessions.findIndex(s => s && s.session_id === finalSid);" in helper_block
+    assert "const previousIdx = previousSid ? _allSessions.findIndex(s => s && s.session_id === previousSid) : -1;" in helper_block
+    assert "const idx = finalIdx >= 0 ? finalIdx : previousIdx;" in helper_block
     assert "const {messages: _messages, tool_calls: _toolCalls, ...sessionMeta} = session;" in helper_block
     assert "...sessionMeta" in helper_block
     assert "session_id: finalSid" in helper_block

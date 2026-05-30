@@ -99,6 +99,25 @@ def _session_field(session, field, default=None):
     return getattr(session, field, default)
 
 
+def _session_counts_toward_pin_quota(session) -> bool:
+    """Return True when a pinned session should consume visible pin quota."""
+    if not _session_field(session, "pinned", False):
+        return False
+    if _session_field(session, "archived", False):
+        return False
+    if isinstance(session, dict):
+        row = session
+    elif hasattr(session, "compact"):
+        row = session.compact()
+    else:
+        row = {
+            "pre_compression_snapshot": _session_field(session, "pre_compression_snapshot", False),
+            "source_tag": _session_field(session, "source_tag", None),
+            "default_hidden": _session_field(session, "default_hidden", False),
+        }
+    return not _hide_from_default_sidebar(row)
+
+
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
 #
 # Sessions and projects are stored in the WebUI sidecar without per-row
@@ -2257,7 +2276,13 @@ def _messages_include_tool_metadata(messages) -> bool:
 
 
 def _tool_calls_for_message_window(tool_calls, start_idx: int, message_count: int) -> list:
-    """Keep session-level tool calls that point into a returned message window."""
+    """Keep session-level tool calls that point into a returned message window.
+
+    ``assistant_msg_idx`` is stored in the full transcript coordinate space, but
+    the frontend renders the returned ``messages`` array from index 0. Rebase the
+    index into the returned window so legacy session-level tool cards still
+    anchor to their visible assistant turn after paginated loads.
+    """
     if not isinstance(tool_calls, list) or message_count <= 0:
         return []
     end_idx = start_idx + message_count
@@ -2269,7 +2294,9 @@ def _tool_calls_for_message_window(tool_calls, start_idx: int, message_count: in
         if isinstance(assistant_idx, bool) or not isinstance(assistant_idx, int):
             continue
         if start_idx <= assistant_idx < end_idx:
-            filtered.append(tool_call)
+            rebased = dict(tool_call)
+            rebased["assistant_msg_idx"] = assistant_idx - start_idx
+            filtered.append(rebased)
     return filtered
 
 
@@ -2730,6 +2757,7 @@ from api.models import (
     merge_session_messages_append_only,
     _session_message_merge_key,
     _is_empty_partial_activity_message,
+    _hide_from_default_sidebar,
     prune_session_from_index,
     ensure_cron_project,
     is_cron_session,
@@ -3510,6 +3538,63 @@ def _handle_insights(handler, parsed) -> bool:
                 hod_activity[dt.tm_hour] += 1
             except Exception:
                 pass
+
+    # ── Also include CLI sessions from Hermes state.db ─────────────────────
+    try:
+        from api.models import _active_state_db_path
+        db_path = _active_state_db_path()
+        if db_path and db_path.exists():
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT id, model, message_count, input_tokens, output_tokens,
+                           estimated_cost_usd, started_at, ended_at
+                    FROM sessions
+                    WHERE (started_at >= ? OR ended_at >= ?)
+                      AND COALESCE(source, '') != 'webui'
+                """, (cutoff, cutoff))
+                for row in cur.fetchall():
+                    _input = _safe_usage_int(row["input_tokens"])
+                    _output = _safe_usage_int(row["output_tokens"])
+                    _cost = _safe_cost_float(row["estimated_cost_usd"])
+                    _msgs = _safe_usage_int(row["message_count"])
+                    total_sessions += 1
+                    total_messages += _msgs
+                    total_input_tokens += _input
+                    total_output_tokens += _output
+                    total_cost += _cost
+
+                    _model = row["model"] or "unknown"
+                    bucket = model_stats.setdefault(_model, {
+                        "sessions": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "cost": 0.0,
+                    })
+                    bucket["sessions"] += 1
+                    bucket["input_tokens"] += _input
+                    bucket["output_tokens"] += _output
+                    bucket["cost"] += _cost
+
+                    _ts = row["started_at"] or row["ended_at"] or 0
+                    if _ts:
+                        _dt = _time.localtime(_ts)
+                        _day_key = _time.strftime("%Y-%m-%d", _dt)
+                        _daily = daily_tokens.setdefault(_day_key, {
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "sessions": 0,
+                            "cost": 0.0,
+                        })
+                        _daily["input_tokens"] += _input
+                        _daily["output_tokens"] += _output
+                        _daily["sessions"] += 1
+                        _daily["cost"] += _cost
+                        dow_activity[_dt.tm_wday] += 1
+                        hod_activity[_dt.tm_hour] += 1
+    except Exception:
+        logger.debug("Failed to include CLI sessions in insights", exc_info=True)
 
     # Build model breakdown
     total_tokens = total_input_tokens + total_output_tokens
@@ -6509,7 +6594,7 @@ def handle_post(handler, parsed) -> bool:
             # so must run outside our own LOCK acquire below).
             persisted_pinned_ids = {
                 _session_field(existing, "session_id", None) for existing in all_sessions()
-                if _session_field(existing, "pinned", False) and not _session_field(existing, "archived", False)
+                if _session_counts_toward_pin_quota(existing)
             }
             with LOCK:
                 # Final authoritative count: merge persisted-pinned with the
@@ -6519,7 +6604,7 @@ def handle_post(handler, parsed) -> bool:
                 pinned_ids = set(persisted_pinned_ids)
                 pinned_ids.update(
                     sid for sid, existing in SESSIONS.items()
-                    if getattr(existing, "pinned", False) and not getattr(existing, "archived", False)
+                    if _session_counts_toward_pin_quota(existing)
                 )
                 pinned_ids.discard(body["session_id"])
                 pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)
@@ -7982,6 +8067,14 @@ def _session_media_token_allows_image_path(sid: str, target: Path, image_mimes: 
     return False
 
 
+def _path_is_within_root(child: Path, root: Path) -> bool:
+    """Return True when ``child`` is inside ``root`` without crashing on Windows drives."""
+    try:
+        return os.path.commonpath([str(child), str(root)]) == str(root)
+    except ValueError:
+        return False
+
+
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
@@ -8058,7 +8151,7 @@ def _handle_media(handler, parsed):
         "image/x-icon", "image/bmp",
     }
     within_allowed = any(
-        _os.path.commonpath([str(target), str(root)]) == str(root)
+        _path_is_within_root(target, root)
         for root in allowed_roots
         if root.exists()
     )

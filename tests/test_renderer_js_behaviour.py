@@ -33,7 +33,8 @@ _DRIVER_SRC = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 global.window = {};
-global.document = { createElement: () => ({ innerHTML: '', textContent: '' }) };
+global.document = { createElement: () => ({ innerHTML: '', textContent: '' }), baseURI: 'http://localhost/app/' };
+function _sessionUrlForSid(sid) { return '/app/session/' + encodeURIComponent(String(sid || '')); }
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
@@ -85,6 +86,29 @@ def _render(driver_path, markdown: str) -> str:
         raise RuntimeError(f"node driver failed: {result.stderr}")
     return result.stdout
 
+
+
+class TestSessionInternalLinks:
+    """Drive renderMd() so session:// hardening covers the real sanitizer path."""
+
+    def test_session_scheme_renders_same_origin_internal_anchor(self, driver_path):
+        out = _render(driver_path, "[Open session](session://abc123)")
+        assert 'class="session-link"' in out
+        assert 'href="/app/session/abc123"' in out
+        assert 'target="_blank"' not in out
+        assert 'rel="noopener"' not in out
+
+    def test_hostile_session_scheme_collapses_to_encoded_session_path(self, driver_path):
+        out = _render(driver_path, "[bad](session://javascript:alert(1))")
+        assert 'class="session-link"' in out
+        assert 'href="/app/session/javascript%3Aalert(1"' in out
+        assert 'href="javascript:' not in out
+        assert 'target="_blank"' not in out
+
+    def test_unrelated_same_origin_session_segment_is_not_allowlisted(self, driver_path):
+        out = _render(driver_path, '<a class="session-link" href="/anything/foo/session/abc">bad</a>')
+        assert 'href="/anything/foo/session/abc"' not in out
+        assert '<a>bad</a>' in out
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Blockquote prefix strip — the bug commit 04e7b53 introduced was a one-char

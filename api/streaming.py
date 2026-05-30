@@ -2286,8 +2286,10 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             # pre-existing parent_session_id lineage.
             saved_sid = s.session_id
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
+            saved_pinned = bool(getattr(s, 'pinned', False))
             s.session_id = old_sid
             s.pre_compression_snapshot = True
+            s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
             # archived snapshot so the sidebar does not reopen the parent as
             # a permanently-running session while the child already holds the
@@ -2314,6 +2316,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             finally:
                 s.session_id = saved_sid
                 s.pre_compression_snapshot = saved_snapshot
+                s.pinned = saved_pinned
                 s.active_stream_id = saved_active_stream_id
                 s.pending_user_message = saved_pending_user_message
                 s.pending_attachments = saved_pending_attachments
@@ -2326,6 +2329,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         snapshot = Session.load(old_sid)
         if snapshot:
             snapshot.pre_compression_snapshot = True
+            snapshot.pinned = False
             # Stage-359 Opus SHOULD-FIX: clear runtime fields on the loaded
             # snapshot too. If the disk snapshot was last persisted while the
             # parent was live, it could carry a stale active_stream_id /
