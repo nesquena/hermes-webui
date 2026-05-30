@@ -59,9 +59,15 @@ def test_thinking_card_header_includes_copy_button_that_does_not_toggle_card():
 def test_live_thinking_updates_existing_card_body_in_place():
     assert "function _renderThinkingInto(row,text='')" in UI_JS
     assert "row.querySelector('.thinking-card-body pre')" in UI_JS
-    assert "pre.textContent=clean" in UI_JS
+    assert "pre.innerHTML=_renderThinkingDisplayHtml(clean)" in UI_JS
     assert "_renderThinkingInto(row,text);" in UI_JS
 
+
+def test_thinking_card_body_matches_assistant_output_typography():
+    assert ".thinking-card-body pre { font-family: var(--font-ui); font-size: 14px; line-height: 1.75;" in STYLE_CSS
+    # Keep thinking visually secondary even though it now shares the output font.
+    assert ".thinking-card-body pre {" in STYLE_CSS
+    assert "color: var(--muted);" in STYLE_CSS
 
 def test_thinking_card_uses_panel_chrome_with_gold_palette():
     # Canonical thinking-card rule lives in the consolidated block (border-radius

@@ -3989,7 +3989,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
   transition: max-height .22s ease, opacity .18s ease, padding .22s ease, border-top-color .22s ease;
 }
 .thinking-card.open .thinking-card-body { max-height: 260px; overflow-y: auto; opacity: 1; padding: 8px 12px; border-top-color: var(--accent-bg-strong); }
-.thinking-card-body pre { font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; word-break: break-word; margin: 0; }
+.thinking-card-body pre { font-family: var(--font-ui); font-size: 14px; line-height: 1.75; color: var(--muted); white-space: pre-wrap; word-break: break-word; margin: 0; }
 .thinking-card-body pre strong.thinking-heading { color: var(--text); font-weight: 700; }
 
 /* ── Tool cards: tighter chrome to match quieter thinking card ── */
