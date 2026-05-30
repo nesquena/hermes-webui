@@ -11,7 +11,7 @@ from pathlib import Path
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
 from api.helpers import j, bad
 from api.models import get_session
-from api.workspace import safe_resolve_ws
+from api.workspace import safe_resolve_ws, resolve_trusted_workspace
 
 _MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
 
@@ -320,3 +320,110 @@ def handle_transcribe(handler):
                 Path(temp_path).unlink(missing_ok=True)
             except Exception:
                 pass
+
+
+def handle_workspace_upload(handler):
+    """Upload a file into a session's workspace directory.
+
+    Form fields:
+        session_id – target session
+        path       – subdirectory within the workspace (default: '')
+    File:
+        file – the uploaded file(s)
+    """
+    import traceback as _tb
+    try:
+        content_type = handler.headers.get('Content-Type', '')
+        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        if content_length > MAX_UPLOAD_BYTES:
+            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
+
+        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        session_id = fields.get('session_id', '')
+        subpath = fields.get('path', '')
+
+        if not session_id:
+            return j(handler, {'error': 'Missing session_id'}, status=400)
+
+        if not files:
+            return j(handler, {'error': 'No file field in request'}, status=400)
+
+        # Validate session
+        try:
+            session = get_session(session_id)
+        except KeyError:
+            return j(handler, {'error': 'Session not found'}, status=404)
+
+        # Resolve workspace root from session
+        workspace = resolve_trusted_workspace(session.workspace)
+
+        # Resolve target subdirectory within workspace
+        target_dir = safe_resolve_ws(workspace, subpath) if subpath else workspace
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        results = []
+        for field_name, (filename, file_bytes) in files.items():
+            if not filename:
+                continue
+
+            safe_name = _sanitize_upload_name(filename)
+            dest = safe_resolve_ws(target_dir, safe_name)
+
+            # Path traversal guard
+            if not dest.resolve().is_relative_to(workspace.resolve()):
+                return j(handler, {'error': f'Path traversal blocked: {safe_name}'}, status=403)
+
+            # Deduplicate: append -1, -2, etc. if file already exists
+            if dest.exists():
+                stem = dest.stem
+                suffix = dest.suffix
+                for idx in range(1, 1000):
+                    candidate = safe_resolve_ws(target_dir, f'{stem}-{idx}{suffix}')
+                    if not candidate.resolve().is_relative_to(workspace.resolve()):
+                        return j(handler, {'error': 'Path traversal blocked'}, status=403)
+                    if not candidate.exists():
+                        dest = candidate
+                        break
+                else:
+                    return j(handler, {'error': 'Too many uploads with the same filename'}, status=400)
+
+            dest.write_bytes(file_bytes)
+            mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
+
+            # For archives, optionally extract
+            is_archive = safe_name.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar.bz2', '.tar.xz'))
+            if is_archive:
+                try:
+                    extract_archive(file_bytes, safe_name, workspace)
+                    # Remove the archive file after extraction
+                    dest.unlink(missing_ok=True)
+                    results.append({
+                        'filename': safe_name,
+                        'path': str(target_dir),
+                        'size': len(file_bytes),
+                        'mime': mime,
+                        'is_image': False,
+                        'extracted': True,
+                    })
+                    continue
+                except (ValueError, Exception) as e:
+                    # If extraction fails, keep the archive file
+                    pass
+
+            results.append({
+                'filename': safe_name,
+                'path': str(dest),
+                'size': dest.stat().st_size,
+                'mime': mime,
+                'is_image': mime.startswith('image/'),
+                'extracted': False,
+            })
+
+        if len(results) == 1:
+            return j(handler, results[0])
+        return j(handler, {'files': results, 'count': len(results)})
+    except ValueError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    except Exception:
+        print('[webui] workspace upload error: ' + _tb.format_exc(), flush=True)
+        return j(handler, {'error': 'Upload failed'}, status=500)

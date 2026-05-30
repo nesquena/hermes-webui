@@ -2779,7 +2779,7 @@ from api.workspace import (
     _strip_surrounding_quotes,
     _workspace_blocked_roots,
 )
-from api.upload import handle_upload, handle_upload_extract, handle_transcribe
+from api.upload import handle_upload, handle_upload_extract, handle_transcribe, handle_workspace_upload
 from api.streaming import (
     _sse,
     _run_agent_streaming,
@@ -5377,6 +5377,8 @@ def handle_post(handler, parsed) -> bool:
         return handle_upload(handler)
     if parsed.path == "/api/upload/extract":
         return handle_upload_extract(handler)
+    if parsed.path == "/api/workspace/upload":
+        return handle_workspace_upload(handler)
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
