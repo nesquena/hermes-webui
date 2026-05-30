@@ -168,6 +168,15 @@ def has_pending(session_key: str) -> bool:
         return bool(_gateway_queues.get(session_key))
 
 
+def pending_count(session_key: str) -> int:
+    """Return the number of unresolved clarify prompts for a session."""
+    with _lock:
+        queue = _gateway_queues.get(session_key) or []
+        if queue:
+            return len(queue)
+        return 1 if _pending.get(session_key) else 0
+
+
 def resolve_clarify(session_key: str, response: str, resolve_all: bool = False) -> int:
     """Resolve the oldest pending clarify request for a session."""
     with _lock:

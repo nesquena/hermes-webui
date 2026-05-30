@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+
+### Added
+
+- Sidebar session rows now surface pending approval and clarify work with `attention` metadata from `/api/sessions`, semantic row classes, and visible action-required badges so inactive conversations that need a permission decision or answer are harder to miss.
+
 ## [v0.51.171] — 2026-05-30 — Release EQ (stage-batch53 — tool-output card badge + Neon opt-in skin)
 
 ### Added
