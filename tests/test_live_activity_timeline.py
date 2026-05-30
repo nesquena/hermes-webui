@@ -29,9 +29,10 @@ def test_empty_thinking_placeholder_becomes_status_row_not_raw_thinking_card():
     assert "Waiting for first model token" in UI_JS
     assert "Stream connected; no model output has arrived yet." in UI_JS
     assert "Waiting on model" in UI_JS
-    assert "Tool finished; waiting for the model to continue." in UI_JS
+    assert "Reviewing the prompt and context, then choosing the next action or composing the response." in UI_JS
+    assert "Reviewing prompt and context" in UI_JS
     assert "Waiting on tool result" in UI_JS
-    assert "The tool is still running; the response will continue after it completes." in UI_JS
+    assert "Last step: ${action} (${toolName}); now choosing the next action or composing a response." in UI_JS
     assert "_thinkingActivityNode(thinkingText, false)" in UI_JS
 
 
@@ -43,6 +44,23 @@ def test_stream_start_refreshes_waiting_status_after_stream_id_arrives():
     assert refresh_idx != -1
     assert attach_idx != -1
     assert refresh_idx < attach_idx
+
+
+def test_activity_feed_default_expand_setting_is_wired():
+    index_html = (REPO / "static" / "index.html").read_text(encoding="utf-8")
+    panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    config_py = (REPO / "api" / "config.py").read_text(encoding="utf-8")
+
+    assert 'id="settingsActivityFeedExpandedDefault"' in index_html
+    assert "settings_label_activity_feed_expanded_default" in index_html
+    assert '"activity_feed_expanded_default": False' in config_py
+    assert "activity_feed_expanded_default" in panels_js
+    assert "window._activityFeedExpandedDefault=!!s.activity_feed_expanded_default;" in boot_js
+    assert "if(window._activityFeedExpandedDefault===true) collapsed=false;" in UI_JS
+    finalize_fn = UI_JS.split("function finalizeThinkingCard")[1].split("\nfunction ")[0]
+    assert "_activityFeedExpandedDefault" in finalize_fn
+    assert "_liveActivityUserExpanded !== false" in finalize_fn
 
 
 def test_tool_events_update_activity_timeline_and_summary():

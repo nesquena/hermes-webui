@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Activity disclosures now have a Settings → Appearance option to expand the activity feed by default, while still honoring per-turn manual collapse/expand choices.
+- Live Activity waiting rows now explain the agent's current step instead of stopping at `Waiting on model`, including a prompt/context review hint before tools run and the latest tool-derived action while the model chooses the next step.
+
 ## [v0.51.180] — 2026-05-30 — Release EZ (stage-batch62 — session/agent cache ownership hardening)
 
 ### Fixed

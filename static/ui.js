@@ -5523,10 +5523,13 @@ function ensureActivityGroup(inner, opts){
   if(!group){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
+    if(window._activityFeedExpandedDefault===true) collapsed=false;
     const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
-    // state win across session switches and reloads.
+    // state win across session switches and reloads. Saved closed-state should
+    // override the default-expanded preference for settled groups the user has
+    // explicitly collapsed.
     if(live && _liveActivityUserExpanded === true) collapsed=false;
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
     if(savedState==='open') collapsed=false;
@@ -7087,14 +7090,33 @@ function _activityProgressLabelForToolName(name){
   return 'Working';
 }
 
+function _activityLatestToolName(group){
+  if(!group) return '';
+  const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
+  const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
+  return latest?String(latest.textContent||'').trim():'';
+}
+
+function _activityWaitingDetail(group,label=''){
+  const toolName=_activityLatestToolName(group);
+  if(toolName){
+    const action=_activityProgressLabelForToolName(toolName);
+    if(group&&group.querySelector('.tool-card.tool-card-running')) return `${action}: ${toolName}. Results will appear here.`;
+    return `Last step: ${action} (${toolName}); now choosing the next action or composing a response.`;
+  }
+  if(String(label||'').toLowerCase().includes('model')) return 'Reviewing the prompt and context, then choosing the next action or composing the response.';
+  return 'The agent is running; tool results and response text will appear here.';
+}
+
 function _activityLiveProgressLabel(group){
   if(!group||group.getAttribute('data-live-tool-call-group')!=='1') return '';
   const idleAge=_activityLastObservedAge(group);
   if(idleAge!==null&&idleAge>=90) return `No recent activity for ${_formatActiveElapsedTimer(idleAge)}`;
   const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
-  const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
+  const latest=running?String(running.textContent||'').trim():_activityLatestToolName(group);
   const waiting=group.querySelector('.agent-activity-status-waiting .agent-activity-status-label');
-  if(latest) return _activityProgressLabelForToolName(latest.textContent);
+  if(latest) return _activityProgressLabelForToolName(latest);
+  if(waiting&&waiting.textContent&&String(waiting.textContent).toLowerCase().includes('model')) return 'Reviewing prompt and context';
   if(waiting&&waiting.textContent) return waiting.textContent;
   return 'Starting agent';
 }
@@ -7173,8 +7195,13 @@ function appendLiveToolCard(tc){
     status:toolDone?(tc.is_error?'error':'done'):'waiting',
     ts:_activityNowSeconds(),
   });
-  const waiting=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"] .agent-activity-status-label');
-  if(waiting&&!toolDone) waiting.textContent='Waiting on tool result';
+  const waiting=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"]');
+  if(waiting&&!toolDone){
+    const labelEl=waiting.querySelector('.agent-activity-status-label');
+    const detailEl=waiting.querySelector('.agent-activity-status-detail');
+    if(labelEl) labelEl.textContent='Waiting on tool result';
+    if(detailEl) detailEl.textContent=`${_activityProgressLabelForToolName(toolName)}: ${toolName}. Results will appear here.`;
+  }
   // Update existing card in place (tool_complete after tool_start)
   if(tid){
     const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
@@ -7969,7 +7996,7 @@ function finalizeThinkingCard(){
     // when the user has not manually expanded this turn's activity group, or
     // has manually collapsed it. Otherwise the panel snaps shut whenever new
     // activity arrives, even mid-read.
-    if(_liveActivityUserExpanded !== true){
+    if(_liveActivityUserExpanded !== true && !(window._activityFeedExpandedDefault === true && _liveActivityUserExpanded !== false)){
       group.classList.add('tool-call-group-collapsed');
       const summary=group.querySelector('.tool-call-group-summary');
       if(summary) summary.setAttribute('aria-expanded','false');
@@ -8047,10 +8074,10 @@ function appendThinking(text='', options){
       detail='Creating the stream and sending your message…';
     }else if(hasRunningTool){
       label='Waiting on tool result';
-      detail='The tool is still running; the response will continue after it completes.';
+      detail=_activityWaitingDetail(group,label);
     }else if(hasToolCard){
       label='Waiting on model';
-      detail='Tool finished; waiting for the model to continue.';
+      detail=_activityWaitingDetail(group,label);
     }else{
       label='Waiting for first model token';
       detail='Stream connected; no model output has arrived yet.';
