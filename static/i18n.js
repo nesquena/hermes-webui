@@ -523,7 +523,7 @@ const LOCALES = {
     settings_desc_session_endless_scroll: 'When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.',
 
     settings_label_tab_visibility: 'Sidebar tabs',
-    settings_desc_tab_visibility: 'Choose which tabs appear in the sidebar and rail. Chat and Settings are always visible.',
+    settings_desc_tab_visibility: 'Choose which tabs appear in the sidebar and rail. Drag chips to reorder them. Chat and Settings are always visible.',
     open_in_browser: 'Open in browser',
     settings_dropdown_conversation: 'Conversation',
     settings_dropdown_appearance: 'Appearance',
@@ -7130,7 +7130,7 @@ const LOCALES = {
     settings_desc_session_endless_scroll: 'Wenn aktiviert, werden ältere Nachrichten beim Hochscrollen automatisch geladen. Wenn deaktiviert, nutzt du den Button für ältere Nachrichten.',
 
     settings_label_tab_visibility: 'Seitenleiste-Tabs',
-    settings_desc_tab_visibility: 'Wähle, welche Tabs in der Seitenleiste und im Rail angezeigt werden. Chat und Einstellungen sind immer sichtbar.',
+    settings_desc_tab_visibility: 'Wähle, welche Tabs in der Seitenleiste und im Rail angezeigt werden. Ziehe die Chips, um die Reihenfolge zu ändern. Chat und Einstellungen sind immer sichtbar.',
 
     workspace_drag_hint: 'Ziehen zum Neuordnen',
     workspace_reorder_failed: 'Neuordnen fehlgeschlagen',
