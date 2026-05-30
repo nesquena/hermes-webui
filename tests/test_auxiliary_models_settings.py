@@ -78,9 +78,12 @@ class TestAuxiliaryModelsJS:
         """Each auxiliary row and the main model should expose gear-driven advanced config editing."""
         for marker in (
             "aux-advanced-btn",
+            "model-advanced-row",
             "model-advanced-btn",
             "mainAdvancedBtn",
             "_bindMainAdvancedOptionsButton",
+            "document.createElement('button')",
+            "row.appendChild(btn)",
             "_openAuxAdvancedOptions",
             "_mainAdvancedConfig=null",
             "btn.disabled=_mainAdvancedConfig===null",
