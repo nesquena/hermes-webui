@@ -32,6 +32,25 @@ function _markActiveSessionViewedOnReturn() {
   if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
 }
 
+function _chatPayloadModel(){
+  return S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'';
+}
+
+function _chatPayloadModelProvider(model){
+  if(typeof _modelProviderForSend==='function') return _modelProviderForSend(model);
+  if(S.session&&S.session.model_provider) return S.session.model_provider||null;
+  return null;
+}
+
+function _chatPayloadModelState(){
+  // Source-compat invariant: the starting precedence is still
+  // model:S.session.model||$('modelSelect').value and
+  // model_provider:S.session.model_provider||null. The helper only fills a
+  // missing provider when it belongs to the same outgoing model.
+  const model=_chatPayloadModel();
+  return {model,model_provider:_chatPayloadModelProvider(model)};
+}
+
 function _deferStreamErrorIfOffline(){
   if(typeof isOfflineBannerVisible==='function' && isOfflineBannerVisible()){
     setComposerStatus(t('offline_stream_waiting'));
@@ -277,7 +296,8 @@ async function send(){
     // so the queued message goes to the chat that owns the active stream.
     const _targetSid=_sendInProgressSid||(S.session&&S.session.session_id);
     if(_text && _targetSid){
-      queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||null,profile:S.activeProfile||'default'});
+      const _modelState=_chatPayloadModelState();
+      queueSessionMessage(_targetSid,{text:_text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
       $('msg').value='';autoResize();
       S.pendingFiles=[];renderTray();
       updateQueueBadge(_targetSid);
@@ -336,7 +356,8 @@ async function send(){
         S.pendingFiles=[];renderTray();
       } else if(busyMode==='interrupt'){
         // Queue the message, then cancel so drain re-sends it.
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||null,profile:S.activeProfile||'default'});
+        const _modelState=_chatPayloadModelState();
+        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
         updateQueueBadge(S.session.session_id);
         $('msg').value='';autoResize();
         S.pendingFiles=[];renderTray();
@@ -349,7 +370,8 @@ async function send(){
       } else {
         // Default: queue mode (current behavior). Also the fallback for
         // 'steer' mode when no stream is active or _trySteer is unavailable.
-        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||null,profile:S.activeProfile||'default'});
+        const _modelState=_chatPayloadModelState();
+        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
         $('msg').value='';autoResize();
         S.pendingFiles=[];renderTray();
         updateQueueBadge(S.session.session_id);
@@ -513,10 +535,13 @@ async function send(){
   // Start the agent via POST, get a stream_id back
   let streamId;
   try{
+    const _modelState=_chatPayloadModelState();
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
-      model:S.session.model||$('modelSelect').value,workspace:S.session.workspace,
-      model_provider:S.session.model_provider||null,
+      // S.session.model remains authoritative; the helper only resolves a
+      // matching provider fallback for the same outgoing model.
+      model:_modelState.model,workspace:S.session.workspace,
+      model_provider:_modelState.model_provider,
       profile:S.activeProfile||S.session.profile||'default',
       attachments:uploaded.length?uploaded:undefined
     })});
@@ -539,6 +564,7 @@ async function send(){
     }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
+    if(typeof appendThinking==='function') appendThinking('',{pending:true});
     // setBusy(true) already ran with activeStreamId=null; refresh now that we
     // have a stream id so the primary button can switch to Stop (see getComposerPrimaryAction).
     if(typeof updateSendBtn==='function') updateSendBtn();
@@ -575,7 +601,8 @@ async function send(){
       stopApprovalPolling();
       stopClarifyPolling();
       // Keep the user's attempted turn by queueing it for after the current run.
-      queueSessionMessage(activeSid,{text:msgText,files:[],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',model_provider:S.session&&S.session.model_provider||null,profile:S.activeProfile||'default'});
+      const _retryModelState=_chatPayloadModelState();
+      queueSessionMessage(activeSid,{text:msgText,files:[],model:_retryModelState.model,model_provider:_retryModelState.model_provider,profile:S.activeProfile||'default'});
       updateQueueBadge(activeSid);
       showToast('Current session is still running. Reconnected and queued your message.',2600);
       try{
@@ -919,6 +946,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamFadeReduceMotion=false;
   let _streamFadeReduceMotionOnChange=null;
   let _lastRunJournalSeq=0;
+  let _lastRunJournalEventId='';
   const _STREAM_FADE_MS=200;
   const _STREAM_FADE_MAX_MS=350;
   const _STREAM_FADE_STAGGER_MS=16;
@@ -1067,7 +1095,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_streamingKatexTimer) return;
     _streamingKatexTimer=setTimeout(()=>{
       _streamingKatexTimer=null;
-      if(assistantBody&&typeof renderKatexBlocks==='function') renderKatexBlocks(assistantBody);
+      if(assistantBody&&typeof renderKatexBlocks==='function') renderKatexBlocks(assistantBody,{streaming:true});
     },150);
   }
   // Helper: feed new displayText delta to the smd parser.
@@ -1435,7 +1463,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!raw) return;
     const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
     const seq=Number.parseInt(tail,10);
-    if(Number.isFinite(seq)&&seq>_lastRunJournalSeq) _lastRunJournalSeq=seq;
+    if(Number.isFinite(seq)&&seq>_lastRunJournalSeq){
+      _lastRunJournalSeq=seq;
+      _lastRunJournalEventId=raw;
+    }
   }
   function _runJournalReplayAfterSeq(){
     return Math.max(0,_lastRunJournalSeq||0);
@@ -1443,8 +1474,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _runJournalReplayParams(){
     // `replay=1` documents frontend intent. The server selects replay when the
     // stream id no longer has a live worker; `after_seq` prevents duplicated
-    // journal events after this EventSource has already rendered part of a run.
-    return `&replay=1&after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}`;
+    // journal events after this EventSource has already rendered part of the
+    // same run. `after_event_id` keeps that cursor run-aware so a stale cursor
+    // from an earlier interrupted stream cannot suppress a newer stream whose
+    // sequence numbers started over from 1.
+    return `&replay=1&after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}&after_event_id=${encodeURIComponent(_lastRunJournalEventId||'')}`;
   }
 
   let _lastRenderMs=0;
@@ -1647,7 +1681,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         tc={name:d.name||'tool', preview:d.preview||'', args:d.args||{}, snippet:'', done:true};
         inflight.toolCalls.push(tc);
       }
-      tc.preview=d.preview||tc.preview||'';
+      // Route result to .snippet (detail) instead of overwriting .preview
+      // (header).  During streaming .preview already holds the last progress
+      // text — replacing it with the same content caused header/detail
+      // duplication.  Fallback: if no progress events were sent, use the
+      // result as preview so the header is not blank.
+      if(d.preview){
+        tc.snippet=tc.snippet||d.preview;
+        if(!tc.preview) tc.preview=d.preview;
+      }
       tc.args=d.args||tc.args||{};
       tc.done=true;
       tc.is_error=!!d.is_error;
@@ -1749,11 +1791,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const sid=d.session_id||activeSid;
         const continuation_prompt=String(d.continuation_prompt||d.text||'').trim();
         if(!continuation_prompt||sid!==activeSid)return;
+        const _modelState=_chatPayloadModelState();
         _pendingGoalContinuation={
           sid,
           text:continuation_prompt,
-          model:S.session&&S.session.model||'',
-          model_provider:S.session&&S.session.model_provider||null,
+          model:_modelState.model,
+          model_provider:_modelState.model_provider,
           profile:S.activeProfile||'default',
         };
         const toast=t('goal_continuing_toast');
@@ -1818,7 +1861,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCost=(S.session&&S.session.estimated_cost)||0;
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
-          S.session=d.session;S.messages=d.session.messages||[];if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
           if(S.session&&S.session.session_id){
             try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
@@ -1980,10 +2023,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const txt=String(d.text||'').trim();
         if(!txt||sid!==activeSid) return;
         if(typeof queueSessionMessage==='function'){
+          const _modelState=_chatPayloadModelState();
           queueSessionMessage(sid,{
             text:txt,files:[],
-            model:S.session&&S.session.model||'',
-            model_provider:S.session&&S.session.model_provider||null,
+            model:_modelState.model,
+            model_provider:_modelState.model_provider,
             profile:S.activeProfile||'default',
           });
           if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
@@ -2107,11 +2151,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isRateLimit=d.type==='rate_limit';
           const isQuotaExhausted=d.type==='quota_exhausted';
           const isAuthMismatch=d.type==='auth_mismatch';
+          const isGatewayAuthError=d.type==='gateway_auth_error';
           const isModelNotFound=d.type==='model_not_found';
           const isCancelled=d.type==='cancelled';
           const isInterrupted=d.type==='interrupted';
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
-          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
+          const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
           const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
@@ -2155,7 +2200,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // If the user has switched to a different session, don't attempt to
       // reconnect — the old stream's EventSource was closed intentionally
       // during session switch and reconnecting would leak a background stream.
-      if(!_isSessionActivelyViewed(activeSid)) return;
+      if(!_isSessionCurrentPane(activeSid)) return;
       if(_terminalStateReached || _streamFinalized){
         return;
       }
@@ -2215,7 +2260,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
           if(data&&data.session&&S.session&&S.session.session_id===activeSid){
             S.session=data.session;
-            S.messages=(data.session.messages||[]).filter(m=>m&&m.role);
+            const _nextMsgs3018=(data.session.messages||[]).filter(m=>m&&m.role);
+            S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
             clearLiveToolCards();if(!assistantText)removeThinking();
             _markSessionViewed(activeSid, data.session.message_count ?? S.messages.length);
             renderMessages({preserveScroll:true});
@@ -2237,6 +2283,48 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
+  }
+
+  // #3018: per-turn ephemeral fields are computed client-side in _finishDone
+  // and attached to message objects (S.messages). When a server refresh
+  // (loadSession, _restoreSettledSession, external active-session poll,
+  // SSE error recovery) replaces S.messages with fresh server data, those
+  // fields are dropped and the usage badge / duration / gateway routing
+  // pill flashes-then-disappears. Carry them forward by matching messages
+  // on (role, timestamp, content prefix) — the same identity the renderer
+  // already uses for stable keys.
+  function _messageIdentityKey(m){
+    if(!m||!m.role) return '';
+    const ts=m._ts||m.timestamp||'';
+    let body='';
+    if(typeof m.content==='string') body=m.content;
+    else if(Array.isArray(m.content)){
+      try{ body=m.content.map(p=>(p&&typeof p==='object')?(p.text||p.input_text||'')||'':String(p||'')).join('').slice(0,160); }catch(_){ body=''; }
+    }
+    return `${m.role}|${ts}|${body.slice(0,160)}`;
+  }
+  const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard'];
+  function _carryForwardEphemeralTurnFields(prevMessages, nextMessages){
+    if(!Array.isArray(prevMessages)||!Array.isArray(nextMessages)) return nextMessages;
+    if(!prevMessages.length||!nextMessages.length) return nextMessages;
+    const prevIdx=new Map();
+    for(const pm of prevMessages){
+      const k=_messageIdentityKey(pm); if(!k) continue;
+      // If duplicate keys, prefer the latest occurrence (it carries the
+      // most-recently-attached ephemeral state).
+      prevIdx.set(k,pm);
+    }
+    for(const nm of nextMessages){
+      const k=_messageIdentityKey(nm); if(!k) continue;
+      const pm=prevIdx.get(k); if(!pm) continue;
+      for(const f of _EPHEMERAL_TURN_FIELDS){
+        if(pm[f]!=null && nm[f]==null) nm[f]=pm[f];
+      }
+    }
+    return nextMessages;
+  }
+  if(typeof window!=='undefined'){
+    window._carryForwardEphemeralTurnFields=_carryForwardEphemeralTurnFields;
   }
 
   async function _restoreSettledSession(source){
@@ -2267,7 +2355,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(isActiveSession){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
-        S.session=session;S.messages=(session.messages||[]).filter(m=>m&&m.role);
+        S.session=session;
+        const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
+        S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
         if(S.session&&S.session.session_id){
           try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
@@ -2425,6 +2515,7 @@ async function toggleYoloFromApproval() {
 
 // ── Approval polling ──
 let _approvalPollTimer = null;
+let _approvalFallbackPollInFlight = false;
 let _approvalHideTimer = null;
 let _approvalVisibleSince = 0;
 let _approvalSignature = '';
@@ -2625,11 +2716,14 @@ function _startApprovalFallbackPoll(sid) {
     if (!S.busy || !S.session || S.session.session_id !== sid) {
       stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true); return;
     }
+    if (_approvalFallbackPollInFlight) return;
+    _approvalFallbackPollInFlight = true;
     try {
-      const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid));
+      const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
       else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
     } catch(e) { /* ignore poll errors */ }
+    finally { _approvalFallbackPollInFlight = false; }
   }, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
 }
 
@@ -2642,6 +2736,7 @@ function stopApprovalPolling() {
   if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
   if (_approvalEventSource) { try { _approvalEventSource.close(); } catch(_){} _approvalEventSource = null; }
   if (_approvalSSEHealthTimer) { clearInterval(_approvalSSEHealthTimer); _approvalSSEHealthTimer = null; }
+  _approvalFallbackPollInFlight = false;
   _approvalPollingSessionId = null;
 }
 
@@ -3115,6 +3210,7 @@ async function respondClarify(response) {
 var _clarifyEventSource = null;
 var _clarifyFallbackTimer = null;
 var _clarifyHealthTimer = null;
+let _clarifyFallbackPollInFlight = false;
 let _clarifyPollingSessionId = null;
 
 function startClarifyPolling(sid) {
@@ -3147,7 +3243,8 @@ function startClarifyPolling(sid) {
   });
 
   _clarifyEventSource.onerror = function() {
-    stopClarifyPolling();
+    if (_clarifyEventSource) { try { _clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
+    if (_clarifyHealthTimer) { clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null; }
     _startClarifyFallbackPoll(sid);
   };
 
@@ -3177,12 +3274,15 @@ function startClarifyPolling(sid) {
 }
 
 function _startClarifyFallbackPoll(sid) {
+  _clarifyPollingSessionId = sid || null;
   _clarifyFallbackTimer = setInterval(async () => {
     if (!S.session || S.session.session_id !== sid) {
       stopClarifyPolling(); _hideClarifyCardIfOwner(sid, true, 'session'); return;
     }
+    if (_clarifyFallbackPollInFlight) return;
+    _clarifyFallbackPollInFlight = true;
     try {
-      const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid));
+      const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showClarifyForSession(sid, data.pending); }
       else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
     } catch(e) {
@@ -3195,6 +3295,8 @@ function _startClarifyFallbackPoll(sid) {
         }
         stopClarifyPolling();
       }
+    } finally {
+      _clarifyFallbackPollInFlight = false;
     }
   }, 3000);
 }
@@ -3208,6 +3310,7 @@ function stopClarifyPolling() {
   if (_clarifyEventSource) { try { _clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
   if (_clarifyFallbackTimer) { clearInterval(_clarifyFallbackTimer); _clarifyFallbackTimer = null; }
   if (_clarifyHealthTimer) { clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null; }
+  _clarifyFallbackPollInFlight = false;
   _clarifyPollingSessionId = null;
 }
 

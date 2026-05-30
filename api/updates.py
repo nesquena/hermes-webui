@@ -10,6 +10,7 @@ Skips repos that are not git checkouts (e.g. Docker baked images where
 """
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -22,6 +23,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
+
+logger = logging.getLogger(__name__)
 
 # Lazy -- may be None if agent not found
 try:
@@ -60,30 +63,97 @@ def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CH
     return sanitized
 
 
+def _restart_blocker_snapshot() -> dict:
+    """Return active chat work that should block a self-restart."""
+    with STREAMS_LOCK:
+        stream_ids = [str(k) for k in STREAMS.keys()]
+    run_ids: list[str] = []
+    try:
+        from api import config as _config
+        active_runs = getattr(_config, 'ACTIVE_RUNS', {})
+        active_runs_lock = getattr(_config, 'ACTIVE_RUNS_LOCK', None)
+        if active_runs_lock is not None:
+            with active_runs_lock:
+                run_ids = [str(k) for k in active_runs.keys()]
+        else:
+            run_ids = [str(k) for k in active_runs.keys()]
+    except Exception:
+        run_ids = []
+    return {
+        'active_streams': len(stream_ids),
+        'active_runs': len(run_ids),
+        'blocking_stream_ids': stream_ids[:10],
+        'blocking_run_ids': run_ids[:10],
+        'restart_blocked': bool(stream_ids or run_ids),
+    }
+
+
 def _active_stream_count() -> int:
     """Return the current in-memory chat stream count.
 
-    Self-update schedules an in-process re-exec after git pull/reset.  That is
-    restart-equivalent for live streams, even when systemd does not see a unit
-    restart.  Refuse update/force-update while a stream exists so a browser
-    update click cannot recreate the pending-message loss class fixed in #1543.
+    Kept for compatibility with older tests/helpers; restart safety should use
+    ``_restart_blocker_snapshot()`` so detached worker runs also block updates.
     """
-    with STREAMS_LOCK:
-        return len(STREAMS)
+    return int(_restart_blocker_snapshot().get('active_streams') or 0)
 
 
-def _restart_blocked_response(target: str, active_streams: int) -> dict:
-    plural = "s" if active_streams != 1 else ""
+def _restart_blocked_response(target: str, blocker_snapshot: dict | int) -> dict:
+    if isinstance(blocker_snapshot, int):
+        blocker_snapshot = {
+            'active_streams': blocker_snapshot,
+            'active_runs': 0,
+            'blocking_stream_ids': [],
+            'blocking_run_ids': [],
+            'restart_blocked': bool(blocker_snapshot),
+        }
+    active_streams = int(blocker_snapshot.get('active_streams') or 0)
+    active_runs = int(blocker_snapshot.get('active_runs') or 0)
+    parts = []
+    if active_streams:
+        parts.append(f"{active_streams} active chat stream{'s' if active_streams != 1 else ''}")
+    if active_runs:
+        parts.append(f"{active_runs} active agent run{'s' if active_runs != 1 else ''}")
+    detail = ' and '.join(parts) or 'active chat work'
     return {
         'ok': False,
         'message': (
-            f'Cannot update {target} while {active_streams} active chat stream{plural} '
-            'is running. Wait for the response to finish, then retry the update.'
+            f'Cannot update {target} while {detail} is running. '
+            'Wait for the response to finish, then retry the update.'
         ),
         'target': target,
         'restart_blocked': True,
         'active_streams': active_streams,
+        'active_runs': active_runs,
+        'blocking_stream_ids': blocker_snapshot.get('blocking_stream_ids') or [],
+        'blocking_run_ids': blocker_snapshot.get('blocking_run_ids') or [],
     }
+
+
+def _wait_until_restart_safe(poll_seconds: float = 2.0, max_wait_seconds: float = 300.0) -> dict:
+    """Wait for active work to finish before self-reexec.
+
+    Bounded by ``max_wait_seconds`` so a long-running (or stuck/orphaned) agent
+    run can't soft-jam the self-update indefinitely. If the deadline is reached
+    while work is still in flight, the snapshot is returned with
+    ``wait_timed_out=True`` so the caller can proceed with the re-exec anyway
+    (preserving the pre-#3105 "execv preempts in-flight work" fallback) rather
+    than holding ``_apply_lock`` for the run's full lifetime.
+    """
+    snapshot = _restart_blocker_snapshot()
+    deadline = time.monotonic() + max(0.0, max_wait_seconds)
+    while snapshot.get('restart_blocked'):
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "restart-safety wait exceeded %.0fs with work still in flight (%s); "
+                "proceeding with re-exec anyway",
+                max_wait_seconds, snapshot,
+            )
+            snapshot = dict(snapshot)
+            snapshot['wait_timed_out'] = True
+            return snapshot
+        time.sleep(max(0.1, poll_seconds))
+        snapshot = _restart_blocker_snapshot()
+    return snapshot
 
 
 def _run_git(args, cwd, timeout=10):
@@ -374,6 +444,20 @@ def _head_is_past_latest_tag(path, current_tag):
     return bool(ok and full_desc and full_desc != current_tag)
 
 
+def _head_contains_ref(path, ref):
+    """Return True when ``ref`` is an ancestor of HEAD.
+
+    Release-channel checks are tag-name based, but users tracking ``main`` can
+    be on a commit that already contains the newest published tag. In that case
+    a positive tag gap is not an available update; applying the tag would move
+    backwards or fail fast-forward. Use the commit graph to detect that state.
+    """
+    if not ref:
+        return False
+    _, ok = _run_git(['merge-base', '--is-ancestor', ref, 'HEAD'], path)
+    return bool(ok)
+
+
 def _select_apply_compare_ref(path):
     """Return the same remote ref family that the update check reports.
 
@@ -394,17 +478,20 @@ def _select_apply_compare_ref(path):
         latest_tag = tags[0]
         current_tag = _current_release_tag(path)
         behind = _release_gap(tags, current_tag, latest_tag)
-        # Mirror the check side exactly: only fall through when behind == 0
-        # AND HEAD has moved past its nearest tag (case A: bench between
-        # tagged releases). Otherwise the tag is correct — including the
-        # case where HEAD is on an older release tag with commits on top
-        # AND a newer tag exists (case D), where `behind > 0` means the
-        # user is genuinely behind the latest release and should advance
-        # to it. Pre-#2855 the apply path only consulted `latest_tag`
-        # without the `behind`/`current_tag` predicate, so case D fell
-        # through to `origin/<branch>` and the pull landed past the
-        # advertised tag. See #2846 + Opus pre-release review for #2855.
-        if not (behind == 0 and _head_is_past_latest_tag(path, current_tag)):
+        # Mirror the check side exactly: fall through to the branch comparison
+        # whenever the checkout has already moved past the release tag that the
+        # banner would otherwise advertise. The common case is behind == 0 and
+        # HEAD is past its nearest tag, but main-tracking checkouts can also
+        # have behind > 0 after fetching a newer tag that HEAD already contains
+        # (#3140). In both cases applying the tag would no-op, move backwards,
+        # or fail fast-forward; branch comparison is the truthful update path.
+        if (
+            behind == 0 and _head_is_past_latest_tag(path, current_tag)
+        ) or (
+            behind > 0 and _head_contains_ref(path, latest_tag)
+        ):
+            pass
+        else:
             return latest_tag
 
     upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
@@ -432,6 +519,14 @@ def _check_repo_release(path, name):
     # instead. The same predicate is used by _select_apply_compare_ref so the
     # check and apply sides cannot drift again. See #2653 (check), #2846 (apply).
     if behind == 0 and _head_is_past_latest_tag(path, current_tag):
+        return None
+
+    # Users tracking main can already contain the newest fetched release tag
+    # while their nearest reachable tag is older. A positive tag gap then means
+    # only "there is a newer tag name", not "HEAD is behind that tag" (#3140).
+    # Fall through to the branch check so the banner compares against the
+    # configured upstream instead of advertising a tag that cannot fast-forward.
+    if behind > 0 and _head_contains_ref(path, latest_tag):
         return None
 
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
@@ -928,6 +1023,7 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # Threads die when execv replaces the process image, so the lock is
         # released atomically by the kernel.
         with _apply_lock:
+            _wait_until_restart_safe()
             try:
                 os.execv(sys.executable, [sys.executable] + sys.argv)
             except Exception:
@@ -950,9 +1046,9 @@ def apply_force_update(target: str) -> dict:
     response with ``conflict: True`` or ``diverged: True`` and the user
     has confirmed they want to discard local changes.
     """
-    active_streams = _active_stream_count()
-    if active_streams:
-        return _restart_blocked_response(target, active_streams)
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response(target, blocker_snapshot)
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
@@ -1002,9 +1098,9 @@ def apply_force_update(target: str) -> dict:
 
 def apply_update(target):
     """Stash, pull --ff-only, pop for the given target repo."""
-    active_streams = _active_stream_count()
-    if active_streams:
-        return _restart_blocked_response(target, active_streams)
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response(target, blocker_snapshot)
 
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}

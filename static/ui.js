@@ -517,7 +517,7 @@ async function refreshDashboardStatus(force=false){
     return _dashboardStatusCache;
   }
   try{
-    const status=await api('/api/dashboard/status');
+    const status=await api('/api/dashboard/status',{timeoutToast:false});
     _dashboardStatusCache=status||{running:false};
   }catch(_){
     _dashboardStatusCache={running:false};
@@ -939,6 +939,34 @@ function _captureModelDropdownSelection(sel){
   }catch(_){}
   return {model:String(sel.value||''),model_provider:null};
 }
+function _modelProviderForSend(modelId){
+  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
+  if(sessionProvider) return sessionProvider;
+  const model=String(modelId||'').trim();
+  if(!model) return null;
+  const explicitProvider=typeof _providerFromModelValue==='function'
+    ? _providerFromModelValue(model)
+    : '';
+  if(explicitProvider) return explicitProvider;
+  const sel=typeof $==='function' ? $('modelSelect') : null;
+  if(sel&&String(sel.value||'').trim()===model&&typeof _modelStateForSelect==='function'){
+    try{
+      const dropdownState=_modelStateForSelect(sel,sel.value);
+      if(dropdownState&&String(dropdownState.model||'').trim()===model){
+        return dropdownState.model_provider||null;
+      }
+    }catch(_){}
+  }
+  if(typeof _readPersistedModelState==='function'){
+    try{
+      const persisted=_readPersistedModelState();
+      if(persisted&&String(persisted.model||'').trim()===model){
+        return persisted.model_provider||null;
+      }
+    }catch(_){}
+  }
+  return null;
+}
 function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   if(!sel) return null;
   const activeSession=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
@@ -1082,6 +1110,13 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
   if(opts.includes(modelId)) return modelId;
   const exact=opts.find(o=>norm(o)===target);
   if(exact) return exact;
+  // If the request is provider-qualified (either explicit @provider:model or
+  // a slash-qualified vendor/model id), do NOT fuzzy-match a sibling model
+  // once exact/provider-aware lookup failed. Returning null lets the caller
+  // preserve the raw typed value instead of snapping to the closest catalog
+  // entry. This keeps uncatalogued models routable instead of silently turning
+  // them into a nearby curated sibling.
+  if(rawModel.startsWith('@')||rawModel.includes('/')) return null;
   // 3. Prefix/substring: require the candidate to start with the FULL normalized target
   // (not a truncated base). This avoids false matches like gpt.5.5 → gpt.5.4.mini (#1188).
   // Only fall back to the shorter base form if target itself is very short (a bare root
@@ -3461,7 +3496,8 @@ function renderMd(raw){
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
-    const apiUrl='api/media?path='+encodeURIComponent(ref);
+    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const apiUrl='api/media?path='+encodeURIComponent(ref)+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
     const localKind=mediaKindForName(ref);
     if(localKind==='image'){
       return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
@@ -4658,7 +4694,7 @@ async function pollSystemHealth(){
   if(document.visibilityState !== 'visible') return;
   if(!_systemHealthPanelIsVisible()) return;
   try{
-    const payload=await api('/api/system/health');
+    const payload=await api('/api/system/health',{timeoutToast:false});
     renderSystemHealth(payload);
   }catch(_){
     setSystemHealthUnavailable('Unavailable');
@@ -4724,7 +4760,7 @@ function dismissAgentHealthAlert(){
 async function pollAgentHealth(){
   if(document.visibilityState !== 'visible') return;
   try{
-    const payload=await api('/api/health/agent');
+    const payload=await api('/api/health/agent',{timeoutToast:false});
     if(payload.alive === true){
       _agentHealthLastState='alive';
       _setAgentHealthDismissed(false);
@@ -5717,6 +5753,19 @@ function appendLiveCompressionCard(state){
     node.setAttribute('data-compression-started-at',String(started));
     node.setAttribute('data-compression-message',String(state.message||'Auto-compressing context...'));
     _startCompressionElapsedTimer();
+  } else {
+    // Completion or error: clear the elapsed-timer attributes so the
+    // interval reader (_compressionLiveCardState) doesn't keep treating
+    // the replaced card as a running compression (#2973).
+    node.removeAttribute('data-compression-started-at');
+    node.removeAttribute('data-compression-message');
+    // Only clear the global timer when the *active* session has no running
+    // compression.  An SSE completion for a background session must not
+    // kill the timer that's driving the current session's display.
+    const _activeCompState = _compressionStateForCurrentSession();
+    if (!_activeCompState || !_activeCompState.automatic || _activeCompState.phase !== 'running') {
+      _clearCompressionElapsedTimer();
+    }
   }
   const existing=inner.querySelector('[data-live-compression-card="1"]');
   if(existing) existing.replaceWith(node);
@@ -6153,7 +6202,7 @@ function _cliLooksLikePatchDiff(text){
 function _cliToolResultSnippet(raw){
   const fullText=_cliToolResultText(raw);
   if(_cliLooksLikePatchDiff(fullText)) return _clipCliToolSnippet(fullText);
-  return String(fullText||'').slice(0,200);
+  return String(fullText||'').slice(0,4000);
 }
 
 function _prefixedCliDiffLines(prefix, value){
@@ -6529,6 +6578,11 @@ function renderMessages(options){
     const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
+    // #3114: show jump-to-question on every assistant message that has a
+    // resolvable question target, not just the turn-final one. Multi-step
+    // turns (tool_call -> assistant -> tool_call -> assistant) otherwise
+    // strip the button from every intermediate assistant bubble and the
+    // user loses the navigation affordance.
     const _qJumpTarget=(!isUser&&!m._live)?questionRawIdxByAssistantRawIdx.get(rawIdx):undefined;
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget)
@@ -6977,7 +7031,7 @@ function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='tool-card-row';
   const icon=toolIcon(tc.name);
-  const hasDetail=tc.snippet||(tc.args&&Object.keys(tc.args).length>0);
+  const hasDetail=(tc.snippet&&tc.snippet!==tc.preview)||(tc.args&&Object.keys(tc.args).length>0);
   let displaySnippet='';
   if(tc.snippet){
     const s=tc.snippet;
@@ -7004,6 +7058,7 @@ function buildToolCard(tc){
       <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
         ${runIndicator}
         <span class="tool-card-icon">${icon}</span>
+        <span class="tool-card-badge">Tool output</span>
         <span class="tool-card-name">${esc(displayName)}</span>
         <span class="tool-card-preview">${esc(previewText)}</span>
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
@@ -7826,8 +7881,25 @@ function renderMermaidBlocks(container){
 let _katexLoading=false;
 let _katexReady=false;
 
-function renderKatexBlocks(container){
+function _isStreamingEquationPending(el,root){
+  const tagName=(el&&el.tagName||'').toLowerCase();
+  if(tagName!=='equation-block'&&tagName!=='equation-inline') return false;
+  // streaming-markdown fills custom equation elements while the parser owns the
+  // open node. If the equation is currently the last descendant of the live
+  // assistant body, we cannot tell whether more TeX is still coming. Skip it
+  // during live debounce passes so a partial source is not permanently marked
+  // data-rendered before the final parser_end flush.
+  let node=el;
+  while(node&&node!==root){
+    if(node.nextSibling) return false;
+    node=node.parentNode;
+  }
+  return Boolean(node===root);
+}
+
+function renderKatexBlocks(container,options){
   const root=container||document;
+  const streaming=Boolean(options&&options.streaming);
   const blocks=root.querySelectorAll(
     '.katex-block:not([data-rendered]),.katex-inline:not([data-rendered]),'+
     'equation-block:not([data-rendered]),equation-inline:not([data-rendered])'
@@ -7851,6 +7923,7 @@ function renderKatexBlocks(container){
     return;
   }
   blocks.forEach(el=>{
+    if(streaming&&_isStreamingEquationPending(el,root)) return;
     el.dataset.rendered='true';
     const src=el.textContent||'';
     const tagName=(el.tagName||'').toLowerCase();
@@ -7995,10 +8068,23 @@ function appendThinking(text='', options){
   const body=group&&group.querySelector('.tool-call-group-body');
   if(!body) return;
   if(!cleanThinking||cleanThinking==='Thinking…'){
-    const label=body.querySelector('.tool-card.tool-card-running')?'Waiting on tool result':'Waiting on model';
-    const detail=body.querySelector('.tool-card-row')
-      ? 'The agent is running; tool results and response text will appear here.'
-      : 'No tool activity has been reported yet.';
+    const hasRunningTool=!!body.querySelector('.tool-card.tool-card-running');
+    const hasToolCard=!!body.querySelector('.tool-card-row');
+    let label;
+    let detail;
+    if(!S.activeStreamId && options && options.pending){
+      label='Starting agent';
+      detail='Creating the stream and sending your message…';
+    }else if(hasRunningTool){
+      label='Waiting on tool result';
+      detail='The tool is still running; the response will continue after it completes.';
+    }else if(hasToolCard){
+      label='Waiting on model';
+      detail='Tool finished; waiting for the model to continue.';
+    }else{
+      label='Waiting for first model token';
+      detail='Stream connected; no model output has arrived yet.';
+    }
     _appendActivityEvent(group,{id:'thinking-placeholder',kind:'waiting',label,detail,status:'waiting',ts:_activityNowSeconds()});
     const active=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
     if(active) active.removeAttribute('data-thinking-active');

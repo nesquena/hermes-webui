@@ -11,6 +11,8 @@ def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
         return 'v0.51.106\nv0.51.103', True
     if args == ['describe', '--tags', '--abbrev=0']:
         return 'v0.51.103', True
+    if args == ['merge-base', '--is-ancestor', 'v0.51.106', 'HEAD']:
+        return '', False
     if args == ['remote', 'get-url', 'origin']:
         return 'https://github.com/nesquena/hermes-webui.git', True
     raise AssertionError(f'unexpected git args: {args!r}')
@@ -231,7 +233,7 @@ def test_apply_force_update_fetches_tags_with_force(tmp_path):
 
     with patch.object(updates, '_run_git', side_effect=fake_git), \
          patch.object(updates, 'REPO_ROOT', tmp_path), \
-         patch.object(updates, '_active_stream_count', return_value=0):
+         patch.object(updates, '_restart_blocker_snapshot', return_value={'restart_blocked': False, 'active_streams': 0, 'active_runs': 0}):
         updates.apply_force_update('webui')
 
     fetch_calls = [a for a in seen_args if a[:2] == ['fetch', 'origin']]
@@ -256,7 +258,7 @@ def test_apply_update_fetches_tags_with_force(tmp_path):
 
     with patch.object(updates, '_run_git', side_effect=fake_git), \
          patch.object(updates, 'REPO_ROOT', tmp_path), \
-         patch.object(updates, '_active_stream_count', return_value=0):
+         patch.object(updates, '_restart_blocker_snapshot', return_value={'restart_blocked': False, 'active_streams': 0, 'active_runs': 0}):
         updates.apply_update('webui')
 
     fetch_calls = [a for a in seen_args if a[:2] == ['fetch', 'origin']]
@@ -553,6 +555,58 @@ def test_check_and_apply_paths_agree_when_head_is_past_tag(tmp_path):
     )
 
 
+def test_check_repo_release_falls_through_when_head_contains_newer_tag(tmp_path):
+    """#3140: main-tracking HEAD can already contain the newest release tag.
+
+    The nearest reachable tag is older, so the tag-name gap is positive, but
+    applying the latest tag would not fast-forward because HEAD already contains
+    it. The release check should fall through to the branch comparison instead
+    of advertising a release update.
+    """
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v2026.5.29.2\nv2026.5.29', True
+        if args == ['describe', '--tags', '--abbrev=0']:
+            return 'v2026.5.29', True
+        if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
+            return '', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        result = updates._check_repo_release(tmp_path, 'agent')
+
+    assert result is None, (
+        'when HEAD already contains the latest release tag, the release check '
+        'must fall through to the branch check instead of reporting a tag gap (#3140)'
+    )
+
+
+def test_select_apply_compare_ref_falls_through_when_head_contains_newer_tag(tmp_path):
+    """#3140: apply path mirrors the check-side fall-through for ahead-of-tag HEAD."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v2026.5.29.2\nv2026.5.29', True
+        if args == ['describe', '--tags', '--abbrev=0']:
+            return 'v2026.5.29', True
+        if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
+            return '', True
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return 'origin/main', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        ref = updates._select_apply_compare_ref(tmp_path)
+
+    assert ref == 'origin/main', (
+        'Update Now must not target a release tag that HEAD already contains; '
+        'it should use the branch comparison path instead (#3140)'
+    )
+
+
 def test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_exists(tmp_path):
     """Case D — HEAD on older tag + commits + newer tag exists → advance to newer tag.
 
@@ -576,8 +630,11 @@ def test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_ex
             # HEAD's nearest reachable tag (older one)
             return 'v2026.5.10', True
         if args == ['describe', '--tags', '--always']:
-            # HEAD has 3 commits past v2026.5.10
+            # HEAD has 3 commits past v2026.5.10, but it does not contain
+            # the newer v2026.5.16 release tag.
             return 'v2026.5.10-3-gabcdef12', True
+        if args == ['merge-base', '--is-ancestor', 'v2026.5.16', 'HEAD']:
+            return '', False
         if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
             return 'origin/main', True
         return '', True

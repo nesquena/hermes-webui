@@ -74,6 +74,15 @@ os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
 # tests that read/write config.yaml stay inside the isolated test home.
 os.environ['HERMES_CONFIG_PATH'] = str(TEST_STATE_DIR / 'config.yaml')
 
+
+@pytest.fixture(autouse=True)
+def _isolate_hermes_config_path():
+    """Keep profile/.env side effects from leaking the live config path across tests."""
+    isolated_config_path = str(TEST_STATE_DIR / 'config.yaml')
+    os.environ['HERMES_CONFIG_PATH'] = isolated_config_path
+    yield
+    os.environ['HERMES_CONFIG_PATH'] = isolated_config_path
+
 # ── Server script: always relative to repo root ───────────────────────────
 SERVER_SCRIPT = REPO_ROOT / 'server.py'
 if not SERVER_SCRIPT.exists():

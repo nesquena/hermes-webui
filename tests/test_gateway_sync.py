@@ -1529,7 +1529,11 @@ def test_cron_sessions_hidden_from_sidebar_by_default():
         sessions = data.get('sessions', [])
         ids = {s['session_id'] for s in sessions}
         assert 'gw_noncron_001' in ids, "Non-cron agent session should still appear"
-        assert 'cron_job123_20260427' not in ids, "Cron session should be hidden by default"
+        cron_row = next((s for s in sessions if s['session_id'] == 'cron_job123_20260427'), None)
+        assert cron_row is None or cron_row.get('default_hidden') is True, (
+            "Cron session should either be omitted from /api/sessions or marked "
+            "default_hidden so the default sidebar filter keeps it hidden"
+        )
     finally:
         try:
             _remove_test_sessions(conn, 'cron_job123_20260427', 'gw_noncron_001')

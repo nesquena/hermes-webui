@@ -79,6 +79,40 @@ def _gateway_api_key(environ: dict[str, str] | None = None) -> str:
     ).strip()
 
 
+def gateway_chat_config_status(config_data=None, environ: dict[str, str] | None = None) -> dict:
+    """Return redacted Gateway-backed chat configuration status."""
+    mode = webui_chat_backend_mode(config_data, environ)
+    base_url = _gateway_base_url(config_data, environ)
+    return {
+        "enabled": mode == "gateway",
+        "backend": mode,
+        "base_url_configured": bool(base_url),
+        "api_key_configured": bool(_gateway_api_key(environ)),
+    }
+
+
+def _gateway_http_error_event(exc: urllib.error.HTTPError, err_body: str, *, api_key_configured: bool) -> dict:
+    safe = _redact_text(err_body or str(exc))[:500]
+    if exc.code == 401:
+        return {
+            "label": "Gateway authentication failed",
+            "type": "gateway_auth_error",
+            "message": "Gateway rejected the WebUI API key (HTTP 401).",
+            "hint": (
+                "Set HERMES_WEBUI_GATEWAY_API_KEY to the same value as the Hermes Gateway "
+                "API_SERVER_KEY, or disable HERMES_WEBUI_CHAT_BACKEND=gateway."
+                if not api_key_configured
+                else "Check that HERMES_WEBUI_GATEWAY_API_KEY matches the Hermes Gateway API_SERVER_KEY."
+            ),
+        }
+    return {
+        "label": "Gateway request failed",
+        "type": "gateway_http_error",
+        "message": f"Gateway returned HTTP {exc.code}.",
+        "hint": safe or "Check the configured Gateway API server.",
+    }
+
+
 def _gateway_sse_delta(payload: dict) -> str:
     """Extract assistant text from an OpenAI-compatible streaming chunk."""
     try:
@@ -106,6 +140,28 @@ def _gateway_stream_usage(payload: dict) -> dict:
         "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
         "estimated_cost": usage.get("estimated_cost") or usage.get("estimated_cost_usd") or 0,
     }
+
+
+def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
+    """Translate Hermes Gateway tool-progress SSE payloads to WebUI events."""
+    if not isinstance(payload, dict):
+        return None
+    name = str(payload.get("tool") or payload.get("name") or payload.get("function_name") or "").strip()
+    if not name or name.startswith("_"):
+        return None
+    status = str(payload.get("status") or "running").strip().lower()
+    tid = payload.get("toolCallId") or payload.get("tool_call_id") or payload.get("id")
+    is_complete = status in {"completed", "complete", "success", "error", "failed"}
+    event_payload = {
+        "event_type": "tool.completed" if is_complete else "tool.started",
+        "name": name,
+        "preview": payload.get("label") or payload.get("preview"),
+        "args": payload.get("args") if isinstance(payload.get("args"), dict) else {},
+        "is_error": status in {"error", "failed"},
+    }
+    if tid:
+        event_payload["tid"] = str(tid)
+    return ("tool_complete" if is_complete else "tool"), event_payload
 
 
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
@@ -189,6 +245,22 @@ def _run_gateway_chat_streaming(
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
         cfg = get_config()
+        try:
+            from api.streaming import (
+                _load_webui_prefill_context,
+                _prefill_messages_with_webui_context,
+                _public_prefill_context_status,
+            )
+
+            prefill_context = _load_webui_prefill_context(cfg)
+            prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
+            put_gateway_event("context_status", {
+                "session_id": session_id,
+                "prefill": _public_prefill_context_status(prefill_context),
+            })
+        except Exception:
+            logger.debug("Failed to load WebUI gateway prefill context", exc_info=True)
+            prefill_messages = []
         base_url = _gateway_base_url(cfg)
         api_key = _gateway_api_key()
         url = f"{base_url}/v1/chat/completions"
@@ -202,10 +274,19 @@ def _run_gateway_chat_streaming(
             # Scope Gateway long-term continuity to this WebUI conversation
             # without exposing the browser's auth cookie or CSRF material.
             headers["X-Hermes-Session-Key"] = f"webui:{session_id}"
+        message_content: Any = str(msg_text or "")
+        if attachments:
+            try:
+                from api.streaming import _build_native_multimodal_message
+
+                message_content = _build_native_multimodal_message("", str(msg_text or ""), attachments, str(workspace), cfg=cfg)
+            except Exception:
+                logger.debug("Failed to build gateway multimodal attachment payload", exc_info=True)
+                message_content = str(msg_text or "")
         body = {
             "model": model or "default",
             "stream": True,
-            "messages": [{"role": "user", "content": str(msg_text or "")}],
+            "messages": [*prefill_messages, {"role": "user", "content": message_content}],
         }
         if model_provider:
             body["provider"] = model_provider
@@ -217,13 +298,20 @@ def _run_gateway_chat_streaming(
         )
         update_active_run(stream_id, phase="gateway-request")
         last_payload = {}
+        sse_event = "message"
         with urllib.request.urlopen(req, timeout=600) as resp:
             for raw_line in resp:
                 if cancel_event.is_set():
                     put_gateway_event("cancel", {"message": "Cancelled by user"})
                     return
                 line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line or not line.startswith("data:"):
+                if not line:
+                    sse_event = "message"
+                    continue
+                if line.startswith("event:"):
+                    sse_event = line[6:].strip() or "message"
+                    continue
+                if not line.startswith("data:"):
                     continue
                 data = line[5:].strip()
                 if data == "[DONE]":
@@ -231,6 +319,32 @@ def _run_gateway_chat_streaming(
                 try:
                     payload = json.loads(data)
                 except json.JSONDecodeError:
+                    continue
+                if sse_event == "hermes.tool.progress":
+                    translated = _gateway_tool_progress_event(payload)
+                    if translated:
+                        event_name, event_payload = translated
+                        if stream_id in STREAM_LIVE_TOOL_CALLS:
+                            if event_name == "tool":
+                                STREAM_LIVE_TOOL_CALLS[stream_id].append({
+                                    "name": event_payload.get("name"),
+                                    "args": event_payload.get("args") or {},
+                                    "done": False,
+                                    **({"tid": event_payload.get("tid")} if event_payload.get("tid") else {}),
+                                })
+                            else:
+                                for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                                    if shared_tc.get("done"):
+                                        continue
+                                    if (
+                                        event_payload.get("tid") and shared_tc.get("tid") == event_payload.get("tid")
+                                    ) or shared_tc.get("name") == event_payload.get("name"):
+                                        shared_tc["done"] = True
+                                        shared_tc["is_error"] = bool(event_payload.get("is_error"))
+                                        break
+                        put_gateway_event(event_name, event_payload)
+                        update_active_run(stream_id, phase="gateway-tool", latest_tool=event_payload.get("name"))
+                    sse_event = "message"
                     continue
                 last_payload = payload
                 delta = _gateway_sse_delta(payload)
@@ -254,11 +368,16 @@ def _run_gateway_chat_streaming(
             s = get_session(session_id)
             if not _stream_writeback_is_current(s, stream_id):
                 return
-            now = int(time.time())
+            now = time.time()
+            # Preserve subsecond ordering for gateway-backed turns. Using an
+            # integer seconds timestamp gives the user and assistant rows the
+            # same sort key; later transcript merges can then fall back to
+            # role/content ordering instead of turn order.
+            assistant_ts = now + 0.000001
             user_msg = {"role": "user", "content": str(msg_text or ""), "timestamp": now}
             if attachments:
                 user_msg["attachments"] = list(attachments)
-            assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": now}
+            assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
             s.context_messages = previous_context + [user_msg, assistant_msg]
             display = list(getattr(s, "messages", None) or [])
@@ -287,13 +406,10 @@ def _run_gateway_chat_streaming(
             err_body = exc.read(2048).decode("utf-8", errors="replace")
         except Exception:
             err_body = ""
-        safe = _redact_text(err_body or str(exc))[:500]
-        put_gateway_event("apperror", {
-            "label": "Gateway request failed",
-            "type": "gateway_http_error",
-            "message": f"Gateway returned HTTP {exc.code}.",
-            "hint": safe or "Check the configured Gateway API server.",
-        })
+        put_gateway_event(
+            "apperror",
+            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key())),
+        )
     except Exception as exc:
         safe = _redact_text(str(exc))[:500]
         put_gateway_event("apperror", {

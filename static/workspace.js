@@ -3,6 +3,7 @@ async function api(path,opts={}){
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,document.baseURI||location.href);
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
+  const timeoutToast=opts.timeoutToast!==false;
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
   // Server errors (4xx/5xx) and client-side timeouts are NOT retried.
   let lastErr;
@@ -15,6 +16,8 @@ async function api(path,opts={}){
     try{
       const fetchOpts={...opts};
       delete fetchOpts.timeoutMs;
+      delete fetchOpts.timeoutToast;
+
       const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
       if(useTimeout&&typeof AbortController!=='undefined'){
         controller=new AbortController();
@@ -69,7 +72,7 @@ async function api(path,opts={}){
         const err=(e&&e.name==='TimeoutError')?e:new Error('Request timed out. Please try again.');
         err.name='TimeoutError';
         err.timeout=true;
-        if(typeof showToast==='function') showToast('Request timed out. Please try again.',5000,'error');
+        if(timeoutToast&&typeof showToast==='function') showToast('Request timed out. Please try again.',5000,'error');
         throw err;
       }
       // Only retry on network errors (TypeError from fetch), not on HTTP errors
@@ -98,7 +101,7 @@ function recordClientSSEError(source, details={}){
       url_path:(typeof location!=='undefined'&&location.pathname)||'/',
       reason:details.reason||'EventSource.onerror',
     };
-    void api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000}).catch(()=>{});
+    void api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000,timeoutToast:false}).catch(()=>{});
   }catch(_){}
 }
 

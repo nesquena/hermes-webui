@@ -107,6 +107,14 @@ let _sessionListLastScrollAt = 0;
 let _pendingSessionListPayload = null;
 let _pendingSessionListApplyTimer = 0;
 const SESSION_LIST_INTERACTION_IDLE_MS = 700;
+const SESSION_SWIPE_DURATION_MS = 500;
+const SESSION_SWIPE_REFLOW_LEAD_MS = 220;
+const SESSION_REFLOW_TIMEOUT_MS = 420;
+const SESSION_LIST_FLIP_TIMEOUT_MS = 460;
+const SESSION_LONG_PRESS_DELAY_MS = 400;
+const SESSION_ARCHIVE_SWIPE_THRESHOLD_PX = 128;
+const SESSION_DELETE_SWIPE_THRESHOLD_PX = 128;
+const SESSION_SWIPE_CANCEL_RATIO = 0.75;
 
 function _formatSessionModelWithGateway(s){
   if(!s||!s.model)return'';
@@ -142,6 +150,9 @@ function _setSessionViewedCount(sid, messageCount = 0) {
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
   counts[sid] = next;
   _saveSessionViewedCounts();
+  // If the viewed count is now current, any prior completion-unread marker is
+  // stale — clear it so _hasUnreadForSession doesn't short-circuit (#3020).
+  _clearSessionCompletionUnread(sid);
 }
 
 function _getSessionCompletionUnread() {
@@ -411,8 +422,13 @@ function _markPollingCompletionUnreadTransitions(sessions) {
       )
     );
     const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);
-    if ((completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) && !_isSessionActivelyViewedForList(sid)) {
-      _markSessionCompletionUnread(sid, s.message_count);
+    if (completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) {
+      if (!_isSessionActivelyViewedForList(sid)) {
+        _markSessionCompletionUnread(sid, s.message_count);
+      } else {
+        // Sync viewed count so we don't flag stale unread on tab switch (#3020)
+        _setSessionViewedCount(sid, messageCount);
+      }
     }
     _sessionStreamingById.set(sid, isStreaming);
     if (isStreaming) {
@@ -459,6 +475,8 @@ async function newSession(flash, options={}){
   _newSessionInFlight=(async()=>{
     updateQueueBadge();
     S.toolCalls=[];
+    _messagesTruncated=false;
+    _oldestIdx=0;
     clearLiveToolCards();
     // One-shot profile-switch workspace: applied to the first new session after a profile
     // switch, then cleared.  Use a dedicated flag so S._profileDefaultWorkspace (the
@@ -621,8 +639,8 @@ async function loadSession(sid){
         // always clear persisted session, strip /session/{id} from URL, and
         // rethrow so boot can deterministically fall through to empty-state.
         if(!currentSid){
-          localStorage.removeItem('hermes-webui-session');
-          try{ history.replaceState(null,'','/'); }catch(_){ }
+          try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+          try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
           if (_loadingSessionId === sid) _loadingSessionId = null;
           throw e;
         }
@@ -1333,10 +1351,14 @@ async function _ensureMessagesLoaded(sid) {
   if (!data || !data.session) return;
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
-  const msgs = (data.session.messages || []).filter(m => m && m.role);
+  // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
+  // so it must be `let`, not `const`. The `const` form threw a TypeError inside
+  // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"
+  // toast on every mobile message (SSE/visibility events trigger this reload path
+  // more aggressively on mobile).
+  let msgs = (data.session.messages || []).filter(m => m && m.role);
   // Check for tool-call metadata on messages (for tool-call card rendering)
   const hasMessageToolMetadata = msgs.some(m => {
-    if (!m || m.role !== 'assistant') return false;
     const hasTc = Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
     const hasTu = Array.isArray(m.content) && m.content.some(p => p && p.type === 'tool_use');
     return hasTc || hasTu;
@@ -1347,6 +1369,11 @@ async function _ensureMessagesLoaded(sid) {
     S.toolCalls = [];
   }
   clearLiveToolCards();
+  // #3018: preserve client-side ephemeral turn fields (_turnUsage, _turnDuration,
+  // _turnTps, _gatewayRouting, _statusCard) across the loadSession replace.
+  if(typeof window._carryForwardEphemeralTurnFields==='function'){
+    msgs=window._carryForwardEphemeralTurnFields(S.messages||[], msgs);
+  }
   S.messages = msgs;
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
@@ -1622,6 +1649,89 @@ const _lineageReportCache = new Map();
 const _lineageReportInflight = new Map();
 let _lineageReportCacheGeneration = 0;
 let _sessionVisibleSidebarIds = [];
+let _pendingSessionReflowPositions = null;
+const _optimisticallyRemovedSessionIds = new Set();
+const _sessionSwipeReturnOffsets = new Map();
+
+function _captureSessionReflowPositions(){
+  const list=$('sessionList');
+  if(!list) return null;
+  const positions=new Map();
+  list.querySelectorAll('.session-item[data-sid]').forEach(row=>{
+    positions.set(row.dataset.sid,row.getBoundingClientRect().top);
+  });
+  return positions;
+}
+
+function _waitForSessionMotion(ms){
+  return new Promise(resolve=>setTimeout(resolve,ms));
+}
+
+function _playSessionRowsReflowFromPositions(before, timeoutMs, prefersReducedMotion){
+  if(!before||!before.size) return;
+  if(prefersReducedMotion&&prefersReducedMotion()) return;
+  const list=$('sessionList');
+  if(!list) return;
+  const movingRows=[];
+  list.querySelectorAll('.session-item[data-sid]').forEach(row=>{
+    const oldTop=before.get(row.dataset.sid);
+    if(oldTop===undefined) return;
+    const delta=oldTop-row.getBoundingClientRect().top;
+    if(Math.abs(delta)<1) return;
+    movingRows.push({row,delta});
+  });
+  if(!movingRows.length) return;
+  movingRows.forEach(({row,delta})=>{
+    row.style.transition='none';
+    row.style.setProperty('--session-reflow-offset',delta+'px');
+    row.classList.add('session-reflowing');
+  });
+  list.getBoundingClientRect();
+  movingRows.forEach(({row})=>{
+    let reflowCleared=false;
+    const clearReflow=()=>{
+      if(reflowCleared) return;
+      reflowCleared=true;
+      row.classList.remove('session-reflowing');
+      row.style.removeProperty('--session-reflow-offset');
+      row.removeEventListener('transitionend',onReflowEnd);
+    };
+    const onReflowEnd=(event)=>{
+      if(event.propertyName==='transform') clearReflow();
+    };
+    row.addEventListener('transitionend',onReflowEnd);
+    row.style.removeProperty('transition');
+    requestAnimationFrame(()=>requestAnimationFrame(()=>{
+      if(!reflowCleared) row.style.setProperty('--session-reflow-offset','0px');
+    }));
+    setTimeout(clearReflow,timeoutMs);
+  });
+}
+
+function _sessionPrefersReducedMotion(){
+  try{
+    return Boolean(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  }catch(_){
+    return false;
+  }
+}
+
+function _makeSessionSwipeAffordance(side, icon, label){
+  const affordance=document.createElement('div');
+  affordance.className='session-swipe-affordance session-swipe-affordance-'+side;
+  affordance.setAttribute('aria-hidden','true');
+  const stack=document.createElement('span');
+  stack.className='session-swipe-action-stack';
+  const badge=document.createElement('span');
+  badge.className='session-swipe-badge';
+  badge.innerHTML=li(icon,18);
+  const text=document.createElement('span');
+  text.className='session-swipe-label';
+  text.textContent=label;
+  stack.append(badge,text);
+  affordance.append(stack);
+  return affordance;
+}
 const SESSION_VIRTUAL_ROW_HEIGHT = 52;
 const SESSION_VIRTUAL_BUFFER_ROWS = 12;
 const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
@@ -1701,6 +1811,12 @@ function _sessionIdFromLocation(){
     return qs.get('session')||qs.get('session_id')||null;
   }catch(_e){return null;}
 }
+function _appRootPath(){
+  try{
+    const base = new URL(document.baseURI||window.location.origin+'/', window.location.origin);
+    return base.pathname || '/';
+  }catch(_e){return '/';}
+}
 function _sessionUrlForSid(sid){
   const encoded=encodeURIComponent(sid);
   let base;
@@ -1709,6 +1825,7 @@ function _sessionUrlForSid(sid){
   try{
     const current=new URL(window.location.href);
     current.searchParams.delete('session');
+    current.searchParams.delete('session_id');
     base.search=current.searchParams.toString();
     base.hash=current.hash;
   }catch(_e){}
@@ -1868,9 +1985,11 @@ function closeSessionActionMenu(){
     _sessionActionMenu = null;
   }
   if(_sessionActionAnchor){
-    _sessionActionAnchor.classList.remove('active');
+    if(_sessionActionAnchor.classList&&_sessionActionAnchor.classList.contains('session-actions-trigger')){
+      _sessionActionAnchor.classList.remove('active');
+    }
     const row=_sessionActionAnchor.closest('.session-item');
-    if(row) row.classList.remove('menu-open');
+    if(row) row.classList.remove('menu-open','long-pressing');
     _sessionActionAnchor = null;
   }
   _sessionActionSessionId = null;
@@ -1933,6 +2052,46 @@ function _appendSessionDuplicateAction(menu, session){
   ));
 }
 
+function _playSessionActionMenuEntrance(menu){
+  if(!menu) return;
+  const reduce=_sessionPrefersReducedMotion();
+  if(reduce) return;
+  if(typeof menu.animate==='function'){
+    try{
+      const anim=menu.animate(
+        [
+          {opacity:0, transform:'translate3d(0,-4px,0) scale(.985)'},
+          {opacity:1, transform:'translate3d(0,0,0) scale(1)'}
+        ],
+        {duration:450, easing:'cubic-bezier(.2,.8,.2,1)'}
+      );
+      if(anim&&anim.finished) anim.finished.catch(()=>{});
+      return;
+    }catch(_){}
+  }
+  menu.classList.add('open-animated');
+}
+
+async function _archiveSession(session, archived=true, beforeListRender=null){
+  if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return false; }
+  const reflowPositions=_captureSessionReflowPositions();
+  const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
+  try{
+    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived})});
+    session.archived=archived;
+    const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
+    if(cached) cached.archived=archived;
+    if(S.session&&S.session.session_id===session.session_id) S.session.archived=archived;
+    showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
+    if(renderHold) await renderHold;
+    if(_showArchived&&!_sessionPrefersReducedMotion()) _sessionSwipeReturnOffsets.set(session.session_id,'0px');
+    _pendingSessionReflowPositions=reflowPositions;
+    renderSessionListFromCache();
+    void renderSessionList();
+    return true;
+  }catch(err){if(renderHold) await renderHold.catch(()=>{});_pendingSessionReflowPositions=null;showToast(t('session_archive_failed')+err.message);return false;}
+}
+
 function _openSessionActionMenu(session, anchorEl){
   if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return; }
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
@@ -1944,7 +2103,7 @@ function _openSessionActionMenu(session, anchorEl){
   const isCliSession = _isCliSession(session);
   const isExternalSession = isMessagingSession || isCliSession;
   const menu=document.createElement('div');
-  menu.className='session-action-menu open';
+  menu.className='session-action-menu';
   // Rename — first menu item by request (#1764). Double-click rename is
   // timing-sensitive: the first click frequently registers as "open the
   // chat" before the second click arrives, so users open the conversation
@@ -2006,14 +2165,7 @@ function _openSessionActionMenu(session, anchorEl){
     session.archived?ICONS.unarchive:ICONS.archive,
     async()=>{
       closeSessionActionMenu();
-      try{
-        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived:!session.archived})});
-        _optimisticallyArchiveSessionInList(session.session_id,!session.archived);
-        session.archived=!session.archived;
-        if(S.session&&S.session.session_id===session.session_id) S.session.archived=session.archived;
-        void renderSessionList();
-        showToast(session.archived?_sessionArchiveToast(response,session):t('session_restored'));
-      }catch(err){showToast(t('session_archive_failed')+err.message);}
+      await _archiveSession(session,!session.archived);
     }
   ));
   if(isExternalSession && !session.archived){
@@ -2077,10 +2229,11 @@ function _openSessionActionMenu(session, anchorEl){
   _sessionActionMenu = menu;
   _sessionActionAnchor = anchorEl;
   _sessionActionSessionId = session.session_id;
-  anchorEl.classList.add('active');
+  if(anchorEl.classList&&anchorEl.classList.contains('session-actions-trigger')) anchorEl.classList.add('active');
   const row=anchorEl.closest('.session-item');
   if(row) row.classList.add('menu-open');
   _positionSessionActionMenu(anchorEl);
+  _playSessionActionMenuEntrance(menu);
 }
 
 document.addEventListener('click',e=>{
@@ -2106,6 +2259,8 @@ window.addEventListener('resize',()=>{
 // concurrently. Without this guard, a slower older response can overwrite _allSessions
 // with stale data, causing sessions to vanish from the sidebar.
 let _renderSessionListGen = 0;
+let _renderSessionListInFlight = null;
+let _renderSessionListQueuedRequest = null;
 let _sessionListRefreshAnimationPending = false;
 let _sessionListFirstRenderAnimated = false;
 let _sessionListEnterAllAnimationPending = false;
@@ -2113,48 +2268,6 @@ let _sessionListEnterAllAnimationPending = false;
 function animateNextSessionListRefresh(options={}){
   _sessionListRefreshAnimationPending = true;
   if(options&&options.enterAll) _sessionListEnterAllAnimationPending = true;
-}
-
-function _captureSessionListFlipPositions(){
-  const list=$('sessionList');
-  if(!list) return null;
-  const positions=new Map();
-  list.querySelectorAll('.session-item[data-sid]').forEach(row=>{
-    positions.set(row.dataset.sid,row.getBoundingClientRect().top);
-  });
-  return positions;
-}
-
-function _sessionListPrefersReducedMotion(){
-  try{return window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;}
-  catch(_){return false;}
-}
-
-function _playSessionListFlipAnimation(before){
-  if(!before||!before.size||_sessionListPrefersReducedMotion()) return;
-  const list=$('sessionList');
-  if(!list) return;
-  list.querySelectorAll('.session-item[data-sid]').forEach(row=>{
-    const oldTop=before.get(row.dataset.sid);
-    if(oldTop===undefined) return;
-    const delta=oldTop-row.getBoundingClientRect().top;
-    if(Math.abs(delta)<1) return;
-    row.style.setProperty('--session-reflow-offset',delta+'px');
-    row.classList.add('session-reflowing');
-    row.getBoundingClientRect();
-    row.style.setProperty('--session-reflow-offset','0px');
-    let cleared=false;
-    const clear=()=>{
-      if(cleared) return;
-      cleared=true;
-      row.classList.remove('session-reflowing');
-      row.style.removeProperty('--session-reflow-offset');
-      row.removeEventListener('transitionend',onEnd);
-    };
-    const onEnd=(event)=>{ if(event.propertyName==='transform') clear(); };
-    row.addEventListener('transitionend',onEnd);
-    setTimeout(clear,460);
-  });
 }
 
 function _isOptimisticFirstTurnSessionRow(s){
@@ -2279,8 +2392,11 @@ function _applySessionListPayload(sessData, projData){
   if (typeof sessData.server_tz === 'string') {
     _serverTz = sessData.server_tz;
   }
-  _reconcileActiveSessionIdleStateFromList(sessData.sessions||[]);
-  _allSessions = _mergeOptimisticFirstTurnSessions(sessData.sessions||[]);
+  const serverSessions=_optimisticallyRemovedSessionIds.size
+    ? (sessData.sessions||[]).filter(s=>s&&!_optimisticallyRemovedSessionIds.has(s.session_id))
+    : (sessData.sessions||[]);
+  _reconcileActiveSessionIdleStateFromList(serverSessions);
+  _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
   _clearLineageReportCache();
   _allProjects = projData.projects||[];
   _markPollingCompletionUnreadTransitions(_allSessions);
@@ -2300,16 +2416,24 @@ function _applySessionListPayload(sessData, projData){
   renderSessionListFromCache();  // no-ops if rename is in progress
 }
 
-async function renderSessionList(opts={}){
+function _mergeRenderSessionListOptions(prev, next){
+  const merged={...(prev||{}),...(next||{})};
+  // Immediate refreshes must not be downgraded by a later passive polling tick.
+  if((prev&&prev.deferWhileInteracting===false)||(next&&next.deferWhileInteracting===false)){
+    merged.deferWhileInteracting=false;
+  }
+  return merged;
+}
+
+async function _runRenderSessionListRefresh(opts, _gen){
   const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);
-  const _gen = ++_renderSessionListGen;
   if(!deferWhileInteracting) _pendingSessionListPayload=null;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const allProfilesQS = _showAllProfiles ? '?all_profiles=1' : '';
     const [sessData, projData] = await Promise.all([
-      api('/api/sessions' + allProfilesQS),
-      api('/api/projects' + allProfilesQS),
+      api('/api/sessions' + allProfilesQS,{timeoutToast:false}),
+      api('/api/projects' + allProfilesQS,{timeoutToast:false}),
     ]);
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
@@ -2322,6 +2446,37 @@ async function renderSessionList(opts={}){
   }catch(e){console.warn('renderSessionList',e);}
 }
 
+async function _drainRenderSessionListQueue(initialRequest){
+  let request=initialRequest;
+  try{
+    while(request){
+      await _runRenderSessionListRefresh(request.opts, request.gen);
+      request=_renderSessionListQueuedRequest;
+      _renderSessionListQueuedRequest=null;
+    }
+  }finally{
+    _renderSessionListInFlight=null;
+    if(_renderSessionListQueuedRequest){
+      const next=_renderSessionListQueuedRequest;
+      _renderSessionListQueuedRequest=null;
+      _renderSessionListInFlight=_drainRenderSessionListQueue(next);
+    }
+  }
+}
+
+async function renderSessionList(opts={}){
+  const request={opts:opts||{},gen:++_renderSessionListGen};
+  if(_renderSessionListInFlight){
+    _renderSessionListQueuedRequest={
+      opts:_mergeRenderSessionListOptions(_renderSessionListQueuedRequest&&_renderSessionListQueuedRequest.opts, request.opts),
+      gen:request.gen,
+    };
+    return _renderSessionListInFlight;
+  }
+  _renderSessionListInFlight=_drainRenderSessionListQueue(request);
+  return _renderSessionListInFlight;
+}
+
 // ── Gateway session SSE (real-time sync for agent sessions) ──
 let _gatewaySSE = null;
 let _gatewayPollTimer = null;
@@ -2330,7 +2485,13 @@ let _gatewaySSEWarningShown = false;
 const _gatewayFallbackPollMs = 30000;
 const _streamingPollMs = 15000;
 const _sessionTimeRefreshMs = 60000;
-const _activeSessionExternalRefreshMs = 20000;
+// #3107: the active-session "is it externally updated?" poll used to fire
+// every 5 s. On long sessions this caused visible scroll jitter and a
+// noticeable network/CPU floor because the SSE session-events stream
+// already pushes invalidations in real time; this poll exists only as a
+// fallback for the case where SSE is broken/unavailable. Bump to 30 s
+// to keep the safety net without turning it into a primary refresh path.
+const _activeSessionExternalRefreshMs = 30000;
 let _streamingPollTimer = null;
 let _sessionTimeRefreshTimer = null;
 let _activeSessionExternalRefreshTimer = null;
@@ -2382,7 +2543,7 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
   _activeSessionExternalRefreshInFlight = true;
   try{
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false});
     if(!data || !data.session) return;
     if(!S.session || S.session.session_id !== sid) return;
     if(S.busy || S.activeStreamId) return;
@@ -2673,9 +2834,29 @@ function _sessionSearchContentPreview(session, query){
   return preview||'';
 }
 
+function syncSessionSearchClear(){
+  const input=$('sessionSearch');
+  const clear=$('sessionSearchClear');
+  if(!input||!clear) return;
+  clear.hidden=!Boolean(input.value);
+}
+
+function clearSessionSearch(focusInput=true){
+  const input=$('sessionSearch');
+  if(!input) return;
+  if(input.value){
+    input.value='';
+    filterSessions();
+  }else{
+    syncSessionSearchClear();
+  }
+  if(focusInput) input.focus();
+}
+
 function filterSessions(){
   // Immediate client-side title filter (no flicker)
   // Debounced content search via API for message text
+  syncSessionSearchClear();
   const q = ($('sessionSearch').value || '').trim();
   if(q!==_lastSessionSearchQuery){
     _lastSessionSearchQuery=q;
@@ -3320,7 +3501,9 @@ function renderSessionListFromCache(){
   // in _profiles_match, and a strict-equality client filter would reject those
   // rows incorrectly. So we trust the wire data and skip the redundant client
   // filter entirely.
-  const profileFiltered=sourceFiltered;
+  const profileFiltered=sourceFiltered.filter(s=>
+    !s.default_hidden||(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)
+  );
   // Filter by active project. NO_PROJECT_FILTER sentinel asks for sessions
   // with no project_id; otherwise filter to the matching project_id, or
   // pass through when no filter is active.
@@ -3338,7 +3521,9 @@ function renderSessionListFromCache(){
   _sessionListRefreshAnimationPending=false;
   const enterAllAnimatedRows=animateRefresh&&_sessionListEnterAllAnimationPending;
   _sessionListEnterAllAnimationPending=false;
-  const flipBefore=animateRefresh?_captureSessionListFlipPositions():null;
+  const flipBefore=animateRefresh?_captureSessionReflowPositions():null;
+  const committedSwipeDuration=_sessionPrefersReducedMotion()?0:SESSION_SWIPE_DURATION_MS;
+  const committedSwipeReflowDelay=Math.max(0,committedSwipeDuration-SESSION_SWIPE_REFLOW_LEAD_MS);
   const listScrollTopBeforeRender=list.scrollTop||0;
   list.innerHTML='';
   // Batch select bar (when in select mode)
@@ -3598,9 +3783,12 @@ function renderSessionListFromCache(){
     toggleBtn.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
     list.appendChild(toggleBtn);
   }
-  if(animateRefresh){
-    _playSessionListFlipAnimation(flipBefore);
-  }
+  // Refresh FLIP and queued archive/delete reflow both drive
+  // --session-reflow-offset. Refresh wins so one render has one transform writer.
+  const reflowBefore=animateRefresh?flipBefore:_pendingSessionReflowPositions;
+  const reflowTimeout=animateRefresh?SESSION_LIST_FLIP_TIMEOUT_MS:SESSION_REFLOW_TIMEOUT_MS;
+  _pendingSessionReflowPositions=null;
+  _playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);
   // Note: declared after the groups loop but available via function hoisting.
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
@@ -3611,6 +3799,16 @@ function renderSessionListFromCache(){
     const hasUnread=_hasUnreadForSession(s)&&!isActive;
     const readOnly=_isReadOnlySession(s);
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'');
+    const swipeReturnOffset=_sessionSwipeReturnOffsets.get(s.session_id);
+    if(swipeReturnOffset!==undefined){
+      _sessionSwipeReturnOffsets.delete(s.session_id);
+      el.style.setProperty('--session-swipe-return-offset',swipeReturnOffset);
+      el.classList.add('session-swipe-returning');
+      el.addEventListener('animationend',()=>{
+        el.classList.remove('session-swipe-returning');
+        el.style.removeProperty('--session-swipe-return-offset');
+      },{once:true});
+    }
     if(animateRefresh&&(enterAllAnimatedRows||!(flipBefore&&flipBefore.has(s.session_id)))){
       el.classList.add('session-list-flip-enter');
     }
@@ -3940,6 +4138,9 @@ function renderSessionListFromCache(){
       menuBtn.setAttribute('aria-haspopup','menu');
       menuBtn.setAttribute('aria-label','Conversation actions');
       menuBtn.innerHTML=ICONS.more;
+      const stopMenuPointer=(e)=>e.stopPropagation();
+      menuBtn.onpointerdown=stopMenuPointer;
+      menuBtn.onpointerup=stopMenuPointer;
       menuBtn.onclick=(e)=>{
         e.stopPropagation();
         e.preventDefault();
@@ -3951,6 +4152,7 @@ function renderSessionListFromCache(){
     el.oncontextmenu=(e)=>{
       if(readOnly) return;
       e.preventDefault();
+      if(e.pointerType==='touch'||e.pointerType==='pen') return;
       e.stopPropagation();
       clearTimeout(_tapTimer);
       _tapTimer=null;
@@ -3959,78 +4161,242 @@ function renderSessionListFromCache(){
       _openSessionActionMenu(s, actions||el);
     };
 
-    // Use pointerup + manual double-tap detection instead of onclick/ondblclick.
+    if(!readOnly){
+      el.append(
+        _makeSessionSwipeAffordance('right',s.archived?'undo':'archive',s.archived?'Restore':t('session_batch_archive')),
+        _makeSessionSwipeAffordance('left','trash-2',t('session_batch_delete')),
+      );
+    }
+
+    // Use release events + manual double-tap detection instead of onclick/ondblclick.
     // onclick/ondblclick are unreliable on touch devices (iPad Safari especially):
     // hover-triggered layout shifts, ghost clicks, and 300ms delay all break
-    // single-tap navigation. pointerup fires immediately on both mouse & touch.
+    // single-tap navigation.
     // Mouse clicks are instant; touch presses need a 300ms delay to distinguish
     // a tap from a scroll-drag gesture on mobile.
-    // Drag detection (pointermove > 5px) cancels the pending tap on release.
+    // Movement promotes pressing into dragging; drag release cancels a pending tap.
     let _lastTapTime=0;
     let _tapTimer=null;
     let _pointerDownX=0;
     let _pointerDownY=0;
-    let _pointerActive=false;
-    let _isDragging=false;
+    let _gestureState='idle'; // idle | pressing | dragging | committed
     let _clearDragTimer=null;
-    const _clearPointerDragState=()=>{
-      _pointerActive=false;
-      if(_isDragging){
-        _isDragging=false;
-        if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
-        _clearDragTimer=setTimeout(()=>{el.classList.remove('dragging');_clearDragTimer=null;},50);
-      }
+    let _longPressTimer=null;
+    let _longPressMenuOpened=false;
+    let _swipeTracking=false;
+    let _pointerX=0;
+    let _pointerY=0;
+    let _gesturePointerType='';
+    const _clearLongPressTimer=()=>{
+      if(_longPressTimer){clearTimeout(_longPressTimer);_longPressTimer=null;}
+      if(!_longPressMenuOpened) el.classList.remove('long-pressing');
     };
-    el.onpointerdown=(e)=>{
-      if(e.pointerType==='mouse' && e.button!==0) return;
-      _pointerActive=true;
-      _pointerDownX=e.clientX;
-      _pointerDownY=e.clientY;
-      _isDragging=false;
+    const _beginSessionGesture=(clientX,clientY,pointerType='')=>{
+      _gesturePointerType=pointerType;
+      _pointerDownX=clientX;
+      _pointerDownY=clientY;
+      _pointerX=clientX;
+      _pointerY=clientY;
+      _gestureState='pressing';
+      _swipeTracking=false;
+      _longPressMenuOpened=false;
       if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
-      el.classList.remove('dragging');
+      el.classList.remove('dragging','swipe-committed','swipe-removing');
+      el.style.removeProperty('height');
+      el.style.removeProperty('min-height');
     };
-    el.onpointermove=(e)=>{
-      // Plain hover also dispatches pointermove. Only mark a row as dragging
-      // after an actual press starts on this row; otherwise hovered rows stay
-      // faded until the next sidebar rerender clears their DOM nodes.
-      if(!_pointerActive) return;
-      if(_isDragging) return;
-      const dx=Math.abs(e.clientX-_pointerDownX);
-      const dy=Math.abs(e.clientY-_pointerDownY);
-      if(dx>5||dy>5){
-        _isDragging=true;
-        el.classList.add('dragging');
-        // Cancel any pending drag-clear so we don't flash hover mid-drag
-        if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
-      }
-    };
-    el.onpointercancel=_clearPointerDragState;
-    el.onpointerleave=()=>{ if(_pointerActive) _clearPointerDragState(); };
-    el.onpointerup=(e)=>{
-      if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
-      _pointerActive=false;
-      if(_renamingSid) return;
-      if(actions&&actions.contains(e.target)) return;
-      if(e.target&&e.target.closest&&e.target.closest('.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment')) return;
-      if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
-      // If the pointer moved enough to be a drag, cancel any pending tap
-      if(_isDragging){clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;_clearDragTimer=setTimeout(()=>{el.classList.remove('dragging');_clearDragTimer=null;},50);return;}
-      const now=Date.now();
-      if(now-_lastTapTime<350){
-        // Double-tap: rename
+    const _scheduleSessionLongPressMenu=()=>{
+      _clearLongPressTimer();
+      el.classList.add('long-pressing');
+      _longPressTimer=setTimeout(()=>{
+        if(_gestureState!=='pressing'||_renamingSid||_sessionSelectMode||readOnly) return;
+        _longPressMenuOpened=true;
         clearTimeout(_tapTimer);
         _tapTimer=null;
         _lastTapTime=0;
-        startRename();
+        _openSessionActionMenu(s, el);
+      },SESSION_LONG_PRESS_DELAY_MS);
+    };
+    const _isSessionSwipeTarget=()=>{
+      return _gesturePointerType!=='mouse'&&!readOnly&&!_renamingSid&&!_sessionSelectMode;
+    };
+    const _isSessionActionTarget=(target)=>{
+      return !!(actions&&target&&actions.contains(target));
+    };
+    const _trackHorizontalSwipe=(dx,dy)=>{
+      if(dx>8&&dx>dy*1.1) _swipeTracking=true;
+    };
+    const _promoteSessionDrag=(dx,dy)=>{
+      if(_gestureState!=='pressing'||(dx<=5&&dy<=5)) return;
+      if(dy>8||dx>10) _clearLongPressTimer();
+      _gestureState='dragging';
+      el.classList.add('dragging');
+      if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+    };
+    const _updateSessionGesture=(clientX,clientY)=>{
+      if(_gestureState==='idle') return false;
+      _pointerX=clientX;
+      _pointerY=clientY;
+      const signedDx=clientX-_pointerDownX;
+      const signedDy=clientY-_pointerDownY;
+      const dx=Math.abs(signedDx);
+      const dy=Math.abs(signedDy);
+      _promoteSessionDrag(dx,dy);
+      _trackHorizontalSwipe(dx,dy);
+      if(_isSessionSwipeTarget()&&(_swipeTracking||dx>dy)) _paintSessionSwipe(signedDx);
+      return _swipeTracking;
+    };
+    const _canSwipeDeleteSession=()=>{
+      return _isSessionSwipeTarget()&&!_isMessagingSession(s)&&!_isCliSession(s);
+    };
+    const _paintSessionSwipe=(signedDx)=>{
+      const rawOffset=signedDx*.55;
+      const revealedOffset=Math.max(-72,Math.min(72,rawOffset));
+      const overshoot=Math.max(0,Math.abs(rawOffset)-72);
+      const offset=Math.sign(rawOffset)*(Math.abs(revealedOffset)+Math.sqrt(overshoot)*5);
+      const progress=Math.min(1,Math.abs(revealedOffset)/72);
+      const reveal=Math.abs(offset);
+      const actionRevealScale=1.15;
+      const iconScale=Math.min(1,Math.max(.01,progress*actionRevealScale));
+      const badgeSize=34*iconScale;
+      const iconSize=18*iconScale;
+      const labelScale=Math.min(1,Math.max(.01,progress*actionRevealScale));
+      const actionOpacity=Math.min(1,Math.max(.01,progress*actionRevealScale));
+      const actionInset=6;
+      const tileGap=6;
+      const stretchStart=72/actionRevealScale;
+      const stretchProgress=Math.max(0,reveal-stretchStart);
+      const badgeStretch=Math.min(Math.max(0,reveal-34),stretchProgress*1.15,Math.max(0,reveal-badgeSize-actionInset-tileGap));
+      el.style.setProperty('--session-swipe-offset',offset+'px');
+      el.style.setProperty('--session-swipe-reveal',reveal+'px');
+      el.style.setProperty('--session-swipe-badge-size',badgeSize+'px');
+      el.style.setProperty('--session-swipe-icon-size',iconSize+'px');
+      el.style.setProperty('--session-swipe-label-scale',labelScale);
+      el.style.setProperty('--session-swipe-badge-stretch',badgeStretch+'px');
+      el.style.setProperty('--session-swipe-progress',actionOpacity);
+      el.classList.toggle('swiping-right',offset>0);
+      el.classList.toggle('swiping-left',offset<0);
+    };
+    const _clearSessionSwipePaint=()=>{
+      el.style.removeProperty('--session-swipe-offset');
+      el.style.removeProperty('--session-swipe-reveal');
+      el.style.removeProperty('--session-swipe-badge-size');
+      el.style.removeProperty('--session-swipe-icon-size');
+      el.style.removeProperty('--session-swipe-label-scale');
+      el.style.removeProperty('--session-swipe-badge-stretch');
+      el.style.removeProperty('--session-swipe-progress');
+      el.style.removeProperty('height');
+      el.style.removeProperty('min-height');
+      el.classList.remove('swiping-right','swiping-left','swipe-committed','swipe-removing');
+    };
+    const _settleSessionSwipePaint=()=>{
+      el.classList.remove('dragging');
+      requestAnimationFrame(()=>requestAnimationFrame(_clearSessionSwipePaint));
+    };
+    const _completeSessionSwipePaint=(signedDx)=>{
+      el.classList.remove('dragging');
+      el.classList.add('swipe-committed');
+      el.style.setProperty('--session-swipe-progress','0');
+      el.style.setProperty('--session-swipe-offset',(signedDx>0?1:-1)*window.innerWidth+'px');
+      const rect=el.getBoundingClientRect();
+      el.style.height=rect.height+'px';
+      el.style.minHeight=rect.height+'px';
+      requestAnimationFrame(()=>el.classList.add('swipe-removing'));
+    };
+    const _handleSessionSwipe=(signedDx,signedDy)=>{
+      if(_gestureState==='committed'||!_isSessionSwipeTarget()) return false;
+      const actionThreshold=signedDx>0?SESSION_ARCHIVE_SWIPE_THRESHOLD_PX:SESSION_DELETE_SWIPE_THRESHOLD_PX;
+      if(Math.abs(signedDx)<actionThreshold) return false;
+      if(Math.abs(signedDy)>Math.abs(signedDx)*SESSION_SWIPE_CANCEL_RATIO) return false;
+      _gestureState='committed';
+      _clearLongPressTimer();
+      clearTimeout(_tapTimer);
+      _tapTimer=null;
+      _lastTapTime=0;
+      if(signedDx>0){
+        if(s.archived){
+          _settleSessionSwipePaint();
+          _archiveSession(s,false,()=>_waitForSessionMotion(committedSwipeDuration)).then((restored)=>{
+            if(!restored) _settleSessionSwipePaint();
+          });
+        }else if(_showArchived){
+          _settleSessionSwipePaint();
+          _archiveSession(s,true,()=>_waitForSessionMotion(committedSwipeDuration)).then((archived)=>{
+            if(!archived) _settleSessionSwipePaint();
+          });
+        }else{
+          _completeSessionSwipePaint(signedDx);
+          _archiveSession(s,true,()=>_waitForSessionMotion(committedSwipeReflowDelay)).then((archived)=>{
+            if(!archived) _settleSessionSwipePaint();
+          });
+        }
+      }else if(_canSwipeDeleteSession()){
+        el.classList.remove('dragging');
+        deleteSession(s.session_id,async()=>{
+          _completeSessionSwipePaint(signedDx);
+          await _waitForSessionMotion(committedSwipeReflowDelay);
+        }).then((deleted)=>{
+          if(!deleted) _settleSessionSwipePaint();
+        });
+      }else if(typeof showToast==='function'){
+        showToast('Imported sessions cannot be deleted here.',3000);
+        _gestureState='dragging';
+        _settleSessionSwipePaint();
+      }
+      return true;
+    };
+    const _commitSessionSwipe=()=>{
+      return _handleSessionSwipe(_pointerX-_pointerDownX,_pointerY-_pointerDownY);
+    };
+    const _clearPointerDragState=()=>{
+      if(_gestureState==='committed'){
+        _clearLongPressTimer();
         return;
       }
+      const wasDragging=_gestureState==='dragging'||_swipeTracking;
+      _gestureState='idle';
+      _clearLongPressTimer();
+      if(wasDragging){
+        if(_clearDragTimer){clearTimeout(_clearDragTimer);_clearDragTimer=null;}
+        _clearDragTimer=setTimeout(()=>{_settleSessionSwipePaint();_clearDragTimer=null;},50);
+      }
+    };
+    const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{
+      const wasDragging=_gestureState==='dragging'||_swipeTracking;
+      _clearLongPressTimer();
+      if(_renamingSid){_gestureState='idle';return false;}
+      if(_isSessionActionTarget(target)){_gestureState='idle';return false;}
+      _pointerX=clientX;
+      _pointerY=clientY;
+      _commitSessionSwipe();
+      if(_longPressMenuOpened){_gestureState='idle';return true;}
+      if(_gestureState==='committed') return true;
+      if(_sessionActionMenu&&!_sessionActionMenu.contains(target)){
+        closeSessionActionMenu();
+        return true;
+      }
+      if(target&&target.closest&&target.closest('.session-child-count,.session-child-sessions,.session-child-session,.session-lineage-count,.session-lineage-segments,.session-lineage-segment')) return false;
+      if(_sessionSelectMode){if(!readOnly)toggleSessionSelect(s.session_id);return true;}
+      if(wasDragging){
+        clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
+        _gestureState='idle';
+        _clearDragTimer=setTimeout(()=>{_settleSessionSwipePaint();_clearDragTimer=null;},50);
+        return false;
+      }
+      _gestureState='idle';
+      const now=Date.now();
+      if(now-_lastTapTime<350){
+        clearTimeout(_tapTimer);
+        _tapTimer=null;
+        _lastTapTime=0;
+        el.classList.remove('loading');
+        startRename();
+        return false;
+      }
       _lastTapTime=now;
-      // Single tap: wait to ensure it's not the first of a double-tap,
-      // then navigate. Mouse is instant; touch needs delay to suppress
-      // accidental navigation during scroll-drag lifts.
       clearTimeout(_tapTimer);
-      const delay=e.pointerType==='mouse'?0:300;
+      const delay=pointerType==='mouse'?0:300;
+      if(pointerType!=='mouse') el.classList.add('loading');
       _tapTimer=setTimeout(async()=>{
         _tapTimer=null;
         _lastTapTime=0;
@@ -4041,10 +4407,43 @@ function renderSessionListFromCache(){
             await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:s.session_id})});
           }catch(e){ /* import failed -- fall through to read-only view */ }
         }
-        if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
-        await loadSession(s.session_id);renderSessionListFromCache();
-        if(typeof closeMobileSidebar==='function')closeMobileSidebar();
+        try{
+          if(($('sessionSearch').value||'').trim()) _hideSearchPreviewsAfterSelect=true;
+          await loadSession(s.session_id);renderSessionListFromCache();
+          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
+        }finally{
+          el.classList.remove('loading');
+        }
       }, delay);
+      return false;
+    };
+    el.onpointerdown=(e)=>{
+      if(e.pointerType==='touch') return;
+      if(e.pointerType==='mouse' && e.button!==0) return;
+      if(_isSessionActionTarget(e.target)) return;
+      _beginSessionGesture(e.clientX,e.clientY,e.pointerType||'');
+      if(e.pointerType==='pen'){
+        _scheduleSessionLongPressMenu();
+      }
+    };
+    el.onpointermove=(e)=>{
+      if(e.pointerType==='touch') return;
+      // Plain hover also dispatches pointermove. Only mark a row as dragging
+      // after an actual press starts on this row; otherwise hovered rows stay
+      // faded until the next sidebar rerender clears their DOM nodes.
+      _updateSessionGesture(e.clientX,e.clientY);
+    };
+    el.onpointercancel=(e)=>{
+      if(e.pointerType==='touch') return;
+      _clearPointerDragState();
+    };
+    el.onpointerleave=()=>{
+      if(_gesturePointerType==='mouse'&&_gestureState!=='idle') _clearPointerDragState();
+    };
+    el.onpointerup=(e)=>{
+      if(e.pointerType==='touch') return;
+      if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
+      if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) e.stopPropagation();
     };
     // Add ondblclick for more reliable double-click detection
     el.ondblclick=(e)=>{
@@ -4056,6 +4455,24 @@ function renderSessionListFromCache(){
       if (_loadingSessionId && _loadingSessionId !== s.session_id) return;
       startRename();
     };
+    el.addEventListener('touchstart',(e)=>{
+      if(_isSessionActionTarget(e.target)) return;
+      const touch=e.changedTouches&&e.changedTouches[0];
+      if(!touch) return;
+      _beginSessionGesture(touch.clientX,touch.clientY,'touch');
+      _scheduleSessionLongPressMenu();
+    },{passive:true});
+    el.addEventListener('touchmove',(e)=>{
+      const touch=e.changedTouches&&e.changedTouches[0];
+      if(!touch) return;
+      if(_updateSessionGesture(touch.clientX,touch.clientY)) e.preventDefault();
+    },{passive:false});
+    el.addEventListener('touchcancel',_clearPointerDragState,{passive:true});
+    el.addEventListener('touchend',(e)=>{
+      const touch=e.changedTouches&&e.changedTouches[0];
+      if(!touch) return;
+      if(_finishSessionGesture(touch.clientX,touch.clientY,e.target,'touch')) e.stopPropagation();
+    },{passive:true});
     return el;
   }
 }
@@ -4159,20 +4576,46 @@ async function removeWorktree(session){
   }
 }
 
-async function deleteSession(sid){
+async function deleteSession(sid, beforeDelete=null){
   const session=_sessionSnapshotById(sid);
   const ok=await showConfirmDialog({
     message:session&&session.worktree_path?t('session_delete_worktree_confirm',session.worktree_path):t('session_delete_confirm'),
     confirmLabel:t('delete_title'),
     danger:true
   });
-  if(!ok)return;
-  let response=null;
-  try{
-    response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
-    _optimisticallyRemoveSessionFromList(sid);
+  if(!ok)return false;
+  const reflowPositions=_captureSessionReflowPositions();
+  const beforeDeleteHold=beforeDelete?Promise.resolve().then(beforeDelete):null;
+  const previousSessions=_allSessions;
+  let optimisticRendered=false;
+  const deleteRequest=api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})}).then(response=>{
     _clearHandoffStorageForSession(sid);
-  }catch(e){setStatus(`Delete failed: ${e.message}`);return;}
+    return {response};
+  }, error=>({error}));
+  if(beforeDeleteHold){
+    await beforeDeleteHold;
+    _optimisticallyRemovedSessionIds.add(sid);
+    _pendingSessionReflowPositions=reflowPositions;
+    _optimisticallyRemoveSessionFromList(sid);
+    optimisticRendered=true;
+  }
+  const deleteResult=await deleteRequest;
+  if(deleteResult&&deleteResult.error){
+    _pendingSessionReflowPositions=null;
+    if(optimisticRendered){
+      _optimisticallyRemovedSessionIds.delete(sid);
+      _allSessions=previousSessions;
+      renderSessionListFromCache();
+    }
+    const err=deleteResult.error;
+    setStatus(`Delete failed: ${err&&err.message?err.message:String(err)}`);
+    return false;
+  }
+  const response=deleteResult&&deleteResult.response;
+  if(!optimisticRendered){
+    _pendingSessionReflowPositions=reflowPositions;
+    _optimisticallyRemoveSessionFromList(sid);
+  }
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
     localStorage.removeItem('hermes-webui-session');
@@ -4191,7 +4634,9 @@ async function deleteSession(sid){
     }
   }
   showToast(_sessionResponseRetainsWorktree(response,session)?t('session_deleted_worktree'):t('session_deleted'));
-  void renderSessionList();
+  if(optimisticRendered) void renderSessionList().finally(()=>_optimisticallyRemovedSessionIds.delete(sid));
+  else await renderSessionList();
+  return true;
 }
 
 // ── Project helpers ─────────────────────────────────────────────────────

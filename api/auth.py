@@ -105,6 +105,7 @@ def _save_sessions(sessions: dict[str, float]) -> None:
 
 # Active sessions: token -> expiry timestamp (persisted across restarts via STATE_DIR)
 _sessions = _load_sessions()
+_SESSIONS_LOCK = threading.Lock()
 
 # ── Login rate limiter ──────────────────────────────────────────────────────
 _LOGIN_ATTEMPTS_FILE = STATE_DIR / '.login_attempts.json'
@@ -184,6 +185,14 @@ def _record_login_attempt(ip: str) -> None:
         attempts.append(now)
         _login_attempts[ip] = attempts
         _save_login_attempts(_login_attempts)
+
+
+def _clear_login_attempts(ip: str) -> None:
+    """Clear failed login attempts after a successful login (thread-safe)."""
+    with _LOGIN_ATTEMPTS_LOCK:
+        if ip in _login_attempts:
+            _login_attempts.pop(ip, None)
+            _save_login_attempts(_login_attempts)
 
 
 def _load_key(filename: str) -> bytes:
@@ -380,8 +389,9 @@ def verify_password(plain: str) -> bool:
 def create_session() -> str:
     """Create a new auth session. Returns signed cookie value."""
     token = secrets.token_hex(32)
-    _sessions[token] = time.time() + _resolve_session_ttl()
-    _save_sessions(_sessions)
+    with _SESSIONS_LOCK:
+        _sessions[token] = time.time() + _resolve_session_ttl()
+        _save_sessions(_sessions)
     sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()
     return f"{token}.{sig}"
 
@@ -389,11 +399,12 @@ def create_session() -> str:
 def _prune_expired_sessions():
     """Remove all expired session entries to prevent unbounded memory growth."""
     now = time.time()
-    expired = [t for t, exp in _sessions.items() if now > exp]
-    if expired:
-        for token in expired:
-            _sessions.pop(token, None)
-        _save_sessions(_sessions)
+    with _SESSIONS_LOCK:
+        expired = [t for t, exp in _sessions.items() if now > exp]
+        if expired:
+            for token in expired:
+                _sessions.pop(token, None)
+            _save_sessions(_sessions)
 
 
 def verify_session(cookie_value: str) -> bool:
@@ -411,10 +422,12 @@ def verify_session(cookie_value: str) -> bool:
     )
     if not valid:
         return False
-    expiry = _sessions.get(token)
-    if not expiry or time.time() > expiry:
-        _sessions.pop(token, None)
-        return False
+    with _SESSIONS_LOCK:
+        expiry = _sessions.get(token)
+        if not expiry or time.time() > expiry:
+            _sessions.pop(token, None)
+            _save_sessions(_sessions)
+            return False
     return True
 
 
@@ -453,9 +466,10 @@ def invalidate_session(cookie_value) -> None:
     """Remove a session token."""
     if cookie_value and '.' in cookie_value:
         token = cookie_value.rsplit('.', 1)[0]
-        if token in _sessions:
-            _sessions.pop(token, None)
-            _save_sessions(_sessions)
+        with _SESSIONS_LOCK:
+            if token in _sessions:
+                _sessions.pop(token, None)
+                _save_sessions(_sessions)
 
 
 def parse_cookie(handler) -> str | None:

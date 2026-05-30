@@ -1,12 +1,22 @@
 from collections import OrderedDict
+import base64
+from email.message import Message
+import json
+from pathlib import Path
+import re
+import urllib.error
 
 import api.gateway_chat as gateway_chat
 import api.models as models
+import api.streaming as streaming
 from api.config import STREAMS, create_stream_channel
 from api.models import new_session
 from api.gateway_chat import (
+    _gateway_http_error_event,
     _gateway_sse_delta,
     _gateway_stream_usage,
+    _gateway_tool_progress_event,
+    gateway_chat_config_status,
     webui_chat_backend_mode,
     webui_gateway_chat_enabled,
 )
@@ -29,6 +39,36 @@ def test_gateway_chat_backend_only_accepts_explicit_gateway_aliases():
 
 def test_gateway_chat_backend_can_be_enabled_from_config_without_env():
     assert webui_chat_backend_mode({"webui_chat_backend": "api_server"}, {}) == "gateway"
+
+
+def test_gateway_chat_config_status_is_redacted_and_reports_missing_key():
+    status = gateway_chat_config_status(
+        {},
+        {
+            "HERMES_WEBUI_CHAT_BACKEND": "gateway",
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gateway.local",
+        },
+    )
+
+    assert status == {
+        "enabled": True,
+        "backend": "gateway",
+        "base_url_configured": True,
+        "api_key_configured": False,
+    }
+
+
+def test_gateway_chat_config_status_reports_fallback_api_server_key_without_exposing_value():
+    status = gateway_chat_config_status(
+        {},
+        {
+            "HERMES_WEBUI_CHAT_BACKEND": "gateway",
+            "API_SERVER_KEY": "secret-token",
+        },
+    )
+
+    assert status["api_key_configured"] is True
+    assert "secret-token" not in repr(status)
 
 
 def test_gateway_chat_backend_env_wins_over_config_and_stays_safe():
@@ -58,6 +98,117 @@ def test_gateway_stream_usage_normalizes_token_names():
     assert _gateway_stream_usage({}) == {}
 
 
+def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
+    assert _gateway_tool_progress_event(
+        {
+            "tool": "terminal",
+            "label": "terminal: pytest",
+            "toolCallId": "call-1",
+            "status": "running",
+        }
+    ) == (
+        "tool",
+        {
+            "event_type": "tool.started",
+            "name": "terminal",
+            "preview": "terminal: pytest",
+            "args": {},
+            "is_error": False,
+            "tid": "call-1",
+        },
+    )
+    assert _gateway_tool_progress_event(
+        {"tool": "terminal", "toolCallId": "call-1", "status": "completed"}
+    ) == (
+        "tool_complete",
+        {
+            "event_type": "tool.completed",
+            "name": "terminal",
+            "preview": None,
+            "args": {},
+            "is_error": False,
+            "tid": "call-1",
+        },
+    )
+    assert _gateway_tool_progress_event({"tool": "_thinking", "status": "running"}) is None
+
+
+def test_gateway_http_401_reports_gateway_auth_not_provider_key():
+    exc = urllib.error.HTTPError(
+        "http://gateway.local/v1/chat/completions",
+        401,
+        "Unauthorized",
+        hdrs=Message(),
+        fp=None,
+    )
+
+    event = _gateway_http_error_event(
+        exc,
+        '{"error":{"message":"Invalid API key","code":"invalid_api_key"}}',
+        api_key_configured=False,
+    )
+
+    assert event["label"] == "Gateway authentication failed"
+    assert event["type"] == "gateway_auth_error"
+    assert "HTTP 401" in event["message"]
+    assert "HERMES_WEBUI_GATEWAY_API_KEY" in event["hint"]
+    assert "API_SERVER_KEY" in event["hint"]
+    assert "Invalid API key" not in event["hint"]
+
+
+def test_gateway_http_401_with_key_suggests_key_mismatch():
+    exc = urllib.error.HTTPError(
+        "http://gateway.local/v1/chat/completions",
+        401,
+        "Unauthorized",
+        hdrs=Message(),
+        fp=None,
+    )
+
+    event = _gateway_http_error_event(exc, "", api_key_configured=True)
+
+    assert event["type"] == "gateway_auth_error"
+    assert event["hint"] == "Check that HERMES_WEBUI_GATEWAY_API_KEY matches the Hermes Gateway API_SERVER_KEY."
+
+
+def test_frontend_renders_gateway_auth_error_with_specific_label():
+    src = Path("static/messages.js").read_text(encoding="utf-8")
+    start = src.find("source.addEventListener('apperror'")
+    end = src.find("source.addEventListener('warning'", start)
+    assert start != -1 and end != -1, "apperror handler not found"
+    block = src[start:end]
+
+    assert "d.type==='gateway_auth_error'" in block
+    assert "isGatewayAuthError" in block
+    assert "gateway_auth_label" in block
+    assert "Gateway authentication failed" in block
+    assert "isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch" in block, (
+        "Gateway API key failures should use their own label before generic provider mismatch handling."
+    )
+
+
+def test_gateway_auth_label_i18n_key_exists_for_every_locale():
+    src = Path("static/i18n.js").read_text(encoding="utf-8")
+    locale_names = [
+        match.group("quoted") or match.group("plain")
+        for match in re.finditer(
+            r"^\s{2}(?:'(?P<quoted>[A-Za-z0-9-]+)'|(?P<plain>[A-Za-z0-9-]+))\s*:\s*\{",
+            src,
+            re.MULTILINE,
+        )
+    ]
+    assert src.count("gateway_auth_label") >= len(locale_names)
+
+
+def test_gateway_chat_health_payload_is_documented_as_operator_diagnostic_only():
+    readme = Path("README.md").read_text(encoding="utf-8")
+    changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+    for text in (readme, changelog):
+        assert "gateway_chat" in text
+        assert "operator diagnostic" in text
+        assert "not currently rendered as a user-facing health banner" in text
+
+
 def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -75,7 +226,11 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
             return False
 
         def __iter__(self):
+            yield b'event: hermes.tool.progress\n'
+            yield b'data: {"tool":"terminal","label":"terminal: pytest","toolCallId":"call-1","status":"running"}\n\n'
             yield b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
+            yield b'event: hermes.tool.progress\n'
+            yield b'data: {"tool":"terminal","toolCallId":"call-1","status":"completed"}\n\n'
             yield b'data: {"choices":[{"delta":{"content":"lo"}}],"usage":{"prompt_tokens":4,"completion_tokens":2}}\n\n'
             yield b'data: [DONE]\n\n'
 
@@ -87,6 +242,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
 
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "loaded", "source": "test", "label": "test", "message_count": 1, "messages": [{"role": "user", "content": "prefill"}]})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: list(ctx["messages"]) + [{"role": "user", "content": "webui session context"}])
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
 
     s = new_session()
@@ -96,7 +253,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     s.pending_attachments = []
     s.pending_started_at = 123
     s.save()
-    STREAMS[stream_id] = create_stream_channel()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
 
     gateway_chat._run_gateway_chat_streaming(
         s.session_id,
@@ -110,6 +269,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     saved = models.get_session(s.session_id)
     assert [m["role"] for m in saved.messages] == ["user", "assistant"]
     assert saved.messages[-1]["content"] == "hello"
+    assert isinstance(saved.messages[0]["timestamp"], float)
+    assert isinstance(saved.messages[1]["timestamp"], float)
+    assert saved.messages[0]["timestamp"] < saved.messages[1]["timestamp"]
     assert saved.active_stream_id is None
     assert stream_id not in STREAMS
     assert captured["url"] == "http://gateway.local/v1/chat/completions"
@@ -117,3 +279,84 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["headers"]["X-hermes-session-id"] == s.session_id
     assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
     assert '"stream": true' in captured["body"]
+    payload = json.loads(captured["body"])
+    assert [m["content"] for m in payload["messages"]] == [
+        "prefill",
+        "webui session context",
+        "Say hello",
+    ]
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    assert ("tool", {
+        "event_type": "tool.started",
+        "name": "terminal",
+        "preview": "terminal: pytest",
+        "args": {},
+        "is_error": False,
+        "tid": "call-1",
+    }) in events
+    assert ("tool_complete", {
+        "event_type": "tool.completed",
+        "name": "terminal",
+        "preview": None,
+        "args": {},
+        "is_error": False,
+        "tid": "call-1",
+    }) in events
+
+
+def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    image_path = tmp_path / "photo.png"
+    image_path.write_bytes(image_bytes)
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"saw it"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse()
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [{"role": "user", "content": "webui session context"}])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    s = new_session()
+    stream_id = "stream-gateway-image-test"
+    s.active_stream_id = stream_id
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "What is in this image?",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [{"path": str(image_path), "mime": "image/png", "is_image": True}],
+    )
+
+    content = captured["body"]["messages"][-1]["content"]
+    assert captured["body"]["messages"][0] == {"role": "user", "content": "webui session context"}
+    assert content[0] == {"type": "text", "text": "What is in this image?"}
+    assert content[1]["type"] == "image_url"
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
