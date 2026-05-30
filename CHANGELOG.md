@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Profile switcher is now available globally in the app titlebar, not just in the chat composer. Clicking the profile button in the header opens the profile dropdown from any panel (Chat, Tasks, Kanban, Settings, Skills, etc.). The label tracks the active profile on boot and after every switch.
+
 ## [v0.51.171] — 2026-05-30 — Release EQ (stage-batch53 — tool-output card badge + Neon opt-in skin)
 
 ### Added

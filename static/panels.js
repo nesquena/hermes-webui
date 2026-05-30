@@ -4345,15 +4345,26 @@ function _positionComposerWsDropdown(){
 
 function _positionProfileDropdown(){
   const dd=$('profileDropdown');
-  const chip=$('profileChip');
-  const footer=document.querySelector('.composer-footer');
-  if(!dd||!chip||!footer)return;
-  const chipRect=chip.getBoundingClientRect();
-  const footerRect=footer.getBoundingClientRect();
-  let left=chipRect.left-footerRect.left;
-  const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
-  left=Math.max(0, Math.min(left, maxLeft));
-  dd.style.left=`${left}px`;
+  const trigger=_profileDropdownTrigger||$('profileChip');
+  if(!dd||!trigger)return;
+  const rect=trigger.getBoundingClientRect();
+  const gap=4;
+  const ddW=dd.offsetWidth||260;
+  // Decide direction: below for titlebar, above for composer
+  const openBelow=trigger===document.getElementById('titlebarProfileBtn');
+  // Horizontal: center on trigger, clamp to viewport
+  let left=rect.left+(rect.width/2)-(ddW/2);
+  left=Math.max(8, Math.min(left, window.innerWidth-ddW-8));
+  dd.style.left=left+'px';
+  // Vertical
+  if(openBelow){
+    dd.style.top=(rect.bottom+gap)+'px';
+    dd.classList.add('open-below');
+  }else{
+    dd.style.top=''; dd.style.bottom=''; // clear fixed top/bottom
+    dd.style.bottom=(window.innerHeight-rect.top+gap)+'px';
+    dd.classList.remove('open-below');
+  }
 }
 
 function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
@@ -4952,6 +4963,7 @@ async function switchToWorkspace(path,name){
 // ── Profile panel + dropdown ──
 let _profilesCache = null;
 let _profileSwitchGeneration = 0;
+let _profileDropdownTrigger = null;  // tracks which element triggered the dropdown
 
 async function _profileSwitchPanelLoad(){
   if (_currentPanel === 'skills') await loadSkills();
@@ -5203,20 +5215,28 @@ function renderProfileDropdown(data) {
   mgmt.innerHTML = `${li('settings',12)} ${esc(t('manage_profiles'))}`;
   mgmt.onclick = () => { closeProfileDropdown(); mobileSwitchPanel('profiles'); };
   dd.appendChild(mgmt);
+  // Sync titlebar label to the resolved active profile
+  const tbl = $('titlebarProfileLabel');
+  if (tbl) tbl.textContent = active;
 }
 
-function toggleProfileDropdown() {
+function toggleProfileDropdown(e) {
   const dd = $('profileDropdown');
   if (!dd) return;
   if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
+  // Track which element triggered the dropdown for positioning
+  _profileDropdownTrigger = (e && e.currentTarget) || $('profileChip');
   api('/api/profiles').then(data => {
     renderProfileDropdown(data);
     dd.classList.add('open');
     _positionProfileDropdown();
+    // Mark the triggering button as active
     const chip=$('profileChip');
-    if(chip) chip.classList.add('active');
+    if(chip && _profileDropdownTrigger===chip) chip.classList.add('active');
+    const tbtn=$('titlebarProfileBtn');
+    if(tbtn && _profileDropdownTrigger===tbtn) tbtn.classList.add('active');
   }).catch(e => { showToast(t('profiles_load_failed')); });
 }
 
@@ -5225,9 +5245,11 @@ function closeProfileDropdown() {
   if (dd) dd.classList.remove('open');
   const chip=$('profileChip');
   if(chip) chip.classList.remove('active');
+  const tbtn=$('titlebarProfileBtn');
+  if(tbtn) tbtn.classList.remove('active');
 }
 document.addEventListener('click', e => {
-  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
+  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#titlebarProfileBtn') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('profileDropdown');
@@ -5244,11 +5266,15 @@ async function switchToProfile(name) {
   // feedback while the async switch is in progress.
   const _chip = $('profileChip');
   const _chipLabel = $('profileChipLabel');
+  const _titlebarBtn = $('titlebarProfileBtn');
+  const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
+  if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
+  if (_titlebarLabel) _titlebarLabel.textContent = name;
 
   // Determine whether the current session has any messages.
   // A session with messages is "in progress" and belongs to the current profile —
@@ -5368,10 +5394,12 @@ async function switchToProfile(name) {
   } catch (e) {
     // Revert the optimistic name update on error
     if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
+    if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
     if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
   } finally {
     // Always remove loading indicator regardless of success or failure
     if (_switchGen === _profileSwitchGeneration && _chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
+    if (_switchGen === _profileSwitchGeneration && _titlebarBtn) { _titlebarBtn.classList.remove('switching'); _titlebarBtn.disabled = false; }
   }
 }
 

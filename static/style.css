@@ -741,6 +741,14 @@
     /* Reload button — visible only in PWA standalone / fullscreen */
     .app-titlebar-reload{display:none;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0;background:none;border:none;color:var(--muted);border-radius:8px;cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent;transition:background-color .15s,color .15s;}
     .app-titlebar-reload:hover{background:var(--hover-bg);color:var(--text);}
+    /* Titlebar profile switcher — always visible across all panels */
+    .app-titlebar-profile{display:inline-flex;align-items:center;gap:4px;height:28px;flex-shrink:0;background:none;border:1px solid var(--border2);color:var(--muted);border-radius:6px;cursor:pointer;padding:0 8px;-webkit-tap-highlight-color:transparent;transition:background-color .15s,color .15s,border-color .15s;font-size:11px;font-weight:500;white-space:nowrap;-webkit-app-region:no-drag;}
+    .app-titlebar-profile:hover{background:var(--hover-bg);color:var(--text);border-color:var(--border);}
+    .app-titlebar-profile.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
+    .app-titlebar-profile.switching{opacity:.6;pointer-events:none;}
+    .app-titlebar-profile-icon{display:inline-flex;align-items:center;flex-shrink:0;}
+    .app-titlebar-profile-label{max-width:80px;overflow:hidden;text-overflow:ellipsis;}
+    .app-titlebar-profile-chevron{display:inline-flex;align-items:center;flex-shrink:0;opacity:.5;}
     @media (display-mode: standalone), (display-mode: fullscreen){
       :root{--app-titlebar-safe-top:env(safe-area-inset-top,0px);}
       .app-titlebar-reload{display:inline-flex;}
@@ -2310,8 +2318,9 @@
 .ws-action-btn:hover{background:rgba(255,255,255,.1);color:var(--text);}
 /* ── Profile dropdown + management panel ── */
 .profile-chip{user-select:none;color:var(--accent-text)!important;}
-.profile-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;min-width:260px;max-width:min(260px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:380px;overflow-y:auto;}
+.profile-dropdown{display:none;position:fixed;min-width:260px;max-width:min(260px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:380px;overflow-y:auto;}
 .profile-dropdown.open{display:block;}
+.profile-dropdown.open-below{box-shadow:0 4px 24px rgba(0,0,0,.4);}
 .profile-opt{padding:10px 14px;cursor:pointer;transition:background .12s;}
 .profile-opt:hover{background:rgba(255,255,255,.07);}
 .profile-opt.active{background:var(--accent-bg);}
