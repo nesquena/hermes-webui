@@ -212,6 +212,25 @@ def _worktree_retained_payload_for_session_id(sid: str) -> dict:
         return {}
 
 
+def _active_profile_config_path() -> Path:
+    """Return config.yaml for the request's active WebUI profile.
+
+    Skills endpoints are profile-scoped UI actions: both the visible disabled
+    toggle state and toggle writes must follow the cookie/thread-local active
+    Hermes home, not process-global HERMES_HOME or HERMES_CONFIG_PATH values
+    captured at server startup.
+    """
+    test_override_module = getattr(_get_config_path, "__module__", "")
+    if test_override_module != "api.config":
+        return _get_config_path()
+    try:
+        from api.profiles import get_active_hermes_home
+
+        return Path(get_active_hermes_home()) / "config.yaml"
+    except Exception:
+        return _get_config_path()
+
+
 def _get_disabled_skill_names_for_profile() -> set:
     """Read disabled skill names from the active profile's config.yaml.
 
@@ -221,7 +240,7 @@ def _get_disabled_skill_names_for_profile() -> set:
     ``skills.platform_disabled.webui`` first, falling back to
     ``skills.disabled``.
     """
-    config_path = _get_config_path()
+    config_path = _active_profile_config_path()
     if not config_path.exists():
         return set()
     try:
@@ -7302,7 +7321,27 @@ def _sse_with_id(handler, event, data, event_id=None):
     _sse(handler, event, data)
 
 
-def _parse_run_journal_after_seq(qs: dict) -> int | None:
+def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None]:
+    raw = str(raw or "").strip()
+    if not raw:
+        return None, None
+    if ":" in raw:
+        run_id, tail = raw.rsplit(":", 1)
+    else:
+        run_id, tail = None, raw
+    try:
+        seq = max(0, int(tail))
+    except (TypeError, ValueError):
+        return run_id or None, None
+    return run_id or None, seq
+
+
+def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int | None:
+    event_run_id, event_seq = _parse_run_journal_event_id(qs.get("after_event_id", [None])[0])
+    if event_run_id:
+        if stream_id and event_run_id != stream_id:
+            return None
+        return event_seq
     raw = qs.get("after_seq", [None])[0]
     if raw in (None, ""):
         return None
@@ -7452,7 +7491,7 @@ def _handle_sse_stream(handler, parsed):
         handler.send_header("Connection", "close")
         handler.end_headers()
         try:
-            _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs))
+            _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs, stream_id))
         except _CLIENT_DISCONNECT_ERRORS:
             pass
         return True
@@ -12341,7 +12380,7 @@ def _handle_skill_toggle(handler, body):
     if not skill_md:
         return bad(handler, f"Skill '{name}' not found", 404)
 
-    config_path = _get_config_path()
+    config_path = _active_profile_config_path()
     with _cfg_lock:
         cfg = _load_yaml_config_file(config_path)
 

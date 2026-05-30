@@ -7,6 +7,43 @@
 
 - `runner-local` runtime adapter mode can now use an explicitly configured HTTP runner endpoint via `HERMES_WEBUI_RUNNER_BASE_URL`, replacing the bounded not-configured path only when the external runner boundary is configured and streaming configured runner events through the existing SSE route without WebUI-owned runner maps.
 
+## [v0.51.171] — 2026-05-30 — Release EQ (stage-batch53 — tool-output card badge + Neon opt-in skin)
+
+### Added
+
+- Tool-call output cards now carry a persistent "Tool output" badge and accent rail so tool output stays visually distinct from final assistant responses without requiring hover (#2867).
+- New opt-in "Neon" cyberpunk skin (dark-first, purple/cyan accents). Default-off; select it from the skin list like Catppuccin or Nous.
+
+## [v0.51.170] — 2026-05-30 — Release EP (stage-batch52 — run-aware SSE replay cursors)
+
+### Fixed
+
+- SSE run-journal replay cursors are now run-aware: a stale `after_seq` from an interrupted prior stream can no longer suppress replay events in a newer stream whose sequence numbers reset from 1. The reconnect cursor now carries a run-scoped `after_event_id` (`run_id:seq`) and the server ignores it when the run id differs, falling back to same-run `after_seq` dedupe (#3124).
+
+## [v0.51.169] — 2026-05-30 — Release EO (stage-batch51 — skill-toggle profile scoping + update-tag filter + Docker docs)
+
+### Fixed
+
+- Docker docs now explain host-localhost URLs (`host.docker.internal` / `host.containers.internal`) and the `sudo docker compose` `$HOME=/root` bind-mount pitfall for users whose WebUI cannot reach host APIs or see `~/.hermes` (#3012, #3006).
+- Skills panel disabled/enabled state and toggle writes now resolve `config.yaml` from the active WebUI profile instead of the process default Hermes home or startup config override (#3066).
+- Update checks no longer advertise a newer release tag when a main-tracking checkout already contains that tag; the banner now falls through to the branch comparison path instead of offering an update that cannot fast-forward (#3140).
+
+## [v0.51.168] — 2026-05-30 — Release EN (stage-batch50 — hotfix: mobile "Failed to load conversation messages")
+
+### Fixed
+
+- Fixed a `TypeError` in `_ensureMessagesLoaded` that surfaced as a "Failed to load conversation messages" toast on mobile after most messages: a `const msgs` binding was reassigned by the #3018 ephemeral-field carry-forward (introduced v0.51.161), which throws at runtime. Changed to `let`. Mobile triggered it most because SSE/visibility events fire the session-reload path more aggressively (#3162).
+
+### Added
+
+- Static JS runtime-error lint guard (`eslint.runtime-guard.config.mjs` + `tests/test_static_js_runtime_lint.py`): a curated, zero-false-positive ESLint check (`no-const-assign`, `no-import-assign`) over `static/**/*.js` that catches the brick-class of runtime errors `node --check` and source-presence tests miss. Runs in the test suite when ESLint is present and skips gracefully otherwise. See `TESTING.md` > "Static JS runtime lint".
+
+## [v0.51.167] — 2026-05-30 — Release EM (stage-batch49 — iOS-style swipe actions for touch devices + session-list FLIP reflow)
+
+### Added
+
+- Touch devices now support iOS-mail-style swipe actions on session rows: swipe left to reveal a Delete action, swipe right to reveal Archive (Restore for already-archived sessions). Swipe is gated to touch/coarse-pointer input, so desktop click, context-menu, and drag behavior are unchanged. Delete still routes through the existing confirmation dialog. The session list also gains FLIP-based reflow animation when rows are archived, deleted, or reordered, honoring `prefers-reduced-motion`.
+
 ## [v0.51.166] — 2026-05-30 — Release EL (stage-batch48 — shared OpenCode runtime key + cron project-chip sessions)
 
 ### Fixed

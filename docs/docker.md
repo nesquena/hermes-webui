@@ -188,6 +188,27 @@ If you must use a bind mount: pick a host path, then mount it to `/opt/hermes` i
 
 **Fix**: Either upgrade to Podman 4+ (which fixes this), or use the [single-container setup](#5-minute-quickstart-single-container), or use the [community all-in-one image](https://github.com/sunnysktsang/hermes-suite).
 
+### 8. "API base URL set to localhost fails from Docker" (#3012)
+
+**Symptom**: A provider, local model server, webhook, or custom API works on the host at `http://localhost:<port>`, but fails when the same URL is configured in Hermes WebUI running in Docker.
+
+**Cause**: Inside a container, `localhost` means *that container*, not your laptop/host. The WebUI process cannot reach host services through `127.0.0.1` unless the service is running inside the same container.
+
+**Fix**: Point Docker-hosted WebUI at the host gateway name instead:
+
+- Docker Desktop on macOS/Windows: `http://host.docker.internal:<port>`
+- Podman: `http://host.containers.internal:<port>`
+- Linux Docker Engine: either publish the host service on the Docker bridge address, or add a host-gateway alias to your compose service:
+
+```yaml
+services:
+  hermes-webui:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+Then configure the URL as `http://host.docker.internal:<port>`. Also ensure the host service binds to an address reachable from containers (not only a loopback interface the Docker bridge cannot reach) and that your host firewall allows the connection.
+
 ## Multi-container architecture
 
 The two- and three-container setups use **named Docker volumes** (not bind mounts) by default for a reason: named volumes solve the UID/GID problem by construction. Docker creates the volume's root directory with the correct ownership, all containers reading/writing to it see the same files, no host-side permission setup required.
@@ -284,7 +305,8 @@ volumes:
 
 1. The host directory MUST be readable by your container UID. Run `id -u` on the host and ensure `~/.hermes` is owned by that UID (or readable via group bits).
 2. ALL containers sharing the volume must run as the SAME UID/GID. Set `UID=$(id -u)` and `GID=$(id -g)` in `.env`.
-3. If your host `.env` is mode 0640, set `HERMES_SKIP_CHMOD=1` or `HERMES_HOME_MODE=0640` so the startup hook doesn't try to enforce 0600.
+3. If you run Compose with sudo, do not rely on `${HOME}` defaults: `sudo` often changes `$HOME` to `/root`, so `${HERMES_HOME:-${HOME}/.hermes}` becomes `/root/.hermes`. Prefer running Docker as your user; otherwise pass absolute paths with `sudo -E`, for example `HERMES_HOME=/home/youruser/.hermes HERMES_WORKSPACE=/home/youruser/workspace sudo -E docker compose up -d`, and confirm the rendered bind mount with `docker compose config`.
+4. If your host `.env` is mode 0640, set `HERMES_SKIP_CHMOD=1` or `HERMES_HOME_MODE=0640` so the startup hook doesn't try to enforce 0600.
 
 ## Reference
 
@@ -300,6 +322,8 @@ volumes:
 - #1416 — agent-image upgrade requires removing `hermes-agent-src` named volume (see [Upgrading the agent container](#upgrading-the-agent-container))
 - #1389 — `HERMES_HOME_MODE` override (fixed in v0.50.254 — agent honors `HERMES_SKIP_CHMOD` and `HERMES_HOME_MODE`)
 - #1399 — UID alignment in compose files (fixed in v0.50.260 via PR #1428 + this guide)
+- #3012 — host `localhost` API URLs fail from Docker containers (use `host.docker.internal` / `host.containers.internal`)
+- #3006 — `sudo docker compose` can mount `/root/.hermes` instead of the user's Hermes home
 - #858 — two-container `/opt/hermes` path confusion
 - #681 — tools running in WebUI container, not agent container (architectural)
 - #668 — auto-detect UID/GID from mounted volume

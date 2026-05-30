@@ -31,7 +31,10 @@ def _find_global_selector(css, selector):
             return -1
         line_start = css.rfind('\n', 0, idx) + 1
         line_prefix = css[line_start:idx]
-        if ':root[data-skin=' not in line_prefix:
+        # Skip skin-scoped rules. Skins use both `:root[data-skin="x"]` and the
+        # dark-variant `:root.dark[data-skin="x"]` (#3164 Neon), so match the
+        # `[data-skin=` marker generically rather than the bare `:root[` form.
+        if '[data-skin=' not in line_prefix:
             return idx
         pos = idx + 1
 
