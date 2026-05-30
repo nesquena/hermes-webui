@@ -946,6 +946,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamFadeReduceMotion=false;
   let _streamFadeReduceMotionOnChange=null;
   let _lastRunJournalSeq=0;
+  let _lastRunJournalEventId='';
   const _STREAM_FADE_MS=200;
   const _STREAM_FADE_MAX_MS=350;
   const _STREAM_FADE_STAGGER_MS=16;
@@ -1462,7 +1463,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!raw) return;
     const tail=raw.includes(':')?raw.slice(raw.lastIndexOf(':')+1):raw;
     const seq=Number.parseInt(tail,10);
-    if(Number.isFinite(seq)&&seq>_lastRunJournalSeq) _lastRunJournalSeq=seq;
+    if(Number.isFinite(seq)&&seq>_lastRunJournalSeq){
+      _lastRunJournalSeq=seq;
+      _lastRunJournalEventId=raw;
+    }
   }
   function _runJournalReplayAfterSeq(){
     return Math.max(0,_lastRunJournalSeq||0);
@@ -1470,8 +1474,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _runJournalReplayParams(){
     // `replay=1` documents frontend intent. The server selects replay when the
     // stream id no longer has a live worker; `after_seq` prevents duplicated
-    // journal events after this EventSource has already rendered part of a run.
-    return `&replay=1&after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}`;
+    // journal events after this EventSource has already rendered part of the
+    // same run. `after_event_id` keeps that cursor run-aware so a stale cursor
+    // from an earlier interrupted stream cannot suppress a newer stream whose
+    // sequence numbers started over from 1.
+    return `&replay=1&after_seq=${encodeURIComponent(String(_runJournalReplayAfterSeq()))}&after_event_id=${encodeURIComponent(_lastRunJournalEventId||'')}`;
   }
 
   let _lastRenderMs=0;

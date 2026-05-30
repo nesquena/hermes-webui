@@ -681,7 +681,11 @@ def test_pwa_safe_area_top_stays_scoped_to_installed_modes():
 
 def test_titlebar_safe_area_top_uses_scoped_variable():
     """The titlebar must use the safe-area variable instead of direct env()."""
-    m = re.search(r'\.app-titlebar\{(?P<body>[^}]*)\}', CSS)
+    # Match the GLOBAL `.app-titlebar{...}` rule, not skin-scoped variants like
+    # `:root.dark[data-skin="neon"] .app-titlebar{...}` (#3164) which can appear
+    # earlier in the file. Require the selector to start the line (optionally
+    # indented) with no `[data-skin=` scope prefix.
+    m = re.search(r'(?m)^\s*\.app-titlebar\{(?P<body>[^}]*)\}', CSS)
     assert m, ".app-titlebar rule missing from style.css"
     rule = m.group("body")
     assert "padding-top:var(--app-titlebar-safe-top)" in rule, (
