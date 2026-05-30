@@ -25,15 +25,17 @@ def test_session_list_disables_browser_scroll_anchoring():
 
 def test_polling_payloads_are_deferred_while_user_scrolls_sidebar():
     render_block = _block("async function renderSessionList", "// ── Gateway session SSE")
-    apply_block = _block("function _applySessionListPayload", "async function renderSessionList")
+    refresh_block = _block("async function _runRenderSessionListRefresh", "async function _drainRenderSessionListQueue")
+    apply_block = _block("function _applySessionListPayload", "function _mergeRenderSessionListOptions")
 
     assert "function _isSessionListUserInteracting()" in SESSIONS_JS
     assert "async function renderSessionList(opts={})" in render_block
-    assert "const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);" in render_block
-    assert "if(deferWhileInteracting&&_isSessionListUserInteracting())" in render_block
-    assert "_pendingSessionListPayload={gen:_gen,sessData,projData};" in render_block
-    assert "_schedulePendingSessionListApply();" in render_block
-    assert "_applySessionListPayload(sessData,projData);" in render_block
+    assert "async function _runRenderSessionListRefresh(opts, _gen)" in refresh_block
+    assert "const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);" in refresh_block
+    assert "if(deferWhileInteracting&&_isSessionListUserInteracting())" in refresh_block
+    assert "_pendingSessionListPayload={gen:_gen,sessData,projData};" in refresh_block
+    assert "_schedulePendingSessionListApply();" in refresh_block
+    assert "_applySessionListPayload(sessData,projData);" in refresh_block
     assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block, (
         "deferring sidebar refreshes must preserve background-completion unread semantics"
     )
@@ -41,9 +43,9 @@ def test_polling_payloads_are_deferred_while_user_scrolls_sidebar():
 
 def test_deferred_payloads_keep_generation_stale_response_guard():
     schedule_apply_block = _block("function _schedulePendingSessionListApply", "function _applySessionListPayload")
-    render_block = _block("async function renderSessionList", "// ── Gateway session SSE")
+    refresh_block = _block("async function _runRenderSessionListRefresh", "async function _drainRenderSessionListQueue")
 
-    assert "if(!deferWhileInteracting) _pendingSessionListPayload=null;" in render_block, (
+    assert "if(!deferWhileInteracting) _pendingSessionListPayload=null;" in refresh_block, (
         "explicit/user-initiated refreshes must clear older deferred background payloads"
     )
     assert "payload.gen!==_renderSessionListGen" in schedule_apply_block, (

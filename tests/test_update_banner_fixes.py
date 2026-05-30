@@ -426,6 +426,90 @@ class TestApplyUpdateRestartSafety:
         assert result.get('restart_blocked') is True
         assert 'active chat stream' in result['message']
 
+    def test_apply_update_refuses_when_active_run_without_stream(self, tmp_path, monkeypatch):
+        import api.updates as upd
+        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
+
+        (tmp_path / '.git').mkdir()
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        called = []
+        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (called.append(a) or ('', True)))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+
+        with STREAMS_LOCK:
+            old_streams = dict(STREAMS)
+            STREAMS.clear()
+        with ACTIVE_RUNS_LOCK:
+            old_runs = dict(ACTIVE_RUNS)
+            ACTIVE_RUNS.clear()
+            ACTIVE_RUNS['run_active'] = {'session_id': 's1', 'stream_id': 'missing-stream'}
+        try:
+            result = upd.apply_update('webui')
+        finally:
+            with ACTIVE_RUNS_LOCK:
+                ACTIVE_RUNS.clear()
+                ACTIVE_RUNS.update(old_runs)
+            with STREAMS_LOCK:
+                STREAMS.clear()
+                STREAMS.update(old_streams)
+
+        assert result['ok'] is False
+        assert result.get('active_streams') == 0
+        assert result.get('active_runs') == 1
+        assert result.get('restart_blocked') is True
+        assert 'active agent run' in result['message']
+        assert called == []
+
+    def test_force_update_refuses_when_active_run_without_stream(self, tmp_path, monkeypatch):
+        import api.updates as upd
+        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
+
+        (tmp_path / '.git').mkdir()
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (_ for _ in ()).throw(AssertionError('must not run git')))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+
+        with STREAMS_LOCK:
+            old_streams = dict(STREAMS)
+            STREAMS.clear()
+        with ACTIVE_RUNS_LOCK:
+            old_runs = dict(ACTIVE_RUNS)
+            ACTIVE_RUNS.clear()
+            ACTIVE_RUNS['run_active'] = {'session_id': 's1', 'stream_id': 'missing-stream'}
+        try:
+            result = upd.apply_force_update('agent')
+        finally:
+            with ACTIVE_RUNS_LOCK:
+                ACTIVE_RUNS.clear()
+                ACTIVE_RUNS.update(old_runs)
+            with STREAMS_LOCK:
+                STREAMS.clear()
+                STREAMS.update(old_streams)
+
+        assert result['ok'] is False
+        assert result.get('active_streams') == 0
+        assert result.get('active_runs') == 1
+        assert result.get('restart_blocked') is True
+        assert 'active agent run' in result['message']
+
+    def test_wait_until_restart_safe_waits_for_active_run_to_clear(self, monkeypatch):
+        import api.updates as upd
+
+        snapshots = [
+            {'restart_blocked': True, 'active_streams': 0, 'active_runs': 1},
+            {'restart_blocked': False, 'active_streams': 0, 'active_runs': 0},
+        ]
+        sleeps = []
+        monkeypatch.setattr(upd, '_restart_blocker_snapshot', lambda: snapshots.pop(0))
+        monkeypatch.setattr(upd.time, 'sleep', lambda seconds: sleeps.append(seconds))
+
+        result = upd._wait_until_restart_safe(poll_seconds=0.25)
+
+        assert result['restart_blocked'] is False
+        assert sleeps == [0.25]
+
 
 class TestSuccessfulUpdateReturnsRestartScheduled:
     """#814 — successful apply_update must return restart_scheduled: True."""

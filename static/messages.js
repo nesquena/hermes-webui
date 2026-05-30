@@ -564,6 +564,7 @@ async function send(){
     }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
+    if(typeof appendThinking==='function') appendThinking('',{pending:true});
     // setBusy(true) already ran with activeStreamId=null; refresh now that we
     // have a stream id so the primary button can switch to Stop (see getComposerPrimaryAction).
     if(typeof updateSendBtn==='function') updateSendBtn();
@@ -2507,6 +2508,7 @@ async function toggleYoloFromApproval() {
 
 // ── Approval polling ──
 let _approvalPollTimer = null;
+let _approvalFallbackPollInFlight = false;
 let _approvalHideTimer = null;
 let _approvalVisibleSince = 0;
 let _approvalSignature = '';
@@ -2707,11 +2709,14 @@ function _startApprovalFallbackPoll(sid) {
     if (!S.busy || !S.session || S.session.session_id !== sid) {
       stopApprovalPolling(); _hideApprovalCardIfOwner(sid, true); return;
     }
+    if (_approvalFallbackPollInFlight) return;
+    _approvalFallbackPollInFlight = true;
     try {
-      const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid));
+      const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showApprovalForSession(sid, data.pending, data.pending_count||1); }
       else { _clearApprovalPendingForSession(sid); _hideApprovalCardIfOwner(sid); }
     } catch(e) { /* ignore poll errors */ }
+    finally { _approvalFallbackPollInFlight = false; }
   }, 1500);  // matches the v0.50.247 polling cadence so degraded-mode users see the same responsiveness
 }
 
@@ -2724,6 +2729,7 @@ function stopApprovalPolling() {
   if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
   if (_approvalEventSource) { try { _approvalEventSource.close(); } catch(_){} _approvalEventSource = null; }
   if (_approvalSSEHealthTimer) { clearInterval(_approvalSSEHealthTimer); _approvalSSEHealthTimer = null; }
+  _approvalFallbackPollInFlight = false;
   _approvalPollingSessionId = null;
 }
 
@@ -3197,6 +3203,7 @@ async function respondClarify(response) {
 var _clarifyEventSource = null;
 var _clarifyFallbackTimer = null;
 var _clarifyHealthTimer = null;
+let _clarifyFallbackPollInFlight = false;
 let _clarifyPollingSessionId = null;
 
 function startClarifyPolling(sid) {
@@ -3265,8 +3272,10 @@ function _startClarifyFallbackPoll(sid) {
     if (!S.session || S.session.session_id !== sid) {
       stopClarifyPolling(); _hideClarifyCardIfOwner(sid, true, 'session'); return;
     }
+    if (_clarifyFallbackPollInFlight) return;
+    _clarifyFallbackPollInFlight = true;
     try {
-      const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid));
+      const data = await api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false});
       if (data.pending) { showClarifyForSession(sid, data.pending); }
       else { _clearClarifyPendingForSession(sid); _hideClarifyCardIfOwner(sid, false, 'expired'); }
     } catch(e) {
@@ -3279,6 +3288,8 @@ function _startClarifyFallbackPoll(sid) {
         }
         stopClarifyPolling();
       }
+    } finally {
+      _clarifyFallbackPollInFlight = false;
     }
   }, 3000);
 }
@@ -3292,6 +3303,7 @@ function stopClarifyPolling() {
   if (_clarifyEventSource) { try { _clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
   if (_clarifyFallbackTimer) { clearInterval(_clarifyFallbackTimer); _clarifyFallbackTimer = null; }
   if (_clarifyHealthTimer) { clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null; }
+  _clarifyFallbackPollInFlight = false;
   _clarifyPollingSessionId = null;
 }
 

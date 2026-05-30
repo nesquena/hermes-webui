@@ -2098,6 +2098,8 @@ window.addEventListener('resize',()=>{
 // concurrently. Without this guard, a slower older response can overwrite _allSessions
 // with stale data, causing sessions to vanish from the sidebar.
 let _renderSessionListGen = 0;
+let _renderSessionListInFlight = null;
+let _renderSessionListQueuedRequest = null;
 let _sessionListRefreshAnimationPending = false;
 let _sessionListFirstRenderAnimated = false;
 let _sessionListEnterAllAnimationPending = false;
@@ -2292,9 +2294,17 @@ function _applySessionListPayload(sessData, projData){
   renderSessionListFromCache();  // no-ops if rename is in progress
 }
 
-async function renderSessionList(opts={}){
+function _mergeRenderSessionListOptions(prev, next){
+  const merged={...(prev||{}),...(next||{})};
+  // Immediate refreshes must not be downgraded by a later passive polling tick.
+  if((prev&&prev.deferWhileInteracting===false)||(next&&next.deferWhileInteracting===false)){
+    merged.deferWhileInteracting=false;
+  }
+  return merged;
+}
+
+async function _runRenderSessionListRefresh(opts, _gen){
   const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);
-  const _gen = ++_renderSessionListGen;
   if(!deferWhileInteracting) _pendingSessionListPayload=null;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
@@ -2312,6 +2322,37 @@ async function renderSessionList(opts={}){
     }
     _applySessionListPayload(sessData,projData);
   }catch(e){console.warn('renderSessionList',e);}
+}
+
+async function _drainRenderSessionListQueue(initialRequest){
+  let request=initialRequest;
+  try{
+    while(request){
+      await _runRenderSessionListRefresh(request.opts, request.gen);
+      request=_renderSessionListQueuedRequest;
+      _renderSessionListQueuedRequest=null;
+    }
+  }finally{
+    _renderSessionListInFlight=null;
+    if(_renderSessionListQueuedRequest){
+      const next=_renderSessionListQueuedRequest;
+      _renderSessionListQueuedRequest=null;
+      _renderSessionListInFlight=_drainRenderSessionListQueue(next);
+    }
+  }
+}
+
+async function renderSessionList(opts={}){
+  const request={opts:opts||{},gen:++_renderSessionListGen};
+  if(_renderSessionListInFlight){
+    _renderSessionListQueuedRequest={
+      opts:_mergeRenderSessionListOptions(_renderSessionListQueuedRequest&&_renderSessionListQueuedRequest.opts, request.opts),
+      gen:request.gen,
+    };
+    return _renderSessionListInFlight;
+  }
+  _renderSessionListInFlight=_drainRenderSessionListQueue(request);
+  return _renderSessionListInFlight;
 }
 
 // ── Gateway session SSE (real-time sync for agent sessions) ──

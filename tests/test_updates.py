@@ -231,7 +231,7 @@ def test_apply_force_update_fetches_tags_with_force(tmp_path):
 
     with patch.object(updates, '_run_git', side_effect=fake_git), \
          patch.object(updates, 'REPO_ROOT', tmp_path), \
-         patch.object(updates, '_active_stream_count', return_value=0):
+         patch.object(updates, '_restart_blocker_snapshot', return_value={'restart_blocked': False, 'active_streams': 0, 'active_runs': 0}):
         updates.apply_force_update('webui')
 
     fetch_calls = [a for a in seen_args if a[:2] == ['fetch', 'origin']]
@@ -256,7 +256,7 @@ def test_apply_update_fetches_tags_with_force(tmp_path):
 
     with patch.object(updates, '_run_git', side_effect=fake_git), \
          patch.object(updates, 'REPO_ROOT', tmp_path), \
-         patch.object(updates, '_active_stream_count', return_value=0):
+         patch.object(updates, '_restart_blocker_snapshot', return_value={'restart_blocked': False, 'active_streams': 0, 'active_runs': 0}):
         updates.apply_update('webui')
 
     fetch_calls = [a for a in seen_args if a[:2] == ['fetch', 'origin']]
