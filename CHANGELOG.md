@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Skills panel disabled/enabled state and toggle writes now resolve `config.yaml` from the active WebUI profile instead of the process default Hermes home or startup config override (#3066).
+
 ## [v0.51.164] — 2026-05-30 — Release EJ (stage-batch46 — passive performance hardening: refresh coalescing + draft-save dedup + activity placeholders + bounded restart-safety wait)
 
 ### Fixed
