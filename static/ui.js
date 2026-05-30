@@ -2563,7 +2563,6 @@ function _setCtxCompressButton(btn,text){
 }
 
 function _syncMobileCtxDisplay(state){
-  const badge=$('composerMobileCtxBadge');
   const mobileConfigBtn=$('composerMobileConfigBtn');
   const row=$('composerMobileContextAction');
   const usageLine=$('composerMobileContextUsage');
@@ -2572,22 +2571,34 @@ function _syncMobileCtxDisplay(state){
   const costLine=$('composerMobileContextCost');
   const compressBtn=$('composerMobileCtxCompressBtn');
   if(!state||!state.visible){
-    if(badge)badge.style.display='none';
     if(row)row.style.display='none';
     if(mobileConfigBtn){
       mobileConfigBtn.setAttribute('aria-label',_MOBILE_CONFIG_BASE_LABEL);
       mobileConfigBtn.setAttribute('title',_MOBILE_CONFIG_BASE_LABEL);
     }
     _setCtxCompressButton(compressBtn,'');
+    // Reset context ring to 0% to clear any stale values from previous sessions
+    var arc = document.getElementById('ctx-arc');
+    var num = document.getElementById('ctx-num');
+    if (arc && num) {
+      var circumference = 87.96;
+      arc.setAttribute('stroke-dashoffset', circumference);
+      num.textContent = '0';
+      arc.setAttribute('stroke', '#22c55e');
+    }
     return;
   }
-  if(badge){
-    badge.style.display='inline-flex';
-    badge.textContent=state.hasPromptTok?String(state.pct):'\u00b7';
-    badge.classList.toggle('ctx-mid',state.pct>50&&state.pct<=75);
-    badge.classList.toggle('ctx-high',state.pct>75);
-    badge.setAttribute('title',state.label);
-  }
+  (function updateCtxRing(pct) {
+    var arc = document.getElementById('ctx-arc');
+    var num = document.getElementById('ctx-num');
+    if (!arc || !num) return;
+    var offset = 87.96 * (1 - Math.min(pct, 100) / 100);
+    arc.setAttribute('stroke-dashoffset', offset);
+    num.textContent = Math.round(pct);
+    arc.setAttribute('stroke',
+      pct <= 50 ? '#22c55e' : pct <= 85 ? '#f97316' : '#ef4444'
+    );
+  })(state.pct);
   if(mobileConfigBtn){
     mobileConfigBtn.setAttribute('aria-label',`${_MOBILE_CONFIG_BASE_LABEL}; ${state.label}`);
     mobileConfigBtn.setAttribute('title',`${_MOBILE_CONFIG_BASE_LABEL} \u00b7 ${state.label}`);
