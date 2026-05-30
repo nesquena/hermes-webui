@@ -1608,6 +1608,8 @@ async function _ensureAllMessagesLoaded() {
 }
 
 let _allSessions = [];  // cached for search filter
+let _sessionAttentionSoundPrimed = false;
+const _sessionAttentionSoundState = new Map();
 let _renamingSid = null;  // session_id currently being renamed (blocks list re-renders)
 let _showArchived = false;  // toggle to show archived sessions
 let _sessionSelectMode = false;  // batch select mode
@@ -2430,6 +2432,42 @@ function _schedulePendingSessionListApply(){
   }, Math.max(120, SESSION_LIST_INTERACTION_IDLE_MS));
 }
 
+
+function _sessionAttentionSoundSignature(s){
+  const attention=s&&s.attention&&typeof s.attention==='object'?s.attention:null;
+  const count=Number(attention&&attention.count);
+  if(!attention||!attention.kind||!Number.isFinite(count)||count<=0)return null;
+  const kind=String(attention.kind)==='approval'?'approval':(String(attention.kind)==='clarify'?'clarify':'attention');
+  return `${kind}:${Math.max(1,count||1)}`;
+}
+
+function _syncSessionAttentionSoundState(sessions){
+  const next=new Map();
+  for(const s of Array.isArray(sessions)?sessions:[]){
+    if(!s||!s.session_id)continue;
+    const sig=_sessionAttentionSoundSignature(s);
+    if(sig) next.set(s.session_id,sig);
+  }
+  if(!_sessionAttentionSoundPrimed){
+    _sessionAttentionSoundPrimed=true;
+    _sessionAttentionSoundState.clear();
+    next.forEach((sig,sid)=>_sessionAttentionSoundState.set(sid,sig));
+    return;
+  }
+  next.forEach((sig,sid)=>{
+    const prev=_sessionAttentionSoundState.get(sid);
+    if(prev!==sig){
+      const [kind,countRaw]=String(sig).split(':');
+      const count=Number(countRaw)||1;
+      const s=(Array.isArray(sessions)?sessions:[]).find(item=>item&&item.session_id===sid)||{session_id:sid};
+      const playKey=typeof _attentionSoundKey==='function'?_attentionSoundKey(s.session_id,kind,count):`${s.session_id}:${sig}`;
+      if(playKey&&typeof playAttentionSound==='function') playAttentionSound(playKey);
+    }
+  });
+  _sessionAttentionSoundState.clear();
+  next.forEach((sig,sid)=>_sessionAttentionSoundState.set(sid,sig));
+}
+
 function _applySessionListPayload(sessData, projData){
   // Server's other_profile_count tells us how many sessions exist outside the
   // active profile so the "Show N from other profiles" toggle can render
@@ -2450,6 +2488,7 @@ function _applySessionListPayload(sessData, projData){
     : (sessData.sessions||[]);
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
+  _syncSessionAttentionSoundState(_allSessions);
   _clearLineageReportCache();
   _allProjects = projData.projects||[];
   _markPollingCompletionUnreadTransitions(_allSessions);
@@ -3614,6 +3653,7 @@ function renderSessionListFromCache(){
   // _allSessions is stale from a prior render (#1171).
   const withMessages=allMatched.filter(s=>
     (s.message_count||0)>0 ||
+    _sessionAttentionState(s) ||
     _isSessionEffectivelyStreaming(s) ||
     !!s.active_stream_id ||
     !!s.pending_user_message ||
@@ -3924,6 +3964,20 @@ function renderSessionListFromCache(){
   _pendingSessionReflowPositions=null;
   _playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);
   // Note: declared after the groups loop but available via function hoisting.
+  function _sessionAttentionState(s){
+    const attention=s&&s.attention&&typeof s.attention==='object'?s.attention:null;
+    if(!attention||!attention.kind||!Number.isFinite(Number(attention.count))||Number(attention.count)<=0)return null;
+    const kind=String(attention.kind)==='approval'?'approval':(String(attention.kind)==='clarify'?'clarify':'attention');
+    const count=Math.max(1,Number(attention.count)||1);
+    const labelKey=kind==='approval'?'session_attention_approval':(kind==='clarify'?'session_attention_clarify':'session_attention_generic');
+    const titleKey=kind==='approval'?'session_attention_approval_title':(kind==='clarify'?'session_attention_clarify_title':'session_attention_generic_title');
+    const fallback=kind==='approval'?(count===1?'Approval':`${count} approvals`):(kind==='clarify'?(count===1?'Question':`${count} questions`):(count===1?'Attention':`${count} items`));
+    const titleFallback=kind==='approval'?'Waiting for permission decision':(kind==='clarify'?'Waiting for your answer':'Waiting for user action');
+    const label=(typeof t==='function')?t(labelKey,count):fallback;
+    const title=(typeof t==='function')?t(titleKey,count):titleFallback;
+    return {kind,count,severity:String(attention.severity||''),label,title};
+  }
+
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
@@ -3931,8 +3985,10 @@ function renderSessionListFromCache(){
     _rememberRenderedStreamingState(s, isStreaming);
     _rememberRenderedSessionSnapshot(s);
     const hasUnread=_hasUnreadForSession(s)&&!isActive;
+    const attention=_sessionAttentionState(s);
+    const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'');
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
     const swipeReturnOffset=_sessionSwipeReturnOffsets.get(s.session_id);
     if(swipeReturnOffset!==undefined){
       _sessionSwipeReturnOffsets.delete(s.session_id);
@@ -4010,7 +4066,7 @@ function renderSessionListFromCache(){
     title.title=readOnly?'Read-only imported session':'Double-click to rename';
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
-    const hasAttentionState=isStreaming||hasUnread;
+    const hasAttentionState=isStreaming||hasUnread||Boolean(attention);
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);
@@ -4257,7 +4313,9 @@ function renderSessionListFromCache(){
     // sits outside the truncating title span and stays visible.)
     el.appendChild(sessionText);
     const state=document.createElement('span');
-    state.className='session-attention-indicator session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''));
+    const attentionDotClass=attention?(attention.kind==='approval'?' is-attention-approval':(attention.kind==='clarify'?' is-attention-clarify':' is-attention-generic')):'';
+    state.className='session-attention-indicator session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''))+attentionDotClass;
+    if(attention&&attention.title) state.title=attention.title;
     state.setAttribute('aria-hidden','true');
     el.appendChild(state);
     // Single trigger button that opens a shared dropdown menu

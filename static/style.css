@@ -804,7 +804,10 @@
      when they're visible — covered by the hover / streaming / unread /
      menu-open / focus-within rule below. */
   .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s,transform .5s cubic-bezier(.22,.61,.36,1),box-shadow .15s ease;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:pan-y;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;transform:translate3d(var(--session-swipe-offset,0),var(--session-reflow-offset,0),0);}
-  .session-item.streaming,.session-item.unread,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
+  .session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
+  .session-item.needs-attention{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
+  .session-item.attention-approval{box-shadow:inset 3px 0 0 var(--error);background:color-mix(in srgb,var(--error) 9%,transparent);}
+  .session-item.attention-clarify{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
   @media (hover:hover){.session-item:hover{background:var(--hover-bg);color:var(--text);}}
   .session-item.loading{background:var(--hover-bg);color:var(--text);}
   .session-item.long-pressing{
@@ -937,10 +940,29 @@
   .session-item.active .session-search-preview{color:var(--accent-text);opacity:.72;}
   .session-item.active .session-search-hit{background:var(--accent-bg-strong);color:var(--accent-text);}
   .session-item.active .session-meta{color:var(--accent-text);opacity:.8;}
+  /* Attention dot variants — see the attention-dot block below the base
+     .session-state-indicator rule. */
   .session-state-indicator{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:10px;height:10px;color:var(--accent);visibility:hidden;}
   .session-attention-indicator{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:26px;height:26px;z-index:1;pointer-events:none;transition:opacity .15s ease,visibility .15s ease;}
   .session-item:hover .session-attention-indicator,.session-item:focus-within .session-attention-indicator,.session-item.menu-open .session-attention-indicator{opacity:0;visibility:hidden;}
   .session-state-indicator.is-streaming,.session-state-indicator.is-unread{visibility:visible;}
+  /* Attention state dot: NO text badge — the right-side status dot itself
+     carries the attention color (red=approval, amber/warning=clarify), and the
+     row keeps its colored left rail + tinted background. Visible even when the
+     session is not streaming/unread. Theme-driven via --error / --warning. */
+  .session-state-indicator.is-attention-approval,
+  .session-state-indicator.is-attention-clarify,
+  .session-state-indicator.is-attention-generic{visibility:visible;}
+  .session-state-indicator.is-attention-approval{color:var(--error);}
+  .session-state-indicator.is-attention-clarify,
+  .session-state-indicator.is-attention-generic{color:var(--warning);}
+  .session-state-indicator.is-attention-approval:not(.is-streaming):not(.is-unread)::before,
+  .session-state-indicator.is-attention-clarify:not(.is-streaming):not(.is-unread)::before,
+  .session-state-indicator.is-attention-generic:not(.is-streaming):not(.is-unread)::before{
+    content:"";display:block;width:8px;height:8px;border-radius:50%;background:currentColor;
+  }
+  /* Approval is the more urgent state — gently pulse its dot. */
+  .session-state-indicator.is-attention-approval:not(.is-streaming):not(.is-unread)::before{animation:sessionAttentionPulse 1.6s ease-in-out infinite;}
   .session-state-indicator::before{content:"";display:block;flex-shrink:0;}
   .session-state-indicator.is-streaming::before{
     width:100%;
@@ -1005,6 +1027,7 @@
     .session-item,.session-item.dragging,.session-item.session-reflowing,.session-item.swipe-committed,.session-item.swipe-removing{transition:none;}
     .session-item.long-pressing,.session-item.session-swipe-returning{animation:none;}
     .session-item.session-list-flip-enter{animation:none;}
+    .session-state-indicator.is-attention-approval:not(.is-streaming):not(.is-unread)::before{animation:none;}
   }
   /* Hide overlay during inline rename */
   .session-item:has(.session-title-input) .session-actions{display:none;}
@@ -1013,6 +1036,7 @@
   @keyframes sessionSwipeReturn{0%{opacity:.62;transform:translate3d(var(--session-swipe-return-offset,32px),var(--session-reflow-offset,0),0) scale(.985);}100%{opacity:1;transform:translate3d(0,var(--session-reflow-offset,0),0) scale(1);}}
   @keyframes newflash{0%{background:var(--accent-bg-strong);color:var(--accent);}100%{background:transparent;color:var(--muted);}}
   @keyframes sessionListFlipIn{0%{opacity:0;transform:perspective(700px) rotateX(-8deg) translateY(10px) scale(.985);}100%{opacity:1;transform:perspective(700px) rotateX(0) translateY(0) scale(1);}}
+  @keyframes sessionAttentionPulse{0%,100%{filter:saturate(1);box-shadow:0 0 0 1px color-mix(in srgb,var(--error) 42%,transparent),0 0 0 0 color-mix(in srgb,var(--error) 18%,transparent);}50%{filter:saturate(1.12);box-shadow:0 0 0 1px color-mix(in srgb,var(--error) 55%,transparent),0 0 0 4px color-mix(in srgb,var(--error) 10%,transparent);}}
   @keyframes spin{to{transform:rotate(360deg);}}
   .session-item.new-flash{animation:newflash 1.4s ease-out forwards;}
   .session-item.session-list-flip-enter{animation:sessionListFlipIn .28s cubic-bezier(.2,.8,.2,1) backwards;transform-origin:center top;}
