@@ -2,6 +2,16 @@ async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,document.baseURI||location.href);
+  // Per-tab profile isolation: inject sessionStorage profile as query param
+  // so different tabs can operate under different profiles (the hermes_profile
+  // cookie is same-origin-scoped, so it cannot provide per-tab isolation).
+  const _tpProfile = sessionStorage.getItem('hermes-profile');
+  // Only inject sessionStorage profile if the caller didn't already
+  // specify one — preserves explicit ?profile= overrides (e.g. boot.js
+  // uses ?profile=default when navigating from a non-default tab).
+  if (_tpProfile && !url.searchParams.has('profile')) {
+    url.searchParams.set('profile', _tpProfile);
+  }
   const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
   // Server errors (4xx/5xx) and client-side timeouts are NOT retried.

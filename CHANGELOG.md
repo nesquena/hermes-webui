@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Model picker now exposes the `kimi-coding-cn` / `KIMI_CN_API_KEY` provider as "Kimi / Moonshot (China)" instead of requiring the global `KIMI_API_KEY` route, so China-region Kimi keys can select `kimi-k2.6` without being sent to the wrong endpoint.
+
 ## [v0.51.145] — 2026-05-26 — Release DQ (stage-batch27 — sidebar running-state preservation)
 
 ### Fixed

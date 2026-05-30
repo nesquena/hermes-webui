@@ -383,7 +383,23 @@ def get_profile_cookie_name() -> str:
 
 
 def get_profile_cookie(handler) -> str | None:
-    """Extract the active-profile cookie value from the request, or None."""
+    """Extract the active-profile value from the request, or None.
+
+    Checks query parameter ``?profile=`` first (per-tab isolation via
+    sessionStorage), then falls back to the ``hermes_profile`` cookie
+    (shared across tabs).  This lets different browser tabs operate under
+    different profiles even though cookies are same-origin-scoped.
+    """
+    # ── Query param override (per-tab profile isolation) ──────────────
+    from urllib.parse import urlparse, parse_qs
+    parsed = urlparse(handler.path)
+    qp_profile = parse_qs(parsed.query).get('profile', [None])[0]
+    if qp_profile:
+        from api.profiles import _PROFILE_ID_RE
+        if qp_profile == 'default' or _PROFILE_ID_RE.fullmatch(qp_profile):
+            return qp_profile
+
+    # ── Cookie fallback (shared across same-origin tabs) ──────────────
     cookie_header = handler.headers.get('Cookie', '')
     if not cookie_header:
         return None

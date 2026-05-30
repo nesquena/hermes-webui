@@ -5242,6 +5242,17 @@ async function switchToProfile(name) {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }) });
     if (_switchGen !== _profileSwitchGeneration) return;
     S.activeProfile = data.active || name;
+    // Per-tab profile isolation: persist in sessionStorage so api() can
+    // attach ?profile= to every request (cookies are same-origin-scoped
+    // and cannot provide per-tab isolation).
+    try { sessionStorage.setItem('hermes-profile', S.activeProfile); } catch (_) {}
+    // Per-tab profile isolation: update URL hash so page refresh and
+    // shared bookmarks keep this tab on its chosen profile.
+    try {
+      const _h=location.hash||'#/chat';
+      const _base=_h.replace(/[?#].*$/,'');
+      location.replace(_base+'?profile='+encodeURIComponent(S.activeProfile));
+    } catch(_) {}
 
     // Update composer placeholder and title bar while the core profile-switch
     // state is still close to the profile API response.
@@ -5282,11 +5293,12 @@ async function switchToProfile(name) {
         : {model:modelToUse,model_provider:providerId};
       S._pendingProfileModel = modelToUse;
       S._pendingProfileModelProvider = modelState.model_provider||providerId||null;
-      // Only patch the in-memory session model if we're NOT about to replace the session
-      if (S.session && !sessionInProgress) {
-        S.session.model = modelToUse;
-        S.session.model_provider = modelState.model_provider||providerId||null;
-      }
+      // Per-tab profile isolation: do NOT mutate S.session.{model,model_provider}
+      // in-place.  Sessions in state.db are shared across tabs (same cookie
+      // domain).  If one tab switches profile and patches the session's provider
+      // (e.g. default→kimi-coding), the other tab's next chat picks up the
+      // wrong provider and routes its model to the wrong API endpoint.
+      // _pendingProfile* fields are consumed by newSession() only.  (#tab-isolation)
     }
 
     // ── Apply workspace ────────────────────────────────────────────────────

@@ -5922,20 +5922,19 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "name is required")
         try:
             from api.profiles import switch_profile, _validate_profile_name
-            from api.helpers import build_profile_cookie
             if name != 'default':
                 _validate_profile_name(name)
             # process_wide=False: don't mutate the process-global _active_profile.
-            # Per-client profile is managed via cookie + thread-local (#798).
+            # Per-client profile is managed via sessionStorage + query param +
+            # thread-local.  Do NOT set a cookie here — cookies with path='/' are
+            # shared across all tabs and cause cross-tab profile contamination.
             result = switch_profile(name, process_wide=False)
             # Invalidate the models cache so the very next /api/models request
             # rebuilds from the new profile's config.yaml rather than returning
             # the old profile's cached model list (#1200 — profile-switch model bug).
             from api.config import invalidate_models_cache
             invalidate_models_cache()
-            return j(handler, result, extra_headers={
-                'Set-Cookie': build_profile_cookie(name),
-            })
+            return j(handler, result)
         except (ValueError, FileNotFoundError) as e:
             return bad(handler, _sanitize_error(e), 404)
         except RuntimeError as e:

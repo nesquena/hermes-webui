@@ -712,6 +712,7 @@ _PROVIDER_DISPLAY = {
     "cursor-acp": "Cursor ACP",
     "zai": "Z.AI / GLM",
     "kimi-coding": "Kimi / Moonshot",
+    "kimi-coding-cn": "Kimi / Moonshot (China)",
     "deepseek": "DeepSeek",
     "minimax": "MiniMax",
     "minimax-cn": "MiniMax (China)",
@@ -1107,6 +1108,14 @@ _PROVIDER_MODELS = {
         {"id": "moonshot-v1-128k", "label": "Moonshot v1 128k"},
         {"id": "kimi-latest", "label": "Kimi Latest"},
         {"id": "kimi-k2.5", "label": "Kimi K2.5"},
+    ],
+    "kimi-coding-cn": [
+        {"id": "kimi-k2.6", "label": "Kimi K2.6"},
+        {"id": "kimi-k2.5", "label": "Kimi K2.5"},
+        {"id": "moonshot-v1-8k", "label": "Moonshot v1 8k"},
+        {"id": "moonshot-v1-32k", "label": "Moonshot v1 32k"},
+        {"id": "moonshot-v1-128k", "label": "Moonshot v1 128k"},
+        {"id": "moonshot-v1-auto", "label": "Moonshot v1 Auto"},
     ],
     "minimax": [
         {"id": "MiniMax-M2.7", "label": "MiniMax M2.7"},
@@ -3395,6 +3404,7 @@ def get_available_models() -> dict:
                 "GEMINI_API_KEY",
                 "GLM_API_KEY",
                 "KIMI_API_KEY",
+                "KIMI_CN_API_KEY",
                 "DEEPSEEK_API_KEY",
                 "XIAOMI_API_KEY",
                 "OPENCODE_ZEN_API_KEY",
@@ -3428,6 +3438,8 @@ def get_available_models() -> dict:
                 detected_providers.add("zai")
             if all_env.get("KIMI_API_KEY"):
                 detected_providers.add("kimi-coding")
+            if all_env.get("KIMI_CN_API_KEY"):
+                detected_providers.add("kimi-coding-cn")
             if all_env.get("MINIMAX_API_KEY"):
                 detected_providers.add("minimax")
             if all_env.get("MINIMAX_CN_API_KEY"):

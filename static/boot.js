@@ -1657,8 +1657,23 @@ function applyBotName(){
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
     api(_checkUrl).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
-  // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
+  // Fetch active profile — URL param or sessionStorage takes priority
+  // for per-tab profile isolation (cookie is same-origin-scoped and
+  // cannot differentiate tabs without these sources).
+  const _searchParams=new URLSearchParams(location.search);
+  const _hashQuery=location.hash.replace(/^#[^?]*\??/,'');
+  if(_hashQuery)new URLSearchParams(_hashQuery).forEach(function(v,k){_searchParams.set(k,v);});
+  const _urlProfile=_searchParams.get('profile');
+  const _ssProfile=sessionStorage.getItem('hermes-profile');
+  const _profileHint=_urlProfile||_ssProfile;
+  try{
+    const p=await api('/api/profile/active'+(_profileHint?'?profile='+encodeURIComponent(_profileHint):''));
+    S.activeProfile=p.name||'default';
+  }catch(e){S.activeProfile=_profileHint||'default';}
+  // Persist to sessionStorage so the api() helper can attach ?profile=
+  // to requests, and so a page refresh (which strips the URL param)
+  // keeps this tab on the same profile.
+  try{sessionStorage.setItem('hermes-profile',S.activeProfile);}catch(_){}
   applyBotName();
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
