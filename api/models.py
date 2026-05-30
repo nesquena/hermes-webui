@@ -29,6 +29,11 @@ from api.agent_sessions import (
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
+# How many messageful cron sessions to surface in the project-chip layer.
+# Needs to exceed CLI_VISIBLE_SESSION_LIMIT so older cron runs stay
+# addressable even when many newer non-cron sessions dominate the default
+# sidebar window (#3172).
+CRON_PROJECT_CHIP_LIMIT = 200
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 _CLI_SESSIONS_CACHE_LOCK = threading.Lock()
 _CLI_SESSIONS_CACHE = {}
@@ -3434,6 +3439,93 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
             '_compression_segment_count': row.get('_compression_segment_count'),
             'is_cli_session': True,
         })
+
+    # --- Second pass: fetch cron sessions that may have been squeezed out
+    # of the default window by more-recent non-cron sessions.
+    # The normal sidebar query caps at CLI_VISIBLE_SESSION_LIMIT (20) rows;
+    # once 20 newer sessions exist, older cron runs vanish from the payload
+    # before _include_project_hidden_background_sidebar_sessions can rescue
+    # them (#3172).  A separate, higher-capped cron-only pass ensures they
+    # stay addressable under their project chip.
+    existing_sids = {s['session_id'] for s in cli_sessions}
+    try:
+        cron_excluded = tuple(
+            s for s in ('webui', 'claude-code')  # keep only 'cron'
+        )
+        for row in read_importable_agent_session_rows(
+            db_path,
+            limit=CRON_PROJECT_CHIP_LIMIT,
+            log=logger,
+            exclude_sources=cron_excluded,
+        ):
+            sid = row['id']
+            if sid in existing_sids:
+                continue
+            _source = row['source'] or 'cli'
+            if _source != 'cron':
+                continue
+            raw_ts = row['last_activity'] or row['started_at']
+            _title = row['title']
+            if not _title and sid.startswith('cron_'):
+                parts = sid.split('_')
+                if len(parts) >= 3:
+                    _job_id = parts[1]
+                    try:
+                        _jobs_path = hermes_home / 'cron' / 'jobs.json'
+                        if _jobs_path.exists():
+                            import json as _json
+                            _jobs_data = _json.loads(_jobs_path.read_text())
+                            for _j in _jobs_data.get('jobs', []):
+                                if _j.get('id') == _job_id:
+                                    _title = _j.get('name') or _title
+                                    break
+                    except Exception:
+                        pass
+            try:
+                _webui_meta = Session.load_metadata_only(sid)
+                if _webui_meta and getattr(_webui_meta, 'title', None):
+                    _title = _webui_meta.title
+            except Exception:
+                pass
+            _display_title = _title or 'Cron Session'
+            cli_sessions.append({
+                'session_id': sid,
+                'title': _display_title,
+                'workspace': str(get_last_workspace()),
+                'model': row['model'] or None,
+                'message_count': row['message_count'] or row['actual_message_count'] or 0,
+                'created_at': row['started_at'],
+                'updated_at': raw_ts,
+                'pinned': False,
+                'archived': False,
+                'project_id': _cron_pid(),
+                'profile': _cli_profile,
+                'source_tag': 'cron',
+                'raw_source': row.get('raw_source'),
+                'user_id': row.get('user_id'),
+                'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
+                'chat_type': row.get('chat_type'),
+                'thread_id': row.get('thread_id'),
+                'session_key': row.get('session_key'),
+                'platform': row.get('platform'),
+                'session_source': row.get('session_source'),
+                'source_label': row.get('source_label'),
+                'parent_session_id': row.get('parent_session_id'),
+                'parent_title': row.get('parent_title'),
+                'parent_source': row.get('parent_source'),
+                'relationship_type': row.get('relationship_type'),
+                '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
+                'end_reason': row.get('end_reason'),
+                'actual_message_count': row.get('actual_message_count'),
+                'user_message_count': row.get('actual_user_message_count'),
+                '_lineage_root_id': row.get('_lineage_root_id'),
+                '_lineage_tip_id': row.get('_lineage_tip_id'),
+                '_compression_segment_count': row.get('_compression_segment_count'),
+                'is_cli_session': True,
+            })
+            existing_sids.add(sid)
+    except Exception:
+        logger.debug("Cron project-chip second pass failed", exc_info=True)
 
     return cli_sessions
 

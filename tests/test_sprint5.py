@@ -108,6 +108,50 @@ def test_workspace_suggest_hidden_dirs_only_when_requested(cleanup_test_sessions
     assert status2 == 200
     assert str(hidden) in data2["suggestions"]
 
+
+def test_workspace_suggest_preserves_tilde_prefix(monkeypatch, tmp_path):
+    from api import workspace
+
+    home = tmp_path / "home"
+    child = home / "Projects"
+    child.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(workspace, "_trusted_workspace_roots", lambda: [home.resolve()])
+
+    suggestions = workspace.list_workspace_suggestions("~/")
+
+    assert "~/Projects" in suggestions
+    assert str(child.resolve()) not in suggestions
+
+
+def test_workspace_suggest_preserves_tilde_prefix_for_partial_child(monkeypatch, tmp_path):
+    from api import workspace
+
+    home = tmp_path / "home"
+    child = home / "Projects"
+    child.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(workspace, "_trusted_workspace_roots", lambda: [home.resolve()])
+
+    suggestions = workspace.list_workspace_suggestions("~/Pro")
+
+    assert suggestions == ["~/Projects"]
+
+
+def test_workspace_suggest_keeps_absolute_prefix_absolute(monkeypatch, tmp_path):
+    from api import workspace
+
+    home = tmp_path / "home"
+    child = home / "Projects"
+    child.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(workspace, "_trusted_workspace_roots", lambda: [home.resolve()])
+
+    suggestions = workspace.list_workspace_suggestions(str(home) + "/Pro")
+
+    assert suggestions == [str(child.resolve())]
+
+
 def test_workspace_remove(cleanup_test_sessions):
     _, ws = make_session_tracked(cleanup_test_sessions)
     child = make_workspace_child(ws, f"workspace-remove-{uuid.uuid4().hex[:6]}")
