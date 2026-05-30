@@ -41,9 +41,10 @@ def test_session_field_helper_reads_dicts_and_objects():
 
 
 def test_pin_limit_snapshot_counts_index_dict_entries():
+    assert "def _session_counts_toward_pin_quota(session)" in ROUTES_PY
     assert "_session_field(existing, \"session_id\", None)" in ROUTES_PY
-    assert "_session_field(existing, \"pinned\", False)" in ROUTES_PY
-    assert "_session_field(existing, \"archived\", False)" in ROUTES_PY
+    assert "_session_counts_toward_pin_quota(existing)" in ROUTES_PY
+    assert "_hide_from_default_sidebar(row)" in ROUTES_PY
     start = ROUTES_PY.find("persisted_pinned_ids = {")
     assert start != -1, "persisted pin snapshot not found"
     end = ROUTES_PY.find("with LOCK:", start)

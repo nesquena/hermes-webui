@@ -255,6 +255,32 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn(".split(_os.pathsep)", block)
         self.assertNotIn('.split(":")', block)
 
+    def test_path_is_within_root_treats_commonpath_valueerror_as_not_within(self):
+        """Windows cross-drive commonpath() errors must not crash /api/media."""
+        from api import routes
+
+        with mock.patch.object(
+            routes.os.path,
+            "commonpath",
+            side_effect=ValueError("Paths don't have the same drive"),
+        ):
+            self.assertFalse(
+                routes._path_is_within_root(
+                    pathlib.Path("D:/outputs/card.png"),
+                    pathlib.Path("C:/Users/agent/.hermes"),
+                )
+            )
+
+    def test_path_is_within_root_accepts_child_path(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            root = pathlib.Path(tmpd).resolve()
+            child = root / "media" / "card.png"
+            child.parent.mkdir()
+            child.write_bytes(b"png")
+            self.assertTrue(routes._path_is_within_root(child.resolve(), root))
+
     def test_media_endpoints_advertise_byte_range_support(self):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         self.assertIn("Accept-Ranges", routes_src)
