@@ -2897,17 +2897,22 @@ main.main.showing-logs > #mainLogs{display:flex;}
 #mainSettings .settings-field > div[style*="color: var(--muted)"]{font-size:12px;color:var(--muted);line-height:1.5;}
 
 .model-advanced-row{
-  display:grid;
-  grid-template-columns:minmax(0,1fr) 34px;
-  gap:8px;
-  align-items:center;
+  position:relative;
+  display:block;
+}
+.model-advanced-row #settingsModel{
+  padding-right:48px!important;
 }
 .model-advanced-btn{
   width:32px;
   height:32px;
-  display:inline-flex;
+  display:flex;
   align-items:center;
   justify-content:center;
+  position:absolute;
+  right:8px;
+  top:50%;
+  transform:translateY(-50%);
   border-radius:8px;
   border:1px solid var(--border);
   background:var(--input-bg);
