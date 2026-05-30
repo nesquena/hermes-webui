@@ -722,6 +722,7 @@ const LOCALES = {
     session_time_hours_ago: (n) => `${n}h`,
     session_time_days_ago: (n) => `${n}d`,
     session_time_last_week: '1w',
+    session_time_bucket_active: 'Active',
     session_time_bucket_recent: 'Recent',
     session_time_bucket_today: 'Today',
     session_time_bucket_yesterday: 'Yesterday',

@@ -46,6 +46,7 @@ def _run_session_time_case(script_body: str) -> dict:
           session_time_hours_ago: (n) => `${{n}}h`,
           session_time_days_ago: (n) => `${{n}}d`,
           session_time_last_week: '1w',
+          session_time_bucket_active: 'Active',
           session_time_bucket_recent: 'Recent',
           session_time_bucket_today: 'Today',
           session_time_bucket_yesterday: 'Yesterday',
@@ -87,6 +88,22 @@ def test_session_sidebar_renders_relative_time_and_meta_rows():
     assert ".session-item.active .session-title" in STYLE_CSS
     assert "|| _sessionTimeBucketLabel" not in SESSIONS_JS
     assert "const ONE_DAY=86400000;" not in SESSIONS_JS
+
+
+def test_session_sidebar_active_bucket_precedes_recent_bucket():
+    render_fn = _extract_function(SESSIONS_JS, "renderSessionListFromCache")
+    active_split = "const activeUnpinned=orderedSessions.filter(s=>!s.pinned&&_isSessionEffectivelyStreaming(s));"
+    inactive_split = "const unpinned=orderedSessions.filter(s=>!s.pinned&&!_isSessionEffectivelyStreaming(s));"
+    pinned_group = "groups.push({label:'\\u2605 Pinned',items:pinned,isPinned:true})"
+    active_group = "groups.push({label:t('session_time_bucket_active'),items:activeUnpinned,isActive:true})"
+    recent_loop = "for(const s of unpinned)"
+
+    assert active_split in render_fn
+    assert inactive_split in render_fn
+    assert pinned_group in render_fn
+    assert active_group in render_fn
+    assert render_fn.index(pinned_group) < render_fn.index(active_group) < render_fn.index(recent_loop)
+    assert "session-date-header'+(g.isPinned?' pinned':'')+(g.isActive?' active':'')" in render_fn
 
 
 def test_session_timestamp_prefers_last_message_at_over_metadata_updated_at():
@@ -167,6 +184,7 @@ def test_relative_time_strings_are_localized_in_english_and_spanish_bundles():
         "session_time_hours_ago",
         "session_time_days_ago",
         "session_time_last_week",
+        "session_time_bucket_active",
         "session_time_bucket_recent",
         "session_time_bucket_today",
         "session_time_bucket_yesterday",

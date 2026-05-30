@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Thinking/tool Activity groups now default open so live and settled tool-call thinking is visible without first expanding the disclosure, while individual tool output details remain collapsed until clicked.
+- Running sessions now appear in an Active sidebar bucket above Recent, keeping in-flight work visible even when its last message is older.
+
 ## [v0.51.171] — 2026-05-30 — Release EQ (stage-batch53 — tool-output card badge + Neon opt-in skin)
 
 ### Added

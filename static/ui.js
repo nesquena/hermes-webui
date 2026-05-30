@@ -5440,6 +5440,7 @@ function _thinkingActivityNode(text, open){
 // finalized into a settled assistant turn (the live attribute is removed in
 // _convertLiveActivityGroupToSettled / when liveAssistantTurn loses its id).
 let _liveActivityUserExpanded;
+const ACTIVITY_GROUP_COLLAPSED_BY_DEFAULT=false;
 const _activityDisclosureStoragePrefix='hermes-activity-disclosure:';
 function _activityDisclosureStorageKey(activityKey){
   if(!activityKey||!S.session||!S.session.session_id) return null;
@@ -5491,7 +5492,7 @@ function ensureActivityGroup(inner, opts){
   let group=inner.querySelector(selector);
   if(!group){
     group=document.createElement('div');
-    let collapsed=opts.collapsed!==false;
+    let collapsed=opts.collapsed===undefined?ACTIVITY_GROUP_COLLAPSED_BY_DEFAULT:opts.collapsed!==false;
     const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
@@ -6786,7 +6787,7 @@ function renderMessages(options){
         if(!anchorRow) continue;
         const anchorParent=anchorRow.parentElement;
         let insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode,activityKey:`assistant:${aIdx}`});
+        const group=ensureActivityGroup(anchorParent,{collapsed:ACTIVITY_GROUP_COLLAPSED_BY_DEFAULT,anchor:insertAfterNode,activityKey:`assistant:${aIdx}`});
         const sourceMsg=S.messages[aIdx]||{};
         if(sourceMsg._turnDuration!==undefined) group.setAttribute('data-turn-duration', String(sourceMsg._turnDuration));
         const body=group&&group.querySelector('.tool-call-group-body');
@@ -7130,7 +7131,7 @@ function appendLiveToolCard(tc){
   }
   const children=Array.from(inner.children);
   const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')).pop();
-  const group=ensureActivityGroup(inner,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
+  const group=ensureActivityGroup(inner,{live:true,collapsed:ACTIVITY_GROUP_COLLAPSED_BY_DEFAULT,anchor,activityKey:_activityKeyForLiveTurn()});
   const body=group.querySelector('.tool-call-group-body');
   const toolName=_toolDisplayName(tc);
   const toolEventId=tid?`tool-${tid}`:`tool-${String(tc.name||'tool').replace(/[^a-z0-9_-]/gi,'_')}`;
@@ -7935,15 +7936,9 @@ function finalizeThinkingCard(){
   const turn=$('liveAssistantTurn');
   const group=turn&&turn.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(group){
-    // Respect the user's explicit expand intent (#1298) — only force-collapse
-    // when the user has not manually expanded this turn's activity group, or
-    // has manually collapsed it. Otherwise the panel snaps shut whenever new
-    // activity arrives, even mid-read.
-    if(_liveActivityUserExpanded !== true){
-      group.classList.add('tool-call-group-collapsed');
-      const summary=group.querySelector('.tool-call-group-summary');
-      if(summary) summary.setAttribute('aria-expanded','false');
-    }
+    // Keep Activity visible by default. User/persisted disclosure state still
+    // wins through ensureActivityGroup(), and a manually-collapsed live group
+    // already carries the collapsed class here.
     const active=turn.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
     if(active) active.removeAttribute('data-thinking-active');
     _syncToolCallGroupSummary(group);
@@ -8004,7 +7999,7 @@ function appendThinking(text='', options){
     el.id!=='toolRunningRow' &&
     el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row')
   ).pop();
-  const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor,activityKey:_activityKeyForLiveTurn()});
+  const group=ensureActivityGroup(blocks,{live:true,collapsed:ACTIVITY_GROUP_COLLAPSED_BY_DEFAULT,anchor,activityKey:_activityKeyForLiveTurn()});
   const body=group&&group.querySelector('.tool-call-group-body');
   if(!body) return;
   if(!cleanThinking||cleanThinking==='Thinking…'){

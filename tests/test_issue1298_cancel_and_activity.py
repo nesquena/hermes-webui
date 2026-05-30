@@ -268,10 +268,10 @@ class TestIssue1298CancelPreservesUserMessage:
 # ── Client-side: ui.js source-level guards for activity-group state ─────────
 
 class TestIssue1298ActivityGroupExpandPersistence:
-    """Issue 1: Expanded Activity list collapses automatically when new
-    activity arrives.
+    """Issue 1: Activity disclosure state must stay stable when new activity
+    arrives.
 
-    Root cause:
+    Historical root cause:
       - ensureActivityGroup() (static/ui.js) creates the live activity group
         with `tool-call-group-collapsed` whenever it's missing
       - finalizeThinkingCard() force-adds `tool-call-group-collapsed` on every
@@ -280,9 +280,24 @@ class TestIssue1298ActivityGroupExpandPersistence:
         so any destroy/recreate cycle (which fires on every thinking → tool →
         thinking transition) wipes it.
 
-    Fix: track the user's last explicit toggle in a per-turn singleton, and
-    skip the force-collapse when the user has explicitly expanded.
+    Fix: track the user's last explicit toggle in a per-turn singleton, keep
+    Activity open by default, and avoid force-collapsing it at thinking/tool
+    boundaries.
     """
+
+    def test_activity_groups_default_open(self):
+        """Thinking/tool Activity groups should be visible by default while
+        keeping individual tool details behind their own expansion affordance."""
+        src = (REPO_ROOT / "static" / "ui.js").read_text()
+        assert "const ACTIVITY_GROUP_COLLAPSED_BY_DEFAULT=false" in src, (
+            "ui.js should define the Activity disclosure default in one place"
+        )
+        assert "collapsed:true,anchor" not in src, (
+            "Activity group call sites should not hard-code collapsed-by-default"
+        )
+        assert "collapsed:true, anchor" not in src, (
+            "Activity group call sites should not hard-code collapsed-by-default"
+        )
 
     def test_ui_js_tracks_user_expand_intent_for_live_activity_group(self):
         src = (REPO_ROOT / "static" / "ui.js").read_text()
@@ -318,7 +333,7 @@ class TestIssue1298ActivityGroupExpandPersistence:
 
     def test_finalize_thinking_card_respects_user_expand(self):
         """finalizeThinkingCard() must NOT force-collapse the live activity
-        group when the user has explicitly expanded it (#1298)."""
+        group at thinking/tool boundaries (#1298)."""
         src = (REPO_ROOT / "static" / "ui.js").read_text()
         m = re.search(
             r"function finalizeThinkingCard\(\)\{(.*?)\n\}",
@@ -326,15 +341,9 @@ class TestIssue1298ActivityGroupExpandPersistence:
         )
         assert m, "finalizeThinkingCard() must exist in ui.js"
         body = m.group(1)
-        assert "_liveActivityUserExpanded" in body, (
-            "finalizeThinkingCard() must respect the user's expand intent — "
-            "without this guard, the panel snaps shut on every tool boundary"
-        )
-        # Hard fail if force-collapse is unconditional
-        assert "_liveActivityUserExpanded !== true" in body or \
-               "_liveActivityUserExpanded!==true" in body.replace(" ", ""), (
-            "finalizeThinkingCard() must skip the force-collapse path when "
-            "_liveActivityUserExpanded === true"
+        assert "group.classList.add('tool-call-group-collapsed')" not in body, (
+            "finalizeThinkingCard() must not snap Activity shut at every tool "
+            "boundary; user/manual disclosure state should be preserved"
         )
 
     def test_inline_onclick_records_user_intent(self):
@@ -368,8 +377,8 @@ class TestIssue1298ActivityGroupExpandPersistence:
 
     def test_clear_live_tool_cards_resets_expand_intent(self):
         """clearLiveToolCards() — invoked between turns — must reset the
-        per-turn user-expand tracker so the next turn starts collapsed by
-        default (#1298)."""
+        per-turn user-expand tracker so prior explicit toggles do not bleed into
+        the next turn's default disclosure state (#1298)."""
         src = (REPO_ROOT / "static" / "ui.js").read_text()
         m = re.search(
             r"function clearLiveToolCards\(\)\{(.*?)\n\}",

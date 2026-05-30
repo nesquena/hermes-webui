@@ -1063,6 +1063,7 @@
   .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:7px 8px 6px;margin:-1px -1px 4px;border-radius:10px 10px 8px 8px;background:color-mix(in srgb,var(--surface-subtle) 80%,transparent);border-bottom:1px solid color-mix(in srgb,var(--border) 70%,transparent);cursor:pointer;user-select:none;opacity:.86;transition:opacity .15s,background .15s;}
   .session-date-header:hover{opacity:1;background:color-mix(in srgb,var(--hover-bg) 72%,transparent);}
   .session-date-header.pinned{color:var(--accent);}
+  .session-date-header.active{color:var(--accent);}
   .session-date-count{margin-left:auto;min-width:18px;padding:1px 6px;border-radius:999px;background:var(--hover-bg);color:var(--muted);font-size:10px;font-weight:700;line-height:1.45;text-align:center;letter-spacing:0;text-transform:none;}
   .session-date-body{display:flex;flex-direction:column;gap:2px;}
   .session-date-body .session-item{margin-bottom:0;}

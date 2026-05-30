@@ -3629,8 +3629,9 @@ function renderSessionListFromCache(){
   const orderedSessions=[...sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
   // Separate pinned from unpinned
   const pinned=orderedSessions.filter(s=>s.pinned);
-  const unpinned=orderedSessions.filter(s=>!s.pinned);
-  // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
+  const activeUnpinned=orderedSessions.filter(s=>!s.pinned&&_isSessionEffectivelyStreaming(s));
+  const unpinned=orderedSessions.filter(s=>!s.pinned&&!_isSessionEffectivelyStreaming(s));
+  // Date grouping: Pinned / Active / Recent / Today / Yesterday / This week / Last week / Older
   const now=_serverNowMs();
   // Collapse state persisted in localStorage
   let _groupCollapsed={};
@@ -3640,6 +3641,7 @@ function renderSessionListFromCache(){
   const groups=[];
   let curLabel=null,curItems=[];
   if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
+  if(activeUnpinned.length) groups.push({label:t('session_time_bucket_active'),items:activeUnpinned,isActive:true});
   for(const s of unpinned){
     const ts=_sessionTimestampMs(s);
     const label=_sessionTimeBucketLabel(ts, now);
@@ -3702,7 +3704,7 @@ function renderSessionListFromCache(){
     const wrapper=document.createElement('div');
     wrapper.className='session-date-group';
     const hdr=document.createElement('div');
-    hdr.className='session-date-header'+(g.isPinned?' pinned':'');
+    hdr.className='session-date-header'+(g.isPinned?' pinned':'')+(g.isActive?' active':'');
     const caret=document.createElement('span');
     caret.className='session-date-caret';
     caret.textContent='\u25BE'; // down when expanded; rotated right when collapsed
