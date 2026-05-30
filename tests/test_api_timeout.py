@@ -221,6 +221,7 @@ def test_passive_background_polls_suppress_timeout_toasts():
     """Passive refreshes should be best-effort and not emit generic timeout toasts."""
     workspace = _source(WORKSPACE_JS)
     sessions = _source(SESSIONS_JS)
+    messages = _source(ROOT / "static" / "messages.js")
     ui = _source(UI_JS)
     panels = _source(PANELS_JS)
 
@@ -228,6 +229,8 @@ def test_passive_background_polls_suppress_timeout_toasts():
     assert "api('/api/sessions' + allProfilesQS,{timeoutToast:false})" in sessions
     assert "api('/api/projects' + allProfilesQS,{timeoutToast:false})" in sessions
     assert "api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false})" in sessions
+    assert 'api("/api/approval/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false})' in messages
+    assert 'api("/api/clarify/pending?session_id=" + encodeURIComponent(sid),{timeoutToast:false})' in messages
     assert "api('/api/dashboard/status',{timeoutToast:false})" in ui
     assert "api('/api/system/health',{timeoutToast:false})" in ui
     assert "api('/api/health/agent',{timeoutToast:false})" in ui

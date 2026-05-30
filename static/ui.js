@@ -8023,8 +8023,23 @@ function appendThinking(text='', options){
   const body=group&&group.querySelector('.tool-call-group-body');
   if(!body) return;
   if(!cleanThinking||cleanThinking==='Thinking…'){
-    const label=body.querySelector('.tool-card.tool-card-running')?'Waiting on tool result':'Waiting on model';
-    const detail=_activityWaitingDetail(group,label);
+    const hasRunningTool=!!body.querySelector('.tool-card.tool-card-running');
+    const hasToolCard=!!body.querySelector('.tool-card-row');
+    let label;
+    let detail;
+    if(!S.activeStreamId && options && options.pending){
+      label='Starting agent';
+      detail='Creating the stream and sending your message…';
+    }else if(hasRunningTool){
+      label='Waiting on tool result';
+      detail=_activityWaitingDetail(group,label);
+    }else if(hasToolCard){
+      label='Waiting on model';
+      detail=_activityWaitingDetail(group,label);
+    }else{
+      label='Waiting for first model token';
+      detail='Stream connected; no model output has arrived yet.';
+    }
     _appendActivityEvent(group,{id:'thinking-placeholder',kind:'waiting',label,detail,status:'waiting',ts:_activityNowSeconds()});
     const active=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
     if(active) active.removeAttribute('data-thinking-active');
