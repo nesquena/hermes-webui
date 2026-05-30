@@ -1224,7 +1224,10 @@ document.addEventListener('keydown',async e=>{
     closeWsDropdown();
     // Clear session search
     const ss=$('sessionSearch');
-    if(ss&&ss.value){ss.value='';filterSessions();}
+    if(ss&&ss.value){
+      if(typeof clearSessionSearch==='function') clearSessionSearch(false);
+      else { ss.value=''; filterSessions(); }
+    }
     // Cancel any active message edit
     const editArea=document.querySelector('.msg-edit-area');
     if(editArea){
@@ -1754,6 +1757,7 @@ function applyBotName(){
   // separately below by a `pageshow` listener — the async IIFE here does NOT
   // re-run when the browser restores the page from bfcache.
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
+  if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
   // Initialize reasoning chip on boot (fixes #1103 — chip hidden until session load)
   if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
@@ -1858,6 +1862,7 @@ window.addEventListener('pageshow', async (event) => {
   if (!event.persisted) return;  // fresh loads are handled by the IIFE above
   const _srch = document.getElementById('sessionSearch');
   if (_srch) _srch.value = '';
+  if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
   // Close any dropdowns/popovers that were open when the user navigated away.
   // bfcache freezes DOM state, so a dropdown left open remains open on restore.
   if (typeof closeModelDropdown === 'function') try { closeModelDropdown(); } catch (_) {}
