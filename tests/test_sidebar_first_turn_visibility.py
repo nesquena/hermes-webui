@@ -110,12 +110,20 @@ class TestSidebarFirstTurnVisibility:
 
     def test_backend_index_filter_keeps_pending_first_turn_sessions(self):
         src = read("api/models.py")
+        helper_start = src.index("def _is_empty_untitled_sidebar_session")
+        helper_end = src.index("def _sidebar_message_count", helper_start)
+        helper_body = src[helper_start:helper_end]
+        assert "has_pending_user_message" in helper_body, (
+            "The shared empty-session predicate must exempt pending first-turn sessions, "
+            "matching the full-scan fallback."
+        )
+
         index_filter_start = src.index("# Hide empty Untitled sessions from the UI entirely")
         index_filter_end = src.index("visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar", index_filter_start)
         index_filter = src[index_filter_start:index_filter_end]
-        assert "has_pending_user_message" in index_filter, (
-            "The index-path empty-session filter must exempt pending first-turn sessions, "
-            "matching the full-scan fallback."
+        assert "_is_empty_untitled_sidebar_session" in index_filter, (
+            "The index-path empty-session filter must use the shared predicate that "
+            "preserves pending first-turn sessions."
         )
 
     def test_session_refresh_preserves_optimistic_first_turn_rows_when_server_lags(self):
