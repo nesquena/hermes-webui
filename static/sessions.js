@@ -10,6 +10,7 @@ const ICONS={
   trash:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5v8.5h7v-8.5"/><line x1="7" y1="7" x2="7" y2="11"/><line x1="9" y1="7" x2="9" y2="11"/></svg>',
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
   edit:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L5 13H3v-2z"/><path d="M10 4l2 2"/></svg>',
+  link:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.7 9.3a3 3 0 0 1 0-4.2l1.7-1.7a3 3 0 0 1 4.2 4.2l-1 1"/><path d="M9.3 6.7a3 3 0 0 1 0 4.2l-1.7 1.7a3 3 0 0 1-4.2-4.2l1-1"/></svg>',
 };
 
 // Tracks which session_id is currently being loaded. Used to discard stale
@@ -2003,6 +2004,77 @@ function _buildSessionAction(label, meta, icon, onSelect, extraClass=''){
   return opt;
 }
 
+function _sessionMarkdownLabel(session){
+  const sid=session&&session.session_id?String(session.session_id):'';
+  const title=String((session&&(session.title||session.name))||'Conversation').replace(/\s+/g,' ').trim()||'Conversation';
+  const shortSid=sid?sid.slice(0,12):'';
+  const label=shortSid?`${title} (${shortSid})`:title;
+  return label.replace(/([\\\[\]])/g,'\\$1').slice(0,120);
+}
+
+function _sessionMarkdownUrlSid(sid){
+  return encodeURIComponent(String(sid||'')).replace(/[()]/g, ch => ch==='('?'%28':'%29');
+}
+
+function _sessionInternalReferenceForSession(session){
+  const sid=session&&session.session_id;
+  if(!sid) return '';
+  return `[${_sessionMarkdownLabel(session)}](session://${_sessionMarkdownUrlSid(sid)})`;
+}
+
+async function _copyTextToClipboard(text){
+  if(navigator&&navigator.clipboard&&typeof navigator.clipboard.writeText==='function'){
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+  const ta=document.createElement('textarea');
+  ta.value=text;
+  ta.setAttribute('readonly','');
+  ta.style.position='fixed';
+  ta.style.left='-9999px';
+  ta.style.top='0';
+  document.body.appendChild(ta);
+  ta.select();
+  try{return document.execCommand('copy');}
+  finally{ta.remove();}
+}
+
+async function _copySessionLink(session){
+  const sid=session&&session.session_id;
+  if(!sid) return;
+  const ref=_sessionInternalReferenceForSession(session);
+  try{
+    await _copyTextToClipboard(ref);
+    showToast(t('session_link_copied'));
+  }catch(err){
+    showToast(t('session_link_copy_failed')+(err&&err.message?err.message:err));
+  }
+}
+
+function _mountSessionActionMenu(menu, session, anchorEl){
+  document.body.appendChild(menu);
+  _sessionActionMenu = menu;
+  _sessionActionAnchor = anchorEl;
+  _sessionActionSessionId = session.session_id;
+  if(anchorEl.classList&&anchorEl.classList.contains('session-actions-trigger')) anchorEl.classList.add('active');
+  const row=anchorEl.closest('.session-item');
+  if(row) row.classList.add('menu-open');
+  _positionSessionActionMenu(anchorEl);
+  _playSessionActionMenuEntrance(menu);
+}
+
+function _appendSessionCopyLinkAction(menu, session){
+  menu.appendChild(_buildSessionAction(
+    t('session_copy_link'),
+    t('session_copy_link_desc'),
+    ICONS.link,
+    async()=>{
+      closeSessionActionMenu();
+      await _copySessionLink(session);
+    }
+  ));
+}
+
 function _appendSessionDuplicateAction(menu, session){
   menu.appendChild(_buildSessionAction(
     t('session_duplicate'),
@@ -2063,7 +2135,7 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
 }
 
 function _openSessionActionMenu(session, anchorEl){
-  if(_isReadOnlySession(session)){ if(typeof showToast==='function') showToast('Read-only imported sessions cannot be modified.',3000); return; }
+  const isReadOnly = _isReadOnlySession(session);
   if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
     closeSessionActionMenu();
     return;
@@ -2074,6 +2146,11 @@ function _openSessionActionMenu(session, anchorEl){
   const isExternalSession = isMessagingSession || isCliSession;
   const menu=document.createElement('div');
   menu.className='session-action-menu';
+  _appendSessionCopyLinkAction(menu, session);
+  if(isReadOnly){
+    _mountSessionActionMenu(menu, session, anchorEl);
+    return;
+  }
   // Rename — first menu item by request (#1764). Double-click rename is
   // timing-sensitive: the first click frequently registers as "open the
   // chat" before the second click arrives, so users open the conversation
@@ -2195,15 +2272,7 @@ function _openSessionActionMenu(session, anchorEl){
       'danger'
     ));
   }
-  document.body.appendChild(menu);
-  _sessionActionMenu = menu;
-  _sessionActionAnchor = anchorEl;
-  _sessionActionSessionId = session.session_id;
-  if(anchorEl.classList&&anchorEl.classList.contains('session-actions-trigger')) anchorEl.classList.add('active');
-  const row=anchorEl.closest('.session-item');
-  if(row) row.classList.add('menu-open');
-  _positionSessionActionMenu(anchorEl);
-  _playSessionActionMenuEntrance(menu);
+  _mountSessionActionMenu(menu, session, anchorEl);
 }
 
 document.addEventListener('click',e=>{
