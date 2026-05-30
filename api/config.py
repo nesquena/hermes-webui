@@ -403,6 +403,35 @@ def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     )
 
 
+def register_webui_mcp_server_config(config_data: dict | None) -> tuple[dict, bool]:
+    """Return config with the bundled Hermes WebUI MCP server registered.
+
+    The bundled MCP server needs a cache-safe way to mutate WebUI project/session
+    metadata without storing the plaintext WebUI password. Register it with the
+    local token-file header path instead; the HTTP auth layer accepts that token
+    only on the narrow MCP mutation allowlist.
+    """
+    next_cfg = copy.deepcopy(config_data) if isinstance(config_data, dict) else {}
+    servers = next_cfg.get("mcp_servers")
+    if not isinstance(servers, dict):
+        servers = {}
+        next_cfg["mcp_servers"] = servers
+
+    desired = {
+        "command": PYTHON_EXE,
+        "args": [str(REPO_ROOT / "mcp_server.py")],
+        "env": {
+            "HERMES_WEBUI_STATE_DIR": str(STATE_DIR),
+            "HERMES_WEBUI_MCP_TOKEN_FILE": str(STATE_DIR / ".mcp_token"),
+            "HERMES_WEBUI_PORT": str(PORT),
+        },
+    }
+    if servers.get("hermes-webui") == desired:
+        return next_cfg, False
+    servers["hermes-webui"] = desired
+    return next_cfg, True
+
+
 # Initial load
 reload_config()
 cfg = _cfg_cache  # alias for backward compat with existing references
