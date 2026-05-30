@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Tool-call output cards now carry a persistent “Tool output” badge and accent rail so tool output remains visually distinct from final assistant responses without requiring hover (#2867).
+
 ## [v0.51.164] — 2026-05-30 — Release EJ (stage-batch46 — passive performance hardening: refresh coalescing + draft-save dedup + activity placeholders + bounded restart-safety wait)
 
 ### Fixed

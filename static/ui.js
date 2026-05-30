@@ -6987,6 +6987,7 @@ function buildToolCard(tc){
       <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
         ${runIndicator}
         <span class="tool-card-icon">${icon}</span>
+        <span class="tool-card-badge">Tool output</span>
         <span class="tool-card-name">${esc(displayName)}</span>
         <span class="tool-card-preview">${esc(previewText)}</span>
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
