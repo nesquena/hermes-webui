@@ -473,6 +473,32 @@ class TestAuxiliaryModelsBackend:
         assert "reasoning_effort: none" in text
         assert "DUMMY_KEY_DO_NOT_PRINT" in text
 
+
+
+    def test_set_hermes_default_model_clear_api_key_removes_key(self, monkeypatch, tmp_path):
+        """Clearing a write-only API key override should remove the key, not persist api_key: ''."""
+        from api import config
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: gpt-5.5\n  api_key: old-secret\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+        monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+        monkeypatch.setattr(config, "resolve_model_provider", lambda model: (model, "openai", None))
+
+        result = config.set_hermes_default_model(
+            "gpt-5.5",
+            advanced={"api_key_clear": True, "api_key": ""},
+        )
+
+        assert result["ok"] is True
+        text = config_path.read_text(encoding="utf-8")
+        assert "old-secret" not in text
+        assert "api_key" not in text
+
     def test_set_auxiliary_model_clears_empty_extra_body(self, monkeypatch, tmp_path):
         """Blank extra_body from the modal should remove config noise instead of writing {}."""
         from api import config

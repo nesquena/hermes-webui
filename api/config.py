@@ -3107,7 +3107,7 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         else:
             raise ValueError("extra_body must be a JSON object")
     if advanced.get("api_key_clear"):
-        model_cfg["api_key"] = ""
+        model_cfg.pop("api_key", None)
     api_key = str(advanced.get("api_key") or "").strip()
     if api_key:
         model_cfg["api_key"] = api_key
