@@ -66,10 +66,31 @@ jobs:
             echo "::endgroup::"
           done
 
+  # Build the Docker image once and cache layers via GHA cache.
+  # The smoke matrix jobs then pull from this cache instead of rebuilding
+  # from scratch, saving ~1-3 minutes per variant.
+  build-image:
+    name: Build Docker image (cache layers)
+    runs-on: ubuntu-latest
+    needs: compose-config
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and cache Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ghcr.io/nesquena/hermes-webui:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   smoke:
     name: Smoke ${{ matrix.variant }}
     runs-on: ubuntu-latest
-    needs: compose-config
+    needs: [compose-config, build-image]
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -80,6 +101,19 @@ jobs:
           - three-container
     steps:
       - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Restore the cached Docker image from the build-image job.
+      # Read-only: the build-image job already populated the GHA cache, so the
+      # smoke variants only need cache-from (no redundant cache-to re-export).
+      - name: Restore Docker image from cache
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ghcr.io/nesquena/hermes-webui:latest
+          cache-from: type=gha
 
       - name: Resolve compose file + project name
         id: vars
@@ -118,15 +152,6 @@ jobs:
           for n in $(docker network ls --format '{{.Name}}' | grep "^hermes-smoke-" || true); do
             docker network rm "$n" || true
           done
-
-      - name: Build local Dockerfile
-        # We always build the local Dockerfile so the PR's changes are tested,
-        # even on the multi-container variants whose compose files reference
-        # ghcr.io/nesquena/hermes-webui:latest. Without this retag, multi-container
-        # smoke runs would test the previous release, not the PR.
-        run: |
-          set -euo pipefail
-          docker build -t ghcr.io/nesquena/hermes-webui:latest .
 
       - name: Prepare ephemeral host paths
         id: paths
