@@ -70,6 +70,91 @@ _MESSAGING_SESSION_METADATA_CACHE: dict[str, object] = {
 }
 _MESSAGING_SESSION_METADATA_LOCK = threading.Lock()
 _STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
+
+
+def _webui_manual_compression_system_message(session) -> str:
+    workspace = getattr(session, "workspace", None) or ""
+    return (
+        f"Active workspace at session start: {workspace}\n"
+        "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
+        "workspace the user has selected in the web UI at the time they sent that message. "
+        "This tag is the single authoritative source of the active workspace and updates "
+        "with every message. It overrides any prior workspace mentioned in this system "
+        "prompt, memory, or conversation history. Always use the value from the most recent "
+        "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
+        "write_file, read_file, search_files, terminal workdir, and patch. "
+        "Never fall back to a hardcoded path when this tag is present."
+    )
+
+
+def _split_model_context_for_display(messages):
+    """Return (display_messages, model_context) for compressor output.
+
+    Context engines may inject model-facing guidance by returning a leading
+    system message when WebUI provides a synthetic system anchor. Keep that
+    guidance in context_messages, but do not render it as a transcript turn.
+    """
+    model_context = list(messages or [])
+    display_messages = list(model_context)
+    if display_messages and isinstance(display_messages[0], dict) and display_messages[0].get("role") == "system":
+        display_messages = display_messages[1:]
+    return display_messages, model_context
+
+
+def _message_text_for_context_policy(message):
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content", "")
+    if isinstance(content, list):
+        return "\n".join(
+            str(part.get("text") or part.get("content") or "")
+            for part in content
+            if isinstance(part, dict)
+        )
+    return str(content or "")
+
+
+def _context_has_lcm_retrieval_policy(messages):
+    return any(
+        "LCM retrieval policy" in _message_text_for_context_policy(message)
+        or "Use lcm_grep" in _message_text_for_context_policy(message)
+        for message in messages or []
+    )
+
+
+def _looks_like_lcm_model_context(messages):
+    for message in messages or []:
+        text = _message_text_for_context_policy(message)
+        if "[Recent Summary" in text or "[Session Arc Summary" in text:
+            return True
+        if "[Expand for details" in text and "node" in text:
+            return True
+    return False
+
+
+def _ensure_lcm_retrieval_policy_model_context(messages, context_engine=None):
+    """Add WebUI-only model-facing LCM retrieval guidance when absent.
+
+    WebUI keeps its system prompt outside persisted conversation history, so
+    LCM's normal system-message note can be missing even though summaries are
+    present. Keep this as model context only; callers strip it from display.
+    """
+    model_context = list(messages or [])
+    engine_name = str(context_engine or "").lower()
+    if engine_name != "lcm" and not _looks_like_lcm_model_context(model_context):
+        return model_context
+    if _context_has_lcm_retrieval_policy(model_context):
+        return model_context
+    policy = (
+        "[LCM retrieval policy: Earlier turns have been compacted into "
+        "retrieval-backed summaries. Before relying on compacted history, use "
+        "lcm_grep to search, lcm_describe to inspect candidate nodes, and "
+        "lcm_expand to recover original details. Pass exactly one identifier "
+        "to lcm_expand (node_id, store_id, or externalized_ref); do not pass "
+        "empty identifiers or store_id=0.]"
+    )
+    return [{"role": "system", "content": policy}, *model_context]
+
 _CSP_REPORT_LOGGER = logging.getLogger("csp_report")
 _CSP_REPORT_RATE_LIMIT: dict[str, list[float]] = {}
 _CSP_REPORT_RATE_LIMIT_LOCK = threading.Lock()
@@ -11284,6 +11369,7 @@ def _run_manual_compression_job(sid, body):
                 )
 
 
+
 def _handle_session_compress_start(handler, body):
     try:
         require(body, "session_id")
@@ -11559,6 +11645,10 @@ def _handle_session_compress(handler, body):
         # Lock contract: hold for the in-memory mutation only, never across
         # network I/O.
         original_messages = list(messages)
+        compression_input_messages = [
+            {"role": "system", "content": _webui_manual_compression_system_message(s)},
+            *original_messages,
+        ]
         original_stream_state = (
             getattr(s, "active_stream_id", None),
             getattr(s, "pending_user_message", None),
@@ -11579,12 +11669,18 @@ def _handle_session_compress(handler, body):
             enabled_toolsets=_resolve_cli_toolsets(),
             session_id=sid,
         )
-        compressed = agent.context_compressor.compress(
-            original_messages,
+        compressed_context = agent.context_compressor.compress(
+            compression_input_messages,
             current_tokens=approx_tokens,
             focus_topic=focus_topic,
         )
-        new_tokens = _estimate_messages_tokens_rough(compressed)
+        compressor_name = getattr(agent.context_compressor, "name", None)
+        compressed_context = _ensure_lcm_retrieval_policy_model_context(
+            compressed_context,
+            compressor_name or getattr(s, "context_engine", None),
+        )
+        compressed, compressed_context = _split_model_context_for_display(compressed_context)
+        new_tokens = _estimate_messages_tokens_rough(compressed_context)
         summary = _summarize_manual_compression(
             original_messages,
             compressed,
@@ -11608,7 +11704,7 @@ def _handle_session_compress(handler, body):
                 return bad(handler, "Session was modified during compression; please retry.", 409)
 
             s.messages = compressed
-            s.context_messages = compressed
+            s.context_messages = compressed_context
             s.tool_calls = []
             s.active_stream_id = None
             s.pending_user_message = None
