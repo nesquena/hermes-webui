@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- SSE run-journal replay cursors are now run-aware, preventing stale `after_seq` values from an interrupted prior stream from suppressing replay events in a newer stream with reset sequence numbers (#3124).
+
 ## [v0.51.164] — 2026-05-30 — Release EJ (stage-batch46 — passive performance hardening: refresh coalescing + draft-save dedup + activity placeholders + bounded restart-safety wait)
 
 ### Fixed
