@@ -7830,7 +7830,7 @@ function _openAuxAdvancedOptions(taskKey,cfg){
 function _bindMainAdvancedOptionsButton(){
  const modelSel=$('settingsModel');
  let btn=$('mainAdvancedBtn');
- if(!btn&&modelSel){
+ if(modelSel){
   const parent=modelSel.parentElement;
   let row=parent&&parent.classList&&parent.classList.contains('model-advanced-row')?parent:null;
   if(!row){
@@ -7839,10 +7839,12 @@ function _bindMainAdvancedOptionsButton(){
    parent.insertBefore(row,modelSel);
    row.appendChild(modelSel);
   }
-  btn=document.createElement('button');
-  btn.type='button';
-  btn.id='mainAdvancedBtn';
-  row.appendChild(btn);
+  if(!btn){
+   btn=document.createElement('button');
+   btn.type='button';
+   btn.id='mainAdvancedBtn';
+  }
+  if(btn.parentElement!==row) row.appendChild(btn);
  }
  if(!btn) return;
  btn.classList.add('model-advanced-btn');
