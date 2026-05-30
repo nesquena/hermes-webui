@@ -468,10 +468,28 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
 
     normalized = str(target)
     normalized_lower = normalized.lower()
+    preserve_tilde = raw.startswith("~")
+    home_root: Path | None = None
+    if preserve_tilde:
+        try:
+            home_root = Path.home().expanduser().resolve()
+        except Exception:
+            home_root = None
     suggestions: list[str] = []
 
+    def format_suggestion(path: Path) -> str:
+        if preserve_tilde and home_root is not None:
+            try:
+                rel = path.resolve().relative_to(home_root)
+                if str(rel) == ".":
+                    return "~"
+                return "~/" + rel.as_posix()
+            except (OSError, ValueError):
+                pass
+        return str(path)
+
     def add(path: Path) -> None:
-        value = str(path)
+        value = format_suggestion(path)
         if value not in suggestions:
             suggestions.append(value)
 

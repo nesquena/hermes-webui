@@ -120,7 +120,7 @@ function _formatSessionModelWithGateway(s){
   if(!s||!s.model)return'';
   const routing=(typeof _latestGatewayRoutingForSession==='function')?_latestGatewayRoutingForSession(s):(s.gateway_routing||null);
   if(typeof _formatGatewayModelLabel==='function'){
-    return _formatGatewayModelLabel(s.model,s.model,routing)||s.model;
+    return _formatGatewayModelLabel(s.model,s.model,routing)||getModelLabel(s.model);
   }
   return s.model;
 }

@@ -195,6 +195,10 @@ def _dirty_suffix(path: Path, timeout=1) -> str:
     # the dirty signal; real errors (timeouts, missing git) carry a different
     # diagnostic and correctly suppress the suffix.
     if not out or out.startswith('git exited with status '):
+        diff, diff_ok = _run_git(['diff', '--binary', 'HEAD', '--'], path, timeout=timeout)
+        if diff_ok and diff:
+            digest = hashlib.sha1(diff.encode('utf-8', errors='replace')).hexdigest()[:8]
+            return f"-dirty-{digest}"
         return "-dirty"
     return ""
 

@@ -7,6 +7,15 @@
 
 - `runner-local` runtime adapter mode can now use an explicitly configured HTTP runner endpoint via `HERMES_WEBUI_RUNNER_BASE_URL`, replacing the bounded not-configured path only when the external runner boundary is configured and streaming configured runner events through the existing SSE route without WebUI-owned runner maps.
 
+## [v0.51.172] — 2026-05-30 — Release ER (stage-batch54 — model-label fallback + dev cache-bust hash + tilde workspace completion + cron project-chip sessions)
+
+### Fixed
+
+- Session model labels now fall back to the friendly `getModelLabel()` form instead of the raw model id when gateway routing info is unavailable (#3174).
+- Dev-build cache-busting now includes a short hash of the tracked dirty diff, so local asset URLs change on each edit instead of staying at a constant `-dirty` suffix (#3159).
+- Workspace path autocomplete now preserves `~/` suggestions while browsing under the user's home directory (#3173).
+- CLI-sourced cron sessions that were squeezed past the default sidebar window now stay addressable under their project chip via a dedicated cron-only lookup pass (#3172).
+
 ## [v0.51.171] — 2026-05-30 — Release EQ (stage-batch53 — tool-output card badge + Neon opt-in skin)
 
 ### Added
