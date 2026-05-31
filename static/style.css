@@ -598,6 +598,33 @@
   :root[data-skin="geist-contrast"] textarea#msg{scrollbar-width:none;overflow-y:auto;}
   :root[data-skin="geist-contrast"] textarea#msg::-webkit-scrollbar{display:none;}
 
+  /* ── Skin: Zeus ──
+     OLED-near-black skin: replaces the default dark-blue/navy surfaces with warm
+     near-blacks while keeping the gold accent unchanged. Borders are gold-tinted
+     for warmth so the accent feels connected to the chrome.
+     Dark-only — no light-mode variant. */
+  :root.dark[data-skin="zeus"]{
+    --bg:#0F0F0F;--sidebar:#111111;--surface:#181818;--code-bg:#181818;
+    --topbar-bg:rgba(15,15,15,.98);--main-bg:rgba(15,15,15,0.6);
+    --border:#2A2A1E;--border2:rgba(255,215,0,0.18);
+    --input-bg:rgba(255,255,255,.04);--hover-bg:rgba(255,215,0,.06);
+    --surface-subtle:rgba(255,255,255,.03);--surface-subtle-hover:rgba(255,255,255,.05);
+    --border-subtle:rgba(255,215,0,.08);--border-muted:rgba(255,215,0,.14);
+    --focus-ring:rgba(255,215,0,.4);--focus-glow:rgba(255,215,0,.1);
+  }
+  :root.dark[data-skin="zeus"] .topbar{background:#0F0F0F;border-bottom:1px solid rgba(255,215,0,0.15);}
+  :root.dark[data-skin="zeus"] .sidebar{background:#111111;border-right:1px solid rgba(255,215,0,0.12);}
+  :root.dark[data-skin="zeus"] .session-item.active{background:rgba(255,215,0,0.1);border-left:2px solid #FFD700;color:#FFD700;}
+  :root.dark[data-skin="zeus"] .session-item:hover:not(.active){background:rgba(255,215,0,0.05);}
+  :root.dark[data-skin="zeus"] .composer-box{background:#141414;border-color:rgba(255,215,0,0.2);}
+  :root.dark[data-skin="zeus"] .msg-row[data-role="assistant"] .msg-body{background:#181818;border-color:rgba(255,215,0,0.1);}
+  :root.dark[data-skin="zeus"] .msg-row[data-role="user"] .msg-body{background:#1C1600;border-color:rgba(255,215,0,0.25);}
+  :root.dark[data-skin="zeus"] .app-dialog{background:linear-gradient(180deg,rgba(24,24,24,.99),rgba(15,15,15,.99));border-color:rgba(255,215,0,0.2);}
+  :root.dark[data-skin="zeus"] .app-dialog-overlay{background:rgba(0,0,0,.72);}
+  :root.dark[data-skin="zeus"] .kanban-modal{background:linear-gradient(180deg,rgba(24,24,24,.99),rgba(15,15,15,.99));border-color:rgba(255,215,0,0.2);}
+  :root.dark[data-skin="zeus"] .kanban-modal-overlay{background:rgba(0,0,0,.72);}
+  :root.dark[data-skin="zeus"] .kanban-board-switcher-menu{background:linear-gradient(180deg,rgba(24,24,24,.99),rgba(15,15,15,.99));border-color:rgba(255,215,0,0.15);}
+
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));

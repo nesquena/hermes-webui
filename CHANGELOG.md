@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- New **Zeus** appearance skin (opt-in, dark-only): OLED-near-black surfaces (`#0F0F0F`–`#181818`) paired with the default gold accent and gold-tinted borders/focus rings. Selectable via Settings → Appearance → Skin or `/theme skin:zeus`. Fills a niche distinct from Geist Contrast (which redefines the accent) and Nous (steel-blue accent) by preserving the default gold while replacing the navy-tinted surfaces with warm near-blacks.
+
 ## [v0.51.195] — 2026-06-01 — Release FO (stage-batch7 — hide attachment path markers in chat UI)
 
 ### Fixed
