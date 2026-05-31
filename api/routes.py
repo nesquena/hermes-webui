@@ -5658,6 +5658,27 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/sessions/cleanup_zero_message":
         return _handle_sessions_cleanup(handler, body, zero_only=True)
 
+    def _sync_session_title_to_insights(session):
+        """Write title-only session metadata updates through to state.db when enabled."""
+        try:
+            if not load_settings().get("sync_to_insights"):
+                return
+            from api.state_sync import sync_session_usage
+
+            messages = getattr(session, "messages", None) or []
+            sync_session_usage(
+                session_id=session.session_id,
+                input_tokens=getattr(session, "input_tokens", None) or 0,
+                output_tokens=getattr(session, "output_tokens", None) or 0,
+                estimated_cost=getattr(session, "estimated_cost", 0.0),
+                model=getattr(session, "model", ""),
+                title=session.title,
+                message_count=len(messages),
+                profile=getattr(session, "profile", None),
+            )
+        except Exception:
+            logger.debug("Failed to update session title in state.db", exc_info=True)
+
     if parsed.path == "/api/session/rename":
         try:
             require(body, "session_id", "title")
@@ -5696,6 +5717,7 @@ def handle_post(handler, parsed) -> bool:
             s.title = str(next_title).strip()[:80] or "Untitled"
             s.llm_title_generated = True
             s.save(touch_updated_at=False)
+        _sync_session_title_to_insights(s)
         publish_session_list_changed("session_title_regenerate")
         return j(handler, {
             "session": s.compact(),

@@ -41,8 +41,20 @@ def test_regenerate_endpoint_persists_generated_title_without_reordering_sidebar
     assert "generate_session_title_for_session" in block
     assert "s.llm_title_generated = True" in block
     assert "s.save(touch_updated_at=False)" in block
+    assert "_sync_session_title_to_insights(s)" in block
     assert 'publish_session_list_changed("session_title_regenerate")' in block
     assert "Read-only imported sessions cannot be renamed" in block
+
+
+def test_regenerate_endpoint_syncs_title_to_state_db_when_enabled():
+    helper_idx = ROUTES_PY.index("def _sync_session_title_to_insights")
+    endpoint_idx = ROUTES_PY.index('"/api/session/title/regenerate"')
+    helper_block = ROUTES_PY[helper_idx:endpoint_idx]
+    assert 'load_settings().get("sync_to_insights")' in helper_block
+    assert "sync_session_usage" in helper_block
+    assert "title=session.title" in helper_block
+    assert "message_count=len(messages)" in helper_block
+    assert "profile=getattr(session, \"profile\", None)" in helper_block
 
 
 def test_streaming_helper_generates_title_from_persisted_transcript(monkeypatch):
