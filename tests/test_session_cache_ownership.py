@@ -87,7 +87,8 @@ def test_cached_agent_session_identity_matches_requested_sid():
     assert _cached_agent_matches_session(legacy, "requested") is True
 
 
-def test_handle_chat_steer_evicts_mismatched_cached_agent():
+def test_handle_chat_steer_evicts_mismatched_cached_agent(monkeypatch):
+    import api.streaming as streaming
     from api.streaming import _handle_chat_steer
 
     class Handler:
@@ -108,6 +109,12 @@ def test_handle_chat_steer_evicts_mismatched_cached_agent():
             pass
 
     wrong_agent = SimpleNamespace(session_id="other-session", steer=lambda _text: True)
+    closed_entries = []
+    monkeypatch.setattr(
+        streaming,
+        "_close_cached_agent_entry_at_session_boundary",
+        lambda session_id, entry: closed_entries.append((session_id, entry)),
+    )
     config.SESSION_AGENT_CACHE.clear()
     config.SESSION_AGENT_CACHE["requested"] = (wrong_agent, "sig")
     handler = Handler()
@@ -118,5 +125,6 @@ def test_handle_chat_steer_evicts_mismatched_cached_agent():
     assert handler.status == 200
     assert payload == {"accepted": False, "fallback": "no_cached_agent", "stream_id": None}
     assert "requested" not in config.SESSION_AGENT_CACHE
+    assert closed_entries == [("requested", (wrong_agent, "sig"))]
 
     config.SESSION_AGENT_CACHE.clear()
