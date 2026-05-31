@@ -198,15 +198,36 @@ make_dmg() {
     "${DMG}" "${APP}" || hdiutil create -volname Hermes -srcfolder "${APP}" -ov -format UDZO "${DMG}"
 }
 
+# Submit to the notary service with retries — the multipart upload to Apple's
+# S3 bucket occasionally dies with a connectTimeout/abortedUpload mid-flight, and
+# that is worth retrying (a genuine rejection is rare once signing is correct and
+# will simply exhaust the retries). Each retry re-uploads from scratch.
+notarize() {  # $1 = path to submit (.zip or .dmg)
+  local target="$1" attempt
+  for attempt in 1 2 3; do
+    if xcrun notarytool submit "${target}" --keychain-profile "${NOTARY_PROFILE}" --wait; then
+      return 0
+    fi
+    say "Notary upload failed (attempt ${attempt}/3) — retrying in 20s…"
+    sleep 20
+  done
+  echo "Notarization failed after 3 attempts for $(basename "${target}")" >&2
+  return 1
+}
+
 if [ "${DO_NOTARIZE}" = 1 ]; then
-  make_dmg
-  say "Submitting DMG to Apple notary service (profile: ${NOTARY_PROFILE})…"
-  xcrun notarytool submit "${DMG}" --keychain-profile "${NOTARY_PROFILE}" --wait
-  say "Stapling tickets"
+  # 1) Notarize the .app itself, then staple it — so the app inside the shipped
+  #    DMG carries its own ticket and validates offline.
+  APPZIP="${BUILD_DIR}/Hermes-notarize.zip"
+  ditto -c -k --keepParent "${APP}" "${APPZIP}"
+  say "Submitting app to Apple notary service (profile: ${NOTARY_PROFILE})…"
+  notarize "${APPZIP}"
   xcrun stapler staple "${APP}"
-  xcrun stapler staple "${DMG}"
-  say "Re-building DMG with stapled app"
+  rm -f "${APPZIP}"
+  # 2) Build the DMG from the now-stapled app, then notarize + staple the DMG.
   make_dmg
+  say "Submitting DMG to Apple notary service…"
+  notarize "${DMG}"
   xcrun stapler staple "${DMG}"
 elif [ "${DO_SIGN}" = 1 ]; then
   make_dmg
