@@ -100,7 +100,7 @@ Recently landed:
 - The Research Harness install completion card now includes a direct `Run research smoke` action that exercises the existing metadata-only research PDF-export path from the installed demo card without exposing generated renderer/source/API-auth markers.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 
-- GitHub repository source-refresh metadata now has a narrow metadata-only parser for allow-listed `/repos/{owner}/{repo}` API payloads, making repository freshness/source summaries available without storing raw repository body, URL/clone/homepage, API-auth, prompt-injection, script, or secret-like fields.
+- GitHub repository/workflow source-refresh metadata now has narrow metadata-only parsers for allow-listed `/repos/{owner}/{repo}` and `/repos/{owner}/{repo}/actions/workflows/{workflow_id}` API payloads, making repository and workflow freshness/source summaries available without storing raw repository bodies, workflow paths/YAML/jobs, URLs, API-auth, prompt-injection, script, or secret-like fields.
 
 Next checkpoint emphasis:
 

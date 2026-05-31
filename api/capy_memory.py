@@ -1091,6 +1091,64 @@ def _github_release_refresh_summary(payload: dict[str, Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+_GITHUB_WORKFLOW_STATES = {"active", "disabled_manually", "disabled_inactivity", "disabled_fork", "deleted"}
+
+
+def _json_payload_is_github_workflow_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not path[2]
+        or not path[3]
+        or lowered[4] != "actions"
+        or lowered[5] != "workflows"
+        or not re.fullmatch(r"[1-9][0-9]*", path[6])
+    ):
+        return False
+    workflow_id = _safe_nonnegative_int(payload.get("id"))
+    if workflow_id != int(path[6]):
+        return False
+    name = _safe_public_text(payload.get("name"), limit=200)
+    if not name:
+        return False
+    state = _safe_public_text(payload.get("state"), limit=60).lower()
+    if not state or state not in _GITHUB_WORKFLOW_STATES:
+        return False
+    for field in ("name", "state", "created_at", "updated_at"):
+        raw_value = payload.get(field)
+        if isinstance(raw_value, _PUBLIC_SCALAR_TYPES) and _REFRESH_BLOCKED_VALUE_RE.search(str(raw_value)):
+            return False
+    for field in ("created_at", "updated_at"):
+        if not _safe_iso_timestamp(payload.get(field)):
+            return False
+    return True
+
+
+def _github_workflow_refresh_summary(payload: dict[str, Any]) -> str:
+    workflow_id = _safe_nonnegative_int(payload.get("id"))
+    name = _safe_public_text(payload.get("name"), limit=200)
+    state = _safe_public_text(payload.get("state"), limit=60).lower()
+    created = _safe_public_text(payload.get("created_at"), limit=80)
+    updated = _safe_public_text(payload.get("updated_at"), limit=80)
+    parts = [f"GitHub workflow #{workflow_id}: {name}"]
+    if state:
+        parts.append(f"state: {state}")
+    if created:
+        parts.append(f"created: {created}")
+    if updated:
+        parts.append(f"updated: {updated}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("refresh failed")
@@ -1115,6 +1173,9 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
     elif _json_payload_is_github_release_metadata(origin_uri, payload):
         title = _safe_public_text(payload.get("name") or payload.get("tag_name"), limit=200) or source_id
         summary = _github_release_refresh_summary(payload)
+    elif _json_payload_is_github_workflow_metadata(origin_uri, payload):
+        title = _safe_public_text(payload.get("name"), limit=200) or source_id
+        summary = _github_workflow_refresh_summary(payload)
     if not summary:
         raise ValueError("refresh failed")
     return {
