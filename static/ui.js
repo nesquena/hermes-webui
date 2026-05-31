@@ -3482,7 +3482,8 @@ function renderMd(raw){
     const localArtifactCard=(src,name)=>{
       const safeSrc=esc(src);
       const safeName=esc(name||'image');
-      return `<span class="msg-artifact-card msg-artifact-card--image"><img class="msg-media-img" src="${safeSrc}" alt="${safeName}" loading="lazy"><span class="msg-artifact-meta"><span class="msg-artifact-title">${safeName}</span><span class="msg-artifact-actions"><a class="msg-artifact-action" href="${safeSrc}" target="_blank" rel="noopener">${t('media_open')}</a><a class="msg-artifact-action" href="${safeSrc}" download="${safeName}">${t('media_download')}</a></span></span></span>`;
+      const tt=(typeof t==='function')?t:(key=>({media_open:'Open',media_download:'Download'}[key]||key));
+      return `<span class="msg-artifact-card msg-artifact-card--image"><img class="msg-media-img" src="${safeSrc}" alt="${safeName}" loading="lazy"><span class="msg-artifact-meta"><span class="msg-artifact-title">${safeName}</span><span class="msg-artifact-actions"><a class="msg-artifact-action" href="${safeSrc}" target="_blank" rel="noopener">${tt('media_open')}</a><a class="msg-artifact-action" href="${safeSrc}" download="${safeName}">${tt('media_download')}</a></span></span></span>`;
     };
     if(/^file:\/\//i.test(ref)){
       try{
