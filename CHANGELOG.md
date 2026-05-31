@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Render assistant-emitted `file://` image artifact links inline through the authenticated `/api/media` route, so browser clients can view generated local images instead of seeing unusable server-local file paths.
+
 ## [v0.51.180] — 2026-05-30 — Release EZ (stage-batch62 — session/agent cache ownership hardening)
 
 ### Fixed

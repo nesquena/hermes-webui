@@ -41,6 +41,15 @@ class TestMediaRenderMdStash(unittest.TestCase):
         self.assertIn("MEDIA:", UI_JS,
                       "MEDIA: token regex must be present in renderMd()")
 
+    def test_bare_file_urls_are_stashed_as_media_artifacts(self):
+        self.assertIn("file:// links for local artifacts", UI_JS)
+        self.assertIn("file:\\/\\/[^\\s<>", UI_JS)
+
+    def test_file_urls_are_rewritten_through_media_endpoint(self):
+        self.assertIn("new URL(ref)", UI_JS)
+        self.assertIn("u.pathname", UI_JS)
+        self.assertIn("api/media?path=", UI_JS)
+
     def test_media_restore_produces_img_tag(self):
         self.assertIn("msg-media-img", UI_JS,
                       "restore pass must produce <img class='msg-media-img'>")

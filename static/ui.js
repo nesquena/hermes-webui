@@ -3014,6 +3014,16 @@ function renderMd(raw){
     media_stash.push(raw_ref);
     return '\x00D'+(media_stash.length-1)+'\x00';
   });
+  // Some gateway/tool surfaces still emit file:// links for local artifacts
+  // instead of MEDIA: tokens. Browser clients cannot open the server's
+  // filesystem directly, so treat bare file:// URLs as media artifacts and
+  // route them through /api/media. This intentionally runs only for bare URLs
+  // (line-start or whitespace-delimited), not inside markdown links, so normal
+  // [label](file://...) anchors continue to use the link path below.
+  s=s.replace(/(^|\s)(file:\/\/[^\s<>"')\]]+)/g,(_,lead,raw_ref)=>{
+    media_stash.push(raw_ref);
+    return lead+'\x00D'+(media_stash.length-1)+'\x00';
+  });
   // ── End MEDIA stash ─────────────────────────────────────────────────────────
   // Pre-pass: decode HTML entities first so markdown processing works correctly.
   // This prevents double-escaping when LLM outputs entities like &lt; &gt; &amp;
@@ -3449,7 +3459,7 @@ function renderMd(raw){
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
-    const ref=media_stash[+i];
+    let ref=media_stash[+i];
     // Keep this logic self-contained: some tests extract renderMd() alone and
     // execute it in node, without the top-level helper functions from ui.js.
     const mediaKindForName=(name='')=>{
@@ -3468,6 +3478,15 @@ function renderMd(raw){
         : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
       return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span></div></div>`;
     };
+    if(/^file:\/\//i.test(ref)){
+      try{
+        const u=new URL(ref);
+        ref=decodeURIComponent(u.pathname||ref.replace(/^file:\/\//i,''));
+      }catch(_){
+        try{ref=decodeURIComponent(ref.replace(/^file:\/\//i,''));}
+        catch(__){ref=ref.replace(/^file:\/\//i,'');}
+      }
+    }
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){
       // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
