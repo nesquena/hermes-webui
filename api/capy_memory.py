@@ -1198,6 +1198,109 @@ def _github_workflow_refresh_summary(payload: dict[str, Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+_GITHUB_WORKFLOW_RUN_STATUSES = {"queued", "in_progress", "completed", "requested", "waiting", "pending"}
+_GITHUB_WORKFLOW_RUN_CONCLUSIONS = {
+    "success",
+    "failure",
+    "neutral",
+    "cancelled",
+    "skipped",
+    "timed_out",
+    "action_required",
+    "startup_failure",
+    "stale",
+}
+
+
+def _json_payload_is_github_workflow_run_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not path[2]
+        or not path[3]
+        or lowered[4] != "actions"
+        or lowered[5] != "runs"
+        or not re.fullmatch(r"[1-9][0-9]*", path[6])
+    ):
+        return False
+    run_id = _safe_nonnegative_int(payload.get("id"))
+    if run_id != int(path[6]):
+        return False
+    name = _safe_public_text(payload.get("name"), limit=200)
+    if not name:
+        return False
+    status = _safe_public_text(payload.get("status"), limit=60).lower()
+    if not status or status not in _GITHUB_WORKFLOW_RUN_STATUSES:
+        return False
+    conclusion = _safe_public_text(payload.get("conclusion"), limit=80).lower()
+    if conclusion and conclusion not in _GITHUB_WORKFLOW_RUN_CONCLUSIONS:
+        return False
+    head_sha = _safe_public_text(payload.get("head_sha"), limit=80)
+    if not re.fullmatch(r"[A-Fa-f0-9]{40}", head_sha):
+        return False
+    branch = _safe_public_text(payload.get("head_branch"), limit=120)
+    if branch and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,119}", branch):
+        return False
+    event = _safe_public_text(payload.get("event"), limit=80)
+    if event and not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", event):
+        return False
+    for field in ("name", "status", "conclusion", "event", "head_branch", "head_sha", "created_at", "updated_at"):
+        raw_value = payload.get(field)
+        if isinstance(raw_value, _PUBLIC_SCALAR_TYPES) and _REFRESH_BLOCKED_VALUE_RE.search(str(raw_value)):
+            return False
+    for field in ("created_at", "updated_at"):
+        if not _safe_iso_timestamp(payload.get(field)):
+            return False
+    for field in ("run_number", "run_attempt"):
+        raw_value = payload.get(field)
+        if raw_value is not None and _safe_optional_nonnegative_int(raw_value) is None:
+            return False
+    return True
+
+
+def _github_workflow_run_refresh_summary(payload: dict[str, Any]) -> str:
+    run_id = _safe_nonnegative_int(payload.get("id"))
+    name = _safe_public_text(payload.get("name"), limit=200)
+    status = _safe_public_text(payload.get("status"), limit=60).lower()
+    conclusion = _safe_public_text(payload.get("conclusion"), limit=80).lower()
+    event = _safe_public_text(payload.get("event"), limit=80)
+    run_number = _safe_optional_nonnegative_int(payload.get("run_number"))
+    run_attempt = _safe_optional_nonnegative_int(payload.get("run_attempt"))
+    branch = _safe_public_text(payload.get("head_branch"), limit=120)
+    head_sha = _safe_public_text(payload.get("head_sha"), limit=80)
+    created = _safe_public_text(payload.get("created_at"), limit=80)
+    updated = _safe_public_text(payload.get("updated_at"), limit=80)
+    parts = [f"GitHub workflow run #{run_id}: {name}"]
+    if status:
+        parts.append(f"status: {status}")
+    if conclusion:
+        parts.append(f"conclusion: {conclusion}")
+    if event:
+        parts.append(f"event: {event}")
+    if run_number is not None:
+        parts.append(f"run number: {run_number}")
+    if run_attempt is not None:
+        parts.append(f"attempt: {run_attempt}")
+    if branch:
+        parts.append(f"branch: {branch}")
+    if head_sha:
+        parts.append(f"head sha: {head_sha[:12]}")
+    if created:
+        parts.append(f"created: {created}")
+    if updated:
+        parts.append(f"updated: {updated}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -1236,6 +1339,9 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         elif _json_payload_is_github_workflow_metadata(origin_uri, payload):
             title = _safe_public_text(payload.get("name"), limit=200) or source_id
             summary = _github_workflow_refresh_summary(payload)
+        elif _json_payload_is_github_workflow_run_metadata(origin_uri, payload):
+            title = _safe_public_text(payload.get("name"), limit=200) or source_id
+            summary = _github_workflow_run_refresh_summary(payload)
     elif _json_payload_is_feed(payload) and isinstance(items, list):
         for item in items[:5]:
             if not isinstance(item, dict):
