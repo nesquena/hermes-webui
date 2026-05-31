@@ -10,6 +10,7 @@ const ICONS={
   trash:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5v8.5h7v-8.5"/><line x1="7" y1="7" x2="7" y2="11"/><line x1="9" y1="7" x2="9" y2="11"/></svg>',
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
   edit:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L5 13H3v-2z"/><path d="M10 4l2 2"/></svg>',
+  spark:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l1.1 3.1 3.1 1.1-3.1 1.1L8 10.2 6.9 7.1 3.8 6l3.1-1.1z"/><path d="M12.5 9.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></svg>',
   link:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.7 9.3a3 3 0 0 1 0-4.2l1.7-1.7a3 3 0 0 1 4.2 4.2l-1 1"/><path d="M9.3 6.7a3 3 0 0 1 0 4.2l-1.7 1.7a3 3 0 0 1-4.2-4.2l1-1"/></svg>',
 };
 
@@ -2192,8 +2193,7 @@ function _openSessionActionMenu(session, anchorEl){
           showToast(t('session_rename_failed_no_row')||'Could not start rename — row not found.', 3000, 'error');
         }
       }
-    ));
-  }
+    ));  }
   menu.appendChild(_buildSessionAction(
     session.pinned?t('session_unpin'):t('session_pin'),
     session.pinned?t('session_unpin_desc'):t('session_pin_desc'),
@@ -2264,6 +2264,33 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
+
+
+    menu.appendChild(_buildSessionAction(
+      t('session_title_regenerate'),
+      t('session_title_regenerate_desc'),
+      ICONS.spark,
+      async()=>{
+        closeSessionActionMenu();
+        try{
+          if(typeof showToast==='function') showToast(t('session_title_regenerating'), 1600);
+          const response=await api('/api/session/title/regenerate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
+          const nextTitle=(response&&response.title)||(response&&response.session&&response.session.title)||'';
+          if(nextTitle){
+            session.title=nextTitle;
+            const cached=(_allSessions||[]).find(item=>item&&item.session_id===session.session_id);
+            if(cached) cached.title=nextTitle;
+            if(S.session&&S.session.session_id===session.session_id){S.session.title=nextTitle;syncTopbar();}
+            renderSessionListFromCache();
+          }
+          if(typeof showToast==='function') showToast(t('session_title_regenerated', nextTitle||t('untitled')), 2400);
+        }catch(err){
+          const msg=t('session_title_regenerate_failed')+(err&&err.message?err.message:String(err));
+          setStatus(msg);
+          if(typeof showToast==='function') showToast(msg,3000,'error');
+        }
+      }
+    ));
   if(!isExternalSession){
     if(session.worktree_path){
       menu.appendChild(_buildSessionAction(

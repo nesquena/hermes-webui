@@ -1,0 +1,94 @@
+"""Regression coverage for manual session title regeneration controls (#3106)."""
+
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import api.streaming as streaming
+
+ROOT = Path(__file__).resolve().parents[1]
+SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+ROUTES_PY = (ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+STREAMING_PY = (ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
+CHANGELOG = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+
+def test_session_action_menu_exposes_regenerate_title_control():
+    assert "session_title_regenerate" in SESSIONS_JS
+    assert "session_title_regenerate_desc" in SESSIONS_JS
+    assert "ICONS.spark" in SESSIONS_JS
+    assert "api('/api/session/title/regenerate'" in SESSIONS_JS
+    assert "renderSessionListFromCache();" in SESSIONS_JS
+
+
+def test_regenerate_title_i18n_and_changelog_entries_exist():
+    for key in [
+        "session_title_regenerate",
+        "session_title_regenerate_desc",
+        "session_title_regenerating",
+        "session_title_regenerated",
+        "session_title_regenerate_failed",
+    ]:
+        assert key in I18N_JS
+    assert "session action menu can regenerate conversation titles" in CHANGELOG
+    assert "#3106" in CHANGELOG
+
+
+def test_regenerate_endpoint_persists_generated_title_without_reordering_sidebar():
+    endpoint_idx = ROUTES_PY.index('"/api/session/title/regenerate"')
+    next_endpoint_idx = ROUTES_PY.index('"/api/personality/set"', endpoint_idx)
+    block = ROUTES_PY[endpoint_idx:next_endpoint_idx]
+    assert "generate_session_title_for_session" in block
+    assert "s.llm_title_generated = True" in block
+    assert "s.save(touch_updated_at=False)" in block
+    assert 'publish_session_list_changed("session_title_regenerate")' in block
+    assert "Read-only imported sessions cannot be renamed" in block
+
+
+def test_streaming_helper_generates_title_from_persisted_transcript(monkeypatch):
+    session = MagicMock()
+    session.messages = [
+        {"role": "user", "content": "Please fix the stale sidebar title controls"},
+        {"role": "assistant", "content": "I will add a regenerate-title action."},
+    ]
+
+    class _ProfileEnv:
+        def __enter__(self):
+            return None
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    import api.profiles as profiles_api
+    monkeypatch.setattr(profiles_api, "profile_env_for_background_worker", lambda *args, **kwargs: _ProfileEnv())
+    monkeypatch.setattr(
+        streaming,
+        "_generate_llm_session_title_via_aux",
+        lambda user, assistant, agent=None: ("Sidebar title controls", "llm", "raw"),
+    )
+
+    title, status, raw = streaming.generate_session_title_for_session(session)
+    assert title == "Sidebar title controls"
+    assert status == "llm"
+    assert raw == "raw"
+
+
+def test_streaming_helper_has_local_fallback_when_llm_title_is_empty(monkeypatch):
+    session = MagicMock()
+    session.messages = [
+        {"role": "user", "content": "Can you triage this GitHub issue and PR review?"},
+        {"role": "assistant", "content": "Sure."},
+    ]
+
+    class _ProfileEnv:
+        def __enter__(self):
+            return None
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    import api.profiles as profiles_api
+    monkeypatch.setattr(profiles_api, "profile_env_for_background_worker", lambda *args, **kwargs: _ProfileEnv())
+    monkeypatch.setattr(streaming, "_generate_llm_session_title_via_aux", lambda *args, **kwargs: (None, "llm_empty", ""))
+
+    title, status, _raw = streaming.generate_session_title_for_session(session)
+    assert title == "GitHub Issue Triage"
+    assert status == "local_summary:llm_empty"

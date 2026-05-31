@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- The session action menu can regenerate conversation titles on demand from the saved transcript, updating the sidebar without touching conversation chronology (#3106).
+
 ## [v0.51.181] — 2026-05-30 — Release FA (stage-batchA — agent-cache eviction teardown + streaming finalize race)
 
 ### Fixed

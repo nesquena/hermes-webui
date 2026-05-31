@@ -24,11 +24,12 @@ class TestSidebarCancelAction:
         # Window bumped from 3200 → 4400 in #1764 to accommodate the new
         # Rename action item, then to 5200 in #2111 for response-aware archive
         # toast handling, then to 6400 in #2294 for the new "Hide from list"
-        # action prepended for external sessions.
+        # action prepended for external sessions, then to 7600 in #3106 for
+        # manual title regeneration controls.
         # The `session.active_stream_id` / cancelSessionStream / delete checks
         # are positional further down in the function, so growing the prefix
         # required growing this read window.
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 6400)
+        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 7600)
         assert "session.active_stream_id" in body, (
             "sidebar action menu must detect per-session active_stream_id instead of S.activeStreamId"
         )
