@@ -2045,8 +2045,16 @@ def _resolve_context_length_for_session_model(
         try:
             _model_cfg_load = _cfg_for_cl.get('model', {}) if isinstance(_cfg_for_cl, dict) else {}
             if isinstance(_model_cfg_load, dict):
+                # Only apply the global model.context_length override when the
+                # session model matches model.default. Otherwise a global cap
+                # set for the default model (e.g. 232000) silently clobbers
+                # other models' real metadata (e.g. a 1M-context variant).
+                _cfg_default_model = str(_model_cfg_load.get('default') or '').strip()
                 _raw_cfg_ctx_load = _model_cfg_load.get('context_length')
-                if _raw_cfg_ctx_load is not None:
+                if _raw_cfg_ctx_load is not None and (
+                    not _cfg_default_model
+                    or _cfg_default_model == model_for_lookup
+                ):
                     try:
                         _parsed_load = int(_raw_cfg_ctx_load)
                         if _parsed_load > 0:
