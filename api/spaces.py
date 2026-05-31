@@ -2119,6 +2119,114 @@ def _space_layout_prompt_preflight_receipt(layout: dict[str, Any]) -> dict[str, 
 
 
 
+def _space_layout_resolve_prompt_preflight_receipt(
+    resolved_layout: dict[str, Any], raw_payload: Any
+) -> dict[str, Any]:
+    """Return bounded preflight evidence for source-style layout resolution.
+
+    ``resolveSpaceLayout`` is a metadata-only helper, but callers may include
+    ignored renderer/html/source/auth/prompt fields. Classify those boundaries
+    using key markers and safe summaries only; never serialize raw ignored
+    values into the preflight hash input.
+    """
+    from api.capy_policy import prompt_preflight
+
+    unsafe_key_categories: list[str] = []
+    counters = {"dicts": 0, "lists": 0, "safe_fields": 0, "unsafe_fields": 0, "truncated": 0}
+
+    def add_category(category: str) -> None:
+        if category not in unsafe_key_categories and len(unsafe_key_categories) < 12:
+            unsafe_key_categories.append(category)
+
+    def key_category(key: Any) -> str | None:
+        key_text = _context_value(key, 80)
+        lowered = key_text.lower()
+        compact = re.sub(r"[^a-z0-9]+", "", lowered)
+        if _payload_key_is_prompt_bearing(key_text) or "rawprompt" in compact:
+            return "raw prompt field"
+        if _SECRET_LIKE_VALUE_RE.search(key_text) or any(
+            marker in compact
+            for marker in ("apikey", "apiauth", "authorization", "bearer", "credential", "password", "secret", "token")
+        ):
+            return "api key field"
+        if any(marker in lowered for marker in _EXECUTABLE_VALUE_MARKERS) or any(
+            marker in compact
+            for marker in ("html", "script", "renderer", "source", "generatedcode", "generatedbody", "widgetbody")
+        ):
+            return "renderer source field"
+        if not _payload_key_is_safe(key_text):
+            return "raw prompt omitted field"
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,80}", key_text):
+            return "raw prompt unsafe field name"
+        return None
+
+    def visit(value: Any, depth: int = 0) -> None:
+        if depth > 4:
+            counters["truncated"] += 1
+            add_category("raw prompt truncated request")
+            return
+        if isinstance(value, dict):
+            counters["dicts"] += 1
+            items = list(value.items())
+            for index, (key, child) in enumerate(items):
+                if index >= 60:
+                    counters["truncated"] += max(1, len(items) - index)
+                    add_category("raw prompt truncated request")
+                    for remaining_key, _remaining_child in items[index:]:
+                        category = key_category(remaining_key)
+                        if category:
+                            counters["unsafe_fields"] += 1
+                            add_category(category)
+                    break
+                category = key_category(key)
+                if category:
+                    counters["unsafe_fields"] += 1
+                    add_category(category)
+                    continue
+                counters["safe_fields"] += 1
+                visit(child, depth + 1)
+            return
+        if isinstance(value, list):
+            counters["lists"] += 1
+            for child in value[:20]:
+                visit(child, depth + 1)
+            if len(value) > 20:
+                counters["truncated"] += len(value) - 20
+                add_category("raw prompt truncated request")
+
+    visit(raw_payload)
+    positions_raw = resolved_layout.get("positions")
+    rendered_sizes_raw = resolved_layout.get("renderedSizes")
+    minimized_map_raw = resolved_layout.get("minimizedMap")
+    positions = positions_raw if isinstance(positions_raw, dict) else {}
+    rendered_sizes = rendered_sizes_raw if isinstance(rendered_sizes_raw, dict) else {}
+    minimized_map = minimized_map_raw if isinstance(minimized_map_raw, dict) else {}
+    preflight_payload: dict[str, Any] = {
+        "layout_shape": {
+            "metadata_only": True,
+            "position_count": len(positions),
+            "rendered_size_count": len(rendered_sizes),
+            "minimized_count": len(minimized_map),
+        },
+        "request_shape": {
+            "metadata_only": True,
+            **counters,
+        },
+    }
+    if unsafe_key_categories:
+        preflight_payload["unsafe_request_key_categories"] = unsafe_key_categories
+    preflight_text = json.dumps(
+        preflight_payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        default=str,
+    )
+    receipt = prompt_preflight(preflight_text, boundary="creator_commit")
+    receipt.setdefault("checks", list(receipt.get("categories") or []))
+    return receipt
+
+
+
 def _space_layout_raw_prompt_preflight_receipt(
     layout: dict[str, Any], raw_payload: Any | None
 ) -> dict[str, Any]:
@@ -7284,7 +7392,27 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name == "space.spaces.findfirstfitwidgetplacement":
         return {"ok": True, "action": name, **_space_tool_find_first_fit_widget_placement(data), "mode": "metadata-only"}
     if name == "space.spaces.resolvespacelayout":
-        return {"ok": True, "action": name, **_space_tool_resolve_space_layout(data), "mode": "metadata-only"}
+        resolved_layout = _space_tool_resolve_space_layout(data)
+        prompt_preflight_receipt = _space_layout_resolve_prompt_preflight_receipt(resolved_layout, data)
+        space_id = validate_space_id(_space_tool_current_id(data) or "layout-preview")
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.resolve")
+        autonomy_policy = _space_layout_action_policy_receipt(name, prompt_preflight_receipt)
+        return {
+            "ok": True,
+            "action": name,
+            **resolved_layout,
+            "mode": "metadata-only",
+            "prompt_preflight": prompt_preflight_receipt,
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=len(resolved_layout.get("positions") or {}),
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
+        }
     if name in {"space.spaces.repositioncurrentspace", "space.current.reposition", "space.current.reposition_viewport"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         request = {
@@ -12596,6 +12724,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "recovery.module.repair_events",
         "layout.rearrange",
         "layout.reposition",
+        "layout.resolve",
         "layout.toggle",
         "space.current.rollback",
         "recovery.disable",
