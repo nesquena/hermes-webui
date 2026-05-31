@@ -6,6 +6,13 @@
 ### Added
 - The session action menu can regenerate conversation titles on demand from the saved transcript, updating the sidebar without touching conversation chronology and syncing the new title through to state.db when Insights sync is enabled (#3106).
 
+## [v0.51.190] — 2026-05-31 — Release FJ (stage-batch2 — Windows upgrade state-stranding hotfix + gateway banner + quiet tool previews)
+
+### Fixed
+- **Windows upgrade no longer strands WebUI state (data-loss-class, priority).** v0.51.134 moved the Windows default Hermes home from `%USERPROFILE%\.hermes` to `%LOCALAPPDATA%\hermes` without a migration, so upgrading users opened an empty app (sessions, pins, UI settings appeared lost — actually just at the address the new build no longer read). `_platform_default_hermes_home()` now prefers the legacy `%USERPROFILE%\.hermes` **only** on the exact post-upgrade fingerprint (legacy holds real `webui/` state AND the new location is not yet established), and `api/profiles.py` delegates to the same resolver so the two can never drift. Non-destructive and self-healing — no files are moved; affected users recover on next launch with no action. Markers key on WebUI-owned `webui/` state only (not agent `auth.json`/`config.yaml`) so a long-time agent user installing WebUI fresh isn't wrongly diverted. Closes #2905 (#3279).
+- **"Gateway not configured" banner on two-container Docker first deploy.** `GET /api/gateway/status` treated all `alive is None` health payloads as unconfigured-unless-`identity_map`, so a freshly-started gateway that hadn't ticked `updated_at` yet (and had no conversations) reported "not configured." A stale-but-**running** gateway (reason `gateway_stale_running_state`, or a `gateway_state == "running"` detail) now reports `configured = True`; a stale-**stopped** gateway deliberately still falls through to the `identity_map` signal so a stopped root gateway reads as "not configured" per #1944. Closes #3194 (#3279).
+- Collapsed tool-call previews stay quiet: instead of falling back to raw result JSON (which made tool-heavy turns look like debug logs), a settled collapsed tool card now shows a compact argument summary (with verbose/secret-bearing keys like `content`/`patch`/`api_key`/`token` excluded) or a short status, keeping the full result inside the expandable detail body (#3267, @ai-ag2026).
+
 ## [v0.51.189] — 2026-05-31 — Release FI (stage-batch1 — ruff lint gate + SSE refresh dedupe + tooltip i18n)
 
 ### Added
