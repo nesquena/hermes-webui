@@ -71,6 +71,29 @@ class TestStreamFinalized:
             "'done' handler must call finalizeThinkingCard() to close thinking card"
         )
 
+    def test_done_sets_stream_finalized_before_fade_window(self):
+        """#3195 regression: the 'done' handler must set _streamFinalized=true
+        IMMEDIATELY after the early-return guard — before the fade machinery /
+        _finishDone() closure runs. Otherwise a stream_end event arriving during
+        the fade window sees _streamFinalized=false, calls _restoreSettledSession(),
+        and overwrites S.messages with stale server data (assistant text between
+        tool-call blocks vanishes on switching back to a settled session).
+        """
+        src = read('static/messages.js')
+        m = re.search(r"source\.addEventListener\('done'.*?\}\);", src, re.DOTALL)
+        assert m, "'done' handler not found"
+        fn = m.group(0)
+        guard_idx = fn.find('if(_streamFinalized) return;')
+        assert guard_idx != -1, "'done' handler must early-return on _streamFinalized"
+        finalize_idx = fn.find('_streamFinalized=true', guard_idx)
+        terminal_idx = fn.find('_terminalStateReached=true', guard_idx)
+        assert finalize_idx != -1, "'done' handler must set _streamFinalized=true"
+        assert terminal_idx != -1, "'done' handler must set _terminalStateReached"
+        assert finalize_idx < terminal_idx, (
+            "_streamFinalized=true must be set immediately after the guard "
+            "(before _terminalStateReached / fade machinery) — #3195"
+        )
+
     def test_apperror_sets_stream_finalized(self):
         src = read('static/messages.js')
         m = re.search(r"source\.addEventListener\('apperror'.*?\}\);", src, re.DOTALL)

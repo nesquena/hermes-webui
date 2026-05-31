@@ -3471,9 +3471,7 @@ function renderMd(raw){
     const localArtifactCard=(src,name)=>{
       const safeSrc=esc(src);
       const safeName=esc(name||'image');
-      const openUrl=src+(String(src).includes('?')?'&':'?')+'inline=1';
-      const downloadUrl=src+(String(src).includes('?')?'&':'?')+'download=1';
-      return `<span class="msg-artifact-card msg-artifact-card--image"><img class="msg-media-img" src="${safeSrc}" alt="${safeName}" loading="lazy"><span class="msg-artifact-meta"><span class="msg-artifact-title">${safeName}</span><span class="msg-artifact-actions"><a class="msg-artifact-action" href="${esc(openUrl)}" target="_blank" rel="noopener">Open</a><a class="msg-artifact-action" href="${esc(downloadUrl)}" download="${safeName}">Download</a></span></span></span>`;
+      return `<span class="msg-artifact-card msg-artifact-card--image"><img class="msg-media-img" src="${safeSrc}" alt="${safeName}" loading="lazy"><span class="msg-artifact-meta"><span class="msg-artifact-title">${safeName}</span><span class="msg-artifact-actions"><a class="msg-artifact-action" href="${safeSrc}" target="_blank" rel="noopener">${t('media_open')}</a><a class="msg-artifact-action" href="${safeSrc}" download="${safeName}">${t('media_download')}</a></span></span></span>`;
     };
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){

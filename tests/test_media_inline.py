@@ -25,6 +25,7 @@ from tests._pytest_port import BASE, TEST_STATE_DIR
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 
 
@@ -53,8 +54,12 @@ class TestMediaRenderMdStash(unittest.TestCase):
         self.assertIn("localArtifactCard", UI_JS)
         self.assertIn("msg-artifact-card msg-artifact-card--image", UI_JS)
         self.assertIn("msg-artifact-actions", UI_JS)
-        self.assertIn("Download</a>", UI_JS)
-        self.assertIn("Open</a>", UI_JS)
+        self.assertIn("t('media_download')", UI_JS)
+        self.assertIn("t('media_open')", UI_JS)
+        self.assertIn("media_open:", I18N_JS)
+        self.assertIn("media_download:", I18N_JS)
+        self.assertNotIn("downloadUrl=src+(String(src).includes('?')?'&':'?')+'download=1'", UI_JS)
+        self.assertNotIn("openUrl=src+(String(src).includes('?')?'&':'?')+'inline=1'", UI_JS)
 
     def test_media_api_url_pattern(self):
         self.assertIn("api/media?path=", UI_JS,
