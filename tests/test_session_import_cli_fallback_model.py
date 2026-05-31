@@ -389,12 +389,179 @@ def test_sessions_endpoint_suppresses_duplicate_webui_state_projection(monkeypat
     assert "telegram_tip" in session_ids
 
 
-def test_messaging_session_loader_prefers_longer_sidecar_transcript():
-    """Pin the /api/session invariant that repaired sidecars can be longer than state.db segments."""
+def test_messaging_session_loader_prefers_repaired_sidecar_transcript():
+    """Pin the /api/session invariant that repaired sidecars keep authoritative order."""
     handler = _extract_handler("handle_get")
     old = "if is_messaging_session and cli_messages:\n                    _all_msgs = cli_messages"
     assert old not in handler
     assert "_all_msgs = _merged_session_messages_for_display(s, cli_messages)" in handler
     src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
     assert "sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)" in src
-    assert "len(sidecar_messages) > len(cli_messages)" in src
+    assert "return prefix + merged_sidecar + suffix" in src
+
+
+
+def test_messaging_merge_applies_truncation_watermark_before_sidecar_advances():
+    import types
+    import api.routes as routes
+
+    session = types.SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "kept", "timestamp": 10.0},
+            {"role": "assistant", "content": "kept answer", "timestamp": 20.0},
+        ],
+        truncation_watermark=20.0,
+    )
+    cli_messages = [
+        {"role": "user", "content": "kept", "timestamp": 10.0},
+        {"role": "assistant", "content": "kept answer", "timestamp": 20.0},
+        {"role": "user", "content": "stale after truncation", "timestamp": 30.0},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m["content"] for m in merged] == ["kept", "kept answer"]
+
+
+def test_messaging_merge_preserves_timestamp_less_cli_rows_at_prefix():
+    import types
+    import api.routes as routes
+
+    session = types.SimpleNamespace(
+        messages=[{"role": "assistant", "content": "sidecar", "timestamp": 10.0}],
+        truncation_watermark=None,
+    )
+    cli_messages = [
+        {"role": "user", "content": "legacy no timestamp"},
+        {"role": "assistant", "content": "sidecar", "timestamp": 10.0},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m["content"] for m in merged] == ["legacy no timestamp", "sidecar"]
+
+
+def test_messaging_merge_places_same_timestamp_cli_extras_after_sidecar_row():
+    import types
+    import api.routes as routes
+
+    session = types.SimpleNamespace(
+        messages=[{"id": "sidecar-a", "role": "assistant", "content": "sidecar", "timestamp": 10.0}],
+        truncation_watermark=None,
+    )
+    cli_messages = [
+        {"id": "sidecar-a", "role": "assistant", "content": "sidecar", "timestamp": 10.0},
+        {"id": "cli-extra", "role": "assistant", "content": "cli extra", "timestamp": 10.0},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m["content"] for m in merged] == ["sidecar", "cli extra"]
+
+def test_messaging_merge_preserves_same_visible_suffix_turn_with_distinct_timestamp():
+    import types
+    import api.routes as routes
+
+    session = types.SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "hello", "timestamp": 100.0},
+            {"role": "assistant", "content": "hi", "timestamp": 101.0},
+            {"role": "user", "content": "alpha", "timestamp": 102.0},
+            {"role": "assistant", "content": "r", "timestamp": 103.0},
+        ],
+        truncation_watermark=None,
+    )
+    cli_messages = list(session.messages) + [
+        {"role": "user", "content": "alpha", "timestamp": 200.0},
+        {"role": "assistant", "content": "two", "timestamp": 201.0},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [(m["role"], m["content"], m.get("timestamp")) for m in merged] == [
+        ("user", "hello", 100.0),
+        ("assistant", "hi", 101.0),
+        ("user", "alpha", 102.0),
+        ("assistant", "r", 103.0),
+        ("user", "alpha", 200.0),
+        ("assistant", "two", 201.0),
+    ]
+
+
+def test_messaging_merge_preserves_timestamp_less_cli_row_without_poisoning_later_repeat():
+    import types
+    import api.routes as routes
+
+    session = types.SimpleNamespace(
+        messages=[{"role": "assistant", "content": "sidecar", "timestamp": 100.0}],
+        truncation_watermark=None,
+    )
+    cli_messages = [
+        {"role": "user", "content": "alpha"},
+        {"role": "assistant", "content": "sidecar", "timestamp": 100.0},
+        {"role": "user", "content": "alpha", "timestamp": 200.0},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [(m["role"], m["content"], m.get("timestamp")) for m in merged] == [
+        ("user", "alpha", None),
+        ("assistant", "sidecar", 100.0),
+        ("user", "alpha", 200.0),
+    ]
+
+
+def test_messaging_merge_dedupes_timestamp_less_cli_row_when_stable_id_matches_sidecar():
+    import types
+    import api.routes as routes
+
+    session = types.SimpleNamespace(
+        messages=[{"message_id": "m1", "role": "user", "content": "alpha", "timestamp": 100.0}],
+        truncation_watermark=None,
+    )
+    cli_messages = [{"message_id": "m1", "role": "user", "content": "alpha"}]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [(m.get("message_id"), m["content"]) for m in merged] == [("m1", "alpha")]
+
+
+def test_messaging_merge_honors_message_id_alias_for_distinct_repeated_suffix_turn():
+    import types
+    import api.routes as routes
+
+    session = types.SimpleNamespace(
+        messages=[{"message_id": "s1", "role": "user", "content": "alpha", "timestamp": 100.0}],
+        truncation_watermark=None,
+    )
+    cli_messages = [
+        {"message_id": "s1", "role": "user", "content": "alpha", "timestamp": 100.0},
+        {"message_id": "c2", "role": "user", "content": "alpha", "timestamp": 200.0},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [(m.get("message_id"), m["content"], m.get("timestamp")) for m in merged] == [
+        ("s1", "alpha", 100.0),
+        ("c2", "alpha", 200.0),
+    ]
+
+def test_state_db_session_messages_preserve_message_id(monkeypatch, tmp_path):
+    import sqlite3
+    import api.models as models
+
+    db_path = tmp_path / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL)"
+        )
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
+            ("msg-1", "sid-1", "user", "hello", 1.0),
+        )
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+    messages = models.get_state_db_session_messages("sid-1")
+
+    assert messages == [{"id": "msg-1", "role": "user", "content": "hello", "timestamp": 1.0}]

@@ -3560,6 +3560,12 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
     )
 
 
+def _session_message_stable_id(msg) -> str:
+    if not isinstance(msg, dict):
+        return ""
+    return str(msg.get("id") or msg.get("message_id") or "")
+
+
 def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     """Return the message coordinate space exposed by ``GET /api/session``.
 
@@ -3568,33 +3574,106 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     snapshot parent plus a child continuation sidecar. The frontend computes
     fork keep-counts against this merged display list, so branch/fork must slice
     the same list rather than the sidecar-only ``session.messages`` array.
+
+    Treat the sidecar as the authoritative repaired ordering when both sources
+    exist: preserve it verbatim, then add only non-overlapping CLI rows before
+    the first sidecar timestamp or after the last sidecar timestamp. Sorting the
+    whole union by timestamp replays older compression-lineage rows into the
+    middle/tail of repaired messaging sidecars and makes repeated user turns
+    appear after reload.
     """
     cli_messages = list(cli_messages or [])
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
-    if cli_messages:
-        if sidecar_messages and sidecar_messages != cli_messages:
-            if len(sidecar_messages) >= len(cli_messages):
-                return merge_session_messages_append_only(
-                    sidecar_messages,
-                    cli_messages,
-                    truncation_watermark=getattr(session, "truncation_watermark", None),
-                )
-            merged_messages = []
-            seen_message_keys = set()
-            for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
-                float(m.get("timestamp") or 0),
-                str(m.get("role") or ""),
-                str(m.get("content") or ""),
-            )):
-                key = _session_message_merge_key(msg)
-                if key in seen_message_keys:
-                    continue
-                seen_message_keys.add(key)
-                merged_messages.append(msg)
-            return merged_messages
-        return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
-    return sidecar_messages
+    if not cli_messages:
+        return sidecar_messages
+    if not sidecar_messages:
+        return cli_messages
+    if sidecar_messages == cli_messages:
+        return sidecar_messages
 
+    sidecar_ids = {
+        stable_id
+        for msg in sidecar_messages
+        if (stable_id := _session_message_stable_id(msg))
+    }
+    sidecar_exact_keys = {
+        (_session_message_visible_key(msg), ts)
+        for msg in sidecar_messages
+        if (ts := _message_timestamp_as_float(msg)) is not None
+    }
+    sidecar_timestamps = [
+        ts for msg in sidecar_messages
+        if (ts := _message_timestamp_as_float(msg)) is not None
+    ]
+    if not sidecar_timestamps:
+        return merge_session_messages_append_only(
+            sidecar_messages,
+            cli_messages,
+            truncation_watermark=getattr(session, "truncation_watermark", None),
+        )
+    first_sidecar_ts = min(sidecar_timestamps)
+    last_sidecar_ts = max(sidecar_timestamps)
+    watermark_ts = _message_timestamp_as_float({"timestamp": getattr(session, "truncation_watermark", None)})
+    sidecar_advanced_past_watermark = watermark_ts is not None and last_sidecar_ts > watermark_ts
+
+    prefix = []
+    in_window_distinct = []
+    suffix = []
+    seen_ids = set(sidecar_ids)
+    for msg in cli_messages:
+        key = _session_message_visible_key(msg)
+        msg_id = _session_message_stable_id(msg)
+        timestamp = _message_timestamp_as_float(msg)
+        if msg_id and msg_id in seen_ids:
+            continue
+        if timestamp is None:
+            prefix.append(msg)
+            if msg_id:
+                seen_ids.add(msg_id)
+            continue
+        if (
+            watermark_ts is not None
+            and timestamp > watermark_ts
+            and not sidecar_advanced_past_watermark
+        ):
+            continue
+        if (key, timestamp) in sidecar_exact_keys and not (
+            msg_id and msg_id not in sidecar_ids and first_sidecar_ts <= timestamp <= last_sidecar_ts
+        ):
+            continue
+        if timestamp < first_sidecar_ts:
+            prefix.append(msg)
+            if msg_id:
+                seen_ids.add(msg_id)
+        elif timestamp > last_sidecar_ts:
+            suffix.append(msg)
+            if msg_id:
+                seen_ids.add(msg_id)
+        else:
+            in_window_distinct.append(msg)
+            if msg_id:
+                seen_ids.add(msg_id)
+
+    def sort_key(m):
+        return (
+            float(m.get("timestamp") or 0),
+            str(m.get("role") or ""),
+            str(m.get("content") or ""),
+        )
+
+    prefix.sort(key=sort_key)
+    suffix.sort(key=sort_key)
+    in_window_distinct.sort(key=sort_key)
+    merged_sidecar = []
+    pending_window = list(in_window_distinct)
+    for sidecar_msg in sidecar_messages:
+        sidecar_ts = _message_timestamp_as_float(sidecar_msg)
+        if sidecar_ts is not None:
+            while pending_window and (_message_timestamp_as_float(pending_window[0]) or 0) < sidecar_ts:
+                merged_sidecar.append(pending_window.pop(0))
+        merged_sidecar.append(sidecar_msg)
+    merged_sidecar.extend(pending_window)
+    return prefix + merged_sidecar + suffix
 
 
 def _merged_webui_lineage_messages_for_display(session, messages=None) -> list:
@@ -4011,6 +4090,7 @@ from api.models import (
     _active_stream_ids,
     _session_message_merge_key,
     _session_message_visible_key,
+    _message_timestamp_as_float,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,

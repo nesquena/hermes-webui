@@ -67,25 +67,25 @@ def test_messaging_merge_helper_dedupes_equivalent_timestamp_formats():
 
 
 def test_messaging_merge_preserves_longer_sidecar_order_when_timestamps_collapse():
-    """A repaired messaging sidecar can preserve order but lose subsecond timestamps.
+    """A repaired messaging sidecar can preserve order while state.db has subsecond mirrors.
 
-    Re-sorting those messages by ``(timestamp, role, content)`` groups assistant
-    and tool rows before user rows, making the WebUI look like replies vanished.
+    Stable IDs prove the CLI rows are mirrors, so the repaired sidecar order stays
+    authoritative instead of re-sorting the union by timestamp.
     """
     session = SimpleNamespace(
         messages=[
-            {"role": "assistant", "content": "prior answer", "timestamp": 100.0},
-            {"role": "user", "content": "first prompt", "timestamp": 101.0},
-            {"role": "assistant", "content": "first answer", "timestamp": 101.0},
-            {"role": "user", "content": "second prompt", "timestamp": 101.0},
-            {"role": "assistant", "content": "second answer", "timestamp": 101.0},
+            {"id": "m0", "role": "assistant", "content": "prior answer", "timestamp": 100.0},
+            {"id": "m1", "role": "user", "content": "first prompt", "timestamp": 101.0},
+            {"id": "m2", "role": "assistant", "content": "first answer", "timestamp": 101.0},
+            {"id": "m3", "role": "user", "content": "second prompt", "timestamp": 101.0},
+            {"id": "m4", "role": "assistant", "content": "second answer", "timestamp": 101.0},
         ]
     )
     cli_messages = [
-        {"role": "user", "content": "first prompt", "timestamp": 101.1},
-        {"role": "assistant", "content": "first answer", "timestamp": 101.2},
-        {"role": "user", "content": "second prompt", "timestamp": 101.3},
-        {"role": "assistant", "content": "second answer", "timestamp": 101.4},
+        {"id": "m1", "role": "user", "content": "first prompt", "timestamp": 101.1},
+        {"id": "m2", "role": "assistant", "content": "first answer", "timestamp": 101.2},
+        {"id": "m3", "role": "user", "content": "second prompt", "timestamp": 101.3},
+        {"id": "m4", "role": "assistant", "content": "second answer", "timestamp": 101.4},
     ]
 
     merged = routes._merged_session_messages_for_display(session, cli_messages)
@@ -96,6 +96,37 @@ def test_messaging_merge_preserves_longer_sidecar_order_when_timestamps_collapse
         "first answer",
         "second prompt",
         "second answer",
+    ]
+
+
+def test_messaging_merge_preserves_ambiguous_repeated_cli_tail_after_repaired_sidecar():
+    """No-ID same-visible/different-timestamp CLI suffix rows may be genuine repeats."""
+    session = SimpleNamespace(
+        messages=[
+            {"role": "user", "content": "start", "timestamp": 100},
+            {"role": "assistant", "content": "ready", "timestamp": 101},
+            {"role": "user", "content": "latest question", "timestamp": 200},
+            {"role": "assistant", "content": "latest answer", "timestamp": 201},
+        ]
+    )
+    cli_messages = [
+        {"role": "user", "content": "start", "timestamp": 100},
+        {"role": "assistant", "content": "ready", "timestamp": 101},
+        {"role": "user", "content": "latest question", "timestamp": 300},
+        {"role": "assistant", "content": "latest answer", "timestamp": 301},
+        {"role": "user", "content": "latest question", "timestamp": 302},
+    ]
+
+    merged = routes._merged_session_messages_for_display(session, cli_messages)
+
+    assert [m["content"] for m in merged] == [
+        "start",
+        "ready",
+        "latest question",
+        "latest answer",
+        "latest question",
+        "latest answer",
+        "latest question",
     ]
 
 
