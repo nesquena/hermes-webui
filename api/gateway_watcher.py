@@ -98,6 +98,15 @@ class GatewayWatcher:
         self._thread: threading.Thread | None = None
         self._last_hash: str = ''
         self._last_sessions: list = []
+        # Track state.db mtime across polls to detect gateway restarts.
+        # When gateway restarts, state.db is re-opened and its mtime may
+        # advance even if the SQL content is identical (WAL flush, journal
+        # file recreation, etc.).  A sudden mtime jump without a matching
+        # session-hash change means the gateway recycled its DB connection;
+        # the existing sessions are preserved, so we suppress the notification
+        # to avoid pushing phantom session-list refreshes to the frontend.
+        self._last_db_mtime: float | None = None
+        self._db_mtime_reset_threshold: float = 3.0  # ignore mtime shifts <3s
 
     def start(self):
         """Start the watcher daemon thread."""
@@ -185,11 +194,44 @@ class GatewayWatcher:
             try:
                 sessions = _get_agent_sessions_from_db()
                 current_hash = _snapshot_hash(sessions)
+                current_mtime = self._get_db_mtime()
 
-                if current_hash != self._last_hash:
-                    self._last_hash = current_hash
-                    self._last_sessions = sessions
+                # Snapshot hash covers session_id + updated_at + message_count
+                # from state.db (see _snapshot_hash docstring).  This is the
+                # sole notification signal:
+                #
+                #   same hash = nothing changed → no notification
+                #   diff hash = data changed → notify subscribers
+                #
+                # The mtime-based _detect_gateway_restart() utility answers
+                # the separate semantic question "was state.db re-opened?"
+                # It is intentionally decoupled from the notify decision
+                # because: (a) when hash is identical there is nothing to
+                # notify about regardless of why mtime changed, and (b) a
+                # hash-diff from real data changes must never be suppressed
+                # even if the mtime happens to jump at the same moment.
+                # Future maintainers: if you add a field to the sessions
+                # payload that should trigger sidebar updates, add it to
+                # _snapshot_hash as well.
+                is_gateway_restart = self._detect_gateway_restart(
+                    current_mtime, current_hash,
+                )
+
+                hash_changed = current_hash != self._last_hash
+                self._last_hash = current_hash
+                self._last_sessions = sessions
+
+                if hash_changed:
+                    if is_gateway_restart:
+                        logger.debug(
+                            "Gateway restart detected with no content change "
+                            "(mtime jumped %.1fs, hash identical) — notifying anyway "
+                            "for sidebar consistency",
+                            current_mtime - (self._last_db_mtime or current_mtime),
+                        )
                     self._notify_subscribers(sessions)
+
+                self._last_db_mtime = current_mtime
             except Exception:
                 logger.debug("Error in gateway watcher poll loop", exc_info=True)
 
@@ -198,6 +240,34 @@ class GatewayWatcher:
                 if self._stop_event.is_set():
                     return
                 time.sleep(0.1)
+
+    def _get_db_mtime(self) -> float | None:
+        """Return state.db mtime (seconds since epoch) or None if unavailable."""
+        try:
+            path = _get_state_db_path()
+            return path.stat().st_mtime if path.exists() else None
+        except (OSError, AttributeError):
+            return None
+
+    def _detect_gateway_restart(
+        self, current_mtime: float | None, current_hash: str
+    ) -> bool:
+        """Return True when the current poll looks like a gateway restart.
+
+        Heuristic: state.db mtime jumped by more than the threshold,
+        AND the session content hash is the same as the previous poll.
+        A true gateway restart re-opens the DB (updating mtime) without
+        changing session data — unless messages arrived during downtime.
+
+        When the hash differs, it's a real content change — NOT a restart
+        — and the notification must be allowed through regardless of the
+        mtime delta.  (This prevents suppressing legitimate notifications
+        when new messages arrive during a gateway restart window.)
+        """
+        if current_mtime is None or self._last_db_mtime is None:
+            return False
+        mtime_delta = current_mtime - self._last_db_mtime
+        return mtime_delta > self._db_mtime_reset_threshold and current_hash == self._last_hash
 
 
 # ── Module-level singleton ─────────────────────────────────────────────────

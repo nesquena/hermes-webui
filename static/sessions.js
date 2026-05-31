@@ -98,6 +98,22 @@ function _clearComposerDraft(sid) {
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
 const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
+
+function _persistActiveSession(sid) {
+  if (!sid) return;
+  // Use the same localStorage key as the boot-time session restore path
+  // (boot.js line 1753 reads 'hermes-webui-session').  Persisting here
+  // ensures the session survives SSE reconnects and gateway restart refresh
+  // cycles even when the existing mechanism at sessions.js:505 is not reachable
+  // (e.g. the loadSession fetch fails before the then-block runs).
+  try { localStorage.setItem('hermes-webui-session', sid); } catch (_) {}
+}
+function _restoreActiveSession() {
+  try { return localStorage.getItem('hermes-webui-session') || null; } catch (_) { return null; }
+}
+function _clearActiveSession() {
+  try { localStorage.removeItem('hermes-webui-session'); } catch (_) {}
+}
 let _sessionViewedCounts = null;
 let _sessionCompletionUnread = null;
 let _sessionObservedStreaming = null;
@@ -587,6 +603,9 @@ async function loadSession(sid){
     const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
     if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
   }
+  // Persist the active session_id to localStorage so the same session
+  // survives page refresh, SSE reconnect, and gateway restart (#session-continuity).
+  _persistActiveSession(sid);
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
