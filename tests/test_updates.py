@@ -171,6 +171,31 @@ def test_run_git_returns_exit_code_when_no_output(tmp_path):
     assert 'status 1' in out
 
 
+def test_run_git_uses_utf8_replacement_for_windows_console_output(tmp_path):
+    """Git output can contain Unicode even when Windows' active code page cannot."""
+    with patch('subprocess.run') as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout='v0.51.184\n', stderr=None)
+
+        out, ok = updates._run_git(['describe', '--tags'], tmp_path)
+
+    assert ok is True
+    assert out == 'v0.51.184'
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs['encoding'] == 'utf-8'
+    assert kwargs['errors'] == 'replace'
+
+
+def test_run_git_handles_missing_stdout_after_decode_thread_failure(tmp_path):
+    """A subprocess reader failure must not make version detection crash on import."""
+    with patch('subprocess.run') as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=None, stderr=None)
+
+        out, ok = updates._run_git(['diff', '--binary', 'HEAD', '--'], tmp_path)
+
+    assert ok is True
+    assert out == ''
+
+
 def test_split_remote_ref_splits_tracking_ref():
     """_split_remote_ref should correctly split origin/branch."""
     assert updates._split_remote_ref('origin/master') == ('origin', 'master')
