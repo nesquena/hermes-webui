@@ -13,6 +13,8 @@ def _fake_git_for_release_fetch_failure(args, cwd, timeout=10):
         return 'v0.51.103', True
     if args == ['merge-base', '--is-ancestor', 'v0.51.106', 'HEAD']:
         return '', False
+    if args == ['merge-base', '--is-ancestor', 'HEAD', 'v0.51.106']:
+        return '', True
     if args == ['remote', 'get-url', 'origin']:
         return 'https://github.com/nesquena/hermes-webui.git', True
     raise AssertionError(f'unexpected git args: {args!r}')
@@ -649,4 +651,58 @@ def test_select_apply_compare_ref_case_d_older_tag_with_commits_and_newer_tag_ex
         'should advance to the newer tag, not silently fall through to '
         'origin/<branch>. Regression for Opus-flagged drift in #2855.'
     )
+
+
+def test_check_repo_release_falls_through_when_latest_tag_is_not_ff_reachable(tmp_path):
+    """Main-tracking HEAD past an older tag cannot ff to a patch release tag.
+
+    Repro: installer puts agent on main at v2026.5.29+N-g..., maintainers cut
+    v2026.5.29.2 from a side branch. Tag gap is positive, but
+    ``git pull --ff-only v2026.5.29.2`` fails with diverging branches.
+    The release check must fall through to the upstream branch comparison.
+    """
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v2026.5.29.2\nv2026.5.29', True
+        if args == ['describe', '--tags', '--abbrev=0']:
+            return 'v2026.5.29', True
+        if args == ['describe', '--tags', '--always']:
+            return 'v2026.5.29-265-g5921d6678', True
+        if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
+            return '', False
+        if args == ['merge-base', '--is-ancestor', 'HEAD', 'v2026.5.29.2']:
+            return '', False
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        result = updates._check_repo_release(tmp_path, 'agent')
+
+    assert result is None
+
+
+def test_select_apply_compare_ref_falls_through_when_latest_tag_is_not_ff_reachable(tmp_path):
+    """Apply path mirrors the ff-unreachable release-tag fall-through."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v2026.5.29.2\nv2026.5.29', True
+        if args == ['describe', '--tags', '--abbrev=0']:
+            return 'v2026.5.29', True
+        if args == ['describe', '--tags', '--always']:
+            return 'v2026.5.29-265-g5921d6678', True
+        if args == ['merge-base', '--is-ancestor', 'v2026.5.29.2', 'HEAD']:
+            return '', False
+        if args == ['merge-base', '--is-ancestor', 'HEAD', 'v2026.5.29.2']:
+            return '', False
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return 'origin/main', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        ref = updates._select_apply_compare_ref(tmp_path)
+
+    assert ref == 'origin/main'
 

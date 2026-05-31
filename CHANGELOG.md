@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Agent self-update no longer advertises or applies unreachable release tags when the checkout tracks `main` past an older tag but the newest published tag lives on a divergent side branch (for example `v2026.5.29` → `v2026.5.29.2`). The update checker and apply path now fall through to the configured upstream branch when `git pull --ff-only <latest-tag>` cannot fast-forward, matching the existing #2653/#3140 release-vs-branch routing.
+
 ## [v0.51.185] — 2026-05-31 — Release FE (stage-batchE — clarify-card bug-fix batch: identical-prompt dedup + autofill guard + GBK startup crash)
 
 ### Fixed
