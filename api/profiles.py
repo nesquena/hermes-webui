@@ -150,11 +150,22 @@ def _resolve_base_hermes_home() -> Path:
         # If HERMES_HOME points to a profiles/ subdir, walk up two levels to the base
         return _unwrap_profile_home_to_base(p)
 
-    if os.name == 'nt':
-        local_app_data = os.getenv('LOCALAPPDATA', '').strip()
-        if local_app_data:
-            return Path(local_app_data) / 'hermes'
-    return Path.home() / '.hermes'
+    # Platform default. On Windows this includes the #2905 migration-safety
+    # fallback (prefer the populated legacy %USERPROFILE%\.hermes over an
+    # empty %LOCALAPPDATA%\hermes). Delegate to config so the base-home
+    # resolution used for the active-profile pointer can never drift from the
+    # one config.STATE_DIR is derived from.
+    try:
+        from api.config import _platform_default_hermes_home
+        return _platform_default_hermes_home()
+    except ImportError:
+        # Defensive: never let a config import problem break profile resolution.
+        # Scoped to ImportError so a real bug inside the helper still surfaces.
+        if os.name == 'nt':
+            local_app_data = os.getenv('LOCALAPPDATA', '').strip()
+            if local_app_data:
+                return Path(local_app_data) / 'hermes'
+        return Path.home() / '.hermes'
 
 _DEFAULT_HERMES_HOME = _resolve_base_hermes_home()
 
