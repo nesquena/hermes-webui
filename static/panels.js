@@ -3380,6 +3380,30 @@ function _renderSkillUsage(d) {
   return `<div class="insights-card" id="skillUsageCard"><div class="insights-card-title">${esc(t('insights_skill_usage_title'))}</div><div class="skill-usage-grid" style="margin-bottom:8px"><div><span>${esc(t('insights_skill_usage_total'))}</span><strong>${totalInvocations.toLocaleString()}</strong></div><div><span>${esc(t('insights_skill_usage_skills_used'))}</span><strong>${uniqueUsed}/${skillNames.length}</strong></div></div><div class="insights-table skill-usage-table"><div class="insights-table-head"><span>${esc(t('insights_skill_usage_col_skill'))}</span><span>${esc(t('insights_skill_usage_col_uses'))}</span><span>${esc(t('insights_skill_usage_col_views'))}</span><span>${esc(t('insights_skill_usage_col_patches'))}</span><span>${esc(t('insights_skill_usage_col_share'))}</span></div>${rows}</div><div class="wiki-status-footer" style="margin-top:8px">${esc(t('insights_skill_usage_footer'))}</div></div>`;
 }
 
+function _renderTrendBadge(curr, prev, isLowerBetter) {
+  if (prev === undefined || prev === null) return '';
+  const currentVal = Number(curr || 0);
+  const previousVal = Number(prev || 0);
+  if (previousVal === 0) {
+    if (currentVal === 0) return '';
+    return `<span class="insights-stat-trend up">New</span>`;
+  }
+  const pct = ((currentVal - previousVal) / previousVal) * 100;
+  if (Math.abs(pct) < 0.1) {
+    return `<span class="insights-stat-trend neutral">0%</span>`;
+  }
+  const displayPct = (pct > 0 ? '+' : '') + pct.toFixed(1) + '%';
+  const isUp = pct > 0;
+  let cls = '';
+  if (isLowerBetter) {
+    cls = isUp ? 'down' : 'up';
+  } else {
+    cls = isUp ? 'up' : 'down';
+  }
+  const arrow = isUp ? '↑' : '↓';
+  return `<span class="insights-stat-trend ${cls}">${arrow} ${displayPct}</span>`;
+}
+
 function _renderInsights(d, box, wikiStatus, skillUsage) {
   const fmtNum = n => Number(n || 0).toLocaleString();
   const fmtCost = c => {
@@ -3393,10 +3417,10 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
 
   // Overview cards
   const overviewCards = [
-    { label: t('insights_sessions'), value: fmtNum(d.total_sessions), icon: li('message-square', 18) },
-    { label: t('insights_messages'), value: fmtNum(d.total_messages), icon: li('hash', 18) },
-    { label: t('insights_tokens'), value: fmtTokens(d.total_tokens), icon: li('cpu', 18) },
-    { label: t('insights_cost'), value: fmtCost(d.total_cost), icon: li('dollar-sign', 18) },
+    { label: t('insights_sessions'), value: fmtNum(d.total_sessions), raw: d.total_sessions, prev: d.prev_total_sessions, icon: li('message-square', 18), isLowerBetter: false },
+    { label: t('insights_messages'), value: fmtNum(d.total_messages), raw: d.total_messages, prev: d.prev_total_messages, icon: li('hash', 18), isLowerBetter: false },
+    { label: t('insights_tokens'), value: fmtTokens(d.total_tokens), raw: d.total_tokens, prev: d.prev_total_tokens, icon: li('cpu', 18), isLowerBetter: true },
+    { label: t('insights_cost'), value: fmtCost(d.total_cost), raw: d.total_cost, prev: d.prev_total_cost, icon: li('dollar-sign', 18), isLowerBetter: true },
   ];
 
   // Daily token trend — bucket long ranges to avoid horizontal overflow
@@ -3463,6 +3487,24 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
       `</div></div>`;
   }
 
+  // Profiles table (multi-profile rollup)
+  let profilesHtml = '';
+  if (d.profiles && d.profiles.length) {
+    const totalCost = d.profiles.reduce((sum, p) => sum + Number(p.cost || 0), 0);
+    const totalTokens = d.profiles.reduce((sum, p) => sum + Number(p.total_tokens || 0), 0);
+    profilesHtml = `<div class="insights-card"><div class="insights-card-title">Profiles Usage Rollup</div><div class="insights-table insights-profile-table"><div class="insights-table-head"><span>Profile</span><span>Sessions</span><span>Tokens</span><span>Cost</span><span>Share</span></div>` +
+      d.profiles.map(p => {
+        const pTokens = Number(p.total_tokens || 0);
+        const pCost = Number(p.cost || 0);
+        const costShare = totalCost > 0 ? (pCost / totalCost * 100) : 0;
+        const tokenShare = totalTokens > 0 ? (pTokens / totalTokens * 100) : 0;
+        const share = Math.round(costShare || tokenShare || 0);
+        const nameLabel = p.is_active ? `${esc(p.name)} <span class="insights-active-badge">Active</span>` : esc(p.name);
+        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(p.name)}">${nameLabel}</span><span>${fmtNum(p.sessions)}</span><span class="insights-model-tokens">${fmtTokens(pTokens)}</span><span class="insights-model-cost">${fmtCost(pCost)}</span><span>${share}%</span></div>`;
+      }).join('') +
+      `</div></div>`;
+  }
+
   // Token breakdown
   const tokenCards = `
     <div class="insights-card">
@@ -3486,9 +3528,21 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
     ${_renderLlmWikiStatus(wikiStatus)}
     ${_renderSkillUsage(skillUsage)}
     <div class="insights-grid">
-      ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
+      ${overviewCards.map(c => `
+        <div class="insights-stat">
+          <div class="insights-stat-icon">${c.icon}</div>
+          <div class="insights-stat-info">
+            <div style="display:flex;align-items:center;">
+              <div class="insights-stat-value">${c.value}</div>
+              ${_renderTrendBadge(c.raw, c.prev, c.isLowerBetter)}
+            </div>
+            <div class="insights-stat-label">${esc(c.label)}</div>
+          </div>
+        </div>
+      `).join('')}
     </div>
     ${dailyHtml}
+    ${profilesHtml}
     <div class="insights-row insights-usage-grid">
       ${tokenCards}
       ${modelsHtml}

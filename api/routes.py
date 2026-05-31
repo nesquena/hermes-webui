@@ -3443,6 +3443,93 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
     return True
 
 
+def _aggregate_insights_for_home(profile_home: Path, cutoff: float) -> dict:
+    """Aggregate session and CLI analytics for a single profile home directory."""
+    import json
+    import sqlite3
+    from contextlib import closing
+
+    total_sessions = 0
+    total_messages = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cost = 0.0
+
+    def _safe_usage_int(value) -> int:
+        try:
+            return max(int(float(value or 0)), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _safe_cost_float(value) -> float:
+        if value is None:
+            return 0.0
+        try:
+            if isinstance(value, str):
+                value = value.strip().replace("$", "").replace(",", "")
+                if not value:
+                    return 0.0
+            return max(float(value), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # 1. Walk WebUI session index
+    idx_path = profile_home / "sessions" / "_index.json"
+    sessions_data = []
+    if idx_path.exists():
+        try:
+            idx = json.loads(idx_path.read_text(encoding="utf-8"))
+            if not isinstance(idx, list):
+                idx = []
+        except Exception:
+            idx = []
+
+        for entry in idx:
+            created = entry.get("created_at", 0) or 0
+            updated = entry.get("updated_at", 0) or 0
+            if max(created, updated) < cutoff:
+                continue
+            sessions_data.append(entry)
+
+    for s in sessions_data:
+        total_sessions += 1
+        total_messages += _safe_usage_int(s.get("message_count"))
+        total_input_tokens += _safe_usage_int(s.get("input_tokens"))
+        total_output_tokens += _safe_usage_int(s.get("output_tokens"))
+        total_cost += _safe_cost_float(s.get("estimated_cost"))
+
+    # 2. Also include CLI sessions from state.db
+    db_path = profile_home / "state.db"
+    if db_path.exists():
+        try:
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT message_count, input_tokens, output_tokens, estimated_cost_usd
+                    FROM sessions
+                    WHERE (started_at >= ? OR ended_at >= ?)
+                      AND COALESCE(source, '') != 'webui'
+                """, (cutoff, cutoff))
+                for row in cur.fetchall():
+                    total_sessions += 1
+                    total_messages += _safe_usage_int(row["message_count"])
+                    total_input_tokens += _safe_usage_int(row["input_tokens"])
+                    total_output_tokens += _safe_usage_int(row["output_tokens"])
+                    total_cost += _safe_cost_float(row["estimated_cost_usd"])
+        except Exception:
+            pass
+
+    return {
+        "sessions": total_sessions,
+        "messages": total_messages,
+        "input_tokens": total_input_tokens,
+        "output_tokens": total_output_tokens,
+        "total_tokens": total_input_tokens + total_output_tokens,
+        "cost": round(total_cost, 6)
+    }
+
+
 def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
@@ -3460,6 +3547,7 @@ def _handle_insights(handler, parsed) -> bool:
     day_secs = 86400
     first_day_ts = today_midnight - ((days - 1) * day_secs)
     cutoff = first_day_ts
+    prev_cutoff = cutoff - (days * day_secs)
 
     def _safe_usage_int(value) -> int:
         try:
@@ -3484,6 +3572,7 @@ def _handle_insights(handler, parsed) -> bool:
 
     # Walk session index (fast, no full JSON parse)
     sessions_data = []
+    prev_sessions_data = []
     idx_path = SESSION_DIR / "_index.json"
     if idx_path.exists():
         try:
@@ -3496,12 +3585,13 @@ def _handle_insights(handler, parsed) -> bool:
     for entry in idx:
         created = entry.get("created_at", 0) or 0
         updated = entry.get("updated_at", 0) or 0
-        # Session is relevant if it was created or updated within the calendar window.
-        if max(created, updated) < cutoff:
-            continue
-        sessions_data.append(entry)
+        ts = max(created, updated)
+        if ts >= cutoff:
+            sessions_data.append(entry)
+        elif ts >= prev_cutoff:
+            prev_sessions_data.append(entry)
 
-    # Aggregate
+    # Aggregate current period
     total_sessions = len(sessions_data)
     total_messages = 0
     total_input_tokens = 0
@@ -3556,7 +3646,20 @@ def _handle_insights(handler, parsed) -> bool:
             except Exception:
                 pass
 
-    # ── Also include CLI sessions from Hermes state.db ─────────────────────
+    # Aggregate previous period
+    prev_total_sessions = len(prev_sessions_data)
+    prev_total_messages = 0
+    prev_total_input_tokens = 0
+    prev_total_output_tokens = 0
+    prev_total_cost = 0.0
+
+    for s in prev_sessions_data:
+        prev_total_messages += _safe_usage_int(s.get("message_count"))
+        prev_total_input_tokens += _safe_usage_int(s.get("input_tokens"))
+        prev_total_output_tokens += _safe_usage_int(s.get("output_tokens"))
+        prev_total_cost += _safe_cost_float(s.get("estimated_cost"))
+
+    # Also include CLI sessions from Hermes state.db
     try:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
@@ -3570,32 +3673,33 @@ def _handle_insights(handler, parsed) -> bool:
                     FROM sessions
                     WHERE (started_at >= ? OR ended_at >= ?)
                       AND COALESCE(source, '') != 'webui'
-                """, (cutoff, cutoff))
+                """, (prev_cutoff, prev_cutoff))
                 for row in cur.fetchall():
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])
                     _cost = _safe_cost_float(row["estimated_cost_usd"])
                     _msgs = _safe_usage_int(row["message_count"])
-                    total_sessions += 1
-                    total_messages += _msgs
-                    total_input_tokens += _input
-                    total_output_tokens += _output
-                    total_cost += _cost
-
-                    _model = row["model"] or "unknown"
-                    bucket = model_stats.setdefault(_model, {
-                        "sessions": 0,
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cost": 0.0,
-                    })
-                    bucket["sessions"] += 1
-                    bucket["input_tokens"] += _input
-                    bucket["output_tokens"] += _output
-                    bucket["cost"] += _cost
-
+                    
                     _ts = row["started_at"] or row["ended_at"] or 0
-                    if _ts:
+                    if _ts >= cutoff:
+                        total_sessions += 1
+                        total_messages += _msgs
+                        total_input_tokens += _input
+                        total_output_tokens += _output
+                        total_cost += _cost
+
+                        _model = row["model"] or "unknown"
+                        bucket = model_stats.setdefault(_model, {
+                            "sessions": 0,
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "cost": 0.0,
+                        })
+                        bucket["sessions"] += 1
+                        bucket["input_tokens"] += _input
+                        bucket["output_tokens"] += _output
+                        bucket["cost"] += _cost
+
                         _dt = _time.localtime(_ts)
                         _day_key = _time.strftime("%Y-%m-%d", _dt)
                         _daily = daily_tokens.setdefault(_day_key, {
@@ -3610,6 +3714,12 @@ def _handle_insights(handler, parsed) -> bool:
                         _daily["cost"] += _cost
                         dow_activity[_dt.tm_wday] += 1
                         hod_activity[_dt.tm_hour] += 1
+                    elif _ts >= prev_cutoff:
+                        prev_total_sessions += 1
+                        prev_total_messages += _msgs
+                        prev_total_input_tokens += _input
+                        prev_total_output_tokens += _output
+                        prev_total_cost += _cost
     except Exception:
         logger.debug("Failed to include CLI sessions in insights", exc_info=True)
 
@@ -3657,6 +3767,28 @@ def _handle_insights(handler, parsed) -> bool:
     # Hour-of-day data
     hod_data = [{"hour": h, "sessions": hod_activity.get(h, 0)} for h in range(24)]
 
+    # Multi-profile token cost breakdown
+    profile_breakdown = []
+    try:
+        from api.profiles import list_profiles_api, get_active_profile_name
+        profiles = list_profiles_api()
+        active_name = get_active_profile_name()
+        for p in profiles:
+            p_name = p.get('name')
+            p_path = Path(p.get('path'))
+            p_stats = _aggregate_insights_for_home(p_path, cutoff)
+            profile_breakdown.append({
+                "name": p_name,
+                "sessions": p_stats["sessions"],
+                "messages": p_stats["messages"],
+                "total_tokens": p_stats["total_tokens"],
+                "cost": p_stats["cost"],
+                "is_active": p_name == active_name
+            })
+        profile_breakdown.sort(key=lambda r: (-r["cost"], -r["sessions"], r["name"]))
+    except Exception:
+        logger.debug("Failed to calculate multi-profile insights", exc_info=True)
+
     return j(handler, {
         "period_days": days,
         "total_sessions": total_sessions,
@@ -3665,10 +3797,15 @@ def _handle_insights(handler, parsed) -> bool:
         "total_output_tokens": total_output_tokens,
         "total_tokens": total_tokens,
         "total_cost": round(total_cost, 6),
+        "prev_total_sessions": prev_total_sessions,
+        "prev_total_messages": prev_total_messages,
+        "prev_total_tokens": prev_total_input_tokens + prev_total_output_tokens,
+        "prev_total_cost": round(prev_total_cost, 6),
         "models": models_breakdown,
         "daily_tokens": daily_series,
         "activity_by_day": dow_data,
         "activity_by_hour": hod_data,
+        "profiles": profile_breakdown,
     })
 
 
