@@ -164,7 +164,7 @@ def _build_csp_report_only_policy() -> str:
 
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
-from api.helpers import j, get_profile_cookie
+from api.helpers import j, get_profile_cookie, _CLIENT_DISCONNECT_ERRORS
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put
 from api.startup import auto_install_agent_deps, fix_credential_permissions
@@ -311,14 +311,22 @@ class Handler(BaseHTTPRequestHandler):
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        except _CLIENT_DISCONNECT_ERRORS:
             # The browser/client closed the socket while we were writing the
             # response. This is expected for probes, tab closes, and SSE
             # reconnect races; do not convert it into a misleading server 500.
             return
-        except Exception as e:
+        except Exception:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
-            return j(self, {'error': 'Internal server error'}, status=500)
+            try:
+                j(self, {'error': 'Internal server error'}, status=500)
+            except _CLIENT_DISCONNECT_ERRORS:
+                # Client disconnected while we were sending the 500 — nothing to do.
+                pass
+            except Exception:
+                # Unexpected failure while sending the error response itself.
+                # Log it so we know something is wrong with our error handler.
+                traceback.print_exc()
         finally:
             clear_request_profile()
 
@@ -342,14 +350,22 @@ class Handler(BaseHTTPRequestHandler):
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        except _CLIENT_DISCONNECT_ERRORS:
             # The browser/client closed the socket while we were writing the
             # response. This is expected for probes, tab closes, and SSE
             # reconnect races; do not convert it into a misleading server 500.
             return
-        except Exception as e:
+        except Exception:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
-            return j(self, {'error': 'Internal server error'}, status=500)
+            try:
+                j(self, {'error': 'Internal server error'}, status=500)
+            except _CLIENT_DISCONNECT_ERRORS:
+                # Client disconnected while we were sending the 500 — nothing to do.
+                pass
+            except Exception:
+                # Unexpected failure while sending the error response itself.
+                # Log it so we know something is wrong with our error handler.
+                traceback.print_exc()
         finally:
             clear_request_profile()
 

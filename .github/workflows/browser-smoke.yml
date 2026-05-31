@@ -1,0 +1,42 @@
+name: Browser smoke
+
+# Headless page-load smoke: boots the real server.py (agent-free) and loads the
+# key pages in Chromium, failing on any console error or uncaught JS exception.
+# This catches the runtime-JS brick class (const-reassign, function/window
+# collision) that `node --check`, ESLint, and the mocked pytest suite cannot
+# see — they only manifest when a real browser executes the page.
+#
+# No secrets, no credentials: the server boots agent-free and the smoke script
+# strips every *_API_KEY from the environment before launch.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+
+jobs:
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            **/requirements*.txt
+            **/pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install "pyyaml>=6.0" playwright
+          # Install only the Chromium browser + its system deps.
+          python -m playwright install --with-deps chromium
+
+      - name: Run browser smoke
+        run: python tests/browser_smoke.py

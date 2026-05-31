@@ -702,3 +702,33 @@ class TestHeadingLevelsH1ThroughH6:
         assert "<h4><strong>bold</strong> in h4</h4>" in out, (
             f"inline markdown inside h4 must still render: {out!r}"
         )
+
+
+class TestBareFileUrlMediaRendering:
+    """#3219/#3234: bare file:// artifact links render as media, but file://
+    inside fenced/inline code stays literal (the new pass runs AFTER code-stash)."""
+
+    def test_bare_file_url_becomes_media(self, driver_path):
+        out = _render(driver_path, "Here is the screenshot file:///tmp/shot.png done")
+        # Routed through /api/media as an inline image, not left as a raw path.
+        assert "api/media?path=" in out
+        assert "msg-media-img" in out or "<img" in out
+
+    def test_file_url_inside_fenced_code_stays_literal(self, driver_path):
+        out = _render(driver_path, "```\nfile:///tmp/shot.png\n```")
+        # Inside a code fence it must remain literal text, NOT become an <img>.
+        assert "file:///tmp/shot.png" in out
+        assert "<img" not in out
+        assert "api/media?path=" not in out
+
+    def test_file_url_inside_inline_code_stays_literal(self, driver_path):
+        out = _render(driver_path, "run `open file:///tmp/shot.png` now")
+        assert "file:///tmp/shot.png" in out
+        assert "<img" not in out
+        assert "api/media?path=" not in out
+
+    def test_markdown_anchor_file_link_uses_link_path_not_media(self, driver_path):
+        out = _render(driver_path, "[the file](file:///tmp/shot.png)")
+        # Labeled anchors keep the normal link path (routed to /api/media as a link,
+        # not auto-loaded as an <img>).
+        assert "<img" not in out

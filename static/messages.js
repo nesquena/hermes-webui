@@ -2834,7 +2834,7 @@ function _ensureClarifyCardDom() {
       <div class="clarify-question" id="clarifyQuestion"></div>
       <div class="clarify-choices" id="clarifyChoices"></div>
       <div class="clarify-response">
-        <input class="clarify-input" id="clarifyInput" type="text" data-i18n-placeholder="clarify_input_placeholder" placeholder="Type your response…">
+        <input class="clarify-input" id="clarifyInput" type="text" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" data-i18n-placeholder="clarify_input_placeholder" placeholder="Type your response…">
         <button class="clarify-submit" id="clarifySubmit" data-i18n="clarify_send">Send</button>
       </div>
       <div class="clarify-hint" id="clarifyHint" data-i18n="clarify_hint">Please choose one option, or type your own response below.</div>
@@ -3074,6 +3074,7 @@ function showClarifyCard(pending) {
     question,
     choices,
     sid: pending._session_id || (S.session && S.session.session_id) || null,
+    clarify_id: pending.clarify_id || null,
   });
   const card = _ensureClarifyCardDom();
   if (!card) return;
@@ -3137,6 +3138,7 @@ function showClarifyCard(pending) {
   if (input) {
     if (!sameClarify) input.value = '';
     input.disabled = false;
+    input.removeAttribute('readonly');
     input.onkeydown = (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
