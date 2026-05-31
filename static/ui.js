@@ -7018,6 +7018,51 @@ function toolIcon(name){
   return icons[name]||li('wrench');
 }
 
+function _toolArgPreviewValue(value){
+  if(value===null||value===undefined) return '';
+  if(Array.isArray(value)){
+    if(!value.length) return '[]';
+    if(value.length<=3&&value.every(v=>v===null||['string','number','boolean'].includes(typeof v))){
+      return value.map(v=>String(v)).join(', ');
+    }
+    return `${value.length} items`;
+  }
+  if(typeof value==='object') return 'object';
+  return String(value).replace(/\s+/g,' ').trim();
+}
+function _formatToolArgPreview(args){
+  if(!args||typeof args!=='object') return '';
+  const preferred=['path','file_path','target','pattern','query','url','urls','name','ref','command','action','mode','schedule','workdir'];
+  const hidden=new Set(['content','file_content','new_string','old_string','patch','text','message','prompt','code','script','cookies','headers','auth','api_key','password','token','secret']);
+  const keys=[];
+  for(const key of preferred){
+    if(Object.prototype.hasOwnProperty.call(args,key)&&!hidden.has(key)) keys.push(key);
+  }
+  for(const key of Object.keys(args)){
+    if(keys.length>=3) break;
+    if(keys.includes(key)||hidden.has(key)) continue;
+    keys.push(key);
+  }
+  const parts=[];
+  for(const key of keys){
+    const raw=_toolArgPreviewValue(args[key]);
+    if(!raw) continue;
+    const val=raw.length>96?`${raw.slice(0,93)}…`:raw;
+    parts.push(`${key}=${val}`);
+    if(parts.join(' · ').length>=150) break;
+  }
+  const out=parts.join(' · ');
+  return out.length>180?`${out.slice(0,177)}…`:out;
+}
+function _toolCardPreviewText(tc, displaySnippet){
+  const explicit=String(tc&&tc.preview||'').trim();
+  if(explicit) return explicit;
+  const argPreview=_formatToolArgPreview(tc&&tc.args);
+  if(argPreview) return argPreview;
+  if(tc&&tc.done===false) return 'Running';
+  if(tc&&tc.is_error) return 'Failed';
+  return 'Completed';
+}
 function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='tool-card-row';
@@ -7042,7 +7087,7 @@ function buildToolCard(tc){
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
   let displayName=_toolDisplayName(tc);
-  let previewText=tc.preview||displaySnippet||'';
+  let previewText=_toolCardPreviewText(tc, displaySnippet);
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
   row.innerHTML=`
     <div class="${cardClass}">
