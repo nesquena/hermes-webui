@@ -122,7 +122,7 @@ def _session_counts_toward_pin_quota(session) -> bool:
 # (mcp_server.py) can import it without duplicating the visibility model.
 # Re-exported here so existing `_profiles_match(...)` call sites in this
 # module keep resolving without per-call-site refactors.
-from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
+from api.profiles import _profiles_match, get_active_hermes_home  # noqa: F401, E402  (re-export)
 
 
 def _all_profiles_query_flag(parsed_url) -> bool:
@@ -4081,19 +4081,13 @@ def _handle_shutdown(handler) -> bool:
 def _handle_health_restart(handler) -> bool:
     """Restart the Hermes messaging gateway service."""
     # 1. Resolve HERMES_HOME for the active profile
-    from api.profiles import get_active_hermes_home
     active_home = get_active_hermes_home()
 
     # 2. Build the environment dictionary with the correct HERMES_HOME
-    import os
     env = os.environ.copy()
     env["HERMES_HOME"] = str(active_home)
 
     # 3. Resolve the path to the hermes CLI binary
-    import shutil
-    import sys
-    from pathlib import Path
-
     hermes_cmd = shutil.which("hermes")
     if not hermes_cmd:
         sys_exe = Path(sys.executable)
@@ -4104,7 +4098,6 @@ def _handle_health_restart(handler) -> bool:
             hermes_cmd = "hermes"
 
     # 4. Run the restart command
-    import subprocess
     logger.info("Restarting gateway service via CLI command: %s gateway restart (HERMES_HOME=%s)", hermes_cmd, active_home)
     try:
         res = subprocess.run(

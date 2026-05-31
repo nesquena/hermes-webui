@@ -5,7 +5,7 @@ from api import routes
 
 def test_handle_health_restart_success(monkeypatch):
     # Mock profiles home path
-    monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: "/mock/hermes/home")
+    monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
 
     # Mock shutil.which to find hermes CLI
     monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
@@ -38,7 +38,7 @@ def test_handle_health_restart_success(monkeypatch):
 
 def test_handle_health_restart_failure(monkeypatch):
     # Mock profiles home path
-    monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: "/mock/hermes/home")
+    monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
     monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
 
     # Mock subprocess.run failure
@@ -59,7 +59,7 @@ def test_handle_health_restart_failure(monkeypatch):
 
 def test_handle_health_restart_exception(monkeypatch):
     # Mock profiles home path
-    monkeypatch.setattr("api.profiles.get_active_hermes_home", lambda: "/mock/hermes/home")
+    monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
     monkeypatch.setattr("shutil.which", lambda cmd: None)
 
     # Mock subprocess.run raising exception
