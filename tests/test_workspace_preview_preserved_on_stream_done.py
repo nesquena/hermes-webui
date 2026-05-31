@@ -50,6 +50,9 @@ def test_load_dir_supports_preserve_preview_option():
     assert "if(!preservePreview&&typeofclearPreview" in block.replace(" ", ""), (
         "loadDir() should skip clearPreview() when preservePreview is requested"
     )
+    assert "awaitrefreshOpenPreviewIfMutated()" in block.replace(" ", ""), (
+        "Background refresh must reload the open preview when a mutation tool touched it"
+    )
 
 
 def test_load_dir_still_clears_preview_for_directory_navigation():
@@ -58,3 +61,25 @@ def test_load_dir_still_clears_preview_for_directory_navigation():
     assert "clearPreview({keepPanelOpen:true})" in block.replace(" ", ""), (
         "Directory navigation must still clear previews when preservePreview is not set"
     )
+
+
+def test_turn_mutation_tracking_reloads_open_preview():
+    block = _function_block(WORKSPACE_JS, "refreshOpenPreviewIfMutated")
+    assert "openFile(_previewCurrentPath" in block.replace(" ", ""), (
+        "Mutated open previews must reload through openFile()"
+    )
+    assert "_previewDirty" in block, "Reload must be skipped while the preview has unsaved edits"
+
+
+def test_tool_complete_tracks_workspace_mutations_for_preview_reload():
+    tool_complete_idx = MESSAGES_JS.find("source.addEventListener('tool_complete'")
+    assert tool_complete_idx != -1
+    end = MESSAGES_JS.find("source.addEventListener('approval'", tool_complete_idx)
+    block = MESSAGES_JS[tool_complete_idx:end]
+    assert "noteWorkspaceMutationsFromToolCall" in block
+    assert "refreshOpenPreviewIfMutated" in block
+
+
+def test_stream_start_resets_turn_mutation_tracking():
+    block = _function_block(MESSAGES_JS, "attachLiveStream")
+    assert "resetTurnWorkspaceMutations" in block

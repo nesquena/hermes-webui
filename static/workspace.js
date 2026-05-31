@@ -223,6 +223,37 @@ function _artifactCandidatesFromToolCall(tc){
   return out;
 }
 
+const _turnMutatedPreviewPaths = new Set();
+
+function resetTurnWorkspaceMutations(){
+  _turnMutatedPreviewPaths.clear();
+}
+
+function noteWorkspaceMutationsFromToolCall(tc){
+  for(const a of _artifactCandidatesFromToolCall(tc)){
+    const path=_normalizeArtifactPath(a.path);
+    if(path) _turnMutatedPreviewPaths.add(path);
+  }
+}
+
+function noteWorkspaceMutationsFromToolCalls(toolCalls){
+  if(!Array.isArray(toolCalls)) return;
+  for(const tc of toolCalls) noteWorkspaceMutationsFromToolCall(tc);
+}
+
+function _isOpenPreviewPathMutated(){
+  if(!_previewCurrentPath) return false;
+  const current=_normalizeArtifactPath(_previewCurrentPath);
+  return !!(current&&_turnMutatedPreviewPaths.has(current));
+}
+
+async function refreshOpenPreviewIfMutated(){
+  if(typeof _previewDirty!=='undefined'&&_previewDirty) return;
+  if(!_isOpenPreviewPathMutated()) return;
+  if(!_previewCurrentPath||!S.session) return;
+  await openFile(_previewCurrentPath, { bustCache: true });
+}
+
 function collectSessionArtifacts(){
   const items = [];
   const seen = new Set();
@@ -321,6 +352,8 @@ async function loadDir(path, opts={}){
       }else{
         clearPreview({keepPanelOpen:true});
       }
+    }else if(preservePreview){
+      await refreshOpenPreviewIfMutated();
     }
     // Fetch git info for workspace root (non-blocking)
     if(!path||path==='.') _refreshGitBadge();
@@ -489,9 +522,11 @@ function cancelEditMode(){
   updateEditBtn();
 }
 
-async function openFile(path){
+async function openFile(path, opts={}){
   if(!S.session)return;
   const ext=fileExt(path);
+  const bustCache=!!(opts&&opts.bustCache);
+  const cacheBust=bustCache?`&_=${Date.now()}`:'';
 
   // Binary/download-only formats: trigger browser download, don't preview
   if(DOWNLOAD_EXTS.has(ext)){
@@ -508,14 +543,14 @@ async function openFile(path){
   if(IMAGE_EXTS.has(ext)){
     // Image: load via raw endpoint, show as <img>
     showPreview('image');
-    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`;
+    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}${cacheBust}`;
     $('previewImg').alt=path;
     $('previewImg').src=url;
     $('previewImg').onerror=()=>setStatus(t('image_load_failed'));
   } else if(AUDIO_EXTS.has(ext)||VIDEO_EXTS.has(ext)){
     const mode=VIDEO_EXTS.has(ext)?'video':'audio';
     showPreview(mode);
-    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1`;
+    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1${cacheBust}`;
     const wrap=$('previewMediaWrap');
     if(wrap){
       wrap.innerHTML=(typeof _mediaPlayerHtml==='function')
@@ -525,7 +560,7 @@ async function openFile(path){
     }
   } else if(PDF_EXTS.has(ext)){
     showPreview('pdf');
-    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1`;
+    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1${cacheBust}`;
     const frame=$('previewPdfFrame');
     if(frame){
       frame.src=''; // clear first to avoid stale content
@@ -557,7 +592,7 @@ async function openFile(path){
     // or reading other origin data. If a stricter mode is needed, remove
     // allow-scripts (or add sandbox="") to disable all JS execution.
     showPreview('html');
-    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1`;
+    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1${cacheBust}`;
     const iframe=$('previewHtmlIframe');
     if(iframe){
       iframe.src=''; // clear first to avoid stale content

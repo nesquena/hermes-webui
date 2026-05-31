@@ -4,7 +4,7 @@
 ## [Unreleased]
 
 ### Fixed
-- Workspace file preview no longer closes when a chat response finishes and the UI refreshes the workspace file tree. Background `loadDir('.')` on stream `done` now preserves an open preview instead of always calling `clearPreview()` (which switched preview-only mode back to the directory listing).
+- Workspace file preview no longer closes when a chat response finishes and the UI refreshes the workspace file tree. Background `loadDir('.')` on stream `done` now preserves an open preview instead of always calling `clearPreview()`, and reloads the open file when a write/edit tool touched that path during the turn (skipping reload while the preview has unsaved local edits).
 
 ## [v0.51.185] — 2026-05-31 — Release FE (stage-batchE — clarify-card bug-fix batch: identical-prompt dedup + autofill guard + GBK startup crash)
 
