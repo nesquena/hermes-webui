@@ -1531,6 +1531,81 @@ def _github_repo_path_segment_is_safe(segment: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", text))
 
 
+def _github_branches_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or lowered[4] != "branches"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_branch_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    raw_name = row.get("name")
+    if not isinstance(raw_name, str):
+        return False
+    name = _safe_public_text(raw_name, limit=120)
+    if not name or _refresh_value_is_blocked(name):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,119}", name):
+        return False
+    commit = row.get("commit")
+    if not isinstance(commit, dict):
+        return False
+    raw_sha = commit.get("sha")
+    if not isinstance(raw_sha, str):
+        return False
+    sha = _safe_public_text(raw_sha, limit=80)
+    if not re.fullmatch(r"[A-Fa-f0-9]{40}", sha):
+        return False
+    if "protected" in row and not isinstance(row.get("protected"), bool):
+        return False
+    for raw_value in (raw_name, raw_sha):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_branches_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_branches_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_branch_row_is_safe(row) for row in payload)
+
+
+def _github_branches_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_branches_path_repo(origin_uri) or "repository"
+    parts = [f"GitHub repository branches for {repo}", f"branch count: {len(payload)}"]
+    for row in payload[:3]:
+        if not _github_branch_row_is_safe(row):
+            continue
+        name = _safe_public_text(row.get("name"), limit=120)
+        commit = row.get("commit") if isinstance(row.get("commit"), dict) else {}
+        sha = _safe_public_text(commit.get("sha"), limit=80)
+        branch_parts = [f"branch: {name}"]
+        if isinstance(row.get("protected"), bool):
+            branch_parts.append(f"protected: {str(row['protected']).lower()}")
+        if sha:
+            branch_parts.append(f"commit: {sha[:12]}")
+        parts.append("; ".join(branch_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_tags_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -1678,6 +1753,15 @@ def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
 
 
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
+    if _json_payload_is_github_branches_metadata(origin_uri, payload):
+        title = f"GitHub branches {(_github_branches_path_repo(origin_uri) or source_id)}"
+        summary = _github_branches_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_tags_metadata(origin_uri, payload):
         title = f"GitHub tags {(_github_tags_path_repo(origin_uri) or source_id)}"
         summary = _github_tags_refresh_summary(origin_uri, payload)
