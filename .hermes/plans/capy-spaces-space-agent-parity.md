@@ -38,6 +38,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub tag metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub tags API payloads (`/repos/{owner}/{repo}/tags`) produce metadata-only advisory summaries, including empty tag lists.
+  - The parser reconstructs summaries from bounded tag names, tag count, and commit SHA prefixes while omitting archive URLs, raw URLs, tag bodies, API-auth/query/fragment, prompt-injection, script, and secret-like fixture fields from receipts/search/vault output.
+  - JSON Feed bypass payloads, unsafe repo path segments, and malformed/unsafe tag rows anywhere in the payload fail closed without creating vault records.
+
 - `feat(capy-memory): ingest GitHub commit metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub commit API payloads (`/repos/{owner}/{repo}/commits/{sha}`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from the path-matched SHA prefix, first safe commit-message line, safe author/committer dates, parent count, changed-file count, and aggregate line stats while omitting emails, signatures, file paths, patches, raw URLs, API-auth/query/fragment, prompt-injection, raw message bodies, script, and secret-like fixture fields from receipts/search/vault output.

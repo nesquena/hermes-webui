@@ -1514,6 +1514,88 @@ def _github_commit_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> 
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _refresh_value_is_blocked(value: Any) -> bool:
+    if not isinstance(value, _PUBLIC_SCALAR_TYPES):
+        return False
+    text = str(value)
+    normalized = re.sub(r"[._/-]+", " ", text)
+    return bool(_REFRESH_BLOCKED_VALUE_RE.search(text) or _REFRESH_BLOCKED_VALUE_RE.search(normalized))
+
+
+def _github_repo_path_segment_is_safe(segment: str) -> bool:
+    text = _safe_public_text(segment, limit=120)
+    if not text or text != segment:
+        return False
+    if _refresh_value_is_blocked(text):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,119}", text))
+
+
+def _github_tags_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or lowered[4] != "tags"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_tag_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    name = _safe_public_text(row.get("name"), limit=120)
+    if not name or _refresh_value_is_blocked(name):
+        return False
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,119}", name):
+        return False
+    commit = row.get("commit")
+    if not isinstance(commit, dict):
+        return False
+    sha = _safe_public_text(commit.get("sha"), limit=80)
+    if not re.fullmatch(r"[A-Fa-f0-9]{40}", sha):
+        return False
+    for raw_value in (row.get("name"), commit.get("sha")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_tags_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_tags_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_tag_row_is_safe(row) for row in payload)
+
+
+def _github_tags_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_tags_path_repo(origin_uri) or "repository"
+    parts = [f"GitHub repository tags for {repo}", f"tag count: {len(payload)}"]
+    for row in payload[:5]:
+        if not _github_tag_row_is_safe(row):
+            continue
+        name = _safe_public_text(row.get("name"), limit=120)
+        commit = row.get("commit") if isinstance(row.get("commit"), dict) else {}
+        sha = _safe_public_text(commit.get("sha"), limit=80)
+        tag_parts = [f"tag: {name}"]
+        if sha:
+            tag_parts.append(f"commit: {sha[:12]}")
+        parts.append("; ".join(tag_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -1532,6 +1614,15 @@ def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
 
 
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
+    if _json_payload_is_github_tags_metadata(origin_uri, payload):
+        title = f"GitHub tags {(_github_tags_path_repo(origin_uri) or source_id)}"
+        summary = _github_tags_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if not isinstance(payload, dict):
         raise ValueError("refresh failed")
     title = _safe_public_text(payload.get("title") or payload.get("name") or payload.get("display_name"), limit=200)
