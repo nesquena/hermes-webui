@@ -42,10 +42,12 @@ def test_mcp_tool_prompt_mentions_required_parameters_and_missing_values():
 
 
 def test_mcp_tool_rows_have_use_and_pin_buttons_with_safe_js_args():
-    assert "function _mcpToolShortcutJsArg(value)" in PANELS_JS
-    assert "JSON.stringify(String(value||'')).replace(/</g,'\\\\u003c')" in PANELS_JS
-    assert "onclick=\"insertMcpToolShortcut(${_mcpToolShortcutJsArg(toolKey)})\"" in PANELS_JS
-    assert "onclick=\"toggleMcpToolShortcut(${_mcpToolShortcutJsArg(toolKey)})\"" in PANELS_JS
+    assert "function _mcpToolShortcutHtmlJsArg(value)" in PANELS_JS
+    assert ".replace(/&/g,'&amp;')" in PANELS_JS
+    assert ".replace(/\"/g,'&quot;')" in PANELS_JS
+    assert "onclick=\"insertMcpToolShortcut(${_mcpToolShortcutHtmlJsArg(toolKey)})\"" in PANELS_JS
+    assert "onclick=\"toggleMcpToolShortcut(${_mcpToolShortcutHtmlJsArg(toolKey)})\"" in PANELS_JS
+    assert "onclick=\"insertMcpToolShortcut(${_mcpToolShortcutHtmlJsArg(key)})\"" in PANELS_JS
     assert "aria-pressed=\"${pinned?'true':'false'}\"" in PANELS_JS
 
 

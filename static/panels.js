@@ -7739,8 +7739,11 @@ function _mcpToolSchemaText(schemaSummary){
 function _mcpToolShortcutKey(tool){
   return `${String(tool&&tool.server||'unknown')}::${String(tool&&tool.name||'')}`;
 }
-function _mcpToolShortcutJsArg(value){
-  return JSON.stringify(String(value||'')).replace(/</g,'\\u003c');
+function _mcpToolShortcutHtmlJsArg(value){
+  return JSON.stringify(String(value||''))
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'\\u003c')
+    .replace(/"/g,'&quot;');
 }
 function _loadMcpToolShortcutKeys(){
   try{
@@ -7793,8 +7796,8 @@ function _renderMcpToolShortcuts(tools){
     return;
   }
   mount.innerHTML=`<div class="mcp-tool-shortcuts-label">${esc(t('mcp_tool_shortcuts_label'))}</div><div class="mcp-tool-shortcuts-list">${pinned.map(tool=>{
-    const key=esc(_mcpToolShortcutKey(tool));
-    return `<button type="button" class="mcp-tool-shortcut-chip" onclick="insertMcpToolShortcut(${_mcpToolShortcutJsArg(_mcpToolShortcutKey(tool))})" title="${esc(t('mcp_tool_shortcut_insert_title',tool.name))}">${esc(tool.name)}<span>${esc(tool.server||'unknown')}</span></button>`;
+    const key=_mcpToolShortcutKey(tool);
+    return `<button type="button" class="mcp-tool-shortcut-chip" onclick="insertMcpToolShortcut(${_mcpToolShortcutHtmlJsArg(key)})" title="${esc(t('mcp_tool_shortcut_insert_title',tool.name))}">${esc(tool.name)}<span>${esc(tool.server||'unknown')}</span></button>`;
   }).join('')}</div>`;
 }
 function _mcpToolsSummary(total, filtered, page, pages, query){
@@ -7859,8 +7862,8 @@ function _renderMcpTools(tools, query){
         <span class="mcp-tool-name">${esc(tool.name)}</span>
         <span class="mcp-tool-server">${esc(tool.server||'unknown')}</span>
         ${statusBadge}
-        <button type="button" class="mcp-tool-action-btn" onclick="insertMcpToolShortcut(${_mcpToolShortcutJsArg(toolKey)})">${esc(t('mcp_tool_shortcut_use'))}</button>
-        <button type="button" class="mcp-tool-action-btn" aria-pressed="${pinned?'true':'false'}" onclick="toggleMcpToolShortcut(${_mcpToolShortcutJsArg(toolKey)})">${esc(actionLabel)}</button>
+        <button type="button" class="mcp-tool-action-btn" onclick="insertMcpToolShortcut(${_mcpToolShortcutHtmlJsArg(toolKey)})">${esc(t('mcp_tool_shortcut_use'))}</button>
+        <button type="button" class="mcp-tool-action-btn" aria-pressed="${pinned?'true':'false'}" onclick="toggleMcpToolShortcut(${_mcpToolShortcutHtmlJsArg(toolKey)})">${esc(actionLabel)}</button>
       </div>
       <div class="mcp-server-detail">${esc(tool.description||'')}</div>
       <pre class="mcp-tool-schema">${esc(schemaText)}</pre>
