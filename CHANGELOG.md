@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Skills detail view now renders `SKILL.md` markdown with the same `.preview-md` typography used by Memory and Notes, instead of unstyled `renderMd()` output. Linked markdown skill files use the same wrapper and post-render code/KaTeX enhancement.
+
 ## [v0.51.190] — 2026-05-31 — Release FJ (stage-batch2 — Windows upgrade state-stranding hotfix + gateway banner + quiet tool previews)
 
 ### Fixed
