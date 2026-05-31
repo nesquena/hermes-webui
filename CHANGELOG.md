@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Render generated local image artifacts as compact chat cards with preview, filename, Open, and Download actions while continuing to serve the files through the authenticated `/api/media` route.
+
 ## [v0.51.180] — 2026-05-30 — Release EZ (stage-batch62 — session/agent cache ownership hardening)
 
 ### Fixed

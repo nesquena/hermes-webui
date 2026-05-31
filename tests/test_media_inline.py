@@ -49,6 +49,13 @@ class TestMediaRenderMdStash(unittest.TestCase):
         self.assertIn("msg-media-link", UI_JS,
                       "restore pass must produce download link for non-image files")
 
+    def test_local_image_media_uses_artifact_card(self):
+        self.assertIn("localArtifactCard", UI_JS)
+        self.assertIn("msg-artifact-card msg-artifact-card--image", UI_JS)
+        self.assertIn("msg-artifact-actions", UI_JS)
+        self.assertIn("Download</a>", UI_JS)
+        self.assertIn("Open</a>", UI_JS)
+
     def test_media_api_url_pattern(self):
         self.assertIn("api/media?path=", UI_JS,
                       "renderMd must build api/media?path=... URL for local files")
@@ -115,8 +122,21 @@ class TestMediaCSS(unittest.TestCase):
                       "Full-size toggle class must exist for zoom-on-click")
 
     def test_msg_media_link_class_defined(self):
-        self.assertIn(".msg-media-link", self.CSS,
-                      "Download link style must be defined for non-image media")
+        self.assertIn(
+            ".msg-media-link",
+            self.CSS,
+            "Download link style must be defined for non-image media",
+        )
+
+    def test_generated_artifact_card_css_defined(self):
+        for cls in [
+            ".msg-artifact-card",
+            ".msg-artifact-meta",
+            ".msg-artifact-title",
+            ".msg-artifact-actions",
+            ".msg-artifact-action",
+        ]:
+            self.assertIn(cls, self.CSS)
 
 
 

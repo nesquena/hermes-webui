@@ -3468,6 +3468,13 @@ function renderMd(raw){
         : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
       return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span></div></div>`;
     };
+    const localArtifactCard=(src,name)=>{
+      const safeSrc=esc(src);
+      const safeName=esc(name||'image');
+      const openUrl=src+(String(src).includes('?')?'&':'?')+'inline=1';
+      const downloadUrl=src+(String(src).includes('?')?'&':'?')+'download=1';
+      return `<span class="msg-artifact-card msg-artifact-card--image"><img class="msg-media-img" src="${safeSrc}" alt="${safeName}" loading="lazy"><span class="msg-artifact-meta"><span class="msg-artifact-title">${safeName}</span><span class="msg-artifact-actions"><a class="msg-artifact-action" href="${esc(openUrl)}" target="_blank" rel="noopener">Open</a><a class="msg-artifact-action" href="${esc(downloadUrl)}" download="${safeName}">Download</a></span></span></span>`;
+    };
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){
       // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
@@ -3500,7 +3507,7 @@ function renderMd(raw){
     const apiUrl='api/media?path='+encodeURIComponent(ref)+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
     const localKind=mediaKindForName(ref);
     if(localKind==='image'){
-      return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
+      return localArtifactCard(apiUrl,ref.split('/').pop()||'image');
     }
     // SVG → inline image (no download, render directly)
     if(_SVG_EXTS.test(ref)){
