@@ -181,13 +181,13 @@ self.addEventListener('notificationclick', (event) => {
     self.clients.matchAll({type: 'window', includeUncontrolled: true}).then((clientList) => {
       const targetClient = clientList.find((client) => client.url === targetUrl && 'focus' in client);
       if (targetClient) return targetClient.focus();
+      if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
       const focusableClient = clientList.find((client) => 'focus' in client);
       if (focusableClient && 'navigate' in focusableClient) {
         return focusableClient.navigate(targetUrl)
           .then((client) => (client && 'focus' in client ? client.focus() : focusableClient.focus()))
           .catch(() => focusableClient.focus());
       }
-      if (self.clients.openWindow) return self.clients.openWindow(targetUrl);
     })
   );
 });

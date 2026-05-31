@@ -30,14 +30,17 @@ def test_notification_payload_uses_completion_session_when_provided():
     assert "sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid})" in MESSAGES_JS
 
 
-def test_service_worker_handles_notification_clicks():
+def test_service_worker_handles_notification_clicks_without_hijacking_other_sessions():
     assert "notificationclick" in SW_JS
     assert "event.notification.close()" in SW_JS
     assert "clients.matchAll" in SW_JS
     assert "clients.openWindow" in SW_JS
     assert "client.url === targetUrl" in SW_JS
     assert "targetClient.focus()" in SW_JS
-    assert "focusableClient.navigate(targetUrl)" in SW_JS
+    exact_idx = SW_JS.index("targetClient.focus()")
+    open_idx = SW_JS.index("self.clients.openWindow(targetUrl)")
+    navigate_idx = SW_JS.index("focusableClient.navigate(targetUrl)")
+    assert exact_idx < open_idx < navigate_idx
 
 
 def test_settings_expose_permission_and_test_controls():
