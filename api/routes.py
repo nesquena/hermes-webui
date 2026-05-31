@@ -4310,6 +4310,11 @@ def handle_get(handler, parsed) -> bool:
         from api.platforms import feishu
         return j(handler, feishu.get_config())
 
+    # ── Platforms: WeCom (企业微信 / WeChat Work) config (GET) ──
+    if parsed.path == "/api/platforms/wecom":
+        from api.platforms import wecom
+        return j(handler, wecom.get_config())
+
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
@@ -5625,6 +5630,25 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(exc), status=400)
         if body.get("restart") is True:
             result = {**result, "restart": feishu.restart_gateway()}
+        return j(handler, result)
+
+    # ── Platforms: WeCom (企业微信 / WeChat Work) credential probe ──
+    if parsed.path == "/api/platforms/wecom/validate":
+        from api.platforms import wecom
+        # Secrets may be the masked sentinel when re-validating saved creds; the
+        # route stays thin and passes the body straight to validate() (the basic
+        # check simply fails for a sentinel, returning {ok: False, ...}).
+        return j(handler, wecom.validate(body))
+
+    # ── Platforms: WeCom (企业微信 / WeChat Work) config save (+ optional restart) ──
+    if parsed.path == "/api/platforms/wecom":
+        from api.platforms import wecom
+        try:
+            result = wecom.save(body)
+        except wecom.WecomConfigError as exc:  # ValueError subclass
+            return bad(handler, str(exc), status=400)
+        if body.get("restart") is True:
+            result = {**result, "restart": wecom.restart_gateway()}
         return j(handler, result)
 
     if parsed.path == "/api/reasoning":

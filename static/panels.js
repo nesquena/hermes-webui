@@ -6455,6 +6455,8 @@ async function loadProvidersPanel(){
 // ── Messaging platforms (Feishu / Lark) ──────────────────────────────────────
 // Matches the backend sentinel in api/platforms/feishu.py (MASKED_SENTINEL).
 const FEISHU_MASKED_SECRET='__FEISHU_SECRET_SET__';
+// Matches the backend sentinel in api/platforms/wecom.py (MASKED_SENTINEL).
+const WECOM_MASKED_SECRET='__WECOM_SECRET_SET__';
 
 async function loadMessagingPanel(){
   const list=$('messagingPlatformsList');
@@ -6465,9 +6467,13 @@ async function loadMessagingPanel(){
   loading.textContent=t('messaging_loading');
   list.appendChild(loading);
   try{
-    const cfg=await api('/api/platforms/feishu');
+    const [feishuCfg,wecomCfg]=await Promise.all([
+      api('/api/platforms/feishu'),
+      api('/api/platforms/wecom'),
+    ]);
     list.innerHTML='';
-    list.appendChild(_buildFeishuCard(cfg||{}));
+    list.appendChild(_buildFeishuCard(feishuCfg||{}));
+    list.appendChild(_buildWecomCard(wecomCfg||{}));
   }catch(e){
     list.innerHTML='';
     const err=document.createElement('div');
@@ -6753,6 +6759,260 @@ function _buildFeishuCard(cfg){
       statusLine.style.color='var(--error)';
       statusLine.textContent=t('feishu_save_failed',msg);
       showToast(t('feishu_save_failed',msg));
+      saveBtn.disabled=false;
+      validateBtn.disabled=false;
+    }
+  };
+
+  btnRow.appendChild(validateBtn);
+  btnRow.appendChild(saveBtn);
+  body.appendChild(btnRow);
+
+  card.appendChild(body);
+  if(configured) card.classList.add('open');
+  header.addEventListener('click',e=>{
+    if(e.target.closest('.provider-card-body')) return;
+    card.classList.toggle('open');
+  });
+  return card;
+}
+
+function _buildWecomCard(cfg){
+  const card=document.createElement('div');
+  card.className='provider-card';
+  card.dataset.platform='wecom';
+
+  const configured=cfg.configured===true;
+
+  // ── Header with status chip ──
+  const header=document.createElement('button');
+  header.type='button';
+  header.className='provider-card-header';
+  const info=document.createElement('div');
+  info.className='provider-card-info';
+  const name=document.createElement('div');
+  name.className='provider-card-name';
+  name.textContent=t('wecom_card_name');
+  const meta=document.createElement('div');
+  meta.className='provider-card-meta';
+  meta.textContent=t('wecom_card_meta');
+  info.appendChild(name);
+  info.appendChild(meta);
+  header.appendChild(info);
+  const badge=document.createElement('span');
+  badge.className='provider-card-badge'+(configured?'':' messaging-platform-badge-off');
+  badge.textContent=configured?t('messaging_status_configured'):t('messaging_status_not_configured');
+  header.appendChild(badge);
+  const chevron=document.createElement('span');
+  chevron.innerHTML='<svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>';
+  header.appendChild(chevron.firstChild);
+  card.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='provider-card-body';
+
+  // ── Mode switch (WebSocket bot vs. callback self-built app) ──
+  const initialMode=(cfg.mode==='wecom_callback')?'wecom_callback':'wecom';
+  const mode=_feishuSelect('wecom_mode',initialMode,[
+    {value:'wecom',labelKey:'wecom_mode_websocket'},
+    {value:'wecom_callback',labelKey:'wecom_mode_callback'},
+  ]);
+  body.appendChild(mode.field);
+
+  // ── Mode A: WebSocket smart bot ──
+  const wsGroup=document.createElement('div');
+  wsGroup.className='messaging-platform-reveal';
+  const botId=_feishuField('wecom_bot_id',cfg.bot_id||'',{placeholder:'bot_xxxxxxxx'});
+  const secretSet=cfg.secret_set===true;
+  const secret=_feishuField('wecom_secret','',{
+    type:'password',
+    placeholder:secretSet?t('wecom_secret_configured'):'',
+  });
+  const wsUrl=_feishuField('wecom_websocket_url',cfg.websocket_url||'',{placeholder:'wss://openws.work.weixin.qq.com'});
+  const dmPolicy=_feishuSelect('wecom_dm_policy',cfg.dm_policy||'open',[
+    {value:'open',labelKey:'wecom_dm_policy_open'},
+    {value:'allowlist',labelKey:'wecom_dm_policy_allowlist'},
+    {value:'disabled',labelKey:'wecom_dm_policy_disabled'},
+    {value:'pairing',labelKey:'wecom_dm_policy_pairing'},
+  ]);
+  const allowedUsers=_feishuField('wecom_allowed_users',cfg.allowed_users||'',{placeholder:t('wecom_allowed_users_placeholder')});
+  const groupPolicy=_feishuSelect('wecom_group_policy',cfg.group_policy||'open',[
+    {value:'open',labelKey:'wecom_group_policy_open'},
+    {value:'allowlist',labelKey:'wecom_group_policy_allowlist'},
+    {value:'disabled',labelKey:'wecom_group_policy_disabled'},
+  ]);
+  const homeChannel=_feishuField('wecom_home_channel',cfg.home_channel||'',{placeholder:t('wecom_home_channel_placeholder')});
+  wsGroup.appendChild(botId.field);
+  wsGroup.appendChild(secret.field);
+  wsGroup.appendChild(wsUrl.field);
+  wsGroup.appendChild(dmPolicy.field);
+  wsGroup.appendChild(allowedUsers.field);
+  wsGroup.appendChild(groupPolicy.field);
+  wsGroup.appendChild(homeChannel.field);
+  body.appendChild(wsGroup);
+
+  // ── Mode B: callback self-built app ──
+  const cbGroup=document.createElement('div');
+  cbGroup.className='messaging-platform-reveal';
+  const corpId=_feishuField('wecom_callback_corp_id',cfg.callback_corp_id||'',{placeholder:'ww_xxxxxxxx'});
+  const corpSecretSet=cfg.callback_corp_secret_set===true;
+  const corpSecret=_feishuField('wecom_callback_corp_secret','',{
+    type:'password',
+    placeholder:corpSecretSet?t('wecom_secret_configured'):'',
+  });
+  const agentId=_feishuField('wecom_callback_agent_id',cfg.callback_agent_id||'',{placeholder:'1000002'});
+  const cbTokenSet=cfg.callback_token_set===true;
+  const cbToken=_feishuField('wecom_callback_token','',{
+    type:'password',
+    placeholder:cbTokenSet?t('wecom_secret_configured'):'',
+  });
+  const aesSet=cfg.callback_encoding_aes_key_set===true;
+  const aesKey=_feishuField('wecom_callback_encoding_aes_key','',{
+    type:'password',
+    placeholder:aesSet?t('wecom_secret_configured'):'',
+  });
+  const cbHost=_feishuField('wecom_callback_host',cfg.callback_host||'',{placeholder:'0.0.0.0'});
+  const cbPort=_feishuField('wecom_callback_port',cfg.callback_port||'',{placeholder:'8645'});
+  cbGroup.appendChild(corpId.field);
+  cbGroup.appendChild(corpSecret.field);
+  cbGroup.appendChild(agentId.field);
+  cbGroup.appendChild(cbToken.field);
+  cbGroup.appendChild(aesKey.field);
+  cbGroup.appendChild(cbHost.field);
+  cbGroup.appendChild(cbPort.field);
+  body.appendChild(cbGroup);
+
+  const syncReveal=()=>{
+    const m=mode.select.value;
+    wsGroup.style.display=m==='wecom'?'block':'none';
+    cbGroup.style.display=m==='wecom_callback'?'block':'none';
+  };
+  syncReveal();
+  mode.select.addEventListener('change',syncReveal);
+
+  // ── Restart-after-save toggle ──
+  const restartToggle=_feishuCheckbox('wecom_restart_after_save',true);
+  body.appendChild(restartToggle.row);
+
+  // ── Status / result line ──
+  const statusLine=document.createElement('div');
+  statusLine.className='messaging-platform-status';
+  statusLine.style.cssText='font-size:12px;margin-top:10px;min-height:16px;color:var(--muted)';
+  body.appendChild(statusLine);
+
+  // Resolve the value to send for a secret field honoring the masked rule.
+  const secretValue=(input,isSet)=>{
+    const v=input.value;
+    if(v) return v;
+    return isSet?WECOM_MASKED_SECRET:'';
+  };
+
+  // Build the request payload for the active mode.
+  const buildPayload=()=>{
+    const m=mode.select.value;
+    if(m==='wecom_callback'){
+      return {
+        mode:'wecom_callback',
+        callback_corp_id:corpId.input.value.trim(),
+        callback_corp_secret:secretValue(corpSecret.input,corpSecretSet),
+        callback_agent_id:agentId.input.value.trim(),
+        callback_token:secretValue(cbToken.input,cbTokenSet),
+        callback_encoding_aes_key:secretValue(aesKey.input,aesSet),
+        callback_host:cbHost.input.value.trim(),
+        callback_port:cbPort.input.value.trim(),
+      };
+    }
+    return {
+      mode:'wecom',
+      bot_id:botId.input.value.trim(),
+      secret:secretValue(secret.input,secretSet),
+      websocket_url:wsUrl.input.value.trim(),
+      dm_policy:dmPolicy.select.value,
+      allowed_users:allowedUsers.input.value.trim(),
+      group_policy:groupPolicy.select.value,
+      home_channel:homeChannel.input.value.trim(),
+    };
+  };
+
+  // ── Buttons ──
+  const btnRow=document.createElement('div');
+  btnRow.className='provider-card-row';
+  btnRow.style.marginTop='12px';
+
+  const validateBtn=document.createElement('button');
+  validateBtn.type='button';
+  validateBtn.className='provider-card-btn provider-card-btn-ghost';
+  validateBtn.textContent=t('wecom_btn_validate');
+  validateBtn.onclick=async()=>{
+    const m=mode.select.value;
+    const needId=m==='wecom_callback'?corpId.input.value.trim():botId.input.value.trim();
+    if(!needId){
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('wecom_validate_need_id');
+      return;
+    }
+    validateBtn.disabled=true;
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('wecom_validating');
+    try{
+      const res=await api('/api/platforms/wecom/validate',{method:'POST',body:JSON.stringify(buildPayload())});
+      if(res&&res.ok){
+        statusLine.style.color='var(--success,#16a34a)';
+        statusLine.textContent=t('wecom_validate_ok');
+        showToast(t('wecom_validate_ok'));
+      }else{
+        const msg=(res&&res.error)||t('wecom_validate_failed_generic');
+        statusLine.style.color='var(--error)';
+        statusLine.textContent=t('wecom_validate_failed',msg);
+        showToast(t('wecom_validate_failed',msg));
+      }
+    }catch(e){
+      const msg=e&&e.message?e.message:String(e);
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('wecom_validate_failed',msg);
+      showToast(t('wecom_validate_failed',msg));
+    }finally{
+      validateBtn.disabled=false;
+    }
+  };
+
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='provider-card-btn provider-card-btn-primary';
+  saveBtn.textContent=t('wecom_btn_save');
+  saveBtn.onclick=async()=>{
+    saveBtn.disabled=true;
+    validateBtn.disabled=true;
+    const wantRestart=restartToggle.input.checked;
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('wecom_saving');
+    const payload={...buildPayload(),restart:wantRestart};
+    try{
+      const res=await api('/api/platforms/wecom',{method:'POST',body:JSON.stringify(payload)});
+      if(res&&res.saved){
+        statusLine.style.color='var(--success,#16a34a)';
+        statusLine.textContent=t('wecom_saved');
+        showToast(t('wecom_saved'));
+        if(res.restart){
+          const ok=res.restart.ok===true;
+          const detail=res.restart.detail||'';
+          showToast(ok?t('wecom_restart_ok',detail):t('wecom_restart_failed',detail));
+        }
+        // Reload so masked placeholders and the status chip reflect saved state.
+        await loadMessagingPanel();
+      }else{
+        const msg=(res&&res.error)||t('wecom_save_failed_generic');
+        statusLine.style.color='var(--error)';
+        statusLine.textContent=t('wecom_save_failed',msg);
+        showToast(t('wecom_save_failed',msg));
+        saveBtn.disabled=false;
+        validateBtn.disabled=false;
+      }
+    }catch(e){
+      const msg=e&&e.message?e.message:String(e);
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('wecom_save_failed',msg);
+      showToast(t('wecom_save_failed',msg));
       saveBtn.disabled=false;
       validateBtn.disabled=false;
     }
