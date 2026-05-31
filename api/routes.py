@@ -40,6 +40,26 @@ from api.session_events import (
 
 logger = logging.getLogger(__name__)
 
+
+def _webui_asset_version_token() -> str:
+    """Version token for frontend asset URLs and the service-worker cache.
+
+    WEBUI_VERSION changes on releases, but local hotfixes can edit static/*.js or
+    static/*.css without changing the package version. Include selected static
+    mtimes so mobile/PWA caches fetch the new shell after local frontend edits.
+    """
+    from api.updates import WEBUI_VERSION
+    static_root = Path(__file__).parent.parent / "static"
+    names = ("style.css", "ui.js", "messages.js", "boot.js", "sw.js")
+    latest = 0
+    for name in names:
+        try:
+            latest = max(latest, (static_root / name).stat().st_mtime_ns)
+        except OSError:
+            continue
+    suffix = format(latest, "x") if latest else "0"
+    return f"{WEBUI_VERSION}-{suffix}"
+
 # ── Cron run tracking ────────────────────────────────────────────────────────
 # Track job IDs currently being executed so the frontend can poll status.
 _RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
@@ -4122,8 +4142,7 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/"):
         try:
             from urllib.parse import quote
-            from api.updates import WEBUI_VERSION
-            version_token = quote(WEBUI_VERSION, safe="")
+            version_token = quote(_webui_asset_version_token(), safe="")
             from api.extensions import inject_extension_tags
 
             csrf_token = ""
@@ -4159,8 +4178,7 @@ def handle_get(handler, parsed) -> bool:
             _resolve_login_locale_key(_lang)
         ]
         from urllib.parse import quote
-        from api.updates import WEBUI_VERSION
-        version_token = quote(WEBUI_VERSION, safe="")
+        version_token = quote(_webui_asset_version_token(), safe="")
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
             .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
@@ -4211,8 +4229,7 @@ def handle_get(handler, parsed) -> bool:
             # Inject the current git-derived version as the cache name so the
             # service worker cache busts automatically on every new deploy.
             from urllib.parse import quote
-            from api.updates import WEBUI_VERSION
-            version_token = quote(WEBUI_VERSION, safe="")
+            version_token = quote(_webui_asset_version_token(), safe="")
             text = sw_path.read_text(encoding="utf-8").replace(
                 "__WEBUI_VERSION__", version_token
             )

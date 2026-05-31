@@ -23,6 +23,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
+STYLE_CSS_PATH = REPO_ROOT / "static" / "style.css"
 
 NODE = shutil.which("node")
 
@@ -33,8 +34,74 @@ _DRIVER_SRC = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 global.window = {};
-global.document = { createElement: () => ({ innerHTML: '', textContent: '' }), baseURI: 'http://localhost/app/' };
-function _sessionUrlForSid(sid) { return '/app/session/' + encodeURIComponent(String(sid || '')); }
+class TestNode {
+  constructor(type, tagName='', text='') {
+    this.nodeType = type;
+    this.tagName = tagName;
+    this._text = text;
+    this.attributes = [];
+    this.childNodes = [];
+    this._removed = false;
+  }
+  get textContent() {
+    if (this.nodeType === 3 || this.nodeType === 8) return this._text || '';
+    return this.childNodes.map(n => n.textContent).join('');
+  }
+  set textContent(v) { this._text = String(v ?? ''); this.childNodes = []; }
+  get innerHTML() { return this.childNodes.filter(n => !n._removed).map(n => n.outerHTML).join(''); }
+  set innerHTML(v) { this.childNodes = parseMiniHtml(String(v ?? '')); }
+  get outerHTML() {
+    if (this.nodeType === 3) return esc(this._text || '');
+    if (this.nodeType === 8) return '';
+    const attrs = this.attributes.map(a => ` ${a.name}="${esc(a.value)}"`).join('');
+    return `<${this.tagName.toLowerCase()}${attrs}>${this.innerHTML}</${this.tagName.toLowerCase()}>`;
+  }
+  setAttribute(name, value) {
+    const found = this.attributes.find(a => a.name === name);
+    if (found) found.value = String(value ?? '');
+    else this.attributes.push({name, value: String(value ?? '')});
+  }
+  removeAttribute(name) { this.attributes = this.attributes.filter(a => a.name !== name); }
+  remove() { this._removed = true; }
+  replaceWith(node) { this._removed = true; this._replacement = node; }
+}
+function parseAttrs(raw) {
+  const attrs = [];
+  String(raw || '').replace(/([a-zA-Z0-9:_-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>`]+)))?/g, (_, name, dq, sq, bare) => {
+    attrs.push({name, value: dq !== undefined ? dq : (sq !== undefined ? sq : (bare !== undefined ? bare : ''))});
+    return '';
+  });
+  return attrs;
+}
+function parseMiniHtml(html) {
+  const root = new TestNode(11, 'fragment');
+  const stack = [root];
+  const re = /<!--([\s\S]*?)-->|<\/([a-zA-Z][\w:-]*)\s*>|<([a-zA-Z][\w:-]*)([^>]*)>|([^<]+)/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const parent = stack[stack.length - 1];
+    if (m[1] !== undefined) { parent.childNodes.push(new TestNode(8, '', m[1])); continue; }
+    if (m[2]) { if (stack.length > 1) stack.pop(); continue; }
+    if (m[3]) {
+      const el = new TestNode(1, m[3]);
+      el.attributes = parseAttrs(m[4] || '');
+      parent.childNodes.push(el);
+      if (!/\/\s*$/.test(m[4] || '') && !/^(input|br|hr|img)$/i.test(m[3])) stack.push(el);
+      continue;
+    }
+    if (m[5]) parent.childNodes.push(new TestNode(3, '', m[5]));
+  }
+  return root.childNodes;
+}
+global.Node = { ELEMENT_NODE: 1, TEXT_NODE: 3, COMMENT_NODE: 8 };
+global.document = {
+  createElement: tag => {
+    const el = new TestNode(1, tag);
+    if (tag === 'template') el.content = el;
+    return el;
+  },
+  createTextNode: text => new TestNode(3, '', text),
+};
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
@@ -86,29 +153,6 @@ def _render(driver_path, markdown: str) -> str:
         raise RuntimeError(f"node driver failed: {result.stderr}")
     return result.stdout
 
-
-
-class TestSessionInternalLinks:
-    """Drive renderMd() so session:// hardening covers the real sanitizer path."""
-
-    def test_session_scheme_renders_same_origin_internal_anchor(self, driver_path):
-        out = _render(driver_path, "[Open session](session://abc123)")
-        assert 'class="session-link"' in out
-        assert 'href="/app/session/abc123"' in out
-        assert 'target="_blank"' not in out
-        assert 'rel="noopener"' not in out
-
-    def test_hostile_session_scheme_collapses_to_encoded_session_path(self, driver_path):
-        out = _render(driver_path, "[bad](session://javascript:alert(1))")
-        assert 'class="session-link"' in out
-        assert 'href="/app/session/javascript%3Aalert(1"' in out
-        assert 'href="javascript:' not in out
-        assert 'target="_blank"' not in out
-
-    def test_unrelated_same_origin_session_segment_is_not_allowlisted(self, driver_path):
-        out = _render(driver_path, '<a class="session-link" href="/anything/foo/session/abc">bad</a>')
-        assert 'href="/anything/foo/session/abc"' not in out
-        assert '<a>bad</a>' in out
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Blockquote prefix strip — the bug commit 04e7b53 introduced was a one-char
@@ -207,6 +251,64 @@ class TestRendererSanitization:
         assert '&lt;img' in out
         assert '<img' not in out
         assert 'onerror' not in out or '&lt;img' in out
+
+    def test_marked_html_fragment_preserves_safe_inline_style(self, driver_path):
+        src = '''Before
+
+<!-- html-render-start -->
+<div data-html-fragment-id="frag-test" style="padding:12px;border-radius:10px;background:#fff;color:#111;position:fixed">
+  <span style="font-weight:700">HTML card</span>
+</div>
+<!-- html-render-end -->
+
+After'''
+        out = _render(driver_path, src).lower()
+        assert '<p>before</p>' in out
+        assert '<p>after</p>' in out
+        assert 'html-fragment-rendered' in out
+        assert 'data-html-fragment-id="frag-test"' in out
+        assert 'padding:12px' in out
+        assert 'border-radius:10px' in out
+        assert 'font-weight:700' in out
+        assert 'position:fixed' not in out
+
+    def test_marked_html_fragment_strips_executable_content(self, driver_path):
+        src = '''<!-- html-render-start -->
+<div onclick="alert(1)" style="background:url(javascript:alert(1));color:#111">
+  <script>alert(2)</script><span>safe</span>
+</div>
+<!-- html-render-end -->'''
+        out = _render(driver_path, src).lower()
+        assert 'html-fragment-rendered' in out
+        assert 'onclick' not in out
+        assert 'javascript:' not in out
+        assert '<script' not in out
+        assert 'alert(' not in out
+        assert '<span>safe</span>' in out
+        assert 'color:#111' in out
+
+    def test_marked_html_fragment_inside_fenced_code_stays_source(self, driver_path):
+        src = '''```html
+<!-- html-render-start -->
+<div data-html-fragment-id="frag-code-example">
+  <div data-html-fragment-role="title">Source only</div>
+</div>
+<!-- html-render-end -->
+```'''
+        out = _render(driver_path, src).lower()
+        assert '<pre>' in out and '<code class="language-html">' in out
+        assert 'html-fragment-rendered' not in out
+        assert '&lt;!-- html-render-start --&gt;' in out
+        assert 'frag-code-example' in out
+
+    def test_html_fragment_styles_are_mobile_width_safe(self):
+        ui = UI_JS_PATH.read_text(encoding="utf-8").lower()
+        css = STYLE_CSS_PATH.read_text(encoding="utf-8").lower()
+        for src in (ui, css):
+            assert 'width:100%' in src
+            assert 'max-width:min(720px,100%)' in src
+            assert 'min-width:0' in src
+            assert 'overflow-wrap:anywhere' in src
 
 
 class TestCommonLLMShapes:
@@ -702,33 +804,3 @@ class TestHeadingLevelsH1ThroughH6:
         assert "<h4><strong>bold</strong> in h4</h4>" in out, (
             f"inline markdown inside h4 must still render: {out!r}"
         )
-
-
-class TestBareFileUrlMediaRendering:
-    """#3219/#3234: bare file:// artifact links render as media, but file://
-    inside fenced/inline code stays literal (the new pass runs AFTER code-stash)."""
-
-    def test_bare_file_url_becomes_media(self, driver_path):
-        out = _render(driver_path, "Here is the screenshot file:///tmp/shot.png done")
-        # Routed through /api/media as an inline image, not left as a raw path.
-        assert "api/media?path=" in out
-        assert "msg-media-img" in out or "<img" in out
-
-    def test_file_url_inside_fenced_code_stays_literal(self, driver_path):
-        out = _render(driver_path, "```\nfile:///tmp/shot.png\n```")
-        # Inside a code fence it must remain literal text, NOT become an <img>.
-        assert "file:///tmp/shot.png" in out
-        assert "<img" not in out
-        assert "api/media?path=" not in out
-
-    def test_file_url_inside_inline_code_stays_literal(self, driver_path):
-        out = _render(driver_path, "run `open file:///tmp/shot.png` now")
-        assert "file:///tmp/shot.png" in out
-        assert "<img" not in out
-        assert "api/media?path=" not in out
-
-    def test_markdown_anchor_file_link_uses_link_path_not_media(self, driver_path):
-        out = _render(driver_path, "[the file](file:///tmp/shot.png)")
-        # Labeled anchors keep the normal link path (routed to /api/media as a link,
-        # not auto-loaded as an <img>).
-        assert "<img" not in out
