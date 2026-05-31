@@ -7,6 +7,11 @@
 
 - Render generated local image artifacts as compact chat cards with preview, filename, localized Open/Download actions, and authenticated `/api/media` URLs.
 
+## [v0.51.188] — 2026-05-31 — Release FH (stage-batchH — configured runner-client boundary, default-off)
+
+### Added
+- **Configured runner-client boundary** for the `runner-local` runtime adapter (RFC `hermes-run-adapter-contract`, tracking #1925, Slice 4c/4d). When — and only when — an operator sets `HERMES_WEBUI_RUNNER_BASE_URL`, WebUI delegates the agent run to that external/supervised runner over a small JSON HTTP client (start / observe / status / cancel / approval / clarify / queue / goal) and bridges the runner's events through the existing SSE stream route, instead of owning the run in the main WebUI process. **Default-off and fully reversible:** with no endpoint configured, the factory preserves the existing bounded "runner-local not configured" path and the live in-process streaming path is unchanged — no behavior change for existing users. New `api/runner_client.py` (`HttpRunnerClient` + `runner_client_configured()`) plus additive `_runner_*` SSE-bridge helpers in `api/routes.py`; the legacy `_run_agent_streaming` control flow is untouched (#3073, @AJV20).
+
 ## [v0.51.187] — 2026-05-31 — Release FG (stage-batchG — workspace-preview persistence + scroll-intent window)
 
 ### Fixed
