@@ -56,6 +56,38 @@ def log(msg: str) -> None:
     print(f"[supervisor] {msg}", flush=True)
 
 
+_last_progress = 0.0
+
+
+def progress(msg: str, *, force: bool = False) -> None:
+    """Emit a user-facing status line the native shell shows on the loading view.
+
+    Throttled to ~2/sec so streaming a noisy installer doesn't spam, except for
+    `force` phase markers which always go through.
+    """
+    global _last_progress
+    now = time.time()
+    if force or now - _last_progress > 0.45:
+        _last_progress = now
+        # One line only; the shell renders the latest as the status text.
+        print(f"HERMES-PROGRESS {msg.strip()[:160]}", flush=True)
+
+
+def _stream_subprocess(cmd: list[str], **popen_kwargs) -> int:
+    """Run a command, forwarding its output live as throttled progress lines."""
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, **popen_kwargs,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        line = line.rstrip()
+        if line:
+            log(line)             # full detail → Console.app
+            progress(line)        # latest line → loading screen
+    return proc.wait()
+
+
 def hermes_available() -> bool:
     if shutil.which("hermes"):
         return True
@@ -65,16 +97,22 @@ def hermes_available() -> bool:
 
 def ensure_agent_installed() -> None:
     """Run the official Hermes Agent installer when no agent is present."""
+    progress("Checking for Hermes agent…", force=True)
     if hermes_available():
         log("Hermes agent already present.")
         return
+    progress("Installing Hermes agent — first run downloads ~300 MB, "
+             "this can take several minutes…", force=True)
     log(f"Hermes agent not found — installing via {INSTALLER_URL}")
-    # The installer is interactive-friendly but works headless via `bash`.
-    subprocess.run(["/bin/bash", "-lc", f"curl -fsSL {INSTALLER_URL} | bash"], check=True)
+    # Stream the installer's output so the loading screen shows live progress.
+    rc = _stream_subprocess(["/bin/bash", "-lc", f"curl -fsSL {INSTALLER_URL} | bash"])
+    if rc != 0:
+        raise RuntimeError(f"agent installer exited with code {rc}")
     # Make the freshly-installed CLI reachable for this process and children.
     local_bin = str(Path.home() / ".local" / "bin")
     if local_bin not in os.environ.get("PATH", ""):
         os.environ["PATH"] = local_bin + os.pathsep + os.environ.get("PATH", "")
+    progress("Hermes agent installed.", force=True)
     log("Hermes agent install finished.")
 
 
@@ -174,8 +212,10 @@ def main() -> int:
         return 2
 
     global _child
+    progress("Starting Hermes backend…", force=True)
     _child = start_webui()
 
+    progress("Waiting for the server to come up…", force=True)
     if wait_for_health(time.time() + READY_TIMEOUT):
         print(f"HERMES-READY port={PORT} url=http://{HOST}:{PORT}", flush=True)
         log("WebUI is healthy.")

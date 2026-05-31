@@ -41,9 +41,13 @@ final class Supervisor {
     private(set) var url: URL?
     private var onReady: ((URL) -> Void)?
     private var onFailure: ((String) -> Void)?
+    private var onProgress: ((String) -> Void)?
 
-    func start(onReady: @escaping (URL) -> Void, onFailure: @escaping (String) -> Void) {
+    func start(onReady: @escaping (URL) -> Void,
+               onProgress: @escaping (String) -> Void,
+               onFailure: @escaping (String) -> Void) {
         self.onReady = onReady
+        self.onProgress = onProgress
         self.onFailure = onFailure
 
         let proc = Process()
@@ -83,6 +87,11 @@ final class Supervisor {
                    let u = URL(string: String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)) {
                     self?.url = u
                     DispatchQueue.main.async { self?.onReady?(u) }
+                } else if let range = line.range(of: "HERMES-PROGRESS ") {
+                    let msg = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+                    if !msg.isEmpty {
+                        DispatchQueue.main.async { self?.onProgress?(msg) }
+                    }
                 }
             }
         }
@@ -126,7 +135,10 @@ final class Supervisor {
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
+    private var loadingTitle: NSTextField!
     private var loadingLabel: NSTextField!
+    private var spinner: NSProgressIndicator!
+    private var loadingStack: NSStackView!
     private let supervisor = Supervisor()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -147,21 +159,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         webView.autoresizingMask = [.width, .height]
         webView.isHidden = true
 
-        loadingLabel = NSTextField(labelWithString: "Starting Hermes…\nInstalling the agent on first launch can take a few minutes.")
+        loadingTitle = NSTextField(labelWithString: "Setting up Hermes")
+        loadingTitle.alignment = .center
+        loadingTitle.font = .systemFont(ofSize: 19, weight: .semibold)
+        loadingTitle.textColor = .labelColor
+        loadingTitle.translatesAutoresizingMaskIntoConstraints = false
+
+        spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .regular
+        spinner.isIndeterminate = true
+        spinner.startAnimation(nil)
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+
+        loadingLabel = NSTextField(labelWithString: "Starting…")
         loadingLabel.alignment = .center
-        loadingLabel.maximumNumberOfLines = 0
+        loadingLabel.maximumNumberOfLines = 3
+        loadingLabel.lineBreakMode = .byTruncatingTail
         loadingLabel.textColor = .secondaryLabelColor
-        loadingLabel.font = .systemFont(ofSize: 14)
+        loadingLabel.font = .systemFont(ofSize: 13)
         loadingLabel.translatesAutoresizingMaskIntoConstraints = false
+
+        loadingStack = NSStackView(views: [loadingTitle, spinner, loadingLabel])
+        loadingStack.orientation = .vertical
+        loadingStack.alignment = .centerX
+        loadingStack.spacing = 16
+        loadingStack.translatesAutoresizingMaskIntoConstraints = false
 
         let container = NSView(frame: frame)
         container.autoresizingMask = [.width, .height]
         container.addSubview(webView)
-        container.addSubview(loadingLabel)
+        container.addSubview(loadingStack)
         NSLayoutConstraint.activate([
-            loadingLabel.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            loadingLabel.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            loadingLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 520),
+            loadingStack.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            loadingStack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            loadingStack.widthAnchor.constraint(lessThanOrEqualToConstant: 560),
+            loadingLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 560),
         ])
         window.contentView = container
         window.makeKeyAndOrderFront(nil)
@@ -170,12 +203,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
         supervisor.start(
             onReady: { [weak self] url in
                 guard let self else { return }
+                self.spinner.stopAnimation(nil)
+                self.loadingStack.isHidden = true
                 self.webView.isHidden = false
-                self.loadingLabel.isHidden = true
                 self.webView.load(URLRequest(url: url))
             },
+            onProgress: { [weak self] message in
+                self?.loadingLabel.stringValue = message
+            },
             onFailure: { [weak self] message in
-                self?.loadingLabel.stringValue = "⚠️ \(message)\n\nSee Console.app → Hermes for details."
+                self?.spinner.stopAnimation(nil)
+                self?.loadingTitle.stringValue = "Couldn’t start Hermes"
+                self?.loadingLabel.stringValue = "⚠️ \(message)\nSee Console.app → Hermes for details."
             })
     }
 
