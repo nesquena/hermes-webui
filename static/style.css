@@ -1825,6 +1825,8 @@
     .composer-workspace-group{min-height:44px;}
     .composer-workspace-files-btn{min-width:44px;padding:6px 8px;}
     .composer-divider{display:none;}
+    .ctx-indicator-wrap{display:none!important;}
+    .ctx-indicator-wrap{display:none!important;}
   }
 
   @container composer-footer (max-width: 520px){
