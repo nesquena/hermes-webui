@@ -36,6 +36,38 @@ npm run lint:runtime
 npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
 ```
 
+## Python lint gate (ruff) — forward-looking, new-code-only
+
+The Python twin of the ESLint runtime guard. A curated `ruff` ruleset
+(`[tool.ruff]` in `pyproject.toml`) catches latent-bug shapes — unused imports
+(F401), undefined/unused names (F841/F821), redefinitions (F811), mutable default
+args (B006), raise-without-from (B904), loop-variable capture in closures (B023) —
+**plus** real syntax/runtime errors (E9). It is **not** a style/formatting linter:
+the pure-style families (line-length, whitespace) are intentionally OFF so the gate
+never demands a reformat of existing code.
+
+The existing tree carries a cosmetic backlog (mostly unused-import F401) that is
+deliberately **not** reformatted. So the gate is enforced **only on the lines a
+change adds or modifies** (`scripts/ruff_lint.py --diff`), which keeps new code
+clean without touching the backlog. Cleaning the backlog is a separate,
+maintainer-run, safe-fixes-only decision (tracked in #3273).
+
+```bash
+# one-time dev setup (ruff is a dev-only tool):
+pip install ruff            # or: uv tool install ruff / uvx ruff ...
+# the gate (only flags violations on lines you added/changed vs origin/master):
+python3 scripts/ruff_lint.py --diff origin/master
+# whole-tree backlog report (informational — never blocks):
+python3 scripts/ruff_lint.py --all
+```
+
+`tests/test_ruff_forward_lint.py` holds the **whole tree** free of E9 (real
+syntax/runtime) findings and verifies the curated config shape; it runs in-suite
+when ruff is present and **skips gracefully** when it isn't — so environments
+without ruff aren't blocked, while CI (which installs ruff) enforces it. The
+diff-scoped gate runs as the `lint` job in `.github/workflows/tests.yml` and is
+also part of the maintainer pre-release pre-gate.
+
 ## Automated browser smoke (runtime brick-class gate)
 
 The ESLint guard above catches `const`-reassign / import-assign statically. The
