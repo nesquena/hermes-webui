@@ -118,6 +118,43 @@ def _session_counts_toward_pin_quota(session) -> bool:
     return not _hide_from_default_sidebar(row)
 
 
+
+
+def _redact_config_for_display(value, *, path: tuple[str, ...] = ()):
+    """Return a config structure safe to display in the browser.
+
+    Values whose key path looks credential-bearing are replaced rather than
+    shipped to the client. Non-secret strings still pass through the existing
+    redactor so accidentally pasted tokens do not leak from unrelated fields.
+    """
+    sensitive_fragments = (
+        "api_key", "apikey", "auth", "bearer", "client_secret", "credential",
+        "key", "oauth", "password", "private", "refresh_token", "secret",
+        "token", "webhook",
+    )
+    path_text = ".".join(path).lower()
+    if isinstance(value, dict):
+        return {str(k): _redact_config_for_display(v, path=path + (str(k),)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_config_for_display(v, path=path) for v in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = str(value)
+    if any(fragment in path_text for fragment in sensitive_fragments):
+        return "[REDACTED]" if text else text
+    return _redact_text(text)
+
+
+def _safe_config_yaml_text() -> tuple[str, int]:
+    redacted = _redact_config_for_display(get_config())
+    try:
+        import yaml as _yaml
+
+        text = _yaml.safe_dump(redacted, sort_keys=False, allow_unicode=True)
+    except Exception:
+        text = json.dumps(redacted, indent=2, ensure_ascii=False)
+    return text, text.count("[REDACTED]")
+
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
 #
 # Sessions and projects are stored in the WebUI sidecar without per-row
@@ -4335,6 +4372,23 @@ def handle_get(handler, parsed) -> bool:
         except (ValueError, TypeError):
             days = 7
         return j(handler, get_provider_cost_history(provider_id, days))
+
+
+    if parsed.path == "/api/config/safe":
+        try:
+            text, redacted_count = _safe_config_yaml_text()
+            cfg_path = _get_config_path()
+            return j(handler, {
+                "ok": True,
+                "path": str(cfg_path),
+                "filename": cfg_path.name,
+                "text": text,
+                "redacted_count": redacted_count,
+                "read_only": True,
+            })
+        except Exception as exc:
+            logger.debug("Safe config view failed", exc_info=True)
+            return bad(handler, f"Could not read config safely: {exc}", 500)
 
     if parsed.path == "/api/settings":
         settings = load_settings()

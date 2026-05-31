@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- Settings → System now includes a safe, read-only config.yaml viewer that redacts credential-looking values before rendering or copying the active profile config (#2929).
+
 ## [v0.51.181] — 2026-05-30 — Release FA (stage-batchA — agent-cache eviction teardown + streaming finalize race)
 
 ### Fixed
