@@ -17,7 +17,8 @@ def test_session_title_hover_shows_full_title_not_rename_hint():
     """
     js = _sessions_js()
     assert "Double-click to rename" not in js
-    assert "title.title=_sessionFullTitleTooltip(rawTitle,cleanTitle);" in js
+    assert "title.title=_sessionFullTitleTooltip(rawTitle,cleanTitle,s);" in js
+    assert "function _sessionFullTitleTooltip(rawTitle, cleanTitle, session)" in js
 
 
 def test_sidebar_status_badges_have_explanatory_tooltips():
