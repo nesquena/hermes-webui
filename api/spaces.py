@@ -6575,6 +6575,7 @@ def _browser_surface_output_compaction_receipt(
 
 def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[str, Any]:
     space_id = validate_space_id(_space_tool_current_id(payload))
+    read_space(space_id)
     kind = _browser_surface_tool_kind(action)
     surface: dict[str, Any] = {
         "mode": "metadata-only",

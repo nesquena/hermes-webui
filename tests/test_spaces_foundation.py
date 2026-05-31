@@ -9523,6 +9523,34 @@ def test_browser_surface_tool_open_returns_receipt_only_policy_progress(monkeypa
     assert "token" not in serialized
 
 
+def test_browser_surface_tool_missing_space_does_not_emit_false_completion(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    with pytest.raises(FileNotFoundError):
+        spaces.run_space_tool(
+            "space.browser.open",
+            {
+                "activeSpaceId": "missing-browser-space",
+                "url": "https://example.com/dashboard?token=SECRET_VALUE_DO_NOT_LEAK",
+                "renderer": "<script>steal()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+
+    progress_log = tmp_path / "capy-progress-events.jsonl"
+    stored = progress_log.read_text(encoding="utf-8").lower() if progress_log.exists() else ""
+    assert "browser.open:missing-browser-space" not in stored
+    assert "tool.completed" not in stored
+    assert "secret_value_do_not_leak" not in stored
+    assert "<script" not in stored
+    assert "renderer" not in stored
+    assert "api_key" not in stored
+
+    from api.capy_progress import progress_status
+
+    assert progress_status(space_id="missing-browser-space")["recent_event_count"] == 0
+
+
 def test_browser_surface_snapshot_click_type_are_receipt_only_and_redact_payload(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "browser-control-lab", "name": "Browser Control Lab"})
