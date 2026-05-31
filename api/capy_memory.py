@@ -540,6 +540,12 @@ def _safe_nonnegative_int(value: Any) -> int:
         return 0
 
 
+def _safe_optional_nonnegative_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _safe_iso_timestamp(value: Any) -> str:
     if not isinstance(value, _PUBLIC_SCALAR_TYPES):
         return ""
@@ -958,6 +964,87 @@ def _github_issue_refresh_summary(payload: dict[str, Any], *, origin_uri: str) -
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _json_payload_is_github_repository_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if len(path) != 4 or path[0] != "" or lowered[1] != "repos" or not path[2] or not path[3]:
+        return False
+    expected_full_name = f"{path[2]}/{path[3]}".lower()
+    full_name = _safe_public_text(payload.get("full_name"), limit=200)
+    repo_name = _safe_public_text(payload.get("name"), limit=120)
+    if full_name.lower() != expected_full_name or repo_name.lower() != path[3].lower():
+        return False
+    for field in ("name", "full_name", "default_branch"):
+        raw_value = payload.get(field)
+        if isinstance(raw_value, _PUBLIC_SCALAR_TYPES) and _REFRESH_BLOCKED_VALUE_RE.search(str(raw_value)):
+            return False
+    raw_description = payload.get("description")
+    if _is_present_public_value(raw_description) and not _safe_public_text(raw_description, limit=280):
+        return False
+    visibility = _safe_public_text(payload.get("visibility"), limit=40).lower()
+    if visibility and visibility not in {"public", "private", "internal"}:
+        return False
+    raw_updated = payload.get("updated_at")
+    if _is_present_public_value(raw_updated) and not _safe_iso_timestamp(raw_updated):
+        return False
+    raw_pushed = payload.get("pushed_at")
+    if _is_present_public_value(raw_pushed) and not _safe_iso_timestamp(raw_pushed):
+        return False
+    raw_topics = payload.get("topics")
+    if isinstance(raw_topics, list):
+        for item in raw_topics:
+            topic = _safe_public_text(item, limit=60)
+            if not topic or _REFRESH_BLOCKED_VALUE_RE.search(topic) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,49}", topic):
+                return False
+    return bool(full_name)
+
+
+def _github_repository_refresh_summary(payload: dict[str, Any]) -> str:
+    full_name = _safe_public_text(payload.get("full_name"), limit=200)
+    description = _safe_public_text(payload.get("description"), limit=280) or "description: not configured"
+    default_branch = _safe_public_text(payload.get("default_branch"), limit=80)
+    visibility = _safe_public_text(payload.get("visibility"), limit=40).lower()
+    updated = _safe_public_text(payload.get("updated_at"), limit=80)
+    topics: list[str] = []
+    raw_topics = payload.get("topics")
+    if isinstance(raw_topics, list):
+        for item in raw_topics[:8]:
+            topic = _safe_public_text(item, limit=60)
+            if topic and not _REFRESH_BLOCKED_VALUE_RE.search(topic):
+                topics.append(topic)
+            if len(topics) >= 5:
+                break
+    parts = [f"GitHub repository {full_name}: {description}"]
+    if default_branch:
+        parts.append(f"default branch: {default_branch}")
+    if visibility:
+        parts.append(f"visibility: {visibility}")
+    if isinstance(payload.get("private"), bool):
+        parts.append(f"private: {str(payload['private']).lower()}")
+    if isinstance(payload.get("archived"), bool):
+        parts.append(f"archived: {str(payload['archived']).lower()}")
+    stars = _safe_optional_nonnegative_int(payload.get("stargazers_count"))
+    forks = _safe_optional_nonnegative_int(payload.get("forks_count"))
+    open_issues = _safe_optional_nonnegative_int(payload.get("open_issues_count"))
+    if stars is not None:
+        parts.append(f"stars: {stars}")
+    if forks is not None:
+        parts.append(f"forks: {forks}")
+    if open_issues is not None:
+        parts.append(f"open issues: {open_issues}")
+    if topics:
+        parts.append(f"topics: {', '.join(topics)}")
+    if updated:
+        parts.append(f"updated: {updated}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_payload_is_github_release_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -1022,6 +1109,9 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             break
     elif _json_payload_is_github_issue_metadata(origin_uri, payload):
         summary = _github_issue_refresh_summary(payload, origin_uri=origin_uri)
+    elif _json_payload_is_github_repository_metadata(origin_uri, payload):
+        title = _safe_public_text(payload.get("full_name"), limit=200) or source_id
+        summary = _github_repository_refresh_summary(payload)
     elif _json_payload_is_github_release_metadata(origin_uri, payload):
         title = _safe_public_text(payload.get("name") or payload.get("tag_name"), limit=200) or source_id
         summary = _github_release_refresh_summary(payload)
