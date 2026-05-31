@@ -21,9 +21,18 @@ enum BundlePaths {
     static var resources: URL {
         Bundle.main.resourceURL ?? URL(fileURLWithPath: ".")
     }
-    /// Bundled relocatable Python interpreter.
+    /// Bundled relocatable Python interpreter. A universal build ships one Python
+    /// per arch (python-arm64 / python-x86_64); each native slice of this binary
+    /// picks its matching one. A single-arch build ships just `python`.
     static var python: URL {
-        resources.appendingPathComponent("python/bin/python3")
+        #if arch(arm64)
+        let archDir = "python-arm64"
+        #else
+        let archDir = "python-x86_64"
+        #endif
+        let universal = resources.appendingPathComponent("\(archDir)/bin/python3")
+        if FileManager.default.isExecutableFile(atPath: universal.path) { return universal }
+        return resources.appendingPathComponent("python/bin/python3")
     }
     /// The WebUI checkout shipped inside the app.
     static var supervisor: URL {

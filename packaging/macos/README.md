@@ -39,17 +39,26 @@ cd packaging/macos
 # 1) Local test build (unsigned) — runs only on THIS Mac (Gatekeeper will warn).
 ./build.sh
 
-# 2) Signed build for distribution to others.
-export SIGN_IDENTITY="Developer ID Application: bo wang (772APYS786)"
-./build.sh --sign
+# 2) Universal (Intel + Apple Silicon) build — one DMG for everyone.
+./build.sh --universal
 
-# 3) Signed + notarized + stapled DMG (what you actually ship).
+# 3) Signed build for distribution to others.
+export SIGN_IDENTITY="Developer ID Application: bo wang (772APYS786)"
+./build.sh --universal --sign
+
+# 4) Signed + notarized + stapled DMG (what you actually ship).
 #    One-time: store your notarization credentials in the keychain:
 xcrun notarytool store-credentials hermes-notary \
   --apple-id YOUR_APPLE_ID --team-id 772APYS786 --password APP_SPECIFIC_PASSWORD
 export SIGN_IDENTITY="Developer ID Application: bo wang (772APYS786)"
-./build.sh --notarize          # uses keychain profile "hermes-notary"
+./build.sh --universal --notarize     # uses keychain profile "hermes-notary"
 ```
+
+`--universal` bundles one CPython per arch (`Resources/python-arm64` +
+`python-x86_64`) and a fat Swift binary; each native slice picks its matching
+Python at runtime. On an Apple-Silicon build host the x86_64 deps install via
+Rosetta (`softwareupdate --install-rosetta`), falling back to cross-resolved
+wheels if Rosetta is absent. Universal DMG ≈ 88 MB vs ≈ 55 MB single-arch.
 
 Output: `build/Hermes.app` and `build/Hermes-<version>.dmg`.
 
@@ -60,8 +69,8 @@ Output: `build/Hermes.app` and `build/Hermes-<version>.dmg`.
   First launch therefore needs internet and takes a few minutes.
 - **Notarization needs an Apple Developer account** ($99/yr) and an app-specific
   password. Without notarization, other users get a Gatekeeper "damaged" warning.
-- **Architecture**: `build.sh` bundles CPython for the *host* arch. Build on an
-  Apple-Silicon Mac for an arm64 app; build on / for Intel separately, or extend
-  the script to assemble a universal Python if you need a single fat binary.
+- **Architecture**: plain `build.sh` bundles CPython for the *host* arch only.
+  Use `--universal` to ship a single DMG that runs natively on both Apple Silicon
+  and Intel (bundles both Pythons + a fat Swift binary).
 - **App icon**: drop an `AppIcon.icns` in this folder before building to brand it.
 - `HERMES_PY_MINOR` (default `3.12`) selects the bundled CPython series.

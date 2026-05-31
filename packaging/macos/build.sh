@@ -36,26 +36,28 @@ NOTARY_PROFILE="${NOTARY_PROFILE:-hermes-notary}"
 BUNDLE_ID="com.nousresearch.hermes.webui"
 VERSION="$(cd "${REPO_ROOT}" && git describe --tags --always 2>/dev/null || echo 0.0.0)"
 
-DO_SIGN=0; DO_NOTARIZE=0
+DO_SIGN=0; DO_NOTARIZE=0; UNIVERSAL=0
 for a in "$@"; do
   case "$a" in
     --sign) DO_SIGN=1 ;;
     --notarize) DO_SIGN=1; DO_NOTARIZE=1 ;;
+    --universal) UNIVERSAL=1 ;;
     *) echo "unknown arg: $a" >&2; exit 1 ;;
   esac
 done
 
+# Arches to bundle. A universal build ships both Pythons + a fat Swift binary so
+# one DMG runs natively on Apple Silicon and Intel; otherwise just the host arch.
+if [ "${UNIVERSAL}" = 1 ]; then ARCHES="arm64 x86_64"; else ARCHES="${ARCH}"; fi
+pbs_arch_of() { case "$1" in arm64) echo aarch64-apple-darwin ;; x86_64) echo x86_64-apple-darwin ;; esac; }
+swift_target_of() { case "$1" in arm64) echo arm64-apple-macosx12.0 ;; x86_64) echo x86_64-apple-macosx12.0 ;; esac; }
+
 say() { printf '\033[1;36m▶ %s\033[0m\n' "$*" >&2; }
 
-# ── 1. Fetch relocatable CPython ─────────────────────────────────────────────
-fetch_python() {
+# ── 1. Fetch relocatable CPython for a given arch ────────────────────────────
+fetch_python() {  # $1 = arch (arm64|x86_64) → prints extracted python dir
+  local arch="$1"; local pbs_arch; pbs_arch="$(pbs_arch_of "${arch}")"
   local cache="${HERE}/.python-cache"; mkdir -p "${cache}"
-  case "${ARCH}" in
-    arm64)  local pbs_arch="aarch64-apple-darwin" ;;
-    x86_64) local pbs_arch="x86_64-apple-darwin" ;;
-    *) echo "unsupported arch ${ARCH}" >&2; exit 1 ;;
-  esac
-  # Resolve the newest python-build-standalone asset for this series + arch.
   say "Resolving python-build-standalone (${PY_MINOR}, ${pbs_arch})…"
   local api="https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
   local asset_url
@@ -66,23 +68,44 @@ fetch_python() {
   [ -n "${asset_url}" ] || { echo "could not find a CPython ${PY_MINOR} ${pbs_arch} asset" >&2; exit 1; }
   local tarball="${cache}/$(basename "${asset_url}")"
   [ -f "${tarball}" ] || { say "Downloading ${asset_url##*/}"; curl -fsSL "${asset_url}" -o "${tarball}"; }
-  rm -rf "${cache}/python"
-  tar -xzf "${tarball}" -C "${cache}"   # extracts to ${cache}/python
-  echo "${cache}/python"
+  local out="${cache}/python-${arch}"
+  rm -rf "${out}"; mkdir -p "${out}"
+  tar -xzf "${tarball}" -C "${out}" --strip-components=1   # python/* → ${out}/*
+  echo "${out}"
+}
+
+# Install the WebUI's light deps into a bundled Python tree (host-arch runs it
+# directly; a foreign arch is installed via Rosetta, else cross-resolved wheels).
+install_deps() {  # $1 = python dir, $2 = arch
+  local pydir="$1"; local arch="$2"; local pybin="${pydir}/bin/python3"
+  if [ "${arch}" = "${ARCH}" ]; then
+    "${pybin}" -m pip install --upgrade pip >/dev/null
+    "${pybin}" -m pip install -r "${REPO_ROOT}/requirements.txt" >/dev/null
+  elif arch -"${arch}" /usr/bin/true 2>/dev/null; then
+    say "Installing deps for ${arch} via Rosetta"
+    arch -"${arch}" "${pybin}" -m pip install --upgrade pip >/dev/null
+    arch -"${arch}" "${pybin}" -m pip install -r "${REPO_ROOT}/requirements.txt" >/dev/null
+  else
+    say "Rosetta unavailable — cross-installing ${arch} wheels"
+    local sp="${pydir}/lib/python${PY_MINOR}/site-packages"
+    python3 -m pip install --only-binary=:all: --platform "macosx_11_0_${arch}" \
+      --implementation cp --python-version "${PY_MINOR}" --target "${sp}" \
+      -r "${REPO_ROOT}/requirements.txt" >/dev/null
+  fi
 }
 
 # ── 2-4. Stage bundle + compile ──────────────────────────────────────────────
 say "Cleaning ${BUILD_DIR}"
 rm -rf "${BUILD_DIR}"; mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
 
-PY_SRC="$(fetch_python)"
-say "Bundling Python from ${PY_SRC}"
-cp -R "${PY_SRC}" "${APP}/Contents/Resources/python"
-PY_BIN="${APP}/Contents/Resources/python/bin/python3"
-
-say "Installing WebUI deps into bundled Python"
-"${PY_BIN}" -m pip install --upgrade pip >/dev/null
-"${PY_BIN}" -m pip install -r "${REPO_ROOT}/requirements.txt" >/dev/null
+for a in ${ARCHES}; do
+  PY_SRC="$(fetch_python "${a}")"
+  if [ "${UNIVERSAL}" = 1 ]; then dest="${APP}/Contents/Resources/python-${a}"; else dest="${APP}/Contents/Resources/python"; fi
+  say "Bundling Python (${a}) → $(basename "${dest}")"
+  cp -R "${PY_SRC}" "${dest}"
+  say "Installing WebUI deps into bundled Python (${a})"
+  install_deps "${dest}" "${a}"
+done
 
 say "Copying WebUI source into bundle"
 rsync -a --delete \
@@ -91,10 +114,20 @@ rsync -a --delete \
   --exclude 'packaging/macos/.python-cache' \
   "${REPO_ROOT}/" "${APP}/Contents/Resources/webui/"
 
-say "Compiling Swift shell"
-swiftc -O -o "${APP}/Contents/MacOS/Hermes" \
-  -framework AppKit -framework WebKit \
-  "${HERE}/HermesApp/main.swift"
+say "Compiling Swift shell (${ARCHES})"
+SWIFT_OUT="${APP}/Contents/MacOS/Hermes"
+if [ "${UNIVERSAL}" = 1 ]; then
+  slices=""
+  for a in ${ARCHES}; do
+    swiftc -O -target "$(swift_target_of "${a}")" -framework AppKit -framework WebKit \
+      -o "${BUILD_DIR}/Hermes.${a}" "${HERE}/HermesApp/main.swift"
+    slices="${slices} ${BUILD_DIR}/Hermes.${a}"
+  done
+  lipo -create -output "${SWIFT_OUT}" ${slices}
+  rm -f ${slices}
+else
+  swiftc -O -framework AppKit -framework WebKit -o "${SWIFT_OUT}" "${HERE}/HermesApp/main.swift"
+fi
 
 say "Writing Info.plist (version ${VERSION})"
 sed "s/__BUILD_VERSION__/${VERSION#v}/g" "${HERE}/Info.plist" > "${APP}/Contents/Info.plist"
@@ -135,8 +168,9 @@ if [ "${DO_SIGN}" = 1 ]; then
   [ -n "${SIGN_IDENTITY}" ] || { echo "SIGN_IDENTITY is required for --sign" >&2; exit 1; }
   local_ent="${HERE}/entitlements.plist"
   say "Signing nested code (Python + dylibs)…"
-  # Sign every Mach-O inside the bundled Python first (deepest first), then the app.
-  find "${APP}/Contents/Resources/python" \( -name '*.dylib' -o -name '*.so' -o -perm -u+x -type f \) -print0 \
+  # Sign every Mach-O inside the bundled Python(s) first, then the app. The glob
+  # covers both single-arch (python) and universal (python-arm64/python-x86_64).
+  find "${APP}/Contents/Resources/"python* \( -name '*.dylib' -o -name '*.so' -o -perm -u+x -type f \) -print0 \
     | while IFS= read -r -d '' f; do
         if file "$f" | grep -q 'Mach-O'; then
           codesign --force --timestamp --options runtime \
