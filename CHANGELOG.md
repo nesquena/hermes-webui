@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- PWA notifications now use the service worker when available, include click-to-reopen behavior, and expose permission/test controls in Settings (#3196).
+
 ## [v0.51.181] — 2026-05-30 — Release FA (stage-batchA — agent-cache eviction teardown + streaming finalize race)
 
 ### Fixed

@@ -3388,16 +3388,45 @@ function playAttentionSound(key){
   }catch(e){console.warn('Attention sound failed:',e);}
 }
 
-function sendBrowserNotification(title,body){
-  if(!window._notificationsEnabled||!document.hidden) return;
-  if(!('Notification' in window)) return;
+function _notificationOptions(body){
+  const sid=S&&S.session&&S.session.session_id;
+  const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
+  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:false,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+}
+function _showPwaNotification(title,body){
   const botName=assistantDisplayName();
-  if(Notification.permission==='granted'){
-    new Notification(title||botName,{body:body});
-  }else if(Notification.permission!=='denied'){
-    Notification.requestPermission().then(p=>{
-      if(p==='granted') new Notification(title||botName,{body:body});
+  const opts=_notificationOptions(body);
+  if(navigator.serviceWorker&&navigator.serviceWorker.ready){
+    return navigator.serviceWorker.ready.then(reg=>{
+      if(reg&&reg.showNotification) return reg.showNotification(title||botName,opts);
+      return new Notification(title||botName,opts);
     });
+  }
+  return Promise.resolve(new Notification(title||botName,opts));
+}
+function requestNotificationPermission(){
+  if(!('Notification' in window)){
+    if(typeof showToast==='function') showToast(t('notifications_unsupported'),3000,'error');
+    return Promise.resolve('unsupported');
+  }
+  if(Notification.permission==='granted') return Promise.resolve('granted');
+  if(Notification.permission==='denied'){
+    if(typeof showToast==='function') showToast(t('notifications_denied'),3500,'error');
+    return Promise.resolve('denied');
+  }
+  return Notification.requestPermission().then(p=>{
+    if(typeof showToast==='function') showToast(p==='granted'?t('notifications_enabled_toast'):t('notifications_denied'),3000,p==='granted'?undefined:'error');
+    return p;
+  });
+}
+function sendBrowserNotification(title,body,options={}){
+  const force=!!(options&&options.force);
+  if(!force&&(!window._notificationsEnabled||!document.hidden)) return;
+  if(!('Notification' in window)) return;
+  if(Notification.permission==='granted'){
+    _showPwaNotification(title,body).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body));}catch(_err){}});
+  }else if(Notification.permission!=='denied'){
+    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body);});
   }
 }
 
