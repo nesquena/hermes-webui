@@ -326,7 +326,8 @@ def test_messages_js_names_browser_sse_disconnect_separately():
 def test_server_treats_broken_pipe_as_client_disconnect_not_500():
     server_py = (models.Path(__file__).parent.parent / "server.py").read_text(encoding="utf-8")
 
-    assert "except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):" in server_py
+    # server.py now uses the centralized _CLIENT_DISCONNECT_ERRORS tuple from api.helpers
+    assert "_CLIENT_DISCONNECT_ERRORS" in server_py
     assert "do not convert it into a misleading server 500" in server_py
 
 

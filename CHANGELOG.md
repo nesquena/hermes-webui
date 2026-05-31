@@ -5,8 +5,15 @@
 
 ### Added
 
-- CI now runs a headless browser smoke test (`tests/browser_smoke.py`, `.github/workflows/browser-smoke.yml`) on every PR and push: it boots the real server agent-free and loads the key pages in Chromium, failing on any console error or uncaught JS exception. This catches the runtime-JS brick class (e.g. a `const` reassigned at runtime as in #3162, or a `function`/`window` name collision as in #2715/#2771) that `node --check`, ESLint, and the mocked test suite cannot see because they only manifest when a real browser executes the page. The smoke is credential-free — it strips `*_API_KEY` from the environment and drives no real model.
 - `runner-local` runtime adapter mode can now use an explicitly configured HTTP runner endpoint via `HERMES_WEBUI_RUNNER_BASE_URL`, replacing the bounded not-configured path only when the external runner boundary is configured and streaming configured runner events through the existing SSE route without WebUI-owned runner maps.
+
+## [v0.51.182] — 2026-05-31 — Release FB (stage-batchB2 — headless browser smoke gate + consolidated client-disconnect handling)
+
+### Added
+- CI now runs a headless browser smoke test (`tests/browser_smoke.py`, `.github/workflows/browser-smoke.yml`) on every PR and push: it boots the real server agent-free and loads the key pages in Chromium, failing on any console error or uncaught JS exception. This catches the runtime-JS brick class (e.g. a `const` reassigned at runtime as in #3162, or a `function`/`window` name collision as in #2715/#2771) that `node --check`, ESLint, and the mocked test suite cannot see because they only manifest when a real browser executes the page. The smoke is credential-free — it strips `*_API_KEY` from the environment and drives no real model (#3231).
+
+### Fixed
+- Client disconnects during response writes (browser tab close, SSE reconnect races, mobile network switches, half-closed sockets) are now handled through a single `_CLIENT_DISCONNECT_ERRORS` set and a `_safe_write` helper instead of ad-hoc per-call-site `try/except`, so an expected disconnect no longer surfaces as a misleading server 500 in the logs. The error-response path is itself wrapped so a disconnect while sending a 500 is swallowed quietly rather than cascading. A bare `TimeoutError` from the Joplin notes integration's `urlopen` is now converted to a clean "not reachable" error at the route rather than escaping to the dispatch-level disconnect handler (#3210).
 
 ## [v0.51.181] — 2026-05-30 — Release FA (stage-batchA — agent-cache eviction teardown + streaming finalize race)
 
