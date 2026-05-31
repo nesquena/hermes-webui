@@ -6467,13 +6467,15 @@ async function loadMessagingPanel(){
   loading.textContent=t('messaging_loading');
   list.appendChild(loading);
   try{
-    const [feishuCfg,wecomCfg]=await Promise.all([
+    const [feishuCfg,wecomCfg,weixinCfg]=await Promise.all([
       api('/api/platforms/feishu'),
       api('/api/platforms/wecom'),
+      api('/api/platforms/weixin'),
     ]);
     list.innerHTML='';
     list.appendChild(_buildFeishuCard(feishuCfg||{}));
     list.appendChild(_buildWecomCard(wecomCfg||{}));
+    list.appendChild(_buildWeixinCard(weixinCfg||{}));
   }catch(e){
     list.innerHTML='';
     const err=document.createElement('div');
@@ -7024,6 +7026,256 @@ function _buildWecomCard(cfg){
 
   card.appendChild(body);
   if(configured) card.classList.add('open');
+  header.addEventListener('click',e=>{
+    if(e.target.closest('.provider-card-body')) return;
+    card.classList.toggle('open');
+  });
+  return card;
+}
+
+function _buildWeixinCard(cfg){
+  const card=document.createElement('div');
+  card.className='provider-card';
+  card.dataset.platform='weixin';
+
+  const configured=cfg.configured===true;
+  const accountId=cfg.account_id||'';
+
+  // ── Header with status chip ──
+  const header=document.createElement('button');
+  header.type='button';
+  header.className='provider-card-header';
+  const info=document.createElement('div');
+  info.className='provider-card-info';
+  const name=document.createElement('div');
+  name.className='provider-card-name';
+  name.textContent=t('weixin_card_name');
+  const meta=document.createElement('div');
+  meta.className='provider-card-meta';
+  meta.textContent=t('weixin_card_meta');
+  info.appendChild(name);
+  info.appendChild(meta);
+  header.appendChild(info);
+  const badge=document.createElement('span');
+  badge.className='provider-card-badge'+(configured?'':' messaging-platform-badge-off');
+  badge.textContent=configured?t('messaging_status_configured'):t('messaging_status_not_configured');
+  header.appendChild(badge);
+  const chevron=document.createElement('span');
+  chevron.innerHTML='<svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>';
+  header.appendChild(chevron.firstChild);
+  card.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='provider-card-body';
+
+  // ── Connection status line ──
+  const connLine=document.createElement('div');
+  connLine.className='messaging-platform-status';
+  connLine.style.cssText='font-size:13px;margin-top:4px;min-height:18px;color:var(--text)';
+  if(configured){
+    connLine.style.color='var(--success,#16a34a)';
+    connLine.textContent=accountId?t('weixin_connected_account',accountId):t('weixin_connected_generic');
+  }else{
+    connLine.style.color='var(--muted)';
+    connLine.textContent=t('weixin_not_logged_in');
+  }
+  body.appendChild(connLine);
+
+  // ── QR login area (hidden until "Scan to login" is clicked) ──
+  const loginArea=document.createElement('div');
+  loginArea.style.cssText='margin-top:12px;display:none;flex-direction:column;align-items:center;gap:10px';
+  const qrImg=document.createElement('img');
+  qrImg.alt='QR';
+  qrImg.style.cssText='width:220px;height:220px;image-rendering:pixelated;border:1px solid var(--border,#ccc);border-radius:8px;background:#fff;display:none';
+  const qrLink=document.createElement('a');
+  qrLink.target='_blank';
+  qrLink.rel='noopener';
+  qrLink.style.cssText='font-size:12px;word-break:break-all;color:var(--accent,#2563eb);display:none;max-width:320px;text-align:center';
+  const qrStatus=document.createElement('div');
+  qrStatus.style.cssText='font-size:13px;min-height:18px;color:var(--muted);text-align:center';
+  loginArea.appendChild(qrImg);
+  loginArea.appendChild(qrLink);
+  loginArea.appendChild(qrStatus);
+  body.appendChild(loginArea);
+
+  // Poll loop state (so we can cancel on re-render / success).
+  let pollTimer=null;
+  const stopPolling=()=>{ if(pollTimer){ clearTimeout(pollTimer); pollTimer=null; } };
+
+  const pollOnce=async(loginId)=>{
+    let res;
+    try{
+      res=await api('/api/platforms/weixin/login/status?login_id='+encodeURIComponent(loginId));
+    }catch(e){
+      qrStatus.style.color='var(--muted)';
+      qrStatus.textContent=t('weixin_login_waiting');
+      pollTimer=setTimeout(()=>pollOnce(loginId),2000);
+      return;
+    }
+    const state=(res&&res.state)||'error';
+    if(state==='waiting'){
+      qrStatus.style.color='var(--muted)';
+      qrStatus.textContent=t('weixin_login_waiting');
+      pollTimer=setTimeout(()=>pollOnce(loginId),2000);
+    }else if(state==='scanned'){
+      qrStatus.style.color='var(--text)';
+      qrStatus.textContent=t('weixin_login_scanned');
+      pollTimer=setTimeout(()=>pollOnce(loginId),2000);
+    }else if(state==='confirmed'){
+      stopPolling();
+      qrStatus.style.color='var(--success,#16a34a)';
+      qrStatus.textContent=t('weixin_login_confirmed');
+      showToast(t('weixin_login_confirmed'));
+      setTimeout(()=>loadMessagingPanel(),900);
+    }else if(state==='expired'){
+      stopPolling();
+      qrStatus.style.color='var(--error)';
+      qrStatus.textContent=t('weixin_login_expired');
+    }else{
+      stopPolling();
+      const msg=(res&&(res.error||res.detail))||t('weixin_login_failed_generic');
+      qrStatus.style.color='var(--error)';
+      qrStatus.textContent=t('weixin_login_failed',msg);
+    }
+  };
+
+  // ── Scan-to-login button (only when not logged in) ──
+  const scanBtn=document.createElement('button');
+  scanBtn.type='button';
+  scanBtn.className='provider-card-btn provider-card-btn-primary';
+  scanBtn.style.marginTop='12px';
+  scanBtn.textContent=configured?t('weixin_btn_relogin'):t('weixin_btn_login');
+  scanBtn.onclick=async()=>{
+    stopPolling();
+    scanBtn.disabled=true;
+    loginArea.style.display='flex';
+    qrImg.style.display='none';
+    qrLink.style.display='none';
+    qrStatus.style.color='var(--muted)';
+    qrStatus.textContent=t('weixin_login_starting');
+    let res;
+    try{
+      res=await api('/api/platforms/weixin/login/start',{method:'POST',body:JSON.stringify({})});
+    }catch(e){
+      qrStatus.style.color='var(--error)';
+      qrStatus.textContent=t('weixin_login_failed',e&&e.message?e.message:String(e));
+      scanBtn.disabled=false;
+      return;
+    }
+    if(!res||res.error||!res.login_id){
+      qrStatus.style.color='var(--error)';
+      qrStatus.textContent=(res&&res.error)||t('weixin_login_failed_generic');
+      scanBtn.disabled=false;
+      return;
+    }
+    if(res.qr_png){
+      qrImg.src='data:image/png;base64,'+res.qr_png;
+      qrImg.style.display='block';
+    }
+    if(res.qr_url){
+      qrLink.href=res.qr_url;
+      qrLink.textContent=res.qr_url;
+      // Only show the text link when we have no rendered image.
+      qrLink.style.display=res.qr_png?'none':'block';
+    }
+    qrStatus.style.color='var(--muted)';
+    qrStatus.textContent=t('weixin_login_waiting');
+    scanBtn.disabled=false;
+    pollOnce(res.login_id);
+  };
+  body.appendChild(scanBtn);
+
+  // ── Access-policy fields ──
+  const policyGroup=document.createElement('div');
+  policyGroup.style.marginTop='6px';
+
+  const dmPolicy=_feishuSelect('weixin_dm_policy',cfg.dm_policy||'open',[
+    {value:'open',labelKey:'weixin_dm_policy_open'},
+    {value:'pairing',labelKey:'weixin_dm_policy_pairing'},
+    {value:'allowlist',labelKey:'weixin_dm_policy_allowlist'},
+    {value:'disabled',labelKey:'weixin_dm_policy_disabled'},
+  ]);
+  policyGroup.appendChild(dmPolicy.field);
+
+  const allowedUsers=_feishuField('weixin_allowed_users',cfg.allowed_users||'',{placeholder:t('weixin_allowed_users_placeholder')});
+  policyGroup.appendChild(allowedUsers.field);
+
+  const groupPolicy=_feishuSelect('weixin_group_policy',cfg.group_policy||'disabled',[
+    {value:'disabled',labelKey:'weixin_group_policy_disabled'},
+    {value:'open',labelKey:'weixin_group_policy_open'},
+    {value:'allowlist',labelKey:'weixin_group_policy_allowlist'},
+  ]);
+  policyGroup.appendChild(groupPolicy.field);
+
+  const groupAllowed=_feishuField('weixin_group_allowed_users',cfg.group_allowed_users||'',{placeholder:t('weixin_group_allowed_users_placeholder')});
+  policyGroup.appendChild(groupAllowed.field);
+
+  const homeChannel=_feishuField('weixin_home_channel',cfg.home_channel||'',{placeholder:t('weixin_home_channel_placeholder')});
+  policyGroup.appendChild(homeChannel.field);
+
+  const restartToggle=_feishuCheckbox('weixin_restart_after_save',true);
+  policyGroup.appendChild(restartToggle.row);
+
+  body.appendChild(policyGroup);
+
+  // ── Save status line ──
+  const statusLine=document.createElement('div');
+  statusLine.className='messaging-platform-status';
+  statusLine.style.cssText='font-size:12px;margin-top:10px;min-height:16px;color:var(--muted)';
+  body.appendChild(statusLine);
+
+  // ── Save button ──
+  const btnRow=document.createElement('div');
+  btnRow.className='provider-card-row';
+  btnRow.style.marginTop='12px';
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='provider-card-btn provider-card-btn-primary';
+  saveBtn.textContent=t('weixin_btn_save');
+  saveBtn.onclick=async()=>{
+    saveBtn.disabled=true;
+    const wantRestart=restartToggle.input.checked;
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('weixin_saving');
+    const payload={
+      dm_policy:dmPolicy.select.value,
+      allowed_users:allowedUsers.input.value.trim(),
+      group_policy:groupPolicy.select.value,
+      group_allowed_users:groupAllowed.input.value.trim(),
+      home_channel:homeChannel.input.value.trim(),
+      restart:wantRestart,
+    };
+    try{
+      const res=await api('/api/platforms/weixin',{method:'POST',body:JSON.stringify(payload)});
+      if(res&&res.saved){
+        statusLine.style.color='var(--success,#16a34a)';
+        statusLine.textContent=t('weixin_saved');
+        showToast(t('weixin_saved'));
+        if(res.restart){
+          const ok=res.restart.ok===true;
+          const detail=res.restart.detail||'';
+          showToast(ok?t('weixin_restart_ok',detail):t('weixin_restart_failed',detail));
+        }
+      }else{
+        const msg=(res&&res.error)||t('weixin_save_failed_generic');
+        statusLine.style.color='var(--error)';
+        statusLine.textContent=t('weixin_save_failed',msg);
+        showToast(t('weixin_save_failed',msg));
+      }
+    }catch(e){
+      const msg=e&&e.message?e.message:String(e);
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('weixin_save_failed',msg);
+      showToast(t('weixin_save_failed',msg));
+    }finally{
+      saveBtn.disabled=false;
+    }
+  };
+  btnRow.appendChild(saveBtn);
+  body.appendChild(btnRow);
+
+  card.appendChild(body);
+  if(!configured) card.classList.add('open');
   header.addEventListener('click',e=>{
     if(e.target.closest('.provider-card-body')) return;
     card.classList.toggle('open');

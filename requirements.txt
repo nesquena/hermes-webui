@@ -3,3 +3,5 @@
 # All heavy ML/agent deps live in the Hermes agent venv.
 pyyaml>=6.0
 cryptography>=42.0
+qrcode>=7.0  # WeChat QR-login rendering in WebUI
+pillow>=10.0  # WeChat QR PNG rendering

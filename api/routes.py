@@ -4315,6 +4315,18 @@ def handle_get(handler, parsed) -> bool:
         from api.platforms import wecom
         return j(handler, wecom.get_config())
 
+    # ── Platforms: Weixin (微信 / 个人微信 / iLink Bot) config (GET) ──
+    if parsed.path == "/api/platforms/weixin":
+        from api.platforms import weixin
+        return j(handler, weixin.get_config())
+
+    # ── Platforms: Weixin QR login status poll (GET ?login_id=...) ──
+    if parsed.path == "/api/platforms/weixin/login/status":
+        from api.platforms import weixin
+        query = parse_qs(parsed.query)
+        login_id = (query.get("login_id", [""])[0] or "").strip()
+        return j(handler, weixin.poll_status(login_id))
+
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
@@ -5649,6 +5661,22 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(exc), status=400)
         if body.get("restart") is True:
             result = {**result, "restart": wecom.restart_gateway()}
+        return j(handler, result)
+
+    # ── Platforms: Weixin (微信 / 个人微信) QR login — start ──
+    if parsed.path == "/api/platforms/weixin/login/start":
+        from api.platforms import weixin
+        return j(handler, weixin.start_login())
+
+    # ── Platforms: Weixin (微信 / 个人微信) access-policy save (+ optional restart) ──
+    if parsed.path == "/api/platforms/weixin":
+        from api.platforms import weixin
+        try:
+            result = weixin.save(body)
+        except weixin.WeixinConfigError as exc:  # ValueError subclass
+            return bad(handler, str(exc), status=400)
+        if body.get("restart") is True:
+            result = {**result, "restart": weixin.restart_gateway()}
         return j(handler, result)
 
     if parsed.path == "/api/reasoning":
