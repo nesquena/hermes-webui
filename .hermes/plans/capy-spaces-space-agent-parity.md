@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub branch refresh metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub branch API payloads (`/repos/{owner}/{repo}/branches/{branch}`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from allow-listed branch name, protected flag, and commit SHA prefix while omitting commit URLs, branch protection details, raw bodies, API-auth/query/fragment, prompt-injection, script, and secret-like fixture fields from receipts/search/vault output.
+
 - `feat(capy-memory): ingest github repository metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub repository API payloads (`/repos/{owner}/{repo}`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from allow-listed repository name/description-or-fallback/default-branch/visibility/private/archived/count/topic/timestamp fields and omits raw body, URL, clone/homepage, API-auth/query/fragment, prompt-injection, script, and secret-like fixture fields from receipts/search/vault output.

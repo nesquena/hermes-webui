@@ -1094,6 +1094,55 @@ def _github_release_refresh_summary(payload: dict[str, Any]) -> str:
 _GITHUB_WORKFLOW_STATES = {"active", "disabled_manually", "disabled_inactivity", "disabled_fork", "deleted"}
 
 
+def _json_payload_is_github_branch_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not path[2]
+        or not path[3]
+        or lowered[4] != "branches"
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", path[5])
+    ):
+        return False
+    name = _safe_public_text(payload.get("name"), limit=120)
+    if name != path[5]:
+        return False
+    commit = payload.get("commit")
+    if not isinstance(commit, dict):
+        return False
+    sha = _safe_public_text(commit.get("sha"), limit=80)
+    if not re.fullmatch(r"[A-Fa-f0-9]{40}", sha):
+        return False
+    for raw_value in (payload.get("name"), commit.get("sha")):
+        if isinstance(raw_value, _PUBLIC_SCALAR_TYPES) and _REFRESH_BLOCKED_VALUE_RE.search(str(raw_value)):
+            return False
+    if "protected" in payload and not isinstance(payload.get("protected"), bool):
+        return False
+    return True
+
+
+def _github_branch_refresh_summary(payload: dict[str, Any]) -> str:
+    name = _safe_public_text(payload.get("name"), limit=120)
+    raw_commit = payload.get("commit")
+    commit = raw_commit if isinstance(raw_commit, dict) else {}
+    sha = _safe_public_text(commit.get("sha"), limit=80)
+    parts = [f"GitHub branch {name}"]
+    if isinstance(payload.get("protected"), bool):
+        parts.append(f"protected: {str(payload['protected']).lower()}")
+    if sha:
+        parts.append(f"commit: {sha[:12]}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_payload_is_github_workflow_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -1149,13 +1198,45 @@ def _github_workflow_refresh_summary(payload: dict[str, Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    return (
+        (parts.hostname or "").strip().lower() == "api.github.com"
+        and len(path) >= 4
+        and path[0] == ""
+        and lowered[1] == "repos"
+        and bool(path[2])
+        and bool(path[3])
+    )
+
+
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("refresh failed")
     title = _safe_public_text(payload.get("title") or payload.get("name") or payload.get("display_name"), limit=200)
     summary = ""
     items = payload.get("items")
-    if _json_payload_is_feed(payload) and isinstance(items, list):
+    if _json_origin_is_github_repo_api(origin_uri):
+        if _json_payload_is_github_issue_metadata(origin_uri, payload):
+            summary = _github_issue_refresh_summary(payload, origin_uri=origin_uri)
+        elif _json_payload_is_github_repository_metadata(origin_uri, payload):
+            title = _safe_public_text(payload.get("full_name"), limit=200) or source_id
+            summary = _github_repository_refresh_summary(payload)
+        elif _json_payload_is_github_release_metadata(origin_uri, payload):
+            title = _safe_public_text(payload.get("name") or payload.get("tag_name"), limit=200) or source_id
+            summary = _github_release_refresh_summary(payload)
+        elif _json_payload_is_github_branch_metadata(origin_uri, payload):
+            title = _safe_public_text(payload.get("name"), limit=200) or source_id
+            summary = _github_branch_refresh_summary(payload)
+        elif _json_payload_is_github_workflow_metadata(origin_uri, payload):
+            title = _safe_public_text(payload.get("name"), limit=200) or source_id
+            summary = _github_workflow_refresh_summary(payload)
+    elif _json_payload_is_feed(payload) and isinstance(items, list):
         for item in items[:5]:
             if not isinstance(item, dict):
                 continue
@@ -1165,17 +1246,6 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             title = _safe_public_text(item.get("title") or title, limit=200) or title
             summary = item_summary
             break
-    elif _json_payload_is_github_issue_metadata(origin_uri, payload):
-        summary = _github_issue_refresh_summary(payload, origin_uri=origin_uri)
-    elif _json_payload_is_github_repository_metadata(origin_uri, payload):
-        title = _safe_public_text(payload.get("full_name"), limit=200) or source_id
-        summary = _github_repository_refresh_summary(payload)
-    elif _json_payload_is_github_release_metadata(origin_uri, payload):
-        title = _safe_public_text(payload.get("name") or payload.get("tag_name"), limit=200) or source_id
-        summary = _github_release_refresh_summary(payload)
-    elif _json_payload_is_github_workflow_metadata(origin_uri, payload):
-        title = _safe_public_text(payload.get("name"), limit=200) or source_id
-        summary = _github_workflow_refresh_summary(payload)
     if not summary:
         raise ValueError("refresh failed")
     return {

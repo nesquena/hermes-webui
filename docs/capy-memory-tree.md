@@ -30,6 +30,10 @@ Capy Memory Tree enables:
 - Do not execute generated UI or loosen Spaces metadata-only safety rules.
 - Do not expose raw fetched documents or raw generated widget bodies to the browser.
 
+## Current source-refresh ingestion boundary
+
+The implemented refresh worker is intentionally narrow. It may ingest safe HTML/plain/Markdown, RSS/Atom, JSON Feed, and allow-listed GitHub API metadata only after the source origin is explicitly allowed. GitHub API refreshes are exact-shape parsers, not generic JSON fallbacks: supported metadata shapes include issue/PR (`/repos/{owner}/{repo}/{issues|pulls}/{number}`), repository (`/repos/{owner}/{repo}`), release (`/repos/{owner}/{repo}/releases/{id}`), branch (`/repos/{owner}/{repo}/branches/{branch}`), and workflow (`/repos/{owner}/{repo}/actions/workflows/{workflow_id}`). Branch summaries are reconstructed only from the branch name, protected flag, and commit SHA prefix; commit URLs, protection details, raw bodies, API-auth fields, prompts, scripts, and secret-looking values stay out of vault Markdown, search results, and public receipts. For `api.github.com/repos/...` origins, a JSON Feed-looking payload must not bypass the exact GitHub metadata parser.
+
 ## Relationship to existing systems
 
 ### Hermes core memory/session components
