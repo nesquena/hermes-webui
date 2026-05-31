@@ -1301,6 +1301,102 @@ def _github_workflow_run_refresh_summary(payload: dict[str, Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_workflow_jobs_path_run_id(origin_uri: str) -> int | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 8
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not path[2]
+        or not path[3]
+        or lowered[4] != "actions"
+        or lowered[5] != "runs"
+        or not re.fullmatch(r"[1-9][0-9]*", path[6])
+        or lowered[7] != "jobs"
+    ):
+        return None
+    return int(path[6])
+
+
+def _github_workflow_job_is_safe(job: Any, *, run_id: int) -> bool:
+    if not isinstance(job, dict):
+        return False
+    job_id = _safe_optional_nonnegative_int(job.get("id"))
+    if job_id is None or job_id <= 0:
+        return False
+    job_run_id = _safe_optional_nonnegative_int(job.get("run_id"))
+    if job_run_id != run_id:
+        return False
+    name = _safe_public_text(job.get("name"), limit=200)
+    if not name:
+        return False
+    status = _safe_public_text(job.get("status"), limit=60).lower()
+    if not status or status not in _GITHUB_WORKFLOW_RUN_STATUSES:
+        return False
+    conclusion = _safe_public_text(job.get("conclusion"), limit=80).lower()
+    if conclusion and conclusion not in _GITHUB_WORKFLOW_RUN_CONCLUSIONS:
+        return False
+    for field in ("name", "status", "conclusion", "started_at", "completed_at"):
+        raw_value = job.get(field)
+        if isinstance(raw_value, _PUBLIC_SCALAR_TYPES) and _REFRESH_BLOCKED_VALUE_RE.search(str(raw_value)):
+            return False
+    for field in ("started_at", "completed_at"):
+        raw_value = job.get(field)
+        if raw_value is not None and not _safe_iso_timestamp(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_workflow_jobs_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
+    run_id = _github_workflow_jobs_path_run_id(origin_uri)
+    if run_id is None:
+        return False
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    if total_count is None:
+        return False
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, list):
+        return False
+    if not jobs:
+        return total_count == 0
+    checked_jobs = jobs[:5]
+    if not checked_jobs:
+        return False
+    return all(_github_workflow_job_is_safe(job, run_id=run_id) for job in checked_jobs)
+
+
+def _github_workflow_jobs_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    run_id = _github_workflow_jobs_path_run_id(origin_uri) or 0
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    parts = [f"GitHub workflow run #{run_id} jobs", f"total count: {total_count if total_count is not None else 0}"]
+    raw_jobs = payload.get("jobs")
+    jobs = raw_jobs if isinstance(raw_jobs, list) else []
+    for job in jobs[:5]:
+        if not _github_workflow_job_is_safe(job, run_id=run_id):
+            continue
+        name = _safe_public_text(job.get("name"), limit=200)
+        status = _safe_public_text(job.get("status"), limit=60).lower()
+        conclusion = _safe_public_text(job.get("conclusion"), limit=80).lower()
+        started = _safe_public_text(job.get("started_at"), limit=80)
+        completed = _safe_public_text(job.get("completed_at"), limit=80)
+        job_parts = [f"job: {name}", f"status: {status}"]
+        if conclusion:
+            job_parts.append(f"conclusion: {conclusion}")
+        if started:
+            job_parts.append(f"started: {started}")
+        if completed:
+            job_parts.append(f"completed: {completed}")
+        parts.append("; ".join(job_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -1342,6 +1438,9 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         elif _json_payload_is_github_workflow_run_metadata(origin_uri, payload):
             title = _safe_public_text(payload.get("name"), limit=200) or source_id
             summary = _github_workflow_run_refresh_summary(payload)
+        elif _json_payload_is_github_workflow_jobs_metadata(origin_uri, payload):
+            title = f"GitHub workflow run {_github_workflow_jobs_path_run_id(origin_uri) or 0} jobs"
+            summary = _github_workflow_jobs_refresh_summary(origin_uri, payload)
     elif _json_payload_is_feed(payload) and isinstance(items, list):
         for item in items[:5]:
             if not isinstance(item, dict):

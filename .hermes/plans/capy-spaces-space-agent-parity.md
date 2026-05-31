@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub workflow jobs metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub Actions jobs-list API payloads (`/repos/{owner}/{repo}/actions/runs/{run_id}/jobs`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from allow-listed run id, total count, and a bounded prefix of safe job names/status/conclusion/timestamp fields while omitting job steps, runner labels/names, logs/html URLs, API-auth/query/fragment, prompt-injection, script, and secret-like fixture fields from receipts/search/vault output.
+
 - `feat(capy-memory): ingest GitHub workflow-run refresh metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub Actions run API payloads (`/repos/{owner}/{repo}/actions/runs/{run_id}`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from allow-listed run id/name/status/conclusion/event/run-number/attempt/branch/SHA-prefix/timestamp fields while omitting logs/jobs/html URLs, commit messages, job payloads, API-auth/query/fragment, prompt-injection, script, and secret-like fixture fields from receipts/search/vault output.
