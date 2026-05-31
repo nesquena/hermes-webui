@@ -21,7 +21,6 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 # ── Reuse established WebUI helpers (do NOT reinvent) ───────────────────────
 from api.profiles import get_active_hermes_home
@@ -167,6 +166,8 @@ def validate(app_id: str, app_secret: str, domain: str) -> dict:
         return {"ok": False, "error": str(exc)}
     if result is None:
         return {"ok": False, "error": "invalid credentials"}
+    if not isinstance(result, dict):
+        return {"ok": False, "error": "invalid probe response"}
     return {
         "ok": True,
         "bot_name": result.get("bot_name"),

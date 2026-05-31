@@ -274,6 +274,14 @@ def test_validate_none_maps_to_error(monkeypatch):
     assert res.get("error")
 
 
+def test_validate_non_dict_probe_maps_to_error(monkeypatch):
+    monkeypatch.setattr(
+        feishu, "_get_probe_bot", lambda: (lambda *a, **k: True)
+    )
+    res = feishu.validate("a", "s", "feishu")
+    assert res == {"ok": False, "error": "invalid probe response"}
+
+
 def test_validate_probe_unavailable(monkeypatch):
     monkeypatch.setattr(feishu, "_get_probe_bot", lambda: None)
     res = feishu.validate("a", "s", "feishu")
