@@ -3577,8 +3577,11 @@ def _attempt_credential_self_heal(
             return None
 
         # 2. Evict the cached agent for this session
+        _evicted_entry = None
         with SESSION_AGENT_CACHE_LOCK:
-            SESSION_AGENT_CACHE.pop(session_id, None)
+            _evicted_entry = SESSION_AGENT_CACHE.pop(session_id, None)
+        if _evicted_entry is not None:
+            _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
 
         # 3. Invalidate the credential pool for this provider
         invalidate_credential_pool_cache(provider_id)
@@ -3678,6 +3681,12 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
     except Exception:
         logger.debug("Failed to close evicted agent session DB for session %s", session_id, exc_info=True)
     return True
+
+
+def _close_cached_agent_entry_at_session_boundary(session_id: str, cache_entry) -> bool:
+    """Commit and tear down a popped SESSION_AGENT_CACHE entry outside the cache lock."""
+    agent = cache_entry[0] if isinstance(cache_entry, tuple) else None
+    return _close_evicted_agent_at_session_boundary(session_id, agent)
 
 
 def _refresh_cached_agent_runtime(agent, agent_kwargs: dict) -> bool:
@@ -4887,6 +4896,7 @@ def _run_agent_streaming(
                 _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
 
                 agent = None
+                _identity_mismatch_entry = None
                 with SESSION_AGENT_CACHE_LOCK:
                     _cached = SESSION_AGENT_CACHE.get(session_id)
                     if _cached and _cached[1] == _agent_sig:
@@ -4896,7 +4906,7 @@ def _run_agent_streaming(
                             SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                             logger.debug('[webui] Reusing cached agent for session %s', session_id)
                         else:
-                            SESSION_AGENT_CACHE.pop(session_id, None)
+                            _identity_mismatch_entry = SESSION_AGENT_CACHE.pop(session_id, None)
                             logger.warning(
                                 '[webui] Evicted cached agent with mismatched session identity: cache_key=%s agent_session_id=%s',
                                 session_id,
@@ -4911,6 +4921,12 @@ def _run_agent_streaming(
                         except Exception:
                             logger.debug("Lifecycle register_agent failed for cached session %s", session_id, exc_info=True)
 
+                if _identity_mismatch_entry is not None:
+                    try:
+                        _close_cached_agent_entry_at_session_boundary(session_id, _identity_mismatch_entry)
+                    except Exception:
+                        logger.debug("Failed to close identity-mismatched cached agent for session %s", session_id, exc_info=True)
+
                 if agent is not None:
                     # Refresh volatile runtime credentials selected from provider
                     # pools without discarding cross-turn agent/provider state.
@@ -4919,13 +4935,14 @@ def _run_agent_streaming(
                             '[webui] Cached agent runtime could not be safely refreshed; rebuilding agent for session %s',
                             session_id,
                         )
-                        try:
-                            if getattr(agent, '_session_db', None) is not None:
-                                agent._session_db.close()
-                        except Exception:
-                            pass
+                        _stale_runtime_entry = None
                         with SESSION_AGENT_CACHE_LOCK:
-                            SESSION_AGENT_CACHE.pop(session_id, None)
+                            _stale_runtime_entry = SESSION_AGENT_CACHE.pop(session_id, None)
+                        if _stale_runtime_entry is not None:
+                            try:
+                                _close_cached_agent_entry_at_session_boundary(session_id, _stale_runtime_entry)
+                            except Exception:
+                                logger.debug("Failed to close stale-runtime cached agent for session %s", session_id, exc_info=True)
                         agent = None
 
                 if agent is not None:
@@ -5564,6 +5581,7 @@ def _run_agent_streaming(
                     # Migrate cached agent to the new session ID so the turn
                     # count survives context compression.
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                    _skipped_agent_migration_entry = None
                     with SESSION_AGENT_CACHE_LOCK:
                         _cached_entry = SESSION_AGENT_CACHE.pop(old_sid, None)
                         if _cached_entry:
@@ -5571,12 +5589,18 @@ def _run_agent_streaming(
                             if _cached_agent_matches_session(_cached_agent, new_sid):
                                 SESSION_AGENT_CACHE[new_sid] = _cached_entry
                             else:
+                                _skipped_agent_migration_entry = _cached_entry
                                 logger.warning(
                                     '[webui] Skipped cached agent migration with mismatched session identity: old_sid=%s new_sid=%s agent_session_id=%s',
                                     old_sid,
                                     new_sid,
                                     _cached_agent_session_identity(_cached_agent),
                                 )
+                    if _skipped_agent_migration_entry is not None:
+                        try:
+                            _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
+                        except Exception:
+                            logger.debug("Failed to close skipped compression-migration cached agent for session %s", old_sid, exc_info=True)
                     _compressed = True
                 # Also detect compression via the result dict or compressor state
                 if not _compressed:
@@ -6450,18 +6474,24 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not text:
         return bad(handler, "text required")
 
+    evicted_cached_entry = None
     with _cfg.SESSION_AGENT_CACHE_LOCK:
         cached = _cfg.SESSION_AGENT_CACHE.get(sid)
         if cached:
             agent = cached[0]
             if not _cached_agent_matches_session(agent, sid):
-                _cfg.SESSION_AGENT_CACHE.pop(sid, None)
+                evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)
                 logger.warning(
                     '[webui] Evicted cached agent before steer due to mismatched session identity: cache_key=%s agent_session_id=%s',
                     sid,
                     _cached_agent_session_identity(agent),
                 )
                 cached = None
+    if evicted_cached_entry is not None:
+        try:
+            _close_cached_agent_entry_at_session_boundary(sid, evicted_cached_entry)
+        except Exception:
+            logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
     if not cached:
         # No active agent for this session — caller falls back to interrupt
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
