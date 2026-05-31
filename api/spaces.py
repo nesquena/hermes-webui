@@ -1807,6 +1807,29 @@ def _shared_data_slot_prompt_preflight_receipt(key: str, item: dict[str, Any]) -
     return receipt
 
 
+def _shared_data_slot_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only evidence that shared-data reads remain preflight-gated.
+
+    Shared data can become agent-visible advisory context. Read/list actions do
+    not carry a free-form prompt to classify, but they still cross the shared
+    context boundary and should surface the required prompt-injection gate in
+    product/tool receipts.
+    """
+    safe_action = _context_value(action, 120) or "space.data.read"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "shared_data_slot",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["shared_context_read", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
 def _shared_data_slot_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None) -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
@@ -1818,6 +1841,10 @@ def _shared_data_slot_action_policy_receipt(action: str, preflight_receipt: dict
         safe_action = "space.shared_slot.set"
     elif action_text.endswith("data.delete"):
         safe_action = "space.shared_slot.delete"
+    elif action_text.endswith("data.list"):
+        safe_action = "space.shared_slot.list"
+    elif action_text.endswith("data.get"):
+        safe_action = "space.shared_slot.read"
     else:
         safe_action = "space.shared_slot.mutate"
     return action_policy_receipt(
@@ -7837,16 +7864,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         items = list_shared_data_slots(space_id)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="shared-slot.list")
+        prompt_preflight = _shared_data_slot_required_prompt_preflight_receipt(name)
+        autonomy_policy = _shared_data_slot_action_policy_receipt(name, prompt_preflight)
         return {
             "ok": True,
             "action": name,
             "space_id": space_id,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
             "items": items,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=0,
+                autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
             ),
         }
@@ -7855,16 +7887,21 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         data_key = validate_data_key(data.get("key"))
         item = read_shared_data_slot(space_id, data_key)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="shared-slot.get")
+        prompt_preflight = _shared_data_slot_required_prompt_preflight_receipt(name)
+        autonomy_policy = _shared_data_slot_action_policy_receipt(name, prompt_preflight)
         return {
             "ok": True,
             "action": name,
             "space_id": space_id,
+            "prompt_preflight": prompt_preflight,
+            "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
             "item": item,
             "output_compaction": _space_tool_action_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_count=0,
+                autonomy_policy=autonomy_policy,
                 progress_event=progress_event,
             ),
         }

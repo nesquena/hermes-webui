@@ -11770,8 +11770,21 @@ def test_space_data_read_list_tools_return_metadata_only_output_compaction_recei
 
     assert listed["items"] == [written["item"]]
     assert read["item"] == written["item"]
-    for action_result, command in ((listed, "space.data.list"), (read, "space.data.get")):
+    for action_result, command, policy_action in (
+        (listed, "space.data.list", "space.shared_slot.list"),
+        (read, "space.data.get", "space.shared_slot.read"),
+    ):
+        prompt_preflight = action_result["prompt_preflight"]
+        autonomy_policy = action_result["autonomy_policy"]
         compaction = action_result["output_compaction"]
+        assert prompt_preflight["boundary"] == "shared_data_slot"
+        assert prompt_preflight["status"] == "required"
+        assert prompt_preflight["metadata_only"] is True
+        assert prompt_preflight["raw_prompt_stored"] is False
+        assert autonomy_policy["action"] == policy_action
+        assert autonomy_policy["approval_gates"] == ["creator_commit"]
+        assert autonomy_policy["prompt_preflight_status"] == "required"
+        assert autonomy_policy["model_route_hint"] == "hint:summarize"
         assert compaction["tool"] == "capy-spaces-tool-action"
         assert compaction["command"] == command
         assert compaction["metadata_only"] is True
@@ -11779,6 +11792,8 @@ def test_space_data_read_list_tools_return_metadata_only_output_compaction_recei
         assert f"space_action: {command}" in compaction["text"]
         assert f"space_id: {created['space_id']}" in compaction["text"]
         assert "widget_count: 0" in compaction["text"]
+        assert "prompt_preflight_status: required" in compaction["text"]
+        assert "model_route_hint: hint:summarize" in compaction["text"]
     assert "safe shared data" in serialized
     assert "raw slot body should not render" not in serialized
     assert "renderer" not in serialized
