@@ -152,12 +152,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let frame = NSRect(x: 0, y: 0, width: 1180, height: 820)
+        // Standard titlebar (no .fullSizeContentView): the web content sits
+        // BELOW the titlebar so it never overlaps the traffic-light buttons, and
+        // the titlebar gives a draggable region to move the window. (The embedded
+        // WebUI page has no -webkit-app-region:drag strip of its own, so a
+        // full-size-content transparent titlebar would leave the window unmovable.)
         window = NSWindow(
             contentRect: frame,
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.title = "Hermes"
-        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
         window.center()
         window.setFrameAutosaveName("HermesMainWindow")
 
