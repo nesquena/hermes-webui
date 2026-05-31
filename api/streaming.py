@@ -4046,10 +4046,26 @@ def _run_agent_streaming(
                         _real_ctx_cache[0] = _resolved_real
                     # Apply the cached real cap when the guard determined one.
                     if _real_ctx_cache[0]:
+                        # Also rescale threshold_tokens by the same ratio so the
+                        # auto-compress trigger reflects the real window, not
+                        # the stale global cap (e.g. 197.2k @ 232K cap → ~850k
+                        # @ 1M real cap).
+                        _orig_cc_cl = getattr(_cc, 'context_length', 0) or 0
+                        _orig_thresh = getattr(_cc, 'threshold_tokens', 0) or 0
                         _cc_cl_u = _real_ctx_cache[0]
-                    _usage['context_length'] = _cc_cl_u
-                    _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
-                    _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+                        if _orig_cc_cl > 0 and _orig_thresh > 0:
+                            _scaled_thresh = int(_orig_thresh * _real_ctx_cache[0] / _orig_cc_cl)
+                            _usage['context_length'] = _cc_cl_u
+                            _usage['threshold_tokens'] = _scaled_thresh
+                            _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+                        else:
+                            _usage['context_length'] = _cc_cl_u
+                            _usage['threshold_tokens'] = _orig_thresh
+                            _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+                    else:
+                        _usage['context_length'] = _cc_cl_u
+                        _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
+                        _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
             except Exception:
                 pass
 
