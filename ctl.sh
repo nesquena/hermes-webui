@@ -7,6 +7,7 @@ PID_FILE="${HERMES_WEBUI_PID_FILE:-${HERMES_HOME}/webui.pid}"
 LOG_FILE="${HERMES_WEBUI_LOG_FILE:-${HERMES_HOME}/webui.log}"
 STATE_FILE="${HERMES_WEBUI_CTL_STATE_FILE:-${HERMES_HOME}/webui.ctl.env}"
 DEFAULT_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-${HERMES_HOME}/webui}"
+DEFAULT_LAUNCHD_LABEL="${HERMES_WEBUI_LAUNCHD_LABEL:-com.parantoux.hermes-webui}"
 
 usage() {
   cat <<'EOF'
@@ -197,6 +198,24 @@ _clear_stale_pid() {
   fi
 }
 
+_launchd_webui_pid() {
+  [[ "${HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT:-0}" == "1" ]] && return 1
+  command -v launchctl >/dev/null 2>&1 || return 1
+  local label="${HERMES_WEBUI_LAUNCHD_LABEL:-${DEFAULT_LAUNCHD_LABEL}}"
+  [[ -n "${label}" ]] || return 1
+  local uid launchd_out pid
+  uid="$(id -u)"
+  launchd_out="$(launchctl print "gui/${uid}/${label}" 2>/dev/null)" || return 1
+  pid="$(printf '%s\n' "${launchd_out}" | awk '/^[[:space:]]*pid = / {print $3; exit}')"
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  (( pid > 0 )) || return 1
+  if _is_alive "${pid}"; then
+    printf '%s\n' "${pid}"
+    return 0
+  fi
+  return 1
+}
+
 start_cmd() {
   ensure_home
   _load_repo_dotenv_preserving_env
@@ -211,6 +230,12 @@ start_cmd() {
   if existing_pid="$(_current_pid 2>/dev/null)"; then
     echo "[ctl] Hermes WebUI is already running (PID ${existing_pid})"
     return 0
+  fi
+  local launchd_pid
+  if launchd_pid="$(_launchd_webui_pid 2>/dev/null)"; then
+    echo "[ctl] Refusing to start a second Hermes WebUI while launchd job ${HERMES_WEBUI_LAUNCHD_LABEL:-${DEFAULT_LAUNCHD_LABEL}} is running (PID ${launchd_pid})." >&2
+    echo "[ctl] Use launchctl kickstart -k gui/$(id -u)/${HERMES_WEBUI_LAUNCHD_LABEL:-${DEFAULT_LAUNCHD_LABEL}} or disable the launchd job before using ctl.sh start." >&2
+    return 2
   fi
   _clear_stale_pid >/dev/null 2>&1 || true
 

@@ -110,6 +110,7 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
             "FAKE_PYTHON_LOG": str(fake_log),
             "HERMES_WEBUI_HOST": "0.0.0.0",
             "HERMES_WEBUI_PORT": "18991",
+            "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
         },
     )
 
@@ -166,6 +167,7 @@ def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
             "HERMES_WEBUI_PYTHON": str(fake_python),
             "FAKE_PYTHON_LOG": str(fake_log),
             "HERMES_WEBUI_HOST": "0.0.0.0",
+            "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
         },
         repo_root=repo_root,
     )
@@ -193,6 +195,49 @@ def test_stale_pid_file_is_removed_without_killing_unrelated_process(tmp_path):
         assert "stale" in (result.stdout + result.stderr).lower()
         assert sleeper.poll() is None, "ctl.sh must not kill unrelated PIDs"
         assert not pid_file.exists()
+    finally:
+        sleeper.terminate()
+        try:
+            sleeper.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            sleeper.kill()
+
+
+def test_start_refuses_second_instance_when_launchd_job_is_running(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    launchctl = fake_bin / "launchctl"
+    launchctl.write_text(
+        textwrap.dedent(
+            f"""
+            #!/usr/bin/env bash
+            if [[ "$1" == "print" ]]; then
+              printf '\tpid = {sleeper.pid}\\n'
+              exit 0
+            fi
+            exit 1
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    launchctl.chmod(0o755)
+
+    try:
+        result = run_ctl(
+            tmp_path,
+            "start",
+            env={
+                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+                "HERMES_WEBUI_LAUNCHD_LABEL": "com.parantoux.hermes-webui",
+            },
+        )
+        assert result.returncode == 2
+        combined = result.stdout + result.stderr
+        assert "Refusing to start a second Hermes WebUI" in combined
+        assert "launchctl kickstart -k" in combined
+        assert not (tmp_path / ".hermes" / "webui.pid").exists()
     finally:
         sleeper.terminate()
         try:
