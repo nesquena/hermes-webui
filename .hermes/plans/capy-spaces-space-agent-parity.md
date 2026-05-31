@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): preflight checkpoint receipts`
+  - Added RED/GREEN backend coverage proving Space checkpoint tool responses now include a top-level metadata-only `prompt_preflight` receipt alongside existing action-policy, `checkpoint:<space_id>` progress, and output-compaction evidence.
+  - Kept rollback anchors advisory and redacted: hostile checkpoint reasons, renderer/source/html/API-auth fields, scripts, prompts, and secret-looking fixture values remain absent from returned receipts and persisted revision details.
+
 - `feat(spaces): compact high-risk template install receipts`
   - Added RED/GREEN backend coverage proving direct, route, and tool-adapter Local Service Dashboard / Model Provider Setup installs now include metadata-only `output_compaction` receipts beside prompt-preflight, autonomy-policy, and progress evidence.
   - Added RED/GREEN real-`static/spaces.js` coverage proving Local Service Dashboard and Model Provider Setup install status cards render compaction evidence from the metadata-only receipt while hostile renderer/source/html/API-auth/token/password/secret fixture fields remain absent from the DOM.

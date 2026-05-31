@@ -8527,13 +8527,14 @@ def create_space_checkpoint(space_id: str, *, reason: Any = "manual checkpoint")
         raise RuntimeError("Capy Spaces is disabled")
     sid = validate_space_id(space_id)
     space = read_space(sid)
-    reason_text = _payload_text_summary(reason, 300) or "manual checkpoint"
+    reason_text = "[REDACTED]"
     details = {
         "metadata_only": True,
         "generated_widgets_rendered": False,
         "reason": reason_text,
     }
     saved = _write_manifest(space, "space.checkpointed", details)
+    prompt_preflight = _recovery_required_prompt_preflight_receipt("space.checkpoint")
     progress_event = _record_space_tool_progress_event(sid, run_prefix="checkpoint")
     autonomy_policy = _recovery_restore_action_policy_receipt("space.checkpoint")
     return {
@@ -8544,6 +8545,7 @@ def create_space_checkpoint(space_id: str, *, reason: Any = "manual checkpoint")
         "generated_widgets_rendered": False,
         "reason": reason_text,
         "revision_event_id": saved["revision_event_id"],
+        "prompt_preflight": prompt_preflight,
         "autonomy_policy": autonomy_policy,
         "progress_event": progress_event,
         "output_compaction": _space_tool_action_output_compaction_receipt(

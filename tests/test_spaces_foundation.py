@@ -591,10 +591,14 @@ def test_space_checkpoint_tool_creates_metadata_only_revision_anchor(monkeypatch
     assert result["generated_widgets_rendered"] is False
     assert result["revision_event_id"]
     assert result["revision_event_id"] not in before_revisions
+    assert result["prompt_preflight"]["boundary"] == "recovery_action"
+    assert result["prompt_preflight"]["status"] == "required"
+    assert result["prompt_preflight"]["metadata_only"] is True
+    assert result["prompt_preflight"]["raw_prompt_stored"] is False
     assert result["autonomy_policy"]["action"] == "space.checkpoint"
     assert result["autonomy_policy"]["metadata_only"] is True
     assert result["autonomy_policy"]["approval_gates"] == ["creator_commit", "generated_widget_execution"]
-    assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert result["autonomy_policy"]["prompt_preflight_status"] == result["prompt_preflight"]["status"]
     assert result["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
     assert result["progress_event"]["event_type"] == "tool.completed"
     assert result["progress_event"]["family"] == "tool"
@@ -638,6 +642,21 @@ def test_space_checkpoint_tool_creates_metadata_only_revision_anchor(monkeypatch
     assert "api_key" not in serialized_details
     assert "secret_value_do_not_leak" not in serialized_details
 
+
+
+def test_space_checkpoint_reason_is_never_returned_or_persisted_raw(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "checkpoint-reason-lab", "name": "Checkpoint Reason Lab"})
+
+    result = spaces.create_space_checkpoint(created["space_id"], reason="benign operator rollback note")
+    event_path = spaces.events_dir() / f"{result['revision_event_id']}.json"
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    serialized = json.dumps({"result": result, "event": event}, sort_keys=True).lower()
+
+    assert result["reason"] == "[REDACTED]"
+    assert event["details"]["reason"] == "[REDACTED]"
+    assert result["prompt_preflight"]["raw_prompt_stored"] is False
+    assert "benign operator rollback note" not in serialized
 
 
 def test_space_checkpoint_route_rejects_ambient_selectors_before_revision(monkeypatch, tmp_path):
