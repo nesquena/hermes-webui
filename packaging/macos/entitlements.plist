@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The bundled CPython JITs nothing but does map writable+executable pages
+       for some C extensions; these keep it runnable under the hardened runtime. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- The agent's venv (installed at runtime into ~/.hermes) loads native .so
+       modules we did not sign; allow loading them. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- Python reads DYLD_*/PYTHONPATH-style env to locate its stdlib. -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+</dict>
+</plist>

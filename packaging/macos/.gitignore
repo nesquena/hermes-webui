@@ -1,0 +1,4 @@
+build/
+.python-cache/
+*.dmg
+AppIcon.icns
