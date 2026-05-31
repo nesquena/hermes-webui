@@ -11118,11 +11118,19 @@ def test_revision_history_tool_responses_include_metadata_only_recovery_policy_r
         assert result["autonomy_policy"]["metadata_only"] is True
         assert result["autonomy_policy"]["local_only"] is True
 
+        progress_event = result["progress_event"]
+        assert progress_event["event_type"] == "tool.completed"
+        assert progress_event["family"] == "tool"
+        assert progress_event["run_id"] == f"recovery.revision.list:{created['space_id']}"
+        assert progress_event["space_id"] == created["space_id"]
+        assert progress_event["redaction_status"] == "metadata_only"
+
         compaction = result["output_compaction"]
         assert compaction["metadata_only"] is True
         assert "prompt_preflight_status: required" in compaction["text"]
         assert f"autonomy_action: {action}" in compaction["text"]
         assert "model_route_hint: hint:reasoning" in compaction["text"]
+        assert f"progress_run_id: recovery.revision.list:{created['space_id']}" in compaction["text"]
 
     assert current_listed["active_space_id"] == created["space_id"]
     assert listed["space_id"] == created["space_id"]
