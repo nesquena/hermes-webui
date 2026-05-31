@@ -7,7 +7,7 @@ WORKSPACE_JS = Path("static/workspace.js").read_text(encoding="utf-8")
 
 
 def _open_file_block() -> str:
-    marker = "async function openFile(path){"
+    marker = "async function openFile(path, opts={}){"
     start = WORKSPACE_JS.find(marker)
     assert start != -1, "openFile() not found in workspace.js"
     end = WORKSPACE_JS.find("\nfunction downloadFile", start)

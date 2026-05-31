@@ -2231,7 +2231,7 @@ let _lastMessageUpwardIntentMs=0;
 let _messageUserUnpinned=false;
 let _bottomSettleToken=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
-const MESSAGE_UPWARD_INTENT_MS=450;
+const MESSAGE_UPWARD_INTENT_MS=2000;
 function _cancelBottomSettle(){ _bottomSettleToken++; }
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
