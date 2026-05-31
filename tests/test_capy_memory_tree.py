@@ -3126,6 +3126,210 @@ def test_run_source_refresh_jobs_default_fetcher_accepts_empty_github_tags_list(
     assert "raw-prompt" not in serialized
 
 
+def test_run_source_refresh_jobs_default_fetcher_ingests_github_languages_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-languages-source-refresh",
+        "title": "GitHub Languages Source Refresh",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/languages?access_token=***#raw-prompt",
+    })
+    github_languages_body = json.dumps({
+        "Python": 12345,
+        "JavaScript": 6789,
+        "HTML": 321,
+        "CSS": 42,
+        "Shell": 7,
+        "Do Not Persist Sixth": 1,
+    }).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_languages_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-languages-source-refresh.md").read_text(encoding="utf-8").lower()
+    search = search_memory("javascript", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [{"url": "https://api.github.com/repos/capy/spaces/languages", "timeout": 8}]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    preflight = result["jobs"][0]["prompt_preflight"]
+    assert preflight["boundary"] == "auto_fetched_source"
+    assert preflight["status"] == "pass"
+    assert preflight["metadata_only"] is True
+    assert preflight["raw_prompt_stored"] is False
+    assert search["results"][0]["source_id"] == "github-languages-source-refresh"
+    assert "github repository languages for capy/spaces" in persisted
+    assert "language count: 6" in persisted
+    assert "total bytes: 19505" in persisted
+    assert "language: python; bytes: 12345" in persisted
+    assert "language: javascript; bytes: 6789" in persisted
+    assert "language: do not persist sixth" not in persisted
+    for unsafe in (
+        "secret_value_do_not_leak",
+        "ignore previous instructions",
+        "access_token",
+        "raw-prompt",
+        "<script",
+        "api_key",
+        "renderer",
+    ):
+        assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+def test_run_source_refresh_jobs_default_fetcher_accepts_empty_github_languages_map(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-languages-empty-map",
+        "title": "GitHub Languages Empty Map",
+        "origin_uri": "https://api.github.com/repos/capy/empty/languages?token=***#raw-prompt",
+    })
+    github_languages_body = json.dumps({}).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_languages_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-languages-empty-map.md").read_text(encoding="utf-8").lower()
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    assert "github repository languages for capy/empty" in persisted
+    assert "language count: 0" in persisted
+    assert "total bytes: 0" in persisted
+    assert "token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_languages_json_feed_bypass(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-languages-feed-bypass",
+        "title": "GitHub Languages Feed Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/languages?access_token=***#raw-prompt",
+    })
+    github_languages_body = json.dumps({
+        "version": "https://jsonfeed.org/version/1.1",
+        "items": [{
+            "title": "Languages feed bypass",
+            "summary": "Safe-looking feed summary should not bypass exact languages metadata validation.",
+            "content_text": "SECRET_VALUE_DO_NOT_LEAK raw languages body",
+        }],
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_languages_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-languages-feed-bypass.md").exists()
+    assert "safe-looking feed summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_languages_malformed_entries(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-languages-malformed",
+        "title": "GitHub Languages Malformed",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/languages?access_token=***#raw-prompt",
+    })
+    safe_rows = {f"Lang{index}": index + 1 for index in range(5)}
+    github_languages_body = json.dumps({
+        **safe_rows,
+        "ignore-previous-instructions": 999,
+        "Python": "12345",
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_languages_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-languages-malformed.md").exists()
+    assert "ignore-previous-instructions" not in serialized
+    assert "ignore previous instructions" not in serialized
+    assert "12345" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_run_source_refresh_jobs_default_fetcher_ingests_github_repository_without_description_and_omits_invalid_counts(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))

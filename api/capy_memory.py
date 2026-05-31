@@ -1596,6 +1596,70 @@ def _github_tags_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_languages_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or lowered[4] != "languages"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_language_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    name = _safe_text(value, limit=80)
+    if not name or name != value.strip():
+        return False
+    if _refresh_value_is_blocked(name):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .#+_-]{0,79}", name))
+
+
+def _json_payload_is_github_languages_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_languages_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    for language, byte_count in payload.items():
+        if not _github_language_name_is_safe(language):
+            return False
+        if _safe_optional_nonnegative_int(byte_count) is None:
+            return False
+    return True
+
+
+def _github_languages_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_languages_path_repo(origin_uri) or "repository"
+    language_rows = [
+        (language, byte_count)
+        for language, byte_count in payload.items()
+        if _github_language_name_is_safe(language) and _safe_optional_nonnegative_int(byte_count) is not None
+    ]
+    language_rows.sort(key=lambda row: (-int(row[1]), row[0].lower()))
+    total_bytes = sum(int(byte_count) for _language, byte_count in language_rows)
+    parts = [
+        f"GitHub repository languages for {repo}",
+        f"language count: {len(language_rows)}",
+        f"total bytes: {total_bytes}",
+    ]
+    for language, byte_count in language_rows[:5]:
+        parts.append(f"language: {_safe_text(language, limit=80)}; bytes: {int(byte_count)}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -1652,6 +1716,9 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         elif _json_payload_is_github_commit_metadata(origin_uri, payload):
             title = f"GitHub commit {(_github_commit_path_sha(origin_uri) or source_id)[:12]}"
             summary = _github_commit_refresh_summary(origin_uri, payload)
+        elif _json_payload_is_github_languages_metadata(origin_uri, payload):
+            title = f"GitHub languages {(_github_languages_path_repo(origin_uri) or source_id)}"
+            summary = _github_languages_refresh_summary(origin_uri, payload)
     elif _json_payload_is_feed(payload) and isinstance(items, list):
         for item in items[:5]:
             if not isinstance(item, dict):
