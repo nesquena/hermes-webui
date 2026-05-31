@@ -6,6 +6,14 @@
 ### Added
 - The session action menu can regenerate conversation titles on demand from the saved transcript, updating the sidebar without touching conversation chronology and syncing the new title through to state.db when Insights sync is enabled (#3106).
 
+## [v0.51.183] — 2026-05-31 — Release FC (stage-batchC — inline file:// media artifacts + /api/media state-file confinement)
+
+### Fixed
+- Render assistant-emitted `file://` image artifact links inline through the authenticated `/api/media` route, so browser clients can view generated local images instead of seeing unusable server-local file paths. Only bare (line-start or whitespace-delimited) `file://` URLs are rewritten — `[label](file://...)` markdown anchors keep the normal link path (#3219).
+
+### Security
+- `/api/media` now hard-denies WebUI state and secret/config files even when they fall under an allowed root (the WebUI state dir, `settings.json`, `state.db`, `auth.json`, `auth.lock`, `config.yaml`, `.env`, signing/PBKDF2 keys, the `sessions`/`memories`/`profiles` state subdirs). Previously the whole Hermes home was an allowed root, so an authenticated session viewing attacker-influenced agent output that emitted a `file://`/`MEDIA:` link to such a file could fetch it. Hardened the boundary at the route for every entry path (bare `file://`, markdown anchors, and `MEDIA:` tokens), closing #3234.
+
 ## [v0.51.182] — 2026-05-31 — Release FB (stage-batchB2 — headless browser smoke gate + consolidated client-disconnect handling)
 
 ### Added
