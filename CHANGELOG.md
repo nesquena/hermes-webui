@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- MCP Tools now supports pinned tool shortcuts: users can pin common tools, then insert a ready-to-send tool request into the composer from the shortcut chip or each tool row (#3042).
+
 ## [v0.51.180] — 2026-05-30 — Release EZ (stage-batch62 — session/agent cache ownership hardening)
 
 ### Fixed

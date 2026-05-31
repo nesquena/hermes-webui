@@ -1304,6 +1304,7 @@
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="mcp_tools_title">MCP Tools</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_tools_desc">Search known tools across active MCP servers.</div>
+              <div id="mcpToolShortcuts" class="mcp-tool-shortcuts" aria-live="polite"></div>
               <input type="search" id="mcpToolSearch" class="mcp-tool-search" data-i18n-placeholder="mcp_tools_search_placeholder" placeholder="Search tools by name, server, or description…" oninput="filterMcpTools()" autocomplete="off">
               <div class="mcp-tool-toolbar" id="mcpToolToolbar" aria-live="polite"></div>
               <div id="mcpToolList" class="mcp-tool-list"></div>

@@ -3239,10 +3239,21 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .mcp-tool-page-size{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;color:var(--muted);font-size:11px;}
 .mcp-tool-page-size select{appearance:none;border:1px solid var(--border2);background:var(--code-bg);color:var(--text);border-radius:7px;padding:4px 22px 4px 8px;font-size:11px;font-weight:600;line-height:1.2;cursor:pointer;}
 .mcp-tool-empty-detail{display:inline-block;margin-top:4px;color:var(--muted);font-size:11px;line-height:1.35;}
+.mcp-tool-shortcuts{display:flex;flex-direction:column;gap:6px;margin:0 0 8px 0;}
+.mcp-tool-shortcuts-empty{color:var(--muted);font-size:11px;line-height:1.4;}
+.mcp-tool-shortcuts-label{color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;}
+.mcp-tool-shortcuts-list{display:flex;flex-wrap:wrap;gap:6px;}
+.mcp-tool-shortcut-chip{display:inline-flex;align-items:center;gap:6px;max-width:100%;border:1px solid var(--border2);background:var(--code-bg);color:var(--text);border-radius:999px;padding:5px 9px;font-size:11px;font-weight:650;cursor:pointer;}
+.mcp-tool-shortcut-chip span{color:var(--muted);font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.mcp-tool-shortcut-chip:hover{border-color:var(--accent-bg-strong);color:var(--accent-text);}
 .mcp-tool-list{max-height:min(52vh,560px);overflow:auto;padding-right:3px;scrollbar-gutter:stable;}
 .mcp-tool-row{display:flex;flex-direction:column;gap:5px;padding:9px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;font-size:12px;background:var(--surface);}
 .mcp-tool-name{font-weight:600;color:var(--text);overflow-wrap:anywhere;}
 .mcp-tool-server{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);background:var(--code-bg);border:1px solid var(--border2);border-radius:999px;padding:2px 6px;}
+.mcp-tool-action-btn{margin-left:auto;border:1px solid var(--border2);background:var(--code-bg);color:var(--text);border-radius:7px;padding:3px 7px;font-size:10px;font-weight:700;line-height:1.2;cursor:pointer;}
+.mcp-tool-action-btn + .mcp-tool-action-btn{margin-left:0;}
+.mcp-tool-action-btn:hover{border-color:var(--accent-bg-strong);color:var(--accent-text);}
+.mcp-tool-action-btn[aria-pressed="true"]{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.32);color:#4ade80;}
 .mcp-tool-schema{margin:2px 0 0 0;padding:7px 8px;white-space:pre-wrap;max-height:140px;overflow:auto;background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;color:var(--muted);font-size:11px;line-height:1.45;}
 .mcp-tool-pager{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:8px;}
 .mcp-tool-page-label{color:var(--muted);font-size:11px;min-width:44px;text-align:center;}
