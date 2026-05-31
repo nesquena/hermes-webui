@@ -4305,6 +4305,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/providers":
         return j(handler, get_providers())
 
+    # ── Platforms: Feishu (飞书 / Lark) config (GET) ──
+    if parsed.path == "/api/platforms/feishu":
+        from api.platforms import feishu
+        return j(handler, feishu.get_config())
+
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
@@ -5598,6 +5603,28 @@ def handle_post(handler, parsed) -> bool:
         result = remove_provider_key(provider_id)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+
+    # ── Platforms: Feishu (飞书 / Lark) credential probe ──
+    if parsed.path == "/api/platforms/feishu/validate":
+        from api.platforms import feishu
+        app_id = (body.get("app_id") or "").strip()
+        # app_secret may be the masked sentinel when re-validating saved creds;
+        # the route stays thin and passes it straight to validate() (the probe
+        # simply fails for a sentinel, returning {ok: False, ...}).
+        app_secret = body.get("app_secret")
+        domain = (body.get("domain") or "feishu").strip()
+        return j(handler, feishu.validate(app_id, app_secret, domain))
+
+    # ── Platforms: Feishu (飞书 / Lark) config save (+ optional restart) ──
+    if parsed.path == "/api/platforms/feishu":
+        from api.platforms import feishu
+        try:
+            result = feishu.save(body)
+        except feishu.FeishuConfigError as exc:  # ValueError subclass
+            return bad(handler, str(exc), status=400)
+        if body.get("restart") is True:
+            result = {**result, "restart": feishu.restart_gateway()}
         return j(handler, result)
 
     if parsed.path == "/api/reasoning":
