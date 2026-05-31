@@ -1821,6 +1821,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
+      // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
+      // a stream_end event arriving during the fade window sees
+      // _streamFinalized=false, calls _restoreSettledSession(), and overwrites
+      // S.messages with stale server data (issue #3195).
+      _streamFinalized=true;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       const _doneData=JSON.parse(e.data);

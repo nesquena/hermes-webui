@@ -3021,8 +3021,10 @@ function renderMd(raw){
   // (line-start or whitespace-delimited), not inside markdown links, so normal
   // [label](file://...) anchors continue to use the link path below.
   s=s.replace(/(^|\s)(file:\/\/[^\s<>"')\]]+)/g,(_,lead,raw_ref)=>{
+    const trailing=(raw_ref.match(/[.,;:]+$/)||[''])[0];
+    if(trailing) raw_ref=raw_ref.slice(0,-trailing.length);
     media_stash.push(raw_ref);
-    return lead+'\x00D'+(media_stash.length-1)+'\x00';
+    return lead+'\x00D'+(media_stash.length-1)+'\x00'+trailing;
   });
   // ── End MEDIA stash ─────────────────────────────────────────────────────────
   // Pre-pass: decode HTML entities first so markdown processing works correctly.

@@ -45,6 +45,10 @@ class TestMediaRenderMdStash(unittest.TestCase):
         self.assertIn("file:// links for local artifacts", UI_JS)
         self.assertIn("file:\\/\\/[^\\s<>", UI_JS)
 
+    def test_bare_file_urls_trim_sentence_punctuation(self):
+        self.assertIn("raw_ref.match(/[.,;:]+$/)", UI_JS)
+        self.assertIn("+'\\x00'+trailing", UI_JS)
+
     def test_file_urls_are_rewritten_through_media_endpoint(self):
         self.assertIn("new URL(ref)", UI_JS)
         self.assertIn("u.pathname", UI_JS)
