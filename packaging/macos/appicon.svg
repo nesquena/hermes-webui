@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Official Hermes Agent / Nous Research mark: white triangle on a black disc.
+       Matches hermes-agent.nousresearch.com favicon. Pure vector → crisp at any
+       icon size. -->
+  <circle cx="256" cy="256" r="256" fill="#000000"/>
+  <path d="M256 165 L368 352 L144 352 Z" fill="#FFFFFF" stroke="#FFFFFF"
+        stroke-width="10" stroke-linejoin="round"/>
+</svg>

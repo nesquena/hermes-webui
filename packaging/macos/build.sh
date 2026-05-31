@@ -99,8 +99,36 @@ swiftc -O -o "${APP}/Contents/MacOS/Hermes" \
 say "Writing Info.plist (version ${VERSION})"
 sed "s/__BUILD_VERSION__/${VERSION#v}/g" "${HERE}/Info.plist" > "${APP}/Contents/Info.plist"
 
-# Optional icon
-[ -f "${HERE}/AppIcon.icns" ] && cp "${HERE}/AppIcon.icns" "${APP}/Contents/Resources/AppIcon.icns"
+# App icon — generated from the Hermes brand mark (static/favicon-512.svg).
+build_icon() {
+  # Prefer the dedicated app-icon source (official Hermes/Nous mark); fall back
+  # to the WebUI brand favicon.
+  local svg="${HERE}/appicon.svg"
+  [ -f "${svg}" ] || svg="${REPO_ROOT}/static/favicon-512.svg"
+  local png="${REPO_ROOT}/static/favicon-512.png"
+  local iconset="${BUILD_DIR}/Hermes.iconset"
+  rm -rf "${iconset}"; mkdir -p "${iconset}"
+  # size:filename pairs the iconset format requires.
+  local specs="16:icon_16x16 32:icon_16x16@2x 32:icon_32x32 64:icon_32x32@2x \
+128:icon_128x128 256:icon_128x128@2x 256:icon_256x256 512:icon_256x256@2x \
+512:icon_512x512 1024:icon_512x512@2x"
+  for spec in ${specs}; do
+    local px="${spec%%:*}"; local name="${spec##*:}"
+    if command -v rsvg-convert >/dev/null 2>&1 && [ -f "${svg}" ]; then
+      rsvg-convert -w "${px}" -h "${px}" "${svg}" -o "${iconset}/${name}.png"
+    else  # fallback: rescale the 512 PNG (slight quality loss above 512)
+      sips -z "${px}" "${px}" "${png}" --out "${iconset}/${name}.png" >/dev/null 2>&1
+    fi
+  done
+  iconutil -c icns "${iconset}" -o "${APP}/Contents/Resources/AppIcon.icns"
+  rm -rf "${iconset}"
+}
+if [ -f "${REPO_ROOT}/static/favicon-512.svg" ] || [ -f "${REPO_ROOT}/static/favicon-512.png" ]; then
+  say "Generating AppIcon.icns from Hermes brand mark"
+  build_icon
+elif [ -f "${HERE}/AppIcon.icns" ]; then
+  cp "${HERE}/AppIcon.icns" "${APP}/Contents/Resources/AppIcon.icns"
+fi
 
 # ── 5. Sign ──────────────────────────────────────────────────────────────────
 if [ "${DO_SIGN}" = 1 ]; then
