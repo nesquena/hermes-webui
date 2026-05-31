@@ -956,6 +956,20 @@ Non-goals for Slice 4e:
 
 #### Slice 4f: Supervised local runner client backend gate
 
+Status as of 2026-05-28: client transport proposed in #3073 behind
+`HERMES_WEBUI_RUNNER_BASE_URL`; it should be described as under review until a
+release PR actually ships it.
+`runner-local` still remains default-off and returns the bounded not-configured
+path unless that endpoint is explicitly configured. When configured, WebUI uses a
+JSON HTTP client boundary for start / observe / status / controls and bridges
+observed runner events through the existing SSE stream route rather than adding
+main-process runner-owned maps.
+This bridge is intentionally a WebUI consumer transport seam: the configured
+runner must emit events that are already compatible with the browser SSE event
+names/payloads, or a later runner-owned normalization layer must translate
+Hermes runtime families such as `token.delta`, `tool.started`, and `done` before
+they reach this route.
+
 After the route-selection harness ships, the next reviewable step is not to make
 `runner-local` the default. It is to define the first concrete supervised/local
 runner client backend that can replace the bounded 501 path under the existing

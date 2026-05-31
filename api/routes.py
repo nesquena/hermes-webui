@@ -7481,11 +7481,106 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
     return True
 
 
+def _runner_stream_cursor_from_query(qs: dict) -> str | None:
+    cursor = str(qs.get("cursor", [""])[0] or "").strip()
+    if cursor:
+        return cursor
+    after_seq = _parse_run_journal_after_seq(qs)
+    return str(after_seq) if after_seq is not None else None
+
+
+def _runner_event_name(entry: dict) -> str:
+    return str(entry.get("event") or entry.get("type") or "message")
+
+
+def _runner_event_payload(entry: dict):
+    if "payload" in entry:
+        return entry.get("payload")
+    if "data" in entry:
+        return entry.get("data")
+    return entry
+
+
+def _runner_event_id(run_id: str, entry: dict) -> str | None:
+    event_id = entry.get("event_id") or entry.get("id")
+    if event_id:
+        return str(event_id)
+    seq = entry.get("seq")
+    if seq not in (None, ""):
+        return f"{run_id}:{seq}"
+    return None
+
+
+def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -> bool:
+    """Stream events from a configured runner without WebUI-owned runtime maps."""
+    run_id = str(run_id or "").strip()
+    if not run_id:
+        return False
+    try:
+        from api.runtime_adapter import build_runtime_adapter, runtime_adapter_runner_enabled
+
+        if not runtime_adapter_runner_enabled():
+            return False
+        adapter = build_runtime_adapter(runner_client_factory=_runtime_runner_client_factory)
+    except NotImplementedError:
+        return False
+    if adapter is None:
+        return False
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+    cursor_value = cursor
+    try:
+        while True:
+            try:
+                event_stream = adapter.observe_run(run_id, cursor=cursor_value)
+            except Exception as exc:
+                _sse(handler, "error", {"error": _sanitize_error(exc)})
+                break
+            emitted = False
+            terminal = False
+            for entry in list(getattr(event_stream, "events", []) or []):
+                if not isinstance(entry, dict):
+                    continue
+                event = _runner_event_name(entry)
+                _sse_with_id(handler, event, _runner_event_payload(entry), _runner_event_id(run_id, entry))
+                emitted = True
+                if event in ("stream_end", "error", "cancel"):
+                    terminal = True
+            next_cursor = getattr(event_stream, "cursor", None)
+            if next_cursor not in (None, ""):
+                cursor_value = str(next_cursor)
+            if terminal:
+                break
+            if not emitted:
+                status = None
+                try:
+                    status = adapter.get_run(run_id)
+                except Exception:
+                    status = None
+                state = str(getattr(status, "terminal_state", None) or getattr(status, "status", "") or "").lower()
+                if state in ("completed", "complete", "failed", "error", "cancelled", "canceled"):
+                    _sse(handler, "stream_end", {"run_id": run_id, "status": state})
+                    break
+                handler.wfile.write(b": heartbeat\n\n")
+                handler.wfile.flush()
+                time.sleep(_SSE_HEARTBEAT_INTERVAL_SECONDS)
+    except _CLIENT_DISCONNECT_ERRORS:
+        pass
+    return True
+
+
 def _handle_sse_stream(handler, parsed):
     qs = parse_qs(parsed.query)
     stream_id = qs.get("stream_id", [""])[0]
     stream = STREAMS.get(stream_id)
     if stream is None:
+        if _stream_runner_run_events(handler, stream_id, _runner_stream_cursor_from_query(qs)):
+            return True
         try:
             journal_available = bool(find_run_summary(stream_id)) if stream_id else False
         except Exception:
@@ -9649,15 +9744,20 @@ def _start_chat_stream_for_session(
 
 
 def _runtime_runner_client_factory():
-    """Return the runner-local client when a supervised backend exists.
+    """Return the configured runner-local client.
 
-    Slice 4d wires the `/api/chat/start` selection point without silently falling
-    back to the legacy in-process runtime when `runner-local` is explicitly
-    requested. The supervised runner backend itself is intentionally not created
-    in this helper yet; a later slice can replace this factory with the concrete
-    client while keeping the route contract stable.
+    `runner-local` remains default-off and bounded: without an explicit runner
+    endpoint this factory preserves the existing "runner-local chat backend is
+    not configured" 501 path. When
+    `HERMES_WEBUI_RUNNER_BASE_URL` is set, the WebUI process only acts as a
+    transport client; the runner endpoint owns execution, run ids, replay, and
+    controls.
     """
-    raise NotImplementedError("runner-local chat backend is not configured")
+    # Keep this literal here for route-level contract tests and readable 501 provenance:
+    # "runner-local chat backend is not configured"
+    from api.runner_client import HttpRunnerClient
+
+    return HttpRunnerClient.from_env()
 
 
 def _chat_start_response_from_run_start(result):
