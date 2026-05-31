@@ -958,6 +958,52 @@ def _github_issue_refresh_summary(payload: dict[str, Any], *, origin_uri: str) -
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _json_payload_is_github_release_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not path[2]
+        or not path[3]
+        or lowered[4] != "releases"
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+    ):
+        return False
+    release_id = _safe_nonnegative_int(payload.get("id"))
+    if release_id != int(path[5]):
+        return False
+    for field in ("name", "tag_name", "published_at"):
+        raw_value = payload.get(field)
+        if isinstance(raw_value, _PUBLIC_SCALAR_TYPES) and _REFRESH_BLOCKED_VALUE_RE.search(str(raw_value)):
+            return False
+    return bool(_safe_public_text(payload.get("name") or payload.get("tag_name"), limit=200))
+
+
+def _github_release_refresh_summary(payload: dict[str, Any]) -> str:
+    release_id = _safe_nonnegative_int(payload.get("id"))
+    name = _safe_public_text(payload.get("name"), limit=200)
+    tag = _safe_public_text(payload.get("tag_name"), limit=120)
+    published = _safe_public_text(payload.get("published_at"), limit=80)
+    parts = [f"GitHub release #{release_id}: {name or tag}"]
+    if tag:
+        parts.append(f"tag: {tag}")
+    if isinstance(payload.get("draft"), bool):
+        parts.append(f"draft: {str(payload['draft']).lower()}")
+    if isinstance(payload.get("prerelease"), bool):
+        parts.append(f"prerelease: {str(payload['prerelease']).lower()}")
+    if published:
+        parts.append(f"published: {published}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError("refresh failed")
@@ -976,6 +1022,9 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             break
     elif _json_payload_is_github_issue_metadata(origin_uri, payload):
         summary = _github_issue_refresh_summary(payload, origin_uri=origin_uri)
+    elif _json_payload_is_github_release_metadata(origin_uri, payload):
+        title = _safe_public_text(payload.get("name") or payload.get("tag_name"), limit=200) or source_id
+        summary = _github_release_refresh_summary(payload)
     if not summary:
         raise ValueError("refresh failed")
     return {

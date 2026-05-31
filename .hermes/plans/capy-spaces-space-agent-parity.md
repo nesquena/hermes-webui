@@ -131,6 +131,10 @@ Recent completed slices:
   - Added RED/GREEN backend coverage proving `space.development.terminal` returns metadata-only development-surface, prompt-preflight, autonomy-policy, progress, and output-compaction receipts without executing commands or enabling filesystem writes.
   - The receipt is reconstructed only from allow-listed action, Space id, policy/model-route status, and progress run metadata while omitting raw terminal commands, prompts, source/html/renderer/API-auth fields, scripts, bearer strings, and secret-looking fixture values.
 
+- `feat(capy-memory): ingest GitHub release refresh metadata`
+  - Added RED/GREEN backend coverage proving the safe source-refresh fetcher can ingest allow-listed GitHub release API JSON as metadata-only Memory Tree records when `api.github.com` is explicitly allow-listed.
+  - The release record is reconstructed only from allow-listed release id, name/tag, draft/prerelease flags, and publish timestamp while raw release bodies, HTML bodies, URLs/query tokens, API-key fields, script markers, prompt-injection text, and secret-looking fixture values remain absent from persisted vault Markdown, search results, and job receipts.
+
 - `feat(capy-memory): ingest GitHub issue refresh metadata`
   - Added RED/GREEN backend coverage proving the safe source-refresh fetcher can ingest GitHub issue/PR API JSON as metadata-only Memory Tree records when `api.github.com` is explicitly allow-listed.
   - The GitHub record is reconstructed only from allow-listed issue/PR number, title, state, labels, and update timestamp while raw issue bodies, HTML bodies, query tokens, API-key fields, script markers, prompt-injection text, and secret-looking fixture values remain absent from persisted vault Markdown, search results, and job receipts.
