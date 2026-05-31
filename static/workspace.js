@@ -284,7 +284,8 @@ async function openArtifactPath(path){
   openFile(rel);
 }
 
-async function loadDir(path){
+async function loadDir(path, opts={}){
+  const preservePreview=!!(opts&&opts.preservePreview);
   if(!S.session)return;
   const sessionId=S.session.session_id;
   try{
@@ -314,7 +315,7 @@ async function loadDir(path){
       }
       if(expanded.size>0)renderFileTree();
     }
-    if(typeof clearPreview==='function'){
+    if(!preservePreview&&typeof clearPreview==='function'){
       if(typeof _previewDirty!=='undefined'&&_previewDirty){
         showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview({keepPanelOpen:true});});
       }else{
