@@ -21,6 +21,13 @@ def test_session_action_menu_exposes_regenerate_title_control():
     assert "renderSessionListFromCache();" in SESSIONS_JS
 
 
+def test_imported_sessions_share_read_only_menu_gate():
+    helper_idx = SESSIONS_JS.index("function _isReadOnlySession(session)")
+    next_helper_idx = SESSIONS_JS.index("function _sourceKeyForSession", helper_idx)
+    helper_block = SESSIONS_JS[helper_idx:next_helper_idx]
+    assert "session.is_imported" in helper_block
+
+
 def test_regenerate_title_i18n_and_changelog_entries_exist():
     for key in [
         "session_title_regenerate",

@@ -915,7 +915,7 @@ function _isMessagingSession(session) {
 }
 
 function _isReadOnlySession(session) {
-  return !!(session && (session.read_only || session.is_read_only));
+  return !!(session && (session.read_only || session.is_read_only || session.is_imported));
 }
 
 function _sourceKeyForSession(session) {
@@ -2193,7 +2193,8 @@ function _openSessionActionMenu(session, anchorEl){
           showToast(t('session_rename_failed_no_row')||'Could not start rename — row not found.', 3000, 'error');
         }
       }
-    ));  }
+    ));
+  }
   menu.appendChild(_buildSessionAction(
     session.pinned?t('session_unpin'):t('session_pin'),
     session.pinned?t('session_unpin_desc'):t('session_pin_desc'),
@@ -2264,33 +2265,31 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
-
-
-    menu.appendChild(_buildSessionAction(
-      t('session_title_regenerate'),
-      t('session_title_regenerate_desc'),
-      ICONS.spark,
-      async()=>{
-        closeSessionActionMenu();
-        try{
-          if(typeof showToast==='function') showToast(t('session_title_regenerating'), 1600);
-          const response=await api('/api/session/title/regenerate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
-          const nextTitle=(response&&response.title)||(response&&response.session&&response.session.title)||'';
-          if(nextTitle){
-            session.title=nextTitle;
-            const cached=(_allSessions||[]).find(item=>item&&item.session_id===session.session_id);
-            if(cached) cached.title=nextTitle;
-            if(S.session&&S.session.session_id===session.session_id){S.session.title=nextTitle;syncTopbar();}
-            renderSessionListFromCache();
-          }
-          if(typeof showToast==='function') showToast(t('session_title_regenerated', nextTitle||t('untitled')), 2400);
-        }catch(err){
-          const msg=t('session_title_regenerate_failed')+(err&&err.message?err.message:String(err));
-          setStatus(msg);
-          if(typeof showToast==='function') showToast(msg,3000,'error');
+  menu.appendChild(_buildSessionAction(
+    t('session_title_regenerate'),
+    t('session_title_regenerate_desc'),
+    ICONS.spark,
+    async()=>{
+      closeSessionActionMenu();
+      try{
+        if(typeof showToast==='function') showToast(t('session_title_regenerating'), 1600);
+        const response=await api('/api/session/title/regenerate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
+        const nextTitle=(response&&response.title)||(response&&response.session&&response.session.title)||'';
+        if(nextTitle){
+          session.title=nextTitle;
+          const cached=(_allSessions||[]).find(item=>item&&item.session_id===session.session_id);
+          if(cached) cached.title=nextTitle;
+          if(S.session&&S.session.session_id===session.session_id){S.session.title=nextTitle;syncTopbar();}
+          renderSessionListFromCache();
         }
+        if(typeof showToast==='function') showToast(t('session_title_regenerated', nextTitle||t('untitled')), 2400);
+      }catch(err){
+        const msg=t('session_title_regenerate_failed')+(err&&err.message?err.message:String(err));
+        setStatus(msg);
+        if(typeof showToast==='function') showToast(msg,3000,'error');
       }
-    ));
+    }
+  ));
   if(!isExternalSession){
     if(session.worktree_path){
       menu.appendChild(_buildSessionAction(
