@@ -2717,6 +2717,151 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_workflow_jobs_js
     assert "raw-prompt" not in serialized
 
 
+def test_run_source_refresh_jobs_default_fetcher_ingests_github_commit_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-commit-source-refresh",
+        "title": "GitHub Commit Source Refresh",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/commits/abcdef123456abcdef123456abcdef123456abcd?access_token=***#raw-prompt",
+    })
+    github_commit_body = json.dumps({
+        "sha": "abcdef123456abcdef123456abcdef123456abcd",
+        "commit": {
+            "message": "Add memory freshness source card\n\nRaw body should never persist.",
+            "author": {"name": "Brendan", "email": "brendan@example.test", "date": "2026-05-31T03:00:00Z"},
+            "committer": {"name": "Capy Bot", "email": "bot@example.test", "date": "2026-05-31T03:05:00Z"},
+            "verification": {"verified": True, "signature": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+        "parents": [
+            {"sha": f"{index:040x}", "html_url": f"https://github.com/capy/spaces/commit/{index}?token=***"}
+            for index in range(1, 13)
+        ],
+        "stats": {"additions": 12, "deletions": 3, "total": 15},
+        "files": [
+            {"filename": f"static/spaces-{index}.js", "patch": "SECRET_VALUE_DO_NOT_LEAK", "raw_url": "https://example.test/raw?token=***"}
+            for index in range(60)
+        ],
+        "html_url": "https://github.com/capy/spaces/commit/abcdef?token=***",
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        "renderer": "<script>steal()</script>",
+    }).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_commit_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-commit-source-refresh.md").read_text(encoding="utf-8").lower()
+    search = search_memory("memory freshness source card", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [{"url": "https://api.github.com/repos/capy/spaces/commits/abcdef123456abcdef123456abcdef123456abcd", "timeout": 8}]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    preflight = result["jobs"][0]["prompt_preflight"]
+    assert preflight["boundary"] == "auto_fetched_source"
+    assert preflight["status"] == "pass"
+    assert preflight["metadata_only"] is True
+    assert preflight["raw_prompt_stored"] is False
+    assert search["results"][0]["source_id"] == "github-commit-source-refresh"
+    assert "github commit abcdef123456" in persisted
+    assert "message: add memory freshness source card" in persisted
+    assert "author date: 2026-05-31t03:00:00+00:00" in persisted
+    assert "committer date: 2026-05-31t03:05:00+00:00" in persisted
+    assert "parents: 12" in persisted
+    assert "changed file count: 60" in persisted
+    assert "additions: 12" in persisted
+    assert "deletions: 3" in persisted
+    for unsafe in (
+        "secret_value_do_not_leak",
+        "raw body should never persist",
+        "brendan@example",
+        "bot@example",
+        "signature",
+        "filename",
+        "static/spaces.js",
+        "patch",
+        "raw_url",
+        "html_url",
+        "api_key",
+        "access_token",
+        "?token",
+        "raw-prompt",
+        "<script",
+        "steal()",
+        "renderer",
+    ):
+        assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_commit_json_feed_bypass(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-commit-feed-bypass",
+        "title": "GitHub Commit Feed Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/commits/abcdef123456abcdef123456abcdef123456abcd?access_token=***#raw-prompt",
+    })
+    github_commit_body = json.dumps({
+        "version": "https://jsonfeed.org/version/1.1",
+        "sha": "abcdef123456abcdef123456abcdef123456abcd",
+        "items": [{
+            "title": "Commit feed bypass",
+            "summary": "Safe-looking feed summary should not bypass exact commit metadata validation.",
+            "content_text": "SECRET_VALUE_DO_NOT_LEAK raw commit body",
+        }],
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_commit_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-commit-feed-bypass.md").exists()
+    assert "safe-looking feed summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_run_source_refresh_jobs_default_fetcher_ingests_github_repository_without_description_and_omits_invalid_counts(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
