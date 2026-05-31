@@ -15715,7 +15715,7 @@ def test_space_tool_adapter_queues_whole_space_repair_metadata_only(monkeypatch,
 
 def test_space_repair_events_tool_response_includes_metadata_only_output_compaction(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
-    created = spaces.create_space({"space_id": "repair-events-list-compaction", "name": "Repair Events List"})
+    created = spaces.create_space({"space_id": "RepairEventsListCompaction", "name": "Repair Events List"})
 
     queued = spaces.run_space_tool(
         "space.recovery.repair_space",
@@ -15753,6 +15753,12 @@ def test_space_repair_events_tool_response_includes_metadata_only_output_compact
     assert listed["autonomy_policy"]["prompt_preflight_status"] == "required"
     assert listed["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
     assert listed["autonomy_policy"]["metadata_only"] is True
+    progress_event = listed["progress_event"]
+    assert progress_event["event_type"] == "tool.completed"
+    assert progress_event["family"] == "tool"
+    assert progress_event["run_id"] == f"recovery.space.repair_events:{created['space_id']}"
+    assert progress_event["space_id"] == created["space_id"]
+    assert progress_event["redaction_status"] == "metadata_only"
     event = listed["events"][0]
     assert event["event_id"] == queued["event_id"]
     assert event["prompt_preflight"]["boundary"] == "space_repair_prompt"
@@ -15771,6 +15777,9 @@ def test_space_repair_events_tool_response_includes_metadata_only_output_compact
     assert compaction["redaction_status"] == "metadata_only"
     assert "space_action: space.recovery.space_repair_events" in compaction["text"]
     assert "event_count: 1" in compaction["text"]
+    assert "prompt_preflight_status: required" in compaction["text"]
+    assert "policy_action: space.recovery.space_repair_events" in compaction["text"]
+    assert f"progress_run_id: recovery.space.repair_events:{created['space_id']}" in compaction["text"]
     assert queued["event_id"] in compaction["text"]
     assert "renderer" not in serialized
     assert "source" not in serialized
@@ -15779,6 +15788,21 @@ def test_space_repair_events_tool_response_includes_metadata_only_output_compact
     assert "bearer placeholder" not in serialized
     assert "<script" not in serialized
     assert "raw prompt body" not in serialized
+
+    unsafe_progress_receipt = spaces._space_repair_events_output_compaction(
+        action="space.recovery.space_repair_events",
+        space_id="safe-repair-events",
+        events=[],
+        prompt_preflight={"status": "required"},
+        autonomy_policy={"action": "space.recovery.space_repair_events"},
+        progress_event={"run_id": "recovery.space.repair_events:Api.Auth.Raw.PromptSpace"},
+    )
+    assert "progress_run_id: metadata-only" in unsafe_progress_receipt["text"]
+    assert "html" not in unsafe_progress_receipt["text"].lower()
+    assert "api.auth" not in unsafe_progress_receipt["text"].lower()
+    assert "bearer" not in unsafe_progress_receipt["text"].lower()
+    assert "raw.prompt" not in unsafe_progress_receipt["text"].lower()
+    assert "rawprompt" not in unsafe_progress_receipt["text"].lower()
 
 
 def test_space_tool_adapter_non_current_rollback_aliases_reject_ambient_current_selectors_before_side_effects(monkeypatch, tmp_path):

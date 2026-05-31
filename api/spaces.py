@@ -8069,6 +8069,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         events = list_space_repair_events(space_id, data.get("limit", 20))
         prompt_preflight = _space_repair_required_prompt_preflight_receipt(name)
         autonomy_policy = _space_repair_action_policy_receipt(name, prompt_preflight)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="recovery.space.repair_events")
         response = {
             "ok": True,
             "action": name,
@@ -8076,6 +8077,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "events": events,
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
         }
         if is_current:
             response["active_space_id"] = space_id
@@ -8084,6 +8086,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             space_id=space_id,
             events=events,
             active_space_id=response.get("active_space_id"),
+            prompt_preflight=prompt_preflight,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
         )
         return response
     if name in {
@@ -12520,6 +12525,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "path.helper",
         "repair",
         "recovery.revision.list",
+        "recovery.space.repair_events",
         "recovery.space.repair",
         "recovery.snapshot",
         "recovery.widget.repair",
@@ -12675,6 +12681,9 @@ def _space_repair_events_output_compaction(
     space_id: str,
     events: list[dict[str, Any]],
     active_space_id: str | None = None,
+    prompt_preflight: dict[str, Any] | None = None,
+    autonomy_policy: dict[str, Any] | None = None,
+    progress_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build metadata-only compaction evidence for whole-Space repair event lists."""
     from api.capy_compaction import compact_output
@@ -12683,6 +12692,14 @@ def _space_repair_events_output_compaction(
     safe_space_id = _context_value(space_id, 120) or "unknown-space"
     safe_active_space_id = _context_value(active_space_id, 120) if active_space_id is not None else None
     safe_events = events if isinstance(events, list) else []
+    safe_prompt_status = _context_value(
+        (prompt_preflight or {}).get("status") if isinstance(prompt_preflight, dict) else None,
+        60,
+    )
+    safe_policy_action = _context_value(
+        (autonomy_policy or {}).get("action") if isinstance(autonomy_policy, dict) else None,
+        120,
+    )
     lines = [
         "Capy Spaces recovery repair events list metadata-only receipt",
         "metadata_only: true",
@@ -12693,6 +12710,33 @@ def _space_repair_events_output_compaction(
     ]
     if safe_active_space_id:
         lines.append(f"active_space_id: {safe_active_space_id}")
+    if safe_prompt_status:
+        lines.append(f"prompt_preflight_status: {safe_prompt_status}")
+    if safe_policy_action:
+        lines.append(f"policy_action: {safe_policy_action}")
+    if isinstance(progress_event, dict):
+        raw_progress_run_id = _context_value(progress_event.get("run_id"), 160)
+        normalized_progress_run_id = re.sub(r"[^a-z0-9]+", "", raw_progress_run_id.lower()) if raw_progress_run_id else ""
+        unsafe_progress_markers = (
+            "secret",
+            "token",
+            "renderer",
+            "source",
+            "script",
+            "html",
+            "bearer",
+            "apiauth",
+            "apikey",
+            "rawprompt",
+        )
+        safe_progress_run_id = (
+            raw_progress_run_id
+            if raw_progress_run_id
+            and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", raw_progress_run_id)
+            and not any(marker in normalized_progress_run_id for marker in unsafe_progress_markers)
+            else "metadata-only"
+        )
+        lines.append(f"progress_run_id: {safe_progress_run_id}")
     for index, event in enumerate(safe_events[:20], start=1):
         if not isinstance(event, dict):
             continue
