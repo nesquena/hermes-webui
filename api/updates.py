@@ -166,9 +166,13 @@ def _run_git(args, cwd, timeout=10):
         r = subprocess.run(
             ['git'] + args, cwd=str(cwd), capture_output=True,
             text=True, timeout=timeout,
+            encoding='utf-8', errors='replace',
         )
-        stdout = r.stdout.strip()
-        stderr = r.stderr.strip()
+        # On non-UTF-8 locales (e.g. Chinese Windows GBK), a binary git
+        # output that fails to decode used to leave r.stdout = None and crash
+        # the whole import with AttributeError. Guard against None defensively.
+        stdout = (r.stdout or '').strip()
+        stderr = (r.stderr or '').strip()
         if r.returncode == 0:
             return stdout, True
         return stderr or stdout or f"git exited with status {r.returncode}", False
