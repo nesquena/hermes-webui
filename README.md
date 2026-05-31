@@ -201,6 +201,21 @@ messaging surfaces. Attachments, cancellation, approvals, and clarify prompts
 still follow WebUI's current compatibility path and may not match every messaging
 surface until the runtime-adapter migration is complete.
 
+### Messaging platform configuration
+
+The WebUI now lets you configure the **Feishu (飞书 / Lark)** messaging
+integration directly under **Settings → Messaging platforms**: enter your app
+credentials, pick the connection mode (WebSocket or Webhook), set access
+policies (allowed users, group policy, require-mention), then **Validate** the
+credentials and **Save**. Saving writes the `FEISHU_*` keys to your active
+profile's `.env`, and you can optionally trigger a gateway restart so the bridge
+picks up the change. Secrets (app secret, verification token, encrypt key) are
+write-only — they are persisted but never returned to the browser, only shown as
+"set".
+
+> **WeChat and other messaging platforms are not yet configurable in the WebUI.**
+> Configure them from the CLI with `hermes gateway setup`.
+
 The bootstrap will:
 
 1. Detect Hermes Agent and, if missing, attempt the official installer (`curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`).
