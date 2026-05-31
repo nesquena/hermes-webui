@@ -2822,8 +2822,17 @@ function startGatewaySSE(){
                     if (next.length < prev) return;
                     if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;
                     S.messages = next;
+                    if(S.session && S.session.session_id === activeSid){
+                      S.session.message_count = next.length;
+                      const newest = next.length ? next[next.length - 1] : null;
+                      const newestTs = Number((newest && (newest.timestamp || newest._ts)) || 0);
+                      if(newestTs){
+                        S.session.last_message_at = newestTs;
+                        S.session.updated_at = newestTs;
+                      }
+                    }
                     if(S.messages.length !== prev){
-                      renderMessages();
+                      renderMessages({preserveScroll:true});
                       if(typeof highlightCode==='function') highlightCode();
                     }
                   }

@@ -831,6 +831,10 @@ const LOCALES = {
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: 'Hands-free voice mode button',
     settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
+    settings_label_raw_audio: 'Send raw audio instead of transcribing',
+    settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
+    voice_send_raw: 'Send raw audio',
+    voice_raw_attached: 'Audio attached. Press Send or type more.',
     settings_label_tts_voice: 'Voice',
     settings_desc_tts_voice: "Preferred voice. Populated from your browser's available voices.",
     settings_label_tts_rate: 'Speech rate',
@@ -2134,6 +2138,10 @@ const LOCALES = {
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: 'Pulsante modalità vocale a mani libere',
     settings_desc_voice_mode: 'Mostra il pulsante modalità vocale (forma d\'onda audio) accanto al microfono di dettatura. Ti permette di parlare naturalmente — Hermes invia automaticamente dopo una pausa e legge le risposte ad alta voce. Richiede un browser che supporti sia il riconoscimento vocale che la sintesi vocale.',
+    settings_label_raw_audio: 'Invia l\'audio originale invece di trascriverlo',
+    settings_desc_raw_audio: 'Registra e invia il file audio originale all\'agente invece di convertirlo prima in testo. L\'agente può trascriverlo o elaborare l\'audio grezzo (emozioni, rumore di fondo, STT personalizzato). Come il comportamento dei messaggi vocali di Telegram.',
+    voice_send_raw: 'Invia audio originale',
+    voice_raw_attached: 'Audio allegato. Premi Invia o aggiungi testo.',
     settings_label_tts_voice: 'Voce',
     settings_desc_tts_voice: 'Voce preferita. Popolata dalle voci disponibili nel browser.',
     settings_label_tts_rate: 'Velocità voce',
@@ -3442,6 +3450,10 @@ const LOCALES = {
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: 'ハンズフリー音声モードのボタン',
     settings_desc_voice_mode: '音声波形ボタンをディクテーションマイクの隣に表示します。発話の合間に自動送信し、返答を読み上げます。音声認識と TTS の両方をサポートするブラウザが必要です。',
+    settings_label_raw_audio: '文字起こしせずに生の音声を送信',
+    settings_desc_raw_audio: '音声をテキストに変換せず、元の音声ファイルをそのままエージェントに送信します。エージェントは文字起こしをするか、生の音声を処理（感情分析、背景ノイズ、カスタムSTT）できます。Telegramの音声メッセージと同様の動作です。',
+    voice_send_raw: '生の音声を送信',
+    voice_raw_attached: '音声を添付しました。送信するかテキストを追加してください。',
     settings_label_tts_voice: '声',
     settings_desc_tts_voice: '優先する声。ブラウザで利用可能な声から選択されます。',
     settings_label_tts_rate: '読み上げ速度',
@@ -5112,6 +5124,10 @@ const LOCALES = {
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: 'Кнопка режима свободных рук',
     settings_desc_voice_mode: 'Показывать кнопку голосового режима (аудиоволны) рядом с микрофоном диктовки. Hermes автоматически отправляет реплики после паузы и зачитывает ответы вслух. Требуется браузер с поддержкой распознавания речи и TTS.',
+    settings_label_raw_audio: 'Отправлять сырую аудиозапись вместо расшифровки',
+    settings_desc_raw_audio: 'Записывать и отправлять агенту исходный аудиофайл вместо преобразования в текст. Агент может расшифровать его или обработать сырое аудио (эмоции, фоновый шум, пользовательский STT). Как голосовые сообщения в Telegram.',
+    voice_send_raw: 'Отправить сырое аудио',
+    voice_raw_attached: 'Аудио прикреплено. Нажмите Отправить или добавьте текст.',
     settings_label_tts_voice: 'Голос',
     settings_desc_tts_voice: 'Выберите голос для синтеза речи',
     settings_label_tts_rate: 'Скорость речи',
@@ -6340,7 +6356,11 @@ const LOCALES = {
     settings_desc_tts_auto_read: 'Leer en voz alta las respuestas del asistente automáticamente',
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
-    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
+    settings_label_raw_audio: 'Send raw audio instead of transcribing',
+    settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
+    voice_send_raw: 'Send raw audio',
+    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
     settings_label_tts_voice: 'Voz',
     settings_desc_tts_voice: 'Seleccionar voz para síntesis de voz',
     settings_label_tts_rate: 'Velocidad de voz',
@@ -7582,7 +7602,11 @@ const LOCALES = {
     settings_desc_tts_auto_read: 'Assistenten-Antworten automatisch vorlesen',
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
-    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
+    settings_label_raw_audio: 'Send raw audio instead of transcribing',
+    settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
+    voice_send_raw: 'Send raw audio',
+    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
     settings_label_tts_voice: 'Stimme',
     settings_desc_tts_voice: 'Stimme für Sprachsynthese auswählen',
     settings_label_tts_rate: 'Sprechgeschwindigkeit',
@@ -8820,6 +8844,10 @@ const LOCALES = {
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: '免提语音模式按钮',
     settings_desc_voice_mode: '在听写麦克风旁显示语音模式按钮（音频波形）。让您自然说话 — Hermes 会在停顿后自动发送并朗读回复。需要支持语音识别和 TTS 的浏览器。',
+    settings_label_raw_audio: '发送原始音频而非转写为文字',
+    settings_desc_raw_audio: '录制并将原始音频文件发送给代理，而不是先转换为文本。代理可以转写它或处理原始音频（情绪、背景噪音、自定义语音识别）。类似Telegram的语音消息行为。',
+    voice_send_raw: '发送原始音频',
+    voice_raw_attached: '音频已附加。按发送或输入更多内容。',
     settings_label_tts_voice: '语音',
     settings_desc_tts_voice: '选择语音合成声音',
     settings_label_tts_rate: '语速',
@@ -10129,7 +10157,11 @@ const LOCALES = {
     settings_desc_tts_auto_read: '自動朗讀助手回覆',
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
-    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
+    settings_label_raw_audio: 'Send raw audio instead of transcribing',
+    settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
+    voice_send_raw: 'Send raw audio',
+    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
     settings_label_tts_voice: '語音',
     settings_desc_tts_voice: '選擇語音合成聲音',
     settings_label_tts_rate: '語速',
@@ -11256,7 +11288,11 @@ const LOCALES = {
     settings_desc_tts_auto_read: 'Ler automaticamente as respostas do assistente',
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
-    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
+    settings_label_raw_audio: 'Send raw audio instead of transcribing',
+    settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
+    voice_send_raw: 'Send raw audio',
+    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
     settings_label_tts_voice: 'Voz',
     settings_desc_tts_voice: 'Selecionar voz para síntese de voz',
     settings_label_tts_rate: 'Velocidade da fala',
@@ -12545,7 +12581,11 @@ const LOCALES = {
     settings_desc_tts_auto_read: '도움말 답변을 자동으로 읽어줌',
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
-    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
+    settings_label_raw_audio: 'Send raw audio instead of transcribing',
+    settings_desc_raw_audio: 'Record and send the original audio file to the agent instead of converting it to text first. The agent can then transcribe it or process the raw audio (emotion, background noise, custom STT). Like Telegram\'s voice message behavior.',
+    voice_send_raw: 'Send raw audio',
+    voice_raw_attached: 'Audio attached. Press Send or type more.',  // TODO: translate
     settings_label_tts_voice: '음성',
     settings_desc_tts_voice: '음성 합성 음성 선택',
     settings_label_tts_rate: '말 속도',
@@ -13294,6 +13334,10 @@ const LOCALES = {
     settings_desc_tts_auto_read: 'Prononcez automatiquement chaque nouvelle réponse de l\'assistant lorsqu\'elle est terminée. S\'arrête lorsque vous commencez à taper.',
     settings_label_voice_mode: 'Bouton du mode vocal mains libres',
     settings_desc_voice_mode: 'Affichez le bouton du mode vocal (forme d\'onde audio) à côté du micro de dictée. Vous permet de parler naturellement : Hermes envoie automatiquement après une pause et lit les réponses à haute voix. Nécessite un navigateur prenant en charge à la fois la reconnaissance vocale et TTS.',
+    settings_label_raw_audio: 'Envoyer l\'audio brut au lieu de transcrire',
+    settings_desc_raw_audio: 'Enregistre et envoie le fichier audio original à l\'agent au lieu de le convertir d\'abord en texte. L\'agent peut le transcrire ou traiter l\'audio brut (émotion, bruit de fond, STT personnalisé). Comme le comportement des messages vocaux de Telegram.',
+    voice_send_raw: 'Envoyer l\'audio brut',
+    voice_raw_attached: 'Audio attaché. Appuyez sur Envoyer ou ajoutez du texte.',
     settings_label_tts_voice: 'Voix',
     settings_desc_tts_voice: 'Voix préférée. Rempli à partir des voix disponibles dans votre navigateur.',
     settings_label_tts_rate: 'Taux de parole',
@@ -15085,6 +15129,10 @@ const LOCALES = {
     // Composer voice-mode pref (#1488)
     settings_label_voice_mode: 'Eller serbest ses modu düğmesi',
     settings_desc_voice_mode: 'Dikte mikrofonunun yanında ses modu düğmesini gösterir. Duraklamadan sonra Hermes otomatik gönderir ve yanıtları sesli okur. Konuşma tanıma ve TTS destekleyen tarayıcı gerektirir.',
+    settings_label_raw_audio: 'Transkripte etmek yerine ham ses gönder',
+    settings_desc_raw_audio: 'Sesi önce metne dönüştürmek yerine orijinal ses dosyasını kaydedip aracıya gönderir. Aracı, dosyayı yazıya dökebilir veya ham sesi (duygu, arka plan gürültüsü, özel STT) işleyebilir. Telegram\'ın sesli mesaj davranışı gibidir.',
+    voice_send_raw: 'Ham ses gönder',
+    voice_raw_attached: 'Ses eklendi. Gönder\'e basın veya metin ekleyin.',
     settings_label_tts_voice: 'Ses',
     settings_desc_tts_voice: 'Ses sentezi sesini seçin',
     settings_label_tts_rate: 'Konuşma hızı',

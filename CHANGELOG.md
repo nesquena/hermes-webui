@@ -7,6 +7,17 @@
 
 - `runner-local` runtime adapter mode can now use an explicitly configured HTTP runner endpoint via `HERMES_WEBUI_RUNNER_BASE_URL`, replacing the bounded not-configured path only when the external runner boundary is configured and streaming configured runner events through the existing SSE route without WebUI-owned runner maps.
 
+## [v0.51.184] — 2026-05-31 — Release FD (stage-batchD — raw audio upload mode + scroll-preserve + non-POSIX test skip)
+
+### Added
+- Optional **raw audio upload mode** (Settings → Sound, off by default): when enabled, the composer mic button sends the recorded audio as a file attachment instead of transcribing it locally, so you can use external STT, raw-audio/emotion analysis, or multimodal models. Classic push-to-talk dictation is unchanged when the toggle is off. The mic tooltip reflects the active mode; localized across all 12 locales (#3169).
+
+### Fixed
+- Transcript scroll position is now preserved during same-session CLI/gateway import SSE refreshes (and the active session's metadata is synced from the refreshed transcript), instead of jumping to the bottom on each refresh (#3237).
+
+### Changed
+- `tests/test_terminal_process_cleanup.py` (POSIX terminal coverage that imports `fcntl` at module load) is now skipped at collection time on non-POSIX hosts instead of erroring (#3235).
+
 ## [v0.51.183] — 2026-05-31 — Release FC (stage-batchC — inline file:// media artifacts + /api/media state-file confinement)
 
 ### Fixed
