@@ -137,11 +137,11 @@ def _redact_config_for_display(value, *, path: tuple[str, ...] = ()):
         return {str(k): _redact_config_for_display(v, path=path + (str(k),)) for k, v in value.items()}
     if isinstance(value, list):
         return [_redact_config_for_display(v, path=path) for v in value]
+    if any(fragment in path_text for fragment in sensitive_fragments):
+        return "[REDACTED]" if value not in (None, "") else value
     if value is None or isinstance(value, (bool, int, float)):
         return value
     text = str(value)
-    if any(fragment in path_text for fragment in sensitive_fragments):
-        return "[REDACTED]" if text else text
     return _redact_text(text)
 
 
@@ -4380,7 +4380,6 @@ def handle_get(handler, parsed) -> bool:
             cfg_path = _get_config_path()
             return j(handler, {
                 "ok": True,
-                "path": str(cfg_path),
                 "filename": cfg_path.name,
                 "text": text,
                 "redacted_count": redacted_count,

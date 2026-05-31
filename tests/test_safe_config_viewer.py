@@ -1,6 +1,7 @@
 """Regression coverage for the safe config.yaml viewer (#2929)."""
 
 from pathlib import Path
+from typing import Any
 
 import api.routes as routes
 
@@ -17,14 +18,19 @@ def test_redact_config_masks_secret_key_paths_and_prefilters_plain_strings(monke
     calls = []
     monkeypatch.setattr(routes, "_redact_text", lambda text: calls.append(text) or text.replace("ghp_sensitive", "[REDACTED]"))
 
-    safe = routes._redact_config_for_display({
+    safe: dict[str, Any] = routes._redact_config_for_display({
         "providers": {"openai": {"api_key": "sk-live-secret", "model": "gpt-5.5"}},
+        "gateway": {"api_key": 1234567890, "enabled": True},
+        "platforms": {"telegram": {"token": False}},
         "webui": {"dashboard": {"public_url": "https://example.test"}},
         "notes": "contains ghp_sensitive token",
         "items": [{"password": "hunter2"}],
     })
 
     assert safe["providers"]["openai"]["api_key"] == "[REDACTED]"
+    assert safe["gateway"]["api_key"] == "[REDACTED]"
+    assert safe["gateway"]["enabled"] is True
+    assert safe["platforms"]["telegram"]["token"] == "[REDACTED]"
     assert safe["providers"]["openai"]["model"] == "gpt-5.5"
     assert safe["webui"]["dashboard"]["public_url"] == "https://example.test"
     assert safe["notes"] == "contains [REDACTED] token"
@@ -39,6 +45,7 @@ def test_safe_config_endpoint_is_get_only_read_only_and_uses_active_config_path(
     block = ROUTES_PY[endpoint_idx:settings_idx]
     assert "_safe_config_yaml_text()" in block
     assert "_get_config_path()" in block
+    assert '"path": str(cfg_path)' not in block
     assert '"read_only": True' in block
     assert 'if parsed.path == "/api/config/safe"' in block
 
