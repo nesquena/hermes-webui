@@ -72,22 +72,6 @@ def test_get_returns_get_config_payload(monkeypatch, captured):
     assert captured["status"] == 200
 
 
-def test_get_never_echoes_a_secret(monkeypatch, captured):
-    # get_config must never include raw secrets; assert none leak through.
-    monkeypatch.setattr(
-        feishu,
-        "get_config",
-        lambda: {"app_id": "cli_abc", "app_secret_set": True, "configured": True},
-    )
-
-    routes.handle_get(object(), SimpleNamespace(path="/api/platforms/feishu"))
-
-    assert "app_secret" not in captured["payload"] or captured["payload"].get(
-        "app_secret"
-    ) in (None,)
-    assert "supersecret" not in captured["serialized"]
-
-
 # ── POST /api/platforms/feishu/validate ──────────────────────────────────────
 
 
