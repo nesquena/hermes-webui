@@ -1721,14 +1721,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       showApprovalForSession(activeSid, d, 1);
       playAttentionSound(_attentionSoundKey(activeSid,'approval',1));
-      sendBrowserNotification('Approval required',d.description||'Tool approval needed');
+      sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid});
     });
 
     source.addEventListener('clarify',e=>{
       const d=JSON.parse(e.data);
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
-      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed');
+      sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid});
     });
 
     source.addEventListener('title',e=>{
@@ -1994,7 +1994,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         renderSessionList();
         _setActivePaneIdleIfOwner();
         playNotificationSound();
-        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
+        sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{sid:activeSid});
       };
       if(_shouldUseStreamFade()&&assistantBody){
         _cancelAnimationFramePendingStreamRender();
@@ -3388,14 +3388,14 @@ function playAttentionSound(key){
   }catch(e){console.warn('Attention sound failed:',e);}
 }
 
-function _notificationOptions(body){
-  const sid=S&&S.session&&S.session.session_id;
+function _notificationOptions(body,options={}){
+  const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
   const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
   return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:false,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
 }
-function _showPwaNotification(title,body){
+function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
-  const opts=_notificationOptions(body);
+  const opts=_notificationOptions(body,options);
   if(navigator.serviceWorker&&navigator.serviceWorker.ready){
     return navigator.serviceWorker.ready.then(reg=>{
       if(reg&&reg.showNotification) return reg.showNotification(title||botName,opts);
@@ -3424,9 +3424,9 @@ function sendBrowserNotification(title,body,options={}){
   if(!force&&(!window._notificationsEnabled||!document.hidden)) return;
   if(!('Notification' in window)) return;
   if(Notification.permission==='granted'){
-    _showPwaNotification(title,body).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body));}catch(_err){}});
+    _showPwaNotification(title,body,options).catch(()=>{try{new Notification(title||assistantDisplayName(),_notificationOptions(body,options));}catch(_err){}});
   }else if(Notification.permission!=='denied'){
-    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body);});
+    requestNotificationPermission().then(p=>{if(p==='granted') _showPwaNotification(title,body,options);});
   }
 }
 

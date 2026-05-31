@@ -19,11 +19,15 @@ def test_browser_notifications_use_service_worker_when_available():
     assert "function sendBrowserNotification" in MESSAGES_JS
 
 
-def test_notification_payload_reopens_current_session():
+def test_notification_payload_uses_completion_session_when_provided():
     assert "function _notificationOptions" in MESSAGES_JS
+    assert "const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);" in MESSAGES_JS
     assert "_sessionUrlForSid(sid)" in MESSAGES_JS
     assert "data:{url}" in MESSAGES_JS
     assert "tag:sid?`hermes-${sid}`" in MESSAGES_JS
+    assert "sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished',{sid:activeSid})" in MESSAGES_JS
+    assert "sendBrowserNotification('Approval required',d.description||'Tool approval needed',{sid:activeSid})" in MESSAGES_JS
+    assert "sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed',{sid:activeSid})" in MESSAGES_JS
 
 
 def test_service_worker_handles_notification_clicks():
@@ -31,7 +35,9 @@ def test_service_worker_handles_notification_clicks():
     assert "event.notification.close()" in SW_JS
     assert "clients.matchAll" in SW_JS
     assert "clients.openWindow" in SW_JS
-    assert "client.navigate(targetUrl)" in SW_JS
+    assert "client.url === targetUrl" in SW_JS
+    assert "targetClient.focus()" in SW_JS
+    assert "focusableClient.navigate(targetUrl)" in SW_JS
 
 
 def test_settings_expose_permission_and_test_controls():
