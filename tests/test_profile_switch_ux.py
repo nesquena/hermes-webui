@@ -23,7 +23,8 @@ class TestProfileSwitchSpinner:
         assert idx != -1, "switchToProfile not found in panels.js"
         depth = 0
         for i, ch in enumerate(self.JS[idx:], idx):
-            if ch == "{": depth += 1
+            if ch == "{":
+                depth += 1
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
@@ -88,7 +89,8 @@ class TestParallelizedFetches:
         assert idx != -1
         depth = 0
         for i, ch in enumerate(self.JS[idx:], idx):
-            if ch == "{": depth += 1
+            if ch == "{":
+                depth += 1
             elif ch == "}":
                 depth -= 1
                 if depth == 0:

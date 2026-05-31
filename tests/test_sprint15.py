@@ -1,7 +1,9 @@
 """
 Sprint 15 Tests: session projects (CRUD, move, backward compat).
 """
-import json, urllib.error, urllib.request
+import json
+import urllib.error
+import urllib.request
 
 from tests._pytest_port import BASE
 

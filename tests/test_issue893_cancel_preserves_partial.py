@@ -15,12 +15,10 @@ After this fix:
 - The cancel marker itself keeps _error=True so the model does not see it
 """
 import threading
-import time
 
 import pytest
 
 import api.config as config
-import api.streaming as streaming
 from api.config import STREAM_PARTIAL_TEXT, STREAMS_LOCK
 
 

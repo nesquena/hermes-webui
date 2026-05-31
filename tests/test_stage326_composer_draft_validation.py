@@ -8,12 +8,6 @@ debounced auto-save. The hardening:
 - text: must be str; clamped to 50 KB
 - files: must be list; clamped to 50 entries
 """
-import json
-import os
-import sys
-import threading
-import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest

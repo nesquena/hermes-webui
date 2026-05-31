@@ -17,7 +17,6 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 
 # ── R19: get_hermes_home_for_profile ─────────────────────────────────────────
@@ -246,8 +245,10 @@ def test_concurrent_new_sessions_get_correct_profiles():
     with patch.object(m.Session, 'save', return_value=None):
         t1 = threading.Thread(target=make_session, args=('alice', 'alice'))
         t2 = threading.Thread(target=make_session, args=('bob', 'bob'))
-        t1.start(); t2.start()
-        t1.join(timeout=5); t2.join(timeout=5)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
 
     assert not errors, f"Threads raised: {errors}"
     assert results.get('alice') == 'alice', f"alice session had profile {results.get('alice')!r}"

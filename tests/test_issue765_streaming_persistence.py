@@ -200,7 +200,7 @@ class TestPeriodicCheckpoint:
 
     def test_checkpoint_stops_on_signal(self):
         """Checkpoint thread exits cleanly when stop event is set."""
-        s = _make_session("ckpt3")
+        _make_session("ckpt3")
         stop_event = threading.Event()
         iterations = [0]
 

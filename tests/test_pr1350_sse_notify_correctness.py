@@ -27,9 +27,7 @@ The fix:
 """
 
 import pathlib
-import queue
 import sys
-import time
 import uuid
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()

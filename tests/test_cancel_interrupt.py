@@ -2,7 +2,6 @@
 Unit tests for cancel/interrupt functionality.
 Tests the integration between cancel_stream() and agent.interrupt().
 """
-import pytest
 import queue
 import threading
 from unittest.mock import Mock

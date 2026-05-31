@@ -14,14 +14,12 @@ No mocking required for session CRUD, upload parser, or approval API.
 
 import io
 import json
-import os
 import sys
 import time
 import uuid
 import urllib.request
 import urllib.parse
 import urllib.error
-import tempfile
 import pathlib
 
 # Allow importing server modules directly for unit tests
@@ -78,7 +76,8 @@ def post_multipart(path, fields, files):
 def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
     body = {}
-    if ws: body["workspace"] = str(ws)
+    if ws:
+        body["workspace"] = str(ws)
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)
@@ -219,7 +218,7 @@ def test_parse_multipart_text_file():
     sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent))
     # Import the function directly from the server module
     import importlib.util
-    spec = importlib.util.spec_from_file_location(
+    importlib.util.spec_from_file_location(
         "server",
         str(pathlib.Path(__file__).parent.parent / "server.py")
     )
@@ -236,7 +235,6 @@ def test_parse_multipart_text_file():
     parse_multipart = ns["parse_multipart"]
 
     # Build a minimal multipart body
-    boundary = b"testboundary"
     body = (
         b"--testboundary\r\n"
         b"Content-Disposition: form-data; name=\"session_id\"\r\n\r\n"
@@ -270,7 +268,6 @@ def test_parse_multipart_binary_file():
 
     # Fake PNG: first 8 bytes of PNG magic
     png_magic = b"\x89PNG\r\n\x1a\n"
-    boundary = b"binboundary"
     body = (
         b"--binboundary\r\n"
         b"Content-Disposition: form-data; name=\"session_id\"\r\n\r\n"

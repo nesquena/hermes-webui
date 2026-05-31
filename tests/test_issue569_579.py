@@ -8,7 +8,6 @@ Tests for fixes:
          in a gated detailed-density mode by #673.
 """
 import pathlib
-import re
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 INIT_SH   = (REPO_ROOT / "docker_init.bash").read_text(encoding="utf-8")

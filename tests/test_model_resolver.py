@@ -239,7 +239,8 @@ def test_no_duplicate_when_default_model_is_prefixed():
     }
     try:
         result = _cfg.get_available_models()
-        norm = lambda mid: mid.split('/', 1)[-1] if '/' in mid else mid
+        def norm(mid):
+            return mid.split('/', 1)[-1] if '/' in mid else mid
         # Check each group individually: no group should have two entries that
         # normalize to the same bare model name
         for g in result['groups']:
@@ -311,7 +312,8 @@ def _available_models_with_full_cfg(provider, default, base_url):
 def test_no_phantom_custom_group_when_active_provider_is_set(monkeypatch):
     """Issue: with provider=openai-codex + base_url set, gpt-5.4 was landing
     under a phantom "Custom" group instead of the "OpenAI Codex" group."""
-    import sys, types
+    import sys
+    import types
 
     # Force hermes_cli to report both the real provider and the phantom
     # 'custom' as authenticated, simulating what list_available_providers()
@@ -349,7 +351,8 @@ def test_default_model_lands_under_active_provider_group(monkeypatch):
     to groups[0] — which, when another provider sorted earlier
     alphabetically (e.g. 'anthropic'), placed gpt-5.4 in the WRONG group.
     """
-    import sys, types
+    import sys
+    import types
     fake_mod = types.ModuleType('hermes_cli.models')
     fake_mod.list_available_providers = lambda: [
         {'id': 'anthropic',    'authenticated': True},  # sorts before openai-codex
@@ -368,7 +371,8 @@ def test_default_model_lands_under_active_provider_group(monkeypatch):
     )
     groups = {g['provider']: [m['id'] for m in g['models']] for g in result['groups']}
     assert 'OpenAI Codex' in groups, f"OpenAI Codex group missing: {list(groups)}"
-    norm = lambda mid: mid.split('/', 1)[-1].split(':', 1)[-1]
+    def norm(mid):
+        return mid.split('/', 1)[-1].split(':', 1)[-1]
     assert 'gpt-5.4' in {norm(mid) for mid in groups['OpenAI Codex']}, (
         f"gpt-5.4 not in OpenAI Codex group; contents: {groups['OpenAI Codex']}"
     )
@@ -387,7 +391,8 @@ def test_unknown_providers_do_not_inherit_default_model(monkeypatch):
     gpt-5.4-mini even though those providers do not serve it. Minimax-Cn is
     now known and should show its own catalog instead.
     """
-    import sys, types
+    import sys
+    import types
 
     fake_mod = types.ModuleType('hermes_cli.models')
     fake_mod.list_available_providers = lambda: [
@@ -406,7 +411,8 @@ def test_unknown_providers_do_not_inherit_default_model(monkeypatch):
         base_url='',
     )
     groups = {g['provider']: [m['id'] for m in g['models']] for g in result['groups']}
-    norm = lambda mid: mid.split('/', 1)[-1].split(':', 1)[-1]
+    def norm(mid):
+        return mid.split('/', 1)[-1].split(':', 1)[-1]
 
     assert 'Alibaba' not in groups, (
         f"Alibaba should not inherit the default model placeholder: {groups}"

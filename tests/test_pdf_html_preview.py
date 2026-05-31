@@ -6,7 +6,6 @@ and that CSS classes are defined.
 """
 import os
 import re
-import pytest
 
 
 def _read_js(name):

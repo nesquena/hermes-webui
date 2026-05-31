@@ -12,11 +12,9 @@ recursion.  Covers:
 - Browsing into a symlink directory via workspace-relative path works
 """
 import json
-import os
 import pathlib
 import urllib.request
 import urllib.error
-import tempfile
 
 from tests._pytest_port import BASE
 

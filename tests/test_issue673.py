@@ -14,7 +14,6 @@ Covers:
 
 import json
 import pathlib
-import re
 import unittest
 import urllib.error
 import urllib.request
@@ -28,7 +27,7 @@ SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE  # noqa: E402
 
 
 def _get(path):

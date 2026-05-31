@@ -22,7 +22,6 @@ from typing import Any
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
-    _get_label_for_model,
     _models_from_live_provider_ids,
     _read_live_provider_model_ids,
     _read_visible_codex_cache_model_ids,
@@ -234,7 +233,7 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
                 new_keys.append(f"{key}={clean}")
 
         # Remove deleted lines (None sentinels)
-        output_lines = [l for l in output_lines if l is not None]
+        output_lines = [ln for ln in output_lines if ln is not None]
 
         # Append new keys after a blank-line separator
         if new_keys:

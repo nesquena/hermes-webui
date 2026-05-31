@@ -59,10 +59,10 @@ class TestConfigYamlModelsLoading:
             },
         }
         result = _available_models_with_cfg(cfg)
-        groups = {g["provider"]: g["models"] for g in result["groups"]}
+        {g["provider"]: g["models"] for g in result["groups"]}
         # Provider should appear (previously it was silently skipped)
         provider_names = [g["provider"] for g in result["groups"]]
-        found = any("my-custom-llm" in n.lower() or "My-Custom-Llm" in n for n in provider_names)
+        any("my-custom-llm" in n.lower() or "My-Custom-Llm" in n for n in provider_names)
         # If it appears, its models must include our cfg models
         for g in result["groups"]:
             if "custom" in g["provider"].lower():

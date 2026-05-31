@@ -18,7 +18,6 @@ import subprocess
 import textwrap
 import time
 
-import pytest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")

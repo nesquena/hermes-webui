@@ -11,7 +11,6 @@ import types
 from api.models import Session
 from api.config import SESSION_DIR
 from api.routes import _handle_session_compress
-from tests._pytest_port import BASE
 
 
 class _FakeHandler:

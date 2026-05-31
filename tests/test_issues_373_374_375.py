@@ -6,7 +6,6 @@ Tests for issues #373, #374, and #375.
 #375: Model dropdown should fetch live models from provider
 """
 import pathlib
-import re
 
 REPO = pathlib.Path(__file__).parent.parent
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")

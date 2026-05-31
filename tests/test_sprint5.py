@@ -1,5 +1,10 @@
 """Sprint 5 tests: workspace CRUD, file save, session index, JS serving."""
-import json, pathlib, uuid, urllib.request, urllib.error, urllib.parse
+import json
+import pathlib
+import uuid
+import urllib.request
+import urllib.error
+import urllib.parse
 import os
 
 from tests._pytest_port import BASE
@@ -25,7 +30,8 @@ def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
     import pathlib as _pathlib
     body = {}
-    if ws: body["workspace"] = str(ws)
+    if ws:
+        body["workspace"] = str(ws)
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)
@@ -83,7 +89,7 @@ def test_workspace_add_requires_path():
 def test_workspace_suggest_returns_trusted_directories(cleanup_test_sessions):
     _, ws = make_session_tracked(cleanup_test_sessions)
     child = make_workspace_child(ws, f"workspace-suggest-{uuid.uuid4().hex[:6]}")
-    nested = make_workspace_child(child, "nested")
+    make_workspace_child(child, "nested")
     prefix = str(child.parent / child.name[:12])
     data, status = get(f"/api/workspaces/suggest?prefix={urllib.parse.quote(prefix)}")
     assert status == 200
@@ -162,7 +168,7 @@ def test_file_save_path_traversal_blocked(cleanup_test_sessions):
 def test_session_index_created_after_save(cleanup_test_sessions):
     # Index is created in the TEST state dir, not the production dir
     test_state_dir = pathlib.Path(os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(pathlib.Path.home() / ".hermes" / "webui-mvp-test")))
-    index_path = test_state_dir / "sessions" / "_index.json"
+    test_state_dir / "sessions" / "_index.json"
     make_session_tracked(cleanup_test_sessions)
     # Index may not exist yet if cleanup already wiped it -- just check the endpoint works
     data, status = get("/api/sessions")

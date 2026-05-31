@@ -11,7 +11,6 @@ These are static regression tests that verify the JS source contains the
 correct guard patterns.
 """
 
-import re
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent

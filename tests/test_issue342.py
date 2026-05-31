@@ -5,7 +5,6 @@ These are structural tests that verify the fix is present in static/ui.js
 without requiring a running server or JavaScript engine.
 """
 import os
-import re
 
 UI_JS = os.path.join(os.path.dirname(__file__), '..', 'static', 'ui.js')
 

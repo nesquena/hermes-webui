@@ -10,7 +10,6 @@ label fell through to a wrong value for an unknown input.
 This file pins the actual rendered output for every effort state so the
 chip's None/Default visibility cannot silently regress.
 """
-import os
 import shutil
 import subprocess
 from pathlib import Path

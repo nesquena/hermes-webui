@@ -26,7 +26,6 @@ The v0.50.255 batch (#1390 + #1405) had four Opus advisor findings:
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -126,7 +125,7 @@ def test_redact_session_data_threads_enabled_once_across_recursion():
     from api import helpers
 
     call_count = [0]
-    real_load_settings = helpers.__dict__.get("load_settings")
+    helpers.__dict__.get("load_settings")
 
     def counting_load_settings():
         call_count[0] += 1

@@ -17,7 +17,7 @@ import urllib.request
 from tests.conftest import TEST_STATE_DIR
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE  # noqa: E402
 
 
 def _read(rel_path: str) -> str:

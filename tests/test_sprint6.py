@@ -1,8 +1,12 @@
 """Sprint 6 tests: Escape from editor, Phase D validation, HTML extraction, cron create, session export."""
-import json, uuid, pathlib, urllib.request, urllib.error
+import json
+import uuid
+import pathlib
+import urllib.request
+import urllib.error
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE  # noqa: E402
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
@@ -23,7 +27,8 @@ def post(path, body=None):
 
 def make_session_tracked(created_list, ws=None):
     body = {}
-    if ws: body["workspace"] = str(ws)
+    if ws:
+        body["workspace"] = str(ws)
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)

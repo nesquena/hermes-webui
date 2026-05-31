@@ -13,11 +13,9 @@ output, because #1358's frontend `_sessionLineageKey` falls through to
 group orphans by a key no other session shares (cosmetic dead state).
 """
 
-import os
 import sqlite3
 import time
 
-import pytest
 
 
 def _make_db(path):

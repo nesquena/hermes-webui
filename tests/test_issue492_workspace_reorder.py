@@ -1,6 +1,5 @@
 """Tests for issue #492 — workspace drag-to-reorder."""
-import json, pytest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 from api.routes import _handle_workspace_reorder
 
 

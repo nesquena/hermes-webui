@@ -11,7 +11,6 @@ Verifies:
   - Frontend EventSource / fallback polling patterns
 """
 
-import json
 import pathlib
 import queue
 import re

@@ -7,7 +7,6 @@ messages like "what time is it" must NOT:
   - trigger goal_continue SSE events
   - burn the goal budget
 """
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -212,13 +211,13 @@ def test_goal_evaluate_after_turn_only_increments_for_user_initiated(monkeypatch
     monkeypatch.setattr(webui_goals, "_default_max_turns", lambda: 10)
 
     # user_initiated=True should increment
-    result1 = webui_goals.evaluate_goal_after_turn(
+    webui_goals.evaluate_goal_after_turn(
         "sid-1", "goal response", user_initiated=True, profile_home=None
     )
     assert len(turns_incremented) == 1
 
     # user_initiated=False should NOT increment
-    result2 = webui_goals.evaluate_goal_after_turn(
+    webui_goals.evaluate_goal_after_turn(
         "sid-1", "unrelated response", user_initiated=False, profile_home=None
     )
     assert len(turns_incremented) == 1, (

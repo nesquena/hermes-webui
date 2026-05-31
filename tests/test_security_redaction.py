@@ -35,7 +35,7 @@ def _server_is_up(port: int = 8788) -> bool:
 # The skipif is evaluated lazily via the fixture, not at collection time.
 _needs_server = pytest.mark.usefixtures("test_server")
 
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE  # noqa: E402
 
 # Sample credentials that should be masked in every API response
 _FAKE_GITHUB_PAT = "ghp_TestFakeCredential1234567890ab"
@@ -194,7 +194,8 @@ def _create_session_with_credentials() -> str:
     from disk, exercising the redaction code path on load.
     Uses TEST_STATE_DIR from conftest.py (the isolated test server state directory).
     """
-    import time, uuid
+    import time
+    import uuid
     try:
         from conftest import TEST_STATE_DIR
         sessions_dir = TEST_STATE_DIR / "sessions"
@@ -253,7 +254,7 @@ def test_api_session_redacts_title():
     }
     result = redact_session_data(session)
     assert _FAKE_GITHUB_PAT not in result["title"], (
-        f"redact_session_data must mask credentials in title field"
+        "redact_session_data must mask credentials in title field"
     )
     assert result["session_id"] == "abc123"  # safe fields preserved
 
@@ -300,7 +301,6 @@ def test_api_memory_redacts_via_write_read(test_server):
 
 def test_fix_credential_permissions_corrects_loose_files(tmp_path, monkeypatch):
     """fix_credential_permissions() tightens group/other read bits."""
-    import os
     from api.startup import fix_credential_permissions
 
     env_file = tmp_path / ".env"

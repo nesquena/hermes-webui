@@ -26,7 +26,6 @@ healed automatically:
 import re
 from pathlib import Path
 
-import pytest
 
 import api.config as cfg
 

@@ -28,7 +28,7 @@ def test_al_stash_includes_img_tags():
 
 # ── Behaviour tests (Python mirror of fixed pipeline) ─────────────────────────
 
-import html as _html
+import html as _html  # noqa: E402
 def esc(s): return _html.escape(str(s), quote=True)
 
 SAFE_TAGS = re.compile(

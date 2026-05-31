@@ -1,7 +1,9 @@
 """
 Sprint 19 Tests: auth/login, security headers, request size limit.
 """
-import json, urllib.error, urllib.request
+import json
+import urllib.error
+import urllib.request
 
 from tests._pytest_port import BASE
 

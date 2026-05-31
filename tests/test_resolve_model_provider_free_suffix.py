@@ -41,7 +41,6 @@ def _restore_config(old, cfg_mod):
 
 def test_openrouter_free_suffix_survives_provider_qualification():
     """tencent/hy3-preview:free must resolve correctly when qualified."""
-    import api.config as cfg_mod
     old, cfg_mod = _set_config_provider("anthropic")
     try:
         qualified = model_with_provider_context("tencent/hy3-preview:free", "openrouter")
@@ -54,7 +53,6 @@ def test_openrouter_free_suffix_survives_provider_qualification():
 
 def test_openrouter_free_suffix_nvidia():
     """nvidia/nemotron-3-super-120b-a12b:free — same bug class."""
-    import api.config as cfg_mod
     old, cfg_mod = _set_config_provider("anthropic")
     try:
         qualified = model_with_provider_context("nvidia/nemotron-3-super-120b-a12b:free", "openrouter")
@@ -67,7 +65,6 @@ def test_openrouter_free_suffix_nvidia():
 
 def test_openrouter_free_suffix_arcee():
     """arcee-ai/trinity-large-preview:free — same bug class."""
-    import api.config as cfg_mod
     old, cfg_mod = _set_config_provider("anthropic")
     try:
         qualified = model_with_provider_context("arcee-ai/trinity-large-preview:free", "openrouter")
@@ -80,7 +77,6 @@ def test_openrouter_free_suffix_arcee():
 
 def test_openrouter_thinking_suffix():
     """Models ending in :thinking should also be preserved."""
-    import api.config as cfg_mod
     old, cfg_mod = _set_config_provider("anthropic")
     try:
         qualified = model_with_provider_context("some/model:thinking", "openrouter")

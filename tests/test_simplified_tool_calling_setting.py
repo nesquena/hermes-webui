@@ -1,6 +1,5 @@
 """Regression tests for the Simplified tool calling setting."""
 
-import importlib
 import json
 
 

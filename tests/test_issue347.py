@@ -204,7 +204,7 @@ def test_katex_throw_on_error_false():
 def test_render_katex_blocks_wired_into_raf():
     """renderKatexBlocks() must be called in the same requestAnimationFrame as renderMermaidBlocks()."""
     # Check that renderKatexBlocks appears somewhere near requestAnimationFrame
-    raf_idx = UI_JS.find('requestAnimationFrame')
+    UI_JS.find('requestAnimationFrame')
     # Find the rAF call that also contains renderKatexBlocks
     has_katex_in_raf = any(
         'renderKatexBlocks' in UI_JS[m.start():m.start()+200]

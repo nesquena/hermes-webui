@@ -2,7 +2,9 @@
 Sprint 26 Tests: canonical appearance settings persist and legacy theme names
 map onto the new theme + skin system.
 """
-import json, urllib.error, urllib.request
+import json
+import urllib.error
+import urllib.request
 import pathlib
 import sys
 
@@ -12,7 +14,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from api import config
+from api import config  # noqa: E402
 
 
 def get(path):

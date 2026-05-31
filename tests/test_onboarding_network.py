@@ -14,9 +14,7 @@ Covers:
 """
 
 import json
-import os
 import pathlib
-import sys
 import unittest.mock
 import urllib.error
 import urllib.request
@@ -24,7 +22,7 @@ import urllib.request
 import pytest
 
 REPO = pathlib.Path(__file__).parent.parent
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Unit tests — directly test the IP-resolution + guard logic in routes.py
@@ -160,7 +158,6 @@ class TestOnboardingSetupEndpoint:
         # The test server runs on 127.0.0.1:{TEST_PORT} so client_address[0] is 127.0.0.1.
         # A valid setup payload with a mock provider should not be rejected for IP reasons.
         # We patch apply_onboarding_setup to avoid actually writing any config.
-        import unittest.mock
         with unittest.mock.patch("api.onboarding.apply_onboarding_setup", return_value={"ok": True}):
             status, body = self._post(
                 "/api/onboarding/setup",
@@ -174,7 +171,6 @@ class TestOnboardingSetupEndpoint:
         Simulated reverse proxy: raw TCP is 127.0.0.1 but X-Forwarded-For is also
         127.0.0.1. Should be allowed.
         """
-        import unittest.mock
         with unittest.mock.patch("api.onboarding.apply_onboarding_setup", return_value={"ok": True}):
             status, body = self._post(
                 "/api/onboarding/setup",

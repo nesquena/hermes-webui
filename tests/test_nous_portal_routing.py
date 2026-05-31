@@ -12,8 +12,6 @@ provider/model path as the canonical name at their inference endpoint.
 Stripping the prefix to a bare name is exactly Bug 1, so the fix for Bug 2
 must not reintroduce it.
 """
-import sys
-import types
 
 
 def _models_with_provider(provider, monkeypatch):

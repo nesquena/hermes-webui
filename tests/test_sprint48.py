@@ -27,7 +27,8 @@ class TestXmlToolCallStrip:
     def _load_fn(self):
         """Import the helper from streaming.py without triggering full server
         initialisation (which would fail in unit-test contexts)."""
-        import importlib, sys, types
+        import sys
+        import types
 
         # Stub heavy transitive imports so we can import the module cleanly.
         for mod in ('api.config', 'api.helpers', 'api.models', 'api.workspace'):

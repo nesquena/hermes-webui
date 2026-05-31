@@ -138,7 +138,7 @@ def test_retry_concurrent_requests_are_safe(cleanup_test_sessions):
 
     with ThreadPoolExecutor(max_workers=4) as ex:
         futures = [ex.submit(_do_retry) for _ in range(4)]
-        results = [f.result() for f in futures]
+        [f.result() for f in futures]
 
     # Each call either succeeds (truncating further) or raises 'no previous
     # message to retry' once nothing is left. After the dust settles, the

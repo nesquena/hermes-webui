@@ -1,5 +1,7 @@
 """Sprint 3 tests: cron API, skills API, memory API, input validation."""
-import json, uuid, urllib.request, urllib.error
+import json
+import urllib.request
+import urllib.error
 
 from tests._pytest_port import BASE
 
@@ -20,7 +22,8 @@ def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
     import pathlib as _pathlib
     body = {}
-    if ws: body["workspace"] = str(ws)
+    if ws:
+        body["workspace"] = str(ws)
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)
@@ -34,7 +37,8 @@ def test_crons_list():
 
 def test_crons_list_has_required_fields():
     data, _ = get("/api/crons")
-    if not data["jobs"]: return
+    if not data["jobs"]:
+        return
     job = data["jobs"][0]
     for field in ("id", "name", "prompt", "enabled", "schedule_display"):
         assert field in job
@@ -48,7 +52,8 @@ def test_crons_output_requires_job_id():
 
 def test_crons_output_real_job():
     data, _ = get("/api/crons")
-    if not data["jobs"]: return
+    if not data["jobs"]:
+        return
     job_id = data["jobs"][0]["id"]
     out, status = get(f"/api/crons/output?job_id={job_id}&limit=3")
     assert status == 200

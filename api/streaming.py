@@ -8,7 +8,6 @@ import json
 import logging
 import mimetypes
 import os
-import queue
 import re
 import threading
 import time
@@ -19,19 +18,18 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-from api.config import (
+from api.config import (  # noqa: E402
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
-    LOCK, SESSIONS, SESSION_DIR,
-    _get_session_agent_lock, _set_thread_env, _clear_thread_env,
+    LOCK, SESSIONS, _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
     resolve_custom_provider_connection,
     model_with_provider_context,
 )
-from api.helpers import redact_session_data, _redact_text
-from api.metering import meter
+from api.helpers import redact_session_data, _redact_text  # noqa: E402
+from api.metering import meter  # noqa: E402
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -219,8 +217,7 @@ def _aiagent_import_error_detail() -> str:
     lines.append("")
     lines.append('  Full troubleshooting: docs/troubleshooting.md ("AIAgent not available")')
     return "\n".join(lines)
-from api.models import get_session, title_from
-from api.workspace import set_last_workspace
+from api.models import get_session, title_from  # noqa: E402
 
 # Fields that are safe to send to LLM provider APIs.
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
@@ -3391,16 +3388,26 @@ def _run_agent_streaming(
                     logger.debug("Failed to unregister clarify callback")
             with _ENV_LOCK:
                 for _key, _old_value in old_profile_env.items():
-                    if _old_value is None: os.environ.pop(_key, None)
-                    else: os.environ[_key] = _old_value
-                if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
-                else: os.environ['TERMINAL_CWD'] = old_cwd
-                if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
-                else: os.environ['HERMES_EXEC_ASK'] = old_exec_ask
-                if old_session_key is None: os.environ.pop('HERMES_SESSION_KEY', None)
-                else: os.environ['HERMES_SESSION_KEY'] = old_session_key
-                if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
-                else: os.environ['HERMES_HOME'] = old_hermes_home
+                    if _old_value is None:
+                        os.environ.pop(_key, None)
+                    else:
+                        os.environ[_key] = _old_value
+                if old_cwd is None:
+                    os.environ.pop('TERMINAL_CWD', None)
+                else:
+                    os.environ['TERMINAL_CWD'] = old_cwd
+                if old_exec_ask is None:
+                    os.environ.pop('HERMES_EXEC_ASK', None)
+                else:
+                    os.environ['HERMES_EXEC_ASK'] = old_exec_ask
+                if old_session_key is None:
+                    os.environ.pop('HERMES_SESSION_KEY', None)
+                else:
+                    os.environ['HERMES_SESSION_KEY'] = old_session_key
+                if old_hermes_home is None:
+                    os.environ.pop('HERMES_HOME', None)
+                else:
+                    os.environ['HERMES_HOME'] = old_hermes_home
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)

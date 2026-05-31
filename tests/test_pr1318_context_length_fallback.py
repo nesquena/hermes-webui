@@ -17,7 +17,6 @@ Tests:
 4. Fallback exception is silently swallowed (older agent builds)
 5. Fallback runs before s.save() so the value is persisted
 """
-import re
 from pathlib import Path
 
 STREAMING = Path(__file__).resolve().parent.parent / "api" / "streaming.py"

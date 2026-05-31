@@ -20,12 +20,9 @@ tracker until they resolve.
 """
 from __future__ import annotations
 
-import os
 import pathlib
 import sys
-import time
 import unittest
-from unittest.mock import patch
 
 
 # Ensure the repo root is importable without relying on CWD.

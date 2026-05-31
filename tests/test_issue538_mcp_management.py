@@ -1,6 +1,6 @@
 """Tests for issue #538 — MCP server management API."""
-import json, pytest
-from unittest.mock import patch, MagicMock, call
+import json
+from unittest.mock import patch, MagicMock
 from api.routes import (
     _handle_mcp_servers_list,
     _handle_mcp_server_update,

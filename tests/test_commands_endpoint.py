@@ -2,7 +2,6 @@
 import json
 import urllib.request
 
-import pytest
 
 from tests.conftest import TEST_BASE, requires_agent_modules
 

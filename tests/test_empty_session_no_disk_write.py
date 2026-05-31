@@ -19,14 +19,12 @@ session is lost. There were no messages to lose, so this is an explicit
 trade-off documented in ``new_session``'s docstring.
 """
 import json
-import time
 
 import pytest
 
 import api.models as models
 from api.models import (
     SESSIONS,
-    Session,
     all_sessions,
     get_session,
     new_session,

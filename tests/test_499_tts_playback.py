@@ -71,7 +71,7 @@ class TestTtsSpeakerButton:
         """ttsBtn must only be added for non-user (assistant) messages."""
         src = _read('ui.js')
         # Find the ttsBtn definition — it should have !isUser guard
-        tts_line = [l for l in src.splitlines() if 'msg-tts-btn' in l][0]
+        tts_line = [ln for ln in src.splitlines() if 'msg-tts-btn' in ln][0]
         assert '!isUser' in tts_line or 'isUser' in tts_line, \
             "TTS button should have user-check guard"
 
@@ -79,14 +79,14 @@ class TestTtsSpeakerButton:
         """ttsBtn must be included in the msg-actions span."""
         src = _read('ui.js')
         # The footHtml line should include ttsBtn
-        foot_lines = [l for l in src.splitlines() if 'footHtml' in l and 'msg-actions' in l]
-        assert any('ttsBtn' in l for l in foot_lines), \
+        foot_lines = [ln for ln in src.splitlines() if 'footHtml' in ln and 'msg-actions' in ln]
+        assert any('ttsBtn' in ln for ln in foot_lines), \
             "ttsBtn not included in footHtml msg-actions"
 
     def test_tts_button_uses_volume_icon(self):
         """Speaker button should use volume-2 icon."""
         src = _read('ui.js')
-        tts_line = [l for l in src.splitlines() if 'msg-tts-btn' in l][0]
+        tts_line = [ln for ln in src.splitlines() if 'msg-tts-btn' in ln][0]
         assert 'volume-2' in tts_line, \
             "TTS button should use volume-2 icon"
 

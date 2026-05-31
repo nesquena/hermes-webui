@@ -18,13 +18,13 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-from api.auth import check_auth
-from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
-from api.helpers import j, get_profile_cookie
-from api.profiles import set_request_profile, clear_request_profile
-from api.routes import handle_delete, handle_get, handle_patch, handle_post
-from api.startup import auto_install_agent_deps, fix_credential_permissions
-from api.updates import WEBUI_VERSION
+from api.auth import check_auth  # noqa: E402
+from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE  # noqa: E402
+from api.helpers import j, get_profile_cookie  # noqa: E402
+from api.profiles import set_request_profile, clear_request_profile  # noqa: E402
+from api.routes import handle_delete, handle_get, handle_patch, handle_post  # noqa: E402
+from api.startup import auto_install_agent_deps, fix_credential_permissions  # noqa: E402
+from api.updates import WEBUI_VERSION  # noqa: E402
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -130,11 +130,12 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            if not check_auth(self, parsed): return
+            if not check_auth(self, parsed):
+                return
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
-        except Exception as e:
+        except Exception:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
             return j(self, {'error': 'Internal server error'}, status=500)
         finally:
@@ -148,11 +149,12 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            if not check_auth(self, parsed): return
+            if not check_auth(self, parsed):
+                return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
-        except Exception as e:
+        except Exception:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
             return j(self, {'error': 'Internal server error'}, status=500)
         finally:
@@ -231,7 +233,7 @@ def main() -> None:
     within_container = False
     # Check for the "/.within_container" file to determine if we're running inside a container; this file is created in the Dockerfile
     try:
-        with open('/.within_container', 'r') as f:
+        with open('/.within_container', 'r'):
             within_container = True
     except FileNotFoundError:
         pass
@@ -243,15 +245,15 @@ def main() -> None:
     from api.auth import is_auth_enabled
     if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
         print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
-        print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
-        print(f'     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
-        print(f'     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
+        print('     Anyone on the network can access your filesystem and agent.', flush=True)
+        print('     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
+        print('     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
         if within_container:
-            print(f'     Note: You are running within a container, must bind to 0.0.0.0 (IPv4) or :: (IPv6) to publish the port.', flush=True)
+            print('     Note: You are running within a container, must bind to 0.0.0.0 (IPv4) or :: (IPv6) to publish the port.', flush=True)
     elif not is_auth_enabled():
-        print(f'  [tip] No password set. Any process on this machine can read sessions', flush=True)
-        print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
-        print(f'        enable authentication.', flush=True)
+        print('  [tip] No password set. Any process on this machine can read sessions', flush=True)
+        print('        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
+        print('        enable authentication.', flush=True)
 
     ok, missing, errors = verify_hermes_imports()
     if not ok and _HERMES_FOUND:

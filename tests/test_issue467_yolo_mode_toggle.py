@@ -12,7 +12,6 @@ Covers:
 import os
 import re
 import json
-import pathlib
 import pytest
 
 from tests.conftest import requires_agent_modules
@@ -21,7 +20,8 @@ TEST_BASE = f"http://127.0.0.1:{os.environ.get('HERMES_WEBUI_TEST_PORT', '8788')
 
 
 def _get(path, expect_ok=True):
-    import urllib.request, urllib.error
+    import urllib.request
+    import urllib.error
     try:
         with urllib.request.urlopen(TEST_BASE + path, timeout=10) as r:
             return json.loads(r.read())
@@ -36,7 +36,8 @@ def _get(path, expect_ok=True):
 
 
 def _post(path, body=None, expect_ok=True):
-    import urllib.request, urllib.error
+    import urllib.request
+    import urllib.error
     data = json.dumps(body or {}).encode()
     req = urllib.request.Request(
         TEST_BASE + path, data=data, headers={"Content-Type": "application/json"}

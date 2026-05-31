@@ -28,7 +28,7 @@ def _ime_guarded_enter_pattern(event_var_pattern, require_no_shift=False):
     return (
         rf"if\s*\(\s*{event_var_pattern}\.key\s*===\s*'Enter'{no_shift}\s*\)\s*\{{\s*"
         + guard +
-        rf"(?:\{{\s*return\s*;?\s*\}}|return\s*;?)"
+        r"(?:\{\s*return\s*;?\s*\}|return\s*;?)"
     )
 
 

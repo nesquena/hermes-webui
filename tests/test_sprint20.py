@@ -7,7 +7,6 @@ the browser with no server-side component.
 """
 import re
 import urllib.request
-import json
 import pathlib
 
 from tests._pytest_port import BASE

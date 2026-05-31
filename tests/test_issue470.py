@@ -240,7 +240,6 @@ def test_link_not_broken_by_prior_autolink():
 def test_href_quote_sanitized():
     """A URL containing a double-quote must have it percent-encoded in href to prevent attribute breakout."""
     # This would break out of href="..." and inject an event handler without the fix
-    url = 'https://evil.com" onmouseover="alert(1)'
     # The [label](url) regex captures up to the closing ), so we test via the render helper
     # by constructing a URL that contains a literal quote character
     safe_url = 'https://example.com/path"with"quotes'

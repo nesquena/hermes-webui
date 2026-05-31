@@ -14,11 +14,9 @@ import platform
 import shutil
 import sqlite3
 import subprocess
-import sys
 import threading
 import time
 import uuid
-import re
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs
@@ -670,8 +668,9 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
         _with_cron_home(profile_home, _persist_success)
     except Exception as e:
         logger.exception("Manual cron run failed for job %s", job_id)
+        err_msg = str(e)
         try:
-            _with_cron_home(profile_home, lambda: mark_job_run(job_id, False, str(e)))
+            _with_cron_home(profile_home, lambda: mark_job_run(job_id, False, err_msg))
         except Exception:
             logger.debug("Failed to mark manual cron run failure for %s", job_id)
     finally:
@@ -746,8 +745,7 @@ def _clear_live_models_cache() -> None:
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE.clear()
 
-from api.config import (
-    STATE_DIR,
+from api.config import (  # noqa: E402
     SESSION_DIR,
     DEFAULT_WORKSPACE,
     DEFAULT_MODEL,
@@ -756,16 +754,11 @@ from api.config import (
     LOCK,
     STREAMS,
     STREAMS_LOCK,
-    CANCEL_FLAGS,
     SERVER_START_TIME,
     _resolve_cli_toolsets,
     _INDEX_HTML_PATH,
     get_available_models,
-    IMAGE_EXTS,
-    MD_EXTS,
     MIME_MAP,
-    MAX_FILE_BYTES,
-    MAX_UPLOAD_BYTES,
     CHAT_LOCK,
     _get_session_agent_lock,
     SESSION_AGENT_LOCKS,
@@ -782,7 +775,7 @@ from api.config import (
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
 )
-from api.helpers import (
+from api.helpers import (  # noqa: E402
     require,
     bad,
     safe_resolve,
@@ -794,9 +787,9 @@ from api.helpers import (
     redact_session_data,
     _redact_text,
 )
-from api.agent_health import build_agent_health_payload
-from api.request_diagnostics import RequestDiagnostics
-from api.system_health import build_system_health_payload
+from api.agent_health import build_agent_health_payload  # noqa: E402
+from api.request_diagnostics import RequestDiagnostics  # noqa: E402
+from api.system_health import build_system_health_payload  # noqa: E402
 
 
 def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
@@ -915,7 +908,7 @@ def _clear_stale_stream_state(session) -> bool:
     return True
 
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
-import re as _re
+import re as _re  # noqa: E402
 
 
 def _normalize_host_port(value: str) -> tuple[str, str | None]:
@@ -1685,13 +1678,12 @@ def _keep_latest_messaging_session_per_source(sessions: list[dict]) -> list[dict
     return kept
 
 
-from api.models import (
+from api.models import (  # noqa: E402
     Session,
     get_session,
     new_session,
     all_sessions,
     title_from,
-    _write_session_index,
     SESSION_INDEX_FILE,
     _active_state_db_path,
     load_projects,
@@ -1702,7 +1694,7 @@ from api.models import (
     ensure_cron_project,
     is_cron_session,
 )
-from api.workspace import (
+from api.workspace import (  # noqa: E402
     load_workspaces,
     save_workspaces,
     get_last_workspace,
@@ -1710,28 +1702,26 @@ from api.workspace import (
     list_dir,
     list_workspace_suggestions,
     read_file_content,
-    safe_resolve_ws,
     resolve_trusted_workspace,
     validate_workspace_to_add,
     _is_blocked_system_path,
     _strip_surrounding_quotes,
-    _workspace_blocked_roots,
 )
-from api.upload import handle_upload, handle_upload_extract, handle_transcribe
-from api.streaming import (
+from api.upload import handle_upload, handle_upload_extract, handle_transcribe  # noqa: E402
+from api.streaming import (  # noqa: E402
     _sse,
     _run_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
 )
-from api.providers import get_providers, get_provider_quota, set_provider_key, remove_provider_key
-from api.onboarding import (
+from api.providers import get_providers, get_provider_quota, set_provider_key, remove_provider_key  # noqa: E402
+from api.onboarding import (  # noqa: E402
     apply_onboarding_setup,
     get_onboarding_status,
     complete_onboarding,
     probe_provider_endpoint,
 )
-from api.oauth import (
+from api.oauth import (  # noqa: E402
     cancel_onboarding_oauth_flow,
     poll_onboarding_oauth_flow,
     start_onboarding_oauth_flow,
@@ -1754,15 +1744,24 @@ try:
         is_session_yolo_enabled,
     )
 except ImportError:
-    _submit_pending_raw = lambda *a, **k: None
-    approve_session = lambda *a, **k: None
-    approve_permanent = lambda *a, **k: None
-    save_permanent_allowlist = lambda *a, **k: None
-    is_approved = lambda *a, **k: True
-    resolve_gateway_approval = lambda *a, **k: 0
-    enable_session_yolo = lambda *a, **k: None
-    disable_session_yolo = lambda *a, **k: None
-    is_session_yolo_enabled = lambda *a, **k: False
+    def _submit_pending_raw(*a, **k):
+        return None
+    def approve_session(*a, **k):
+        return None
+    def approve_permanent(*a, **k):
+        return None
+    def save_permanent_allowlist(*a, **k):
+        return None
+    def is_approved(*a, **k):
+        return True
+    def resolve_gateway_approval(*a, **k):
+        return 0
+    def enable_session_yolo(*a, **k):
+        return None
+    def disable_session_yolo(*a, **k):
+        return None
+    def is_session_yolo_enabled(*a, **k):
+        return False
     _pending = {}
     _lock = threading.Lock()
     _permanent_approved = set()
@@ -1870,10 +1869,13 @@ try:
         sse_unsubscribe as clarify_sse_unsubscribe,
     )
 except ImportError:
-    submit_clarify_pending = lambda *a, **k: None
-    get_clarify_pending = lambda *a, **k: None
+    def submit_clarify_pending(*a, **k):
+        return None
+    def get_clarify_pending(*a, **k):
+        return None
     clarify_sse_subscribe = None
-    resolve_clarify = lambda *a, **k: 0
+    def resolve_clarify(*a, **k):
+        return 0
 
 
 # ── Login page locale strings ─────────────────────────────────────────────────
@@ -8733,7 +8735,7 @@ def _handle_session_import(handler, body):
 
 
 # ── MCP Server helpers ──
-from api.config import get_config, _save_yaml_config_file, _get_config_path, reload_config
+from api.config import get_config, _save_yaml_config_file, _get_config_path, reload_config  # noqa: E402
 
 def _mask_secrets(obj):
     """Mask sensitive values in env vars and headers."""

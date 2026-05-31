@@ -28,7 +28,6 @@ Reported by @AvidFuturist in Discord (May 1 2026, "the 100 comes up way too
 often").  Confirmed live on the dev server: 23 of 75 sessions had
 `context_length=0` + `input_tokens > 128K`, all rendering >100%.
 """
-import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import urlparse

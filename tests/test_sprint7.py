@@ -1,7 +1,11 @@
 """
 Sprint 7 Tests: Cron CRUD, Skill CRUD, Memory Write, Session Content Search, Health
 """
-import json, pathlib, urllib.error, urllib.parse, urllib.request
+import json
+import pathlib
+import urllib.error
+import urllib.parse
+import urllib.request
 
 from tests._pytest_port import BASE
 
@@ -20,7 +24,8 @@ def post(path, body=None):
 
 def make_session_tracked(created_list, ws=None):
     body = {}
-    if ws: body["workspace"] = str(ws)
+    if ws:
+        body["workspace"] = str(ws)
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)

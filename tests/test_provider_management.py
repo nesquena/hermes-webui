@@ -121,7 +121,7 @@ class TestGetProviders:
         try:
             result = get_providers()
             for p in result["providers"]:
-                assert "id" in p, f"Missing 'id' in provider entry"
+                assert "id" in p, "Missing 'id' in provider entry"
                 assert "display_name" in p, f"Missing 'display_name' for {p['id']}"
                 assert "has_key" in p, f"Missing 'has_key' for {p['id']}"
                 assert "configurable" in p, f"Missing 'configurable' for {p['id']}"

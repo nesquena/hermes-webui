@@ -12,7 +12,6 @@ import json
 import os
 import sys
 import tempfile
-import uuid
 from pathlib import Path
 
 import pytest
@@ -188,7 +187,6 @@ def _reimport_mcp():
     # object as `mcp_server.get_active_profile_name`'s closure reference.
     # We need to mutate the closure-bound module so mcp_server sees our
     # _active_profile assignment.
-    import api.profiles as fresh_profiles_via_import
     # mcp_server.get_active_profile_name is bound at first-import time and
     # reads `_active_profile` from its own module's globals via closure.
     # That module is the function's __globals__["__name__"] entry in
@@ -775,9 +773,9 @@ class TestProfileCliOrdering:
 # and capture (path, body) from the requests our handlers issue. This is
 # the thing that would have caught the original 8788 vs 8787 mismatch.
 
-import http.server
-import socket
-import threading
+import http.server  # noqa: E402
+import socket  # noqa: E402
+import threading  # noqa: E402
 
 
 class _RecordingHandler(http.server.BaseHTTPRequestHandler):

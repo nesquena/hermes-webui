@@ -19,7 +19,7 @@ UI_JS = (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text(en
 # Python mirror of the new blockquote rule + inlineMd (for behavioural tests)
 # ---------------------------------------------------------------------------
 
-import html as _html
+import html as _html  # noqa: E402
 
 
 def _esc(s):
@@ -47,8 +47,8 @@ def _apply_blockquote(s):
                 break
             lines.pop()
         processed = []
-        for l in lines:
-            stripped = re.sub(r"^>[ \t]?", "", l)
+        for ln in lines:
+            stripped = re.sub(r"^>[ \t]?", "", ln)
             if stripped.strip() == "":
                 processed.append("<br>")
             else:

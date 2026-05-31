@@ -11,8 +11,8 @@ Validates:
   - Fallback when categories are empty
 """
 
-import pytest
-import sys, os
+import sys
+import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -203,7 +203,7 @@ class TestApplyBaseURL:
     def test_requires_base_url_writes_user_url(self, tmp_path, monkeypatch):
         """Providers with requires_base_url=True should write user-provided base_url."""
         config_path = str(tmp_path / "config.yaml")
-        env_path = str(tmp_path / ".env")
+        str(tmp_path / ".env")
 
         monkeypatch.setattr("api.onboarding._get_config_path", lambda: config_path)
         monkeypatch.setattr("api.onboarding._get_active_hermes_home", lambda: tmp_path)

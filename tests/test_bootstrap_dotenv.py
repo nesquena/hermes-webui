@@ -18,11 +18,9 @@ Covers:
   10. Structural: loader is called before DEFAULT_HOST/DEFAULT_PORT
 """
 import os
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
 

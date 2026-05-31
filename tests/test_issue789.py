@@ -189,9 +189,9 @@ def test_titled_session_with_no_messages_old_is_visible():
 def test_mixed_sessions_correct_visibility():
     """With a mix of sessions, only sessions with messages OR titled sessions
     are surfaced (#1171). Both new and old Untitled+empty sessions are hidden."""
-    new_ghost = _make_untitled_session(age_seconds=5, session_id="new_ghost")
-    old_ghost = _make_untitled_session(age_seconds=200, session_id="old_ghost")
-    real_session = _make_titled_session(age_seconds=500, session_id="real_session")
+    _make_untitled_session(age_seconds=5, session_id="new_ghost")
+    _make_untitled_session(age_seconds=200, session_id="old_ghost")
+    _make_titled_session(age_seconds=500, session_id="real_session")
 
     result = all_sessions()
     ids = {s["session_id"] for s in result}

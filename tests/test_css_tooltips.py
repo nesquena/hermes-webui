@@ -458,7 +458,7 @@ class RailTooltipCascadeTests(unittest.TestCase):
         )
         self.assertEqual(
             missing, [],
-            f"Rail buttons without working tooltip markup:\n  " +
+            "Rail buttons without working tooltip markup:\n  " +
             "\n  ".join(f"{reason}: {attrs}" for reason, attrs in missing),
         )
 

@@ -5,7 +5,6 @@ with chevron toggles, click handlers, and persisted collapse state.
 """
 import os
 import re
-import pytest
 
 
 def _readpanels():

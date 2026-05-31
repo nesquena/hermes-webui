@@ -7,11 +7,9 @@ fallback cases the maintainer asked about.
 """
 import base64
 import os
-import struct
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-import pytest
 
 from api.streaming import (
     _attachment_name,
@@ -334,7 +332,7 @@ class TestBuildNativeMultimodalMessage:
 
 # ── _is_valid_image magic-byte checks ────────────────────────────────────────
 
-from api.streaming import _is_valid_image
+from api.streaming import _is_valid_image  # noqa: E402
 
 
 class TestIsValidImage:

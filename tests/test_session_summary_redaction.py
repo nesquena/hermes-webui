@@ -11,7 +11,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent))
 
 _needs_server = pytest.mark.usefixtures("test_server")
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE  # noqa: E402
 _FULL_SECRET = "sk-" + ("B" * 24)
 
 

@@ -1,5 +1,4 @@
 """Tests for #1106 — custom_providers[].models dict keys populate model dropdown."""
-import pytest
 import api.config as config
 
 

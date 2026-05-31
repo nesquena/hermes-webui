@@ -1,5 +1,4 @@
 """Hermes Web UI -- Session model and in-memory session store."""
-import collections
 import datetime
 import hashlib
 import json
@@ -11,7 +10,6 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-import api.config as _cfg
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
@@ -1054,15 +1052,18 @@ def all_sessions(diag=None):
     _diag_stage(diag, "all_sessions.full_scan")
     out = []
     for p in SESSION_DIR.glob('*.json'):
-        if p.name.startswith('_'): continue
+        if p.name.startswith('_'):
+            continue
         try:
             s = Session.load(p.stem)
-            if s: out.append(s)
+            if s:
+                out.append(s)
         except Exception:
             logger.debug("Failed to load session from %s", p)
     _diag_stage(diag, "all_sessions.full_scan_overlay")
     for s in SESSIONS.values():
-        if all(s.session_id != x.session_id for x in out): out.append(s)
+        if all(s.session_id != x.session_id for x in out):
+            out.append(s)
     _diag_stage(diag, "all_sessions.full_scan_sort_filter")
     out.sort(key=lambda s: (getattr(s, 'pinned', False), _session_sort_timestamp(s)), reverse=True)
     # Hide empty Untitled sessions from the UI entirely — kept consistent with the
@@ -1751,7 +1752,9 @@ def count_conversation_rounds(sid: str, since: float | None = None) -> int:
     int
         Number of complete conversation rounds.
     """
-    import os, sqlite3, datetime
+    import os
+    import sqlite3
+    import datetime
 
     try:
         from api.profiles import get_active_hermes_home

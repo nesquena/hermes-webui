@@ -17,7 +17,6 @@ Fix:
 import json
 import threading
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -226,7 +225,6 @@ def test_profile_field_on_project_dict_default_create(monkeypatch):
     instead we pin the file-level invariant: the create handler now stamps
     `profile` on the created dict.
     """
-    from pathlib import Path
     src = (Path(__file__).parent.parent / 'api' / 'routes.py').read_text(encoding='utf-8')
 
     # The create handler must now include get_active_profile_name() for the new dict
@@ -241,7 +239,6 @@ def test_profile_field_on_project_dict_default_create(monkeypatch):
 
 def test_project_rename_rejects_cross_profile():
     """Source-string check that rename's active-profile guard is in place."""
-    from pathlib import Path
     src = (Path(__file__).parent.parent / 'api' / 'routes.py').read_text(encoding='utf-8')
 
     rename_idx = src.find('"/api/projects/rename"')
@@ -254,7 +251,6 @@ def test_project_rename_rejects_cross_profile():
 
 
 def test_project_delete_rejects_cross_profile():
-    from pathlib import Path
     src = (Path(__file__).parent.parent / 'api' / 'routes.py').read_text(encoding='utf-8')
 
     delete_idx = src.find('"/api/projects/delete"')
@@ -267,7 +263,6 @@ def test_project_delete_rejects_cross_profile():
 
 def test_session_move_rejects_cross_profile_project():
     """/api/session/move must refuse moves into a project from another profile."""
-    from pathlib import Path
     src = (Path(__file__).parent.parent / 'api' / 'routes.py').read_text(encoding='utf-8')
 
     move_idx = src.find('"/api/session/move"')

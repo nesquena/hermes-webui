@@ -7,7 +7,6 @@ lacks pyyaml.
 """
 import json
 import pathlib
-import sys
 import urllib.error
 import urllib.request
 
@@ -17,7 +16,7 @@ from tests._pytest_port import BASE
 
 # Check if pyyaml is available — onboarding setup tests need it on the server
 try:
-    import yaml as _yaml
+    import yaml as _yaml  # noqa: F401
     _HAS_YAML = True
 except ImportError:
     _HAS_YAML = False

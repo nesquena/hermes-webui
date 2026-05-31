@@ -17,11 +17,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from api.config import (
+from api.config import (  # noqa: E402
     WORKSPACES_FILE as _GLOBAL_WS_FILE,
     LAST_WORKSPACE_FILE as _GLOBAL_LW_FILE,
     DEFAULT_WORKSPACE as _BOOT_DEFAULT_WORKSPACE,
-    MAX_FILE_BYTES, IMAGE_EXTS, MD_EXTS
+    MAX_FILE_BYTES
 )
 
 
@@ -783,9 +783,9 @@ def git_info_for_workspace(workspace: Path) -> dict:
         return int(r) if r and r.isdigit() else 0
     def _status():
         out = _run_git(['status', '--porcelain'], workspace) or ''
-        lines = [l for l in out.splitlines() if l]
-        modified = sum(1 for l in lines if len(l) >= 2 and (l[0] in 'MAR' or l[1] in 'MAR'))
-        untracked = sum(1 for l in lines if l.startswith('??'))
+        lines = [ln for ln in out.splitlines() if ln]
+        modified = sum(1 for ln in lines if len(ln) >= 2 and (ln[0] in 'MAR' or ln[1] in 'MAR'))
+        untracked = sum(1 for ln in lines if ln.startswith('??'))
         return len(lines), modified, untracked
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         f_status = pool.submit(_status)

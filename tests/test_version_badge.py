@@ -10,9 +10,6 @@ Covers:
   6. static/panels.js: loadSettingsPanel() populates both version badges from settings
   7. server.py: server_version is not the old hardcoded string
 """
-import importlib
-import sys
-import types
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 

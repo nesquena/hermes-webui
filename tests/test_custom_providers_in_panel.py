@@ -4,14 +4,11 @@ Verifies that config.yaml custom_providers entries (e.g. glmcode, timicc)
 are surfaced in the /api/providers response alongside built-in providers.
 """
 
-import json
-import os
 import sys
 import types
 
 import api.config as config
 import api.profiles as profiles
-from tests._pytest_port import BASE
 
 
 def _install_fake_hermes_cli(monkeypatch):

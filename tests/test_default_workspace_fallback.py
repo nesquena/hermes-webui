@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 import api.config as config
 
@@ -52,7 +51,8 @@ def test_resolve_default_workspace_creates_home_workspace_when_missing(monkeypat
 
 def test_resolve_default_workspace_raises_when_all_candidates_fail(monkeypatch, tmp_path):
     """RuntimeError is raised when every candidate is unwritable."""
-    import stat, pytest
+    import stat
+    import pytest
     # Make tmp_path read-only so mkdir inside it fails
     tmp_path.chmod(stat.S_IRUSR | stat.S_IXUSR)
     state_dir = tmp_path / "state"

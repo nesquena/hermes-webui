@@ -37,7 +37,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -176,7 +175,6 @@ def test_session_load_metadata_only_returns_instance_not_dict():
     if a future change converts it to a dict."""
     sys.path.insert(0, str(REPO))
     from api.models import Session
-    import tempfile
 
     with tempfile.TemporaryDirectory() as tmpd:
         # Create a fake session file

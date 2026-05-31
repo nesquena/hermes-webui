@@ -9,7 +9,6 @@ Covers:
 - i18n.js contains all required OAuth onboarding keys in both English and Spanish
 """
 import pathlib
-import re
 import unittest
 from unittest.mock import patch
 

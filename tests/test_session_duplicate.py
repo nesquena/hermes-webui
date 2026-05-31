@@ -8,18 +8,11 @@ Tests verify that:
 4. Error handling works properly
 """
 import json
-import pathlib
-import shutil
-import subprocess
-import time
 import urllib.request
 import urllib.error
-import uuid
-import tempfile
 
-import pytest
 
-from tests.conftest import TEST_BASE, TEST_STATE_DIR, _post, TEST_WORKSPACE, _wait_for_server
+from tests.conftest import TEST_BASE, _post
 
 
 def _get(path):

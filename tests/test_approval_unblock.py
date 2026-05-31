@@ -6,7 +6,6 @@ need to prevent the UI getting stuck in "Thinking…" during dangerous commands.
 """
 
 import json
-import threading
 import uuid
 import urllib.request
 import urllib.error
@@ -26,7 +25,6 @@ try:
         _gateway_notify_cbs,
         _lock,
         _ApprovalEntry,
-        submit_pending,
     )
     # has_pending and pop_pending were removed from tools.approval when the
     # agent renamed has_pending -> has_blocking_approval (gateway queue check)
@@ -41,7 +39,7 @@ pytestmark = pytest.mark.skipif(
     reason="tools.approval not available in this environment"
 )
 
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE  # noqa: E402
 
 
 def get(path):

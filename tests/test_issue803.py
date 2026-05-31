@@ -15,10 +15,8 @@ Covers:
 """
 import os
 import threading
-from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
 
 
 # ── 1. Cookie build/parse roundtrip ──────────────────────────────────────────
@@ -207,8 +205,10 @@ def test_concurrent_threads_see_independent_profiles():
 
     t1 = threading.Thread(target=worker, args=('alice', 'alice'))
     t2 = threading.Thread(target=worker, args=('bob', 'bob'))
-    t1.start(); t2.start()
-    t1.join(timeout=10); t2.join(timeout=10)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
 
     assert not errors, f"Workers raised: {errors}"
     assert results.get('alice') == 'alice', f"alice thread saw {results.get('alice')!r}"

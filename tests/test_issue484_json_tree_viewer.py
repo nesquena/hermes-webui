@@ -1,5 +1,4 @@
 """Tests for issue #484 — collapsible JSON/YAML tree viewer."""
-import pytest
 
 
 class TestTreeRenderer:

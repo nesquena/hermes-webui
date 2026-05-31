@@ -68,7 +68,7 @@ class TestWriteEndpointToConfig:
 
 # ── 6-7: API integration tests ────────────────────────────────────────────────
 
-from tests._pytest_port import BASE as _TEST_BASE
+from tests._pytest_port import BASE as _TEST_BASE  # noqa: E402
 
 
 def _post(path, body=None):

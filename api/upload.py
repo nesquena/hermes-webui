@@ -3,18 +3,18 @@ Hermes Web UI -- File upload: multipart parser and upload handler.
 """
 import mimetypes
 import re as _re
-import email.parser
 import tempfile
 from pathlib import Path
 
 from api.config import MAX_UPLOAD_BYTES
-from api.helpers import j, bad
+from api.helpers import j
 from api.models import get_session
 from api.workspace import safe_resolve_ws
 
 
 def parse_multipart(rfile, content_type, content_length) -> tuple:
-    import re as _re, email.parser as _ep
+    import re as _re
+    import email.parser as _ep
     m = _re.search(r'boundary=([^;\s]+)', content_type)
     if not m:
         raise ValueError('No boundary in Content-Type')
@@ -23,7 +23,7 @@ def parse_multipart(rfile, content_type, content_length) -> tuple:
     fields = {}
     files = {}
     delimiter = b'--' + boundary
-    end_marker = b'--' + boundary + b'--'
+    b'--' + boundary + b'--'
     parts = raw.split(delimiter)
     for part in parts[1:]:
         stripped = part.lstrip(b'\r\n')
@@ -107,7 +107,10 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     Returns a dict with ``extracted`` (int), ``files`` (list[str]).
     Raises ValueError on zip-slip or unsupported format.
     """
-    import zipfile, tarfile, io, os, shutil
+    import zipfile
+    import tarfile
+    import io
+    import shutil
 
     name = Path(filename).name
     stem = Path(filename).stem  # strip .zip / .tar.gz etc.
@@ -123,7 +126,8 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     dest_dir = safe_resolve_ws(workspace, stem)
     # Avoid overwriting existing files by appending a suffix
     if dest_dir.exists():
-        import string, random
+        import string
+        import random
         while dest_dir.exists():
             suffix = ''.join(random.choices(string.digits, k=3))
             dest_dir = dest_dir.with_name(stem + '_' + suffix)

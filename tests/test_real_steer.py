@@ -16,7 +16,6 @@ emitted so the frontend can queue the leftover text as a next-turn message.
 """
 import sys
 import os
-import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 

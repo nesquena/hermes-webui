@@ -19,10 +19,9 @@ import pathlib
 import tempfile
 import unittest.mock
 
-import pytest
 
 REPO = pathlib.Path(__file__).parent.parent
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE  # noqa: E402
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -169,7 +168,6 @@ class TestStatusFromRuntimeOAuth:
         We mock hermes_cli.auth to be unavailable so the function falls through
         to the auth.json path.  With no auth.json the result must be False.
         """
-        import unittest.mock
 
         # Prevent the hermes_cli fast path from finding real credentials
         with unittest.mock.patch(
@@ -269,7 +267,8 @@ class TestApplyOnboardingSetupUnsupportedProvider:
     """
 
     def _call(self, provider: str) -> dict:
-        import sys, pathlib, unittest.mock, tempfile, os
+        import sys
+        import pathlib
         repo = pathlib.Path(__file__).parent.parent
         if str(repo) not in sys.path:
             sys.path.insert(0, str(repo))

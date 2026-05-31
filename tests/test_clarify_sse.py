@@ -9,7 +9,6 @@ Covers:
 import os
 import queue
 import threading
-import textwrap
 
 import pytest
 
@@ -142,7 +141,7 @@ class TestClarifySSEUnit:
 
     def test_multiple_subscribers_same_session(self, clarify_mod):
         q1 = clarify_mod.sse_subscribe("s1")
-        q2 = clarify_mod.sse_subscribe("s1")
+        clarify_mod.sse_subscribe("s1")
         assert len(clarify_mod._clarify_sse_subscribers["s1"]) == 2
         clarify_mod.sse_unsubscribe("s1", q1)
         assert len(clarify_mod._clarify_sse_subscribers["s1"]) == 1

@@ -200,7 +200,6 @@ class TestTLSEndToEnd(unittest.TestCase):
             "HTTP fallback server did not start after TLS failure",
         )
         # Confirm TLS warning was printed
-        import fcntl
         os.set_blocking(self._proc.stdout.fileno(), False)
         output = ""
         try:

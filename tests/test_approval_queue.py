@@ -4,7 +4,6 @@ Previously _pending[sid] held one entry, so simultaneous approvals overwrote
 each other. This PR changes submit_pending() to append to a list and adds
 approval_id so /api/approval/respond can target a specific entry.
 """
-import json
 import pathlib
 import re
 import sys
@@ -120,7 +119,6 @@ def test_approval_counter_element_exists():
 
 def test_multiple_approvals_both_surfaced():
     """Two submit_pending calls must produce two queued entries, not one."""
-    import threading
     from api import routes as r
 
     # Reset state

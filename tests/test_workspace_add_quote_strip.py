@@ -12,7 +12,6 @@ This file pins the behaviour:
   - Mismatched / unpaired quotes are preserved (path may legitimately contain one).
   - Whitespace outside the quotes is also handled.
 """
-import pytest
 
 from api.workspace import _strip_surrounding_quotes
 

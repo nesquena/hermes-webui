@@ -6,9 +6,7 @@ Root cause: the paragraph-splitter in renderMd() replaced \n with <br> inside
 text. The fix stashes <pre> blocks (and pre-header divs, mermaid, katex) before
 the paragraph split and restores them afterwards.
 """
-import re
 import subprocess
-import sys
 import os
 
 UI_JS = os.path.join(os.path.dirname(__file__), '..', 'static', 'ui.js')
@@ -53,8 +51,8 @@ class TestCodeBlockNewlinePreservation:
         src = get_ui_js()
         # The map line must check for \x00E in its bypass condition
         map_line = next(
-            l for l in src.splitlines()
-            if 'parts.map' in l and '<br>' in l
+            ln for ln in src.splitlines()
+            if 'parts.map' in ln and '<br>' in ln
         )
         assert r'\x00E' in map_line or r'\x00[E' in map_line, (
             r"paragraph map must bypass \x00E stash tokens (literally or as "

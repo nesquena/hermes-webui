@@ -10,8 +10,6 @@ Covers all five new functions added to api/streaming.py:
 import sys
 import os
 import threading
-import types
-import unittest
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -384,7 +382,6 @@ class TestMaybeScheduleTitleRefresh:
     def test_spawns_thread_at_exact_interval(self):
         """Refresh fires when exchange_count == refresh_interval."""
         with patch('api.streaming._get_title_refresh_interval', return_value=5):
-            spawned = []
             with patch('threading.Thread') as mock_thread_cls:
                 mock_thread = MagicMock()
                 mock_thread_cls.return_value = mock_thread

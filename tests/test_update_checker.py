@@ -8,11 +8,8 @@ Tests cover the four new branches in _apply_update_inner():
   3. pull fails + no upstream tracking  → recovery command with set-upstream-to
   4. pull fails + generic fallback  → raw git output truncated at 300 chars
 """
-from pathlib import Path
-from unittest.mock import patch, call
-import subprocess
+from unittest.mock import patch
 
-import pytest
 
 
 # ---------------------------------------------------------------------------

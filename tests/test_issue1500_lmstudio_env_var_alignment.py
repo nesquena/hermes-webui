@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import sys
 import types
-from pathlib import Path
 
 import api.config as config
 import api.profiles as profiles

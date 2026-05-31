@@ -18,10 +18,8 @@ import queue
 import sys
 import threading
 import time
-import traceback
-import uuid
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
 HOME = Path.home()
@@ -430,7 +428,6 @@ DEFAULT_MODEL = os.getenv("HERMES_WEBUI_DEFAULT_MODEL", "")  # Empty = use provi
 def print_startup_config() -> None:
     """Print detected configuration at startup so the user can verify what was found."""
     ok = "\033[32m[ok]\033[0m"
-    warn = "\033[33m[!!]\033[0m"
     err = "\033[31m[XX]\033[0m"
 
     lines = [
@@ -1961,7 +1958,7 @@ _cache_build_in_progress = False  # True while a cold path is actively building
 # session is expensive (~10s for zai due to endpoint probing).  The credential pool
 # only changes when the user adds/removes credentials, which is rare; a 24h TTL
 # is plenty safe and ensures get_available_models() cold paths are fast.
-_CREDENTIAL_POOL_CACHE: dict[str, tuple[float, "CredentialPool"]] = {}  # pid -> (ts, pool)
+_CREDENTIAL_POOL_CACHE: dict[str, tuple[float, "CredentialPool"]] = {}  # pid -> (ts, pool)  # noqa: F821
 _provider_models_invalidated_ts: dict[str, float] = {}  # provider_id -> timestamp of last invalidation
 
 # Disk-backed in-memory cache for get_available_models().
@@ -2313,7 +2310,8 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
         lookup_id = lookup_id.split(":", 1)[1]
 
     # Check existing groups for a matching label
-    _norm = lambda s: (s.split("/", 1)[-1] if "/" in s else s).replace("-", ".").lower()
+    def _norm(s):
+        return (s.split("/", 1)[-1] if "/" in s else s).replace("-", ".").lower()
     norm_lookup = _norm(lookup_id)
     for g in existing_groups:
         for m in g.get("models", []):
@@ -3660,7 +3658,6 @@ SERVER_START_TIME = time.time()
 # LRU cache with size limit to prevent memory bloat.
 # All cache operations (get, set, move_to_end, popitem) are protected by
 # SESSION_AGENT_CACHE_LOCK for thread safety in multi-threaded ASGI servers.
-import collections
 SESSION_AGENT_CACHE: collections.OrderedDict = collections.OrderedDict()  # LRU cache
 SESSION_AGENT_CACHE_MAX = 50  # Maximum cached agents (each holds full conversation history)
 SESSION_AGENT_CACHE_LOCK = threading.Lock()

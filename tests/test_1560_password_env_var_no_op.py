@@ -20,7 +20,6 @@ the silent-no-op UX bug.
 
 import io
 import json
-import os
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -219,7 +218,7 @@ def test_post_set_password_settings_hash_unchanged_after_409(monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_PASSWORD", "shadow-pw")
 
     # Seed settings.json with a known sentinel hash so we can detect any write.
-    from api.config import load_settings, save_settings
+    from api.config import load_settings
     # Don't go through save_settings (it would re-route _set_password) — write
     # the file directly via the same path load_settings reads from.
     import api.config as cfg

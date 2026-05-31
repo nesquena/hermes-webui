@@ -7,7 +7,6 @@ Covers:
   - @minimax: provider hint routing works correctly
   - minimax/MiniMax-M2.7 (slash format) is routed via openrouter when active provider differs
 """
-import os
 import pytest
 import api.config as config
 
@@ -152,7 +151,7 @@ def test_minimax_api_key_in_env_scan_tuple():
     """MINIMAX_API_KEY must be included in the env var scan performed by
     get_available_models(), so users who export MINIMAX_API_KEY see the
     MiniMax provider in the dropdown without editing ~/.hermes/.env."""
-    import inspect, ast, textwrap
+    import inspect
     src = inspect.getsource(config.get_available_models)
     assert 'MINIMAX_API_KEY' in src, (
         "MINIMAX_API_KEY not found in get_available_models() source — "

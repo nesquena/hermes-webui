@@ -1,5 +1,8 @@
 """Sprint 4 tests: relocation, session rename, search, file ops, validation."""
-import json, pathlib, uuid, urllib.request, urllib.error
+import json
+import uuid
+import urllib.request
+import urllib.error
 
 from tests._pytest_port import BASE
 
@@ -24,7 +27,8 @@ def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
     import pathlib as _pathlib
     body = {}
-    if ws: body["workspace"] = str(ws)
+    if ws:
+        body["workspace"] = str(ws)
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)

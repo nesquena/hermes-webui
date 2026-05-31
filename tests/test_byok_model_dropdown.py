@@ -219,7 +219,6 @@ class TestLiveModelsCustomProviderFallback:
             return True
         monkeypatch.setattr(r, "j", fake_j)
 
-        from urllib.parse import urlparse
         parsed = mock.MagicMock()
         parsed.query = "provider=custom"
 

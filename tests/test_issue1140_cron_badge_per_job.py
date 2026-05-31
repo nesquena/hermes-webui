@@ -8,7 +8,6 @@ Verifies that:
 5. _renderCronDetail() adds has-new-run class to Last Output card
 """
 
-import pytest
 
 # ── Static file tests (no server needed) ──
 

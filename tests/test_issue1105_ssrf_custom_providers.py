@@ -5,8 +5,6 @@ hardcoded allowlist. This fix extracts hostnames from custom_providers config
 and adds them to the trusted set, so user-explicitly configured local endpoints
 (ollama, llama.cpp, vLLM, TabbyAPI, etc.) are not blocked.
 """
-import os
-import pytest
 
 
 # ---------- Source-code analysis tests ----------

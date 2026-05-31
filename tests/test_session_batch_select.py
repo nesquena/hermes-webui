@@ -1,5 +1,4 @@
 """Test: session batch select mode functions exist in sessions.js (#568)"""
-import re
 
 
 def test_batch_select_state_variables():
@@ -189,9 +188,9 @@ def test_batch_select_i18n_keys():
         for locale in locales:
             # Check if the key exists in the locale block
             if locale == 'zh-Hant':
-                pattern = rf"'{locale}'\s*:.*?{key}"
+                pass
             else:
-                pattern = rf"{locale}\s*:.*?{key}"
+                pass
             # Simpler check: just verify the key string with colon exists
             assert f"{key}:" in src, f"Missing i18n key '{key}' in i18n.js"
     # Count occurrences - each key should appear in all 7 locales

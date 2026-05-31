@@ -147,7 +147,6 @@ def test_get_models_grouped_unconfigured_providers_get_independent_dicts(monkeyp
     A regression of the deepcopy() removal causes the `is not` assertion
     to flip immediately.
     """
-    import importlib
 
     import api.config as cfg_mod
 

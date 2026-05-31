@@ -6,7 +6,6 @@ Tests for streaming error handling fixes:
 
 All static tests (no live server required).
 """
-import ast
 import re
 import pathlib
 

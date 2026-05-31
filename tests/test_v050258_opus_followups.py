@@ -29,7 +29,6 @@ path-with-query string that the browser auto-decodes once.
 
 from __future__ import annotations
 
-import re
 import urllib.parse as _urlparse
 from pathlib import Path
 

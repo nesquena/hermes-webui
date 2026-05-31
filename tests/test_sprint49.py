@@ -10,7 +10,6 @@ Covers:
 """
 
 import pathlib
-import re
 
 from api.streaming import _restore_reasoning_metadata
 

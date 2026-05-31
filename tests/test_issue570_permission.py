@@ -8,7 +8,6 @@ load_settings() must treat that as "file not accessible = use defaults" rather
 than propagating the exception up to crash the request handler.
 """
 import stat
-import pytest
 import api.config as config
 
 

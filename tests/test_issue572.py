@@ -17,13 +17,11 @@ Covers:
 """
 from __future__ import annotations
 
-import os
 import pathlib
 import sys
 import types
 from unittest import mock
 
-import pytest
 
 
 def _inject_hermes_cli_auth(get_auth_status_return):
@@ -96,7 +94,7 @@ class TestProviderApiKeyPresentFallback:
 
     def test_supported_provider_still_works_without_fallback(self):
         """openrouter with env key must still succeed via the original path."""
-        from api.onboarding import _provider_api_key_present, _SUPPORTED_PROVIDER_SETUPS
+        from api.onboarding import _provider_api_key_present
         env_values = {"OPENROUTER_API_KEY": "sk-test"}
         result = _provider_api_key_present("openrouter", {}, env_values)
         assert result is True

@@ -12,10 +12,10 @@ import os
 _TEST_STATE = Path(tempfile.mkdtemp())
 os.environ["HERMES_WEBUI_STATE_DIR"] = str(_TEST_STATE)
 
-import sys
+import sys  # noqa: E402
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import importlib
+import importlib  # noqa: E402
 
 # Force re-import of auth module so it picks up our TEST_STATE_DIR
 auth = importlib.import_module("api.auth")

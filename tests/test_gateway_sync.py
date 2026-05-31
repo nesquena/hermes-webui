@@ -10,7 +10,6 @@ Tests are ordered TDD-style:
   6. Settings UI has renamed label
 """
 import json
-import os
 import pathlib
 import sqlite3
 import time
@@ -18,7 +17,7 @@ import urllib.error
 import urllib.request
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE  # noqa: E402
 
 
 def get(path):
@@ -1519,7 +1518,7 @@ def test_gateway_session_messages_readable():
 
         post('/api/settings', {'show_cli_sessions': True})
 
-        data, status = get(f'/api/session?session_id=gw_read_001')
+        data, status = get('/api/session?session_id=gw_read_001')
         assert status == 200
         msgs = data.get('session', {}).get('messages', [])
         assert len(msgs) >= 2, f"Expected at least 2 messages, got {len(msgs)}"
@@ -1872,10 +1871,10 @@ def test_cli_sessions_still_work():
 # These replace the deleted repo-root test_gateway_sse_probe_unit.py and account
 # for the watcher_alive check (thread existence + is_alive()).
 
-import sys
-import threading
+import sys  # noqa: E402
+import threading  # noqa: E402
 sys.path.insert(0, str(REPO_ROOT))
-from api.routes import _gateway_sse_probe_payload
+from api.routes import _gateway_sse_probe_payload  # noqa: E402
 
 
 def test_probe_payload_when_disabled():
@@ -1919,7 +1918,6 @@ def test_probe_payload_when_watcher_thread_alive():
     t.start()
     w._thread = t
     # Thread may finish fast — loop-start a live daemon thread for reliability
-    import time as _time
     done = threading.Event()
     live = threading.Thread(target=done.wait, daemon=True)
     live.start()

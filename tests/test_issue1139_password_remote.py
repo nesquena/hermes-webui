@@ -5,7 +5,6 @@ Users in Settings > System could type a new password but had no way to submit it
 Disable Auth and Sign Out buttons existed but Save was missing.
 """
 
-import pytest
 
 
 def test_system_pane_has_save_button():

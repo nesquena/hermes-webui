@@ -20,7 +20,7 @@ os.environ["HERMES_WEBUI_STATE_DIR"] = str(_TEST_STATE)
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import api.auth as auth
+import api.auth as auth  # noqa: E402
 
 
 class TestSessionPersistence(unittest.TestCase):

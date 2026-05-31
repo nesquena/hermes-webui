@@ -11,9 +11,6 @@ Fix: centralize the "is this the root?" check in `_is_root_profile(name)`
 and replace each scattered `if name == 'default':` with it.
 """
 
-import os
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 

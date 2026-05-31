@@ -11,10 +11,8 @@ Covers:
 - Logging: at least 5 modules add a module-level logger (B110 remediation)
 - routes.py: session titles redacted in /api/sessions list response
 """
-import ast
 import pathlib
 import re
-import sys
 import unittest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
@@ -46,7 +44,6 @@ class TestMD5SecurityFix(unittest.TestCase):
     def test_gateway_watcher_md5_pattern(self):
         """Exact pattern: hashlib.md5(..., usedforsecurity=False)."""
         # Use re.search with DOTALL since the arg may span parens internally
-        import re
         self.assertIsNotNone(
             re.search(r"hashlib\.md5\(.*?usedforsecurity=False\)", GATEWAY_WATCHER_PY, re.DOTALL),
             "MD5 call must include usedforsecurity=False kwarg",
@@ -216,7 +213,6 @@ class TestQuietHTTPServer(unittest.TestCase):
 
     def test_sys_imported_in_server(self):
         """server.py must import sys (needed for sys.exc_info)."""
-        import re
         self.assertIsNotNone(
             re.search(r"^import sys", SERVER_PY, re.MULTILINE),
             "server.py: sys must be imported",

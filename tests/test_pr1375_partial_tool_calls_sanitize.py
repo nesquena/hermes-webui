@@ -20,7 +20,6 @@ sanitize-for-API.
 import pathlib
 import sys
 
-import pytest
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(REPO_ROOT))

@@ -11,9 +11,7 @@ Bug 2: /api/models returned stale results after a profile switch because the
 These tests verify both fixes.
 """
 import os
-import json
 import tempfile
-import textwrap
 from pathlib import Path
 
 
@@ -203,7 +201,6 @@ no active session), the early-return branch ran without updating the chip.
 This caused the chip to keep showing the old profile name after switchToProfile().
 """
 
-import re
 
 
 def test_syncTopbar_early_return_updates_profile_chip():
@@ -290,7 +287,7 @@ def test_regression_switch_profile_default_workspace_not_from_process_global(tmp
             "switch_profile() is reading from the wrong profile."
         )
         assert str(old_ws) not in ws, (
-            f"REGRESSION: Returned old profile workspace. Bug 1 regressed."
+            "REGRESSION: Returned old profile workspace. Bug 1 regressed."
         )
     finally:
         profiles._DEFAULT_HERMES_HOME = orig_default
@@ -362,13 +359,13 @@ def test_regression_switch_profile_returns_target_model():
     """
     import api.profiles as profiles
     from pathlib import Path
-    import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
         target = base / "profiles" / "myp"
         target.mkdir(parents=True)
-        ws = base / "mypws"; ws.mkdir()
+        ws = base / "mypws"
+        ws.mkdir()
         (target / "config.yaml").write_text(
             f"model:\n  default: my-target-model\nterminal:\n  cwd: {ws}\n",
             encoding="utf-8",

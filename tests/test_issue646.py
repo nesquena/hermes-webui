@@ -1,5 +1,4 @@
 """Tests for PR #649 — empty DEFAULT_MODEL does not inject blank model entries."""
-import pytest
 from api import config as cfg
 
 

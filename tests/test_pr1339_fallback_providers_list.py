@@ -8,7 +8,6 @@ which would raise `AttributeError: 'list' object has no attribute 'get'`.
 The fix makes streaming.py handle both legacy dict form and new list form, picking
 the first entry from the list when given a list.
 """
-import re
 from pathlib import Path
 
 STREAMING_PY = Path(__file__).resolve().parent.parent / "api" / "streaming.py"

@@ -82,7 +82,7 @@ def test_logs_tab_is_wired_between_insights_and_settings_in_rail_and_mobile_nav(
 
 def test_logs_panel_fetches_allowlisted_api_and_exposes_controls():
     load_fn = _function_body(PANELS, "loadLogs")
-    render_fn = _function_body(PANELS, "_renderLogs")
+    _function_body(PANELS, "_renderLogs")
     selected_file_fn = _function_body(PANELS, "_selectedLogsFile")
     selected_tail_fn = _function_body(PANELS, "_selectedLogsTail")
     assert "api('/api/logs" in load_fn or 'api("/api/logs' in load_fn

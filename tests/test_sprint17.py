@@ -1,7 +1,9 @@
 """
 Sprint 17 Tests: send_key setting, commands.js static file, workspace subdir listing.
 """
-import json, urllib.error, urllib.request
+import json
+import urllib.error
+import urllib.request
 
 from tests._pytest_port import BASE
 

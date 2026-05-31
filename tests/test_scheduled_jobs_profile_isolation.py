@@ -14,7 +14,6 @@ import os
 import pathlib
 import sys
 import threading
-from unittest import mock
 
 import pytest
 
@@ -147,8 +146,10 @@ def test_cron_profile_context_serializes_concurrent_access(tmp_path):
 
     t1 = threading.Thread(target=worker, args=(home_a, "A"))
     t2 = threading.Thread(target=worker, args=(home_b, "B"))
-    t1.start(); t2.start()
-    t1.join(); t2.join()
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
 
     # Every enter must be immediately followed by its matching exit (no
     # interleaving), because the lock serializes the two contexts.

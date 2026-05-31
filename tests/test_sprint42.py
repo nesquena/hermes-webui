@@ -10,7 +10,6 @@ Covers:
 """
 import ast
 import pathlib
-import re
 import queue
 import sys
 import types

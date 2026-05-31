@@ -18,8 +18,6 @@ restart could wipe a 1000-message conversation in a single round-trip.
 This test reproduces the data loss path against the on-disk session file.
 """
 import json
-import sys
-from pathlib import Path
 
 import pytest
 

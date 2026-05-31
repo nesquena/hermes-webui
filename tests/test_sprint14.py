@@ -1,7 +1,9 @@
 """
 Sprint 14 Tests: file rename, folder create, session archive, session tags, mermaid, timestamps.
 """
-import json, os, pathlib, shutil, tempfile, urllib.error, urllib.request
+import json
+import urllib.error
+import urllib.request
 
 from tests._pytest_port import BASE
 

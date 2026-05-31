@@ -100,9 +100,9 @@ def render_md(raw):
     def handle_ul(block):
         lines = block.strip().split("\n")
         out = "<ul>"
-        for l in lines:
-            indent = bool(re.match(r"^ {2,}", l))
-            text = re.sub(r"^ {0,4}[-*+] ", "", l)
+        for ln in lines:
+            indent = bool(re.match(r"^ {2,}", ln))
+            text = re.sub(r"^ {0,4}[-*+] ", "", ln)
             style = ' style="margin-left:16px"' if indent else ""
             out += f"<li{style}>{inline_md(text)}</li>"
         return out + "</ul>"
@@ -112,8 +112,8 @@ def render_md(raw):
     def handle_ol(block):
         lines = block.strip().split("\n")
         out = "<ol>"
-        for l in lines:
-            text = re.sub(r"^ {0,4}\d+\. ", "", l)
+        for ln in lines:
+            text = re.sub(r"^ {0,4}\d+\. ", "", ln)
             out += f"<li>{inline_md(text)}</li>"
         return out + "</ol>"
 
@@ -126,8 +126,10 @@ def render_md(raw):
     parts = s.split("\n\n")
     def wrap(p):
         p = p.strip()
-        if not p: return ""
-        if re.match(r"^<(h[1-6]|ul|ol|pre|hr|blockquote)", p): return p
+        if not p:
+            return ""
+        if re.match(r"^<(h[1-6]|ul|ol|pre|hr|blockquote)", p):
+            return p
         return "<p>" + p.replace("\n", "<br>") + "</p>"
     s = "\n".join(wrap(p) for p in parts)
     return s

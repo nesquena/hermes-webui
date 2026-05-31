@@ -31,7 +31,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
 
 from tests.test_sprint16 import render_md  # Python mirror of renderMd()
 

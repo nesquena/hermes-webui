@@ -12,11 +12,9 @@ asserting the rendered HTML for the most common LLM-output shapes.
 Add a case here whenever the renderer fix targets a class of input the
 Python mirror cannot exercise faithfully.
 """
-import os
 import re
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest

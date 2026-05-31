@@ -13,7 +13,6 @@ Covers:
 """
 
 import pathlib
-import re
 
 REPO = pathlib.Path(__file__).parent.parent
 

@@ -20,11 +20,9 @@ This test suite locks the diagnostic shape of the new error message:
 Behavioural test for the actual raise path lives in the streaming integration
 suite; this file only exercises the helper.
 """
-import os
 import sys
 from pathlib import Path
 
-import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

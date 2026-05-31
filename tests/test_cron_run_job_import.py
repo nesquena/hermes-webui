@@ -6,7 +6,6 @@ Before the fix, run_job was only imported inside _handle_cron_run
 (a local scope invisible to _run_cron_tracked), causing NameError.
 """
 import ast
-import inspect
 from pathlib import Path
 
 import pytest
@@ -38,7 +37,7 @@ class TestRunCronTrackedImport:
             def visit_Name(self, node):
                 names_used.add(node.id)
 
-        ImportCollector = type(
+        type(
             "ImportCollector",
             (ast.NodeVisitor,),
             {

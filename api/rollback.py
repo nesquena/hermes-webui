@@ -7,13 +7,12 @@ created by the Hermes agent's CheckpointManager.  Checkpoints live at
 """
 
 import hashlib
-import json
 import logging
 import os
 import re
 import shutil
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -237,7 +236,7 @@ def get_checkpoint_diff(workspace: str, checkpoint: str) -> dict[str, Any]:
             # File exists in checkpoint but not in workspace (deleted)
             files_changed.append({"file": rel_path, "status": "deleted"})
             diff_lines.append(f"--- a/{rel_path}")
-            diff_lines.append(f"+++ /dev/null")
+            diff_lines.append("+++ /dev/null")
             diff_lines.append("@@ -1,{lines} +0,0 @@".format(lines=len(ckpt_content.splitlines())))
             for line in ckpt_content.splitlines():
                 diff_lines.append(f"-{line}")

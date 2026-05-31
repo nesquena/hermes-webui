@@ -1,11 +1,7 @@
 """Regression tests for first-class WebUI /goal command parity."""
 
-import io
-import json
 from pathlib import Path
-from types import SimpleNamespace
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")

@@ -1,5 +1,4 @@
 """Tests for inline HTML preview in workspace panel (issue #779)."""
-import pytest
 
 
 def _get_routes_content():

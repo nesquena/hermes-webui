@@ -321,11 +321,16 @@ class FakeKanbanDB:
         if slug not in boards:
             raise LookupError(f"board {slug!r} does not exist")
         meta = dict(boards[slug])
-        if name is not None: meta["name"] = name
-        if description is not None: meta["description"] = description
-        if icon is not None: meta["icon"] = icon
-        if color is not None: meta["color"] = color
-        if archived is not None: meta["archived"] = bool(archived)
+        if name is not None:
+            meta["name"] = name
+        if description is not None:
+            meta["description"] = description
+        if icon is not None:
+            meta["icon"] = icon
+        if color is not None:
+            meta["color"] = color
+        if archived is not None:
+            meta["archived"] = bool(archived)
         boards[slug] = meta
         return dict(meta)
 

@@ -5,7 +5,6 @@ import json as _json
 import os
 import re as _re
 from pathlib import Path
-from api.config import IMAGE_EXTS, MD_EXTS
 
 
 def require(body: dict, *fields) -> None:

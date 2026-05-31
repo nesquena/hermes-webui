@@ -17,7 +17,6 @@ finalizes the agent — which on a long-running server may be never.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest

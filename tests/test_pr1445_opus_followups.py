@@ -8,7 +8,6 @@ These tests pin the defense-in-depth additions from the Opus advisor review:
 """
 
 import logging
-from pathlib import Path
 from types import SimpleNamespace
 
 

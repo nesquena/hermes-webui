@@ -3,7 +3,6 @@ Tests for OpenCode Zen and OpenCode Go provider support.
 Verifies provider registration in display/model catalogs and
 env-var fallback detection.
 """
-import os
 import sys
 import types
 import pytest

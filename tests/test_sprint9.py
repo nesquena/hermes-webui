@@ -2,7 +2,9 @@
 Sprint 9 Tests: app.js module split verification, tool cards, todo panel.
 Run: python -m pytest tests/test_sprint9.py -v
 """
-import json, pathlib, urllib.error, urllib.request
+import json
+import urllib.error
+import urllib.request
 
 from tests._pytest_port import BASE
 
@@ -99,7 +101,6 @@ def test_no_duplicate_function_definitions(cleanup_test_sessions):
 
 def test_all_functions_present_across_modules(cleanup_test_sessions):
     """Key functions must be present somewhere in the split modules."""
-    import re
     modules = ["ui.js", "workspace.js", "sessions.js", "messages.js", "panels.js", "boot.js"]
     all_src = ""
     for m in modules:

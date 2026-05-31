@@ -11,13 +11,12 @@ These tests verify that after cancel_stream() is called:
 All tests are isolated and clean up after themselves.
 """
 
-import pytest
 import queue
 import threading
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 from api.streaming import cancel_stream
-from api.config import AGENT_INSTANCES, STREAMS, STREAMS_LOCK, CANCEL_FLAGS
+from api.config import AGENT_INSTANCES, STREAMS, CANCEL_FLAGS
 
 
 class TestCancelStreamEagerRelease:

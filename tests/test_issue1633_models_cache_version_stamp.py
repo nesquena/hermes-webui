@@ -14,8 +14,6 @@ the cache on the very next /api/models call instead of lingering for 24h.
 
 import json
 import sys
-import tempfile
-from pathlib import Path
 
 import pytest
 

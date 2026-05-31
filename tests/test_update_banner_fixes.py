@@ -14,9 +14,7 @@ Covers:
 
 import pathlib
 import re
-import threading
 import time
-import sys
 import os
 
 REPO = pathlib.Path(__file__).parent.parent
@@ -180,7 +178,6 @@ class TestScheduleRestart:
 
         # Monkeypatch os.execv inside the module's thread closure
         import os as _os
-        original_execv = _os.execv
 
         monkeypatch.setattr(_os, 'execv', fake_execv)
 

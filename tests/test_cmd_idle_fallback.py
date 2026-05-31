@@ -8,7 +8,6 @@ fall through to a direct send() call, matching CLI behaviour:
   - /interrupt msg → send when idle, cancel+requeue when busy+streaming
   - /steer msg  → send when idle, inject mid-turn when busy+streaming
 """
-import re
 import pathlib
 
 COMMANDS_JS = (pathlib.Path(__file__).parent.parent / "static" / "commands.js").read_text(encoding="utf-8")

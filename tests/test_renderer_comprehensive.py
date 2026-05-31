@@ -12,7 +12,7 @@ import pathlib
 
 UI_JS = (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
 
-import html as _html
+import html as _html  # noqa: E402
 
 
 def _esc(s):
@@ -40,26 +40,31 @@ def _apply_blockquotes(src):
         lines = block.split("\n")
         while lines and (lines[-1].strip() in (">", "")):
             if lines[-1].strip() == ">":
-                lines.pop(); break
+                lines.pop()
+                break
             lines.pop()
-        stripped = [re.sub(r"^>[ \t]?", "", l) for l in lines]
+        stripped = [re.sub(r"^>[ \t]?", "", ln) for ln in lines]
         inner_raw = "\n".join(stripped)
         if re.search(r"^>", inner_raw, re.MULTILINE):
             inner = _apply_blockquotes(inner_raw)
         elif re.search(r"^(  )?[-*+] .+", inner_raw, re.MULTILINE):
             def inner_list(lb):
-                ll = lb.strip().split("\n"); h = "<ul>"
+                ll = lb.strip().split("\n")
+                h = "<ul>"
                 for li in ll:
                     txt = re.sub(r"^ {0,4}[-*+] ", "", li)
-                    if re.match(r"\[x\] ", txt, re.I): ih = f"✅ {_inline_md(txt[4:])}"
-                    elif txt.startswith("[ ] "): ih = f"☐ {_inline_md(txt[4:])}"
-                    else: ih = _inline_md(txt)
+                    if re.match(r"\[x\] ", txt, re.I):
+                        ih = f"✅ {_inline_md(txt[4:])}"
+                    elif txt.startswith("[ ] "):
+                        ih = f"☐ {_inline_md(txt[4:])}"
+                    else:
+                        ih = _inline_md(txt)
                     h += f"<li>{ih}</li>"
                 return h + "</ul>"
             inner = re.sub(r"((?:^(?:  )?[-*+] .+\n?)+)", lambda m2: inner_list(m2.group(0)),
                            inner_raw, flags=re.MULTILINE)
         else:
-            inner = "\n".join("<br>" if l.strip() == "" else _inline_md(l) for l in stripped)
+            inner = "\n".join("<br>" if ln.strip() == "" else _inline_md(ln) for ln in stripped)
         return f"<blockquote>{inner}</blockquote>"
     return re.sub(r"((?:^>[^\n]*(?:\n|$))+)", replacer, src, flags=re.MULTILINE)
 
@@ -265,8 +270,8 @@ class TestTaskLists:
     def _apply_list(self, block):
         lines = block.strip().split("\n")
         html = "<ul>"
-        for l in lines:
-            text = re.sub(r"^ {0,4}[-*+] ", "", l)
+        for ln in lines:
+            text = re.sub(r"^ {0,4}[-*+] ", "", ln)
             if re.match(r"\[x\] ", text, re.I):
                 html += f"<li>✅ {_inline_md(text[4:])}</li>"
             elif text.startswith("[ ] "):

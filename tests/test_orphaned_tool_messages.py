@@ -10,7 +10,7 @@ import pathlib
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 sys.path.insert(0, str(REPO_ROOT))
 
-from api.streaming import _sanitize_messages_for_api
+from api.streaming import _sanitize_messages_for_api  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

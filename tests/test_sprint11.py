@@ -1,10 +1,14 @@
 """
 Sprint 11 Tests: multi-provider model support, streaming smoothness, routes extraction.
 """
-import json, pathlib, urllib.error, urllib.request, urllib.parse
+import json
+import pathlib
+import urllib.error
+import urllib.request
+import urllib.parse
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE  # noqa: E402
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:

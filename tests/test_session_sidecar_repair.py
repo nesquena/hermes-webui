@@ -1,7 +1,6 @@
 """Regression tests for session sidecar repair logic."""
 import json
 import queue
-import os
 import sys
 import threading
 import time
@@ -16,7 +15,6 @@ from api.models import (
     _get_profile_home,
     _apply_core_sync_or_error_marker,
     _repair_stale_pending,
-    _active_stream_ids,
 )
 import api.config as config
 import api.streaming as streaming

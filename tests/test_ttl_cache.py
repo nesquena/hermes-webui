@@ -85,7 +85,7 @@ def test_ttl_expiry():
         config._cfg_mtime = 0.0
 
     # First call populates cache
-    result1 = config.get_available_models()
+    config.get_available_models()
     assert config._available_models_cache is not None, "Cache should be populated"
 
     # Record the cache timestamp
@@ -96,7 +96,7 @@ def test_ttl_expiry():
     offset = config._AVAILABLE_MODELS_CACHE_TTL + 10.0  # 70s past the real monotonic
 
     with patch.object(time, "monotonic", side_effect=lambda: original_monotonic() + offset):
-        result2 = config.get_available_models()
+        config.get_available_models()
 
     # The cache should have been refreshed — the timestamp must be newer
     assert config._available_models_cache_ts > cache_ts, (
@@ -122,7 +122,7 @@ def test_mtime_invalidation():
     config._cfg_mtime = real_mtime
 
     # First call populates cache
-    result1 = config.get_available_models()
+    config.get_available_models()
     assert config._available_models_cache is not None
 
     # Simulate config.yaml changed on disk by setting _cfg_mtime to 0
@@ -130,10 +130,8 @@ def test_mtime_invalidation():
     config._cfg_mtime = 0.0
 
     # The next call should detect mtime mismatch, reload, and invalidate cache
-    old_cache = config._available_models_cache
-    old_ts = config._available_models_cache_ts
 
-    result2 = config.get_available_models()
+    config.get_available_models()
 
     # Cache must have been refreshed — timestamp advanced since we reset it
     # to 0.0 on invalidation.
@@ -204,7 +202,7 @@ def test_invalidate_models_cache_direct():
         config._cfg_mtime = 0.0
 
     # First call populates cache
-    result1 = config.get_available_models()
+    config.get_available_models()
     assert config._available_models_cache is not None, "Cache should be populated"
     first_ts = config._available_models_cache_ts
 
@@ -217,7 +215,7 @@ def test_invalidate_models_cache_direct():
     )
 
     # Next call should re-scan and produce a fresh cache
-    result2 = config.get_available_models()
+    config.get_available_models()
     assert config._available_models_cache is not None, "Cache should be re-populated"
     assert config._available_models_cache_ts >= first_ts, (
         "Cache timestamp should be updated after re-scan"

@@ -11,7 +11,6 @@ Fixes:
 2. Exception path: log a warning instead of silently returning [].
 """
 import pathlib
-import re
 
 MODELS_PY = pathlib.Path(__file__).parent.parent / 'api' / 'models.py'
 AGENT_SESSIONS_PY = pathlib.Path(__file__).parent.parent / 'api' / 'agent_sessions.py'

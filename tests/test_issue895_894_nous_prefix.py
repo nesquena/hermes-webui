@@ -2,7 +2,6 @@
 Regression tests for #895 (set_hermes_default_model strips @nous: prefix + blocks on live fetch)
 and #894 (resolve_model_provider strips cross-namespace prefix for portal providers with base_url).
 """
-import threading
 import pytest
 from pathlib import Path
 

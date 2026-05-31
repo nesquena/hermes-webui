@@ -13,7 +13,6 @@ import api.models as models
 from api.models import (
     SESSIONS,
     STREAMS,
-    Session,
     all_sessions,
     new_session,
 )

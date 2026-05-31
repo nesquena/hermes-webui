@@ -293,7 +293,7 @@ def test_yaml_block_renders_multiline_html_shape(driver_path):
 
     pre_inner = _extract_pre_inner(out)
     # Split on \n to count rendered lines. Empty trailing line tolerated.
-    rendered_lines = [l for l in pre_inner.split("\n") if l.strip()]
+    rendered_lines = [ln for ln in pre_inner.split("\n") if ln.strip()]
 
     assert len(rendered_lines) == 5, (
         f"YAML block should preserve 5 lines, got {len(rendered_lines)}: {rendered_lines}.  "

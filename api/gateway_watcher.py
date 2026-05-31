@@ -9,7 +9,6 @@ This enables real-time session list updates in the sidebar without
 requiring any changes to hermes-agent.
 """
 import hashlib
-import json
 import logging
 import os
 import queue

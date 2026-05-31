@@ -98,7 +98,7 @@ class TestCancelStreamCleanup:
         block = self._get_cancel_block()
         # The S.activeStreamId=null and setBusy(false) must appear after the try/catch
         # Verify they are NOT only inside the try block by checking position relative to catch
-        try_idx = block.find("try{")
+        block.find("try{")
         catch_idx = block.find("}catch(")
         cleanup_idx = block.find("S.activeStreamId=null")
         if cleanup_idx == -1:

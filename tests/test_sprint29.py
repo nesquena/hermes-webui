@@ -15,7 +15,6 @@ Covers:
   11. SSRF DNS check logic (unit test on helper function)
   12. ENV_LOCK export — _ENV_LOCK importable from streaming module
 """
-import importlib
 import json
 import pathlib
 import sys
@@ -25,7 +24,6 @@ import urllib.parse
 import urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from conftest import TEST_STATE_DIR
 
 from tests._pytest_port import BASE
 
@@ -315,13 +313,11 @@ class TestCSRFHelpers:
 class TestLoginRateLimit:
     def test_rate_limit_triggers_429(self):
         """More than 5 failed login attempts from same IP must yield 429."""
-        from api.auth import _login_attempts, _LOGIN_WINDOW
 
         # Force the rate limiter state: inject 5 stale-now timestamps so next call is fresh
         # Actually easier: just hit the endpoint 6 times with wrong password
         # But we can't set a password in a test without config file.
         # Instead test the helper directly.
-        import time
         from api import auth as _auth
 
         # Reset state for a fake IP
@@ -367,7 +363,7 @@ class TestSessionIDValidation:
         """A valid hex session ID gets past the validation check."""
         import sys
         sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
-        from api.models import Session, SESSION_DIR
+        from api.models import Session
         valid_hex = "deadbeef" * 8  # 64 hex chars
         # Should not raise — returns None only if file doesn't exist (it won't)
         result = Session.load(valid_hex)
@@ -518,7 +514,8 @@ class TestSkillsPathTraversal:
         })
         # 500 = skills module not available (hermes-agent not installed) — skip
         if status == 500:
-            import pytest; pytest.skip("skills module requires hermes-agent")
+            import pytest
+            pytest.skip("skills module requires hermes-agent")
         # Should succeed (200) or need auth (401/403) — not path error (400)
         assert status in (200, 401, 403, 404), \
             f"Valid skill save got unexpected status {status}: {body}"
@@ -536,8 +533,6 @@ class TestSkillsPathTraversal:
 class TestContentDisposition:
     def test_html_file_forced_download(self, webui_server, tmp_path):
         """HTML files served via /api/file/raw must have Content-Disposition: attachment."""
-        import urllib.request
-        import urllib.error
 
         # Use a session to create an HTML file in the workspace
         sessions_body, _ = post("/api/sessions/new", {})
@@ -547,14 +542,12 @@ class TestContentDisposition:
 
         # Can't easily create a file via the test server without a workspace,
         # so test the logic directly instead.
-        from api.routes import _handle_file_raw
         dangerous_types = {'text/html', 'application/xhtml+xml', 'image/svg+xml'}
         for mime in dangerous_types:
             assert mime in dangerous_types, f"{mime} should be in dangerous_types set"
 
     def test_dangerous_mime_types_set_complete(self):
         """The set of dangerous MIME types must include html, xhtml, and svg."""
-        import ast
         import pathlib
         routes_src = pathlib.Path(__file__).parent.parent / "api" / "routes.py"
         src = routes_src.read_text()
@@ -651,7 +644,6 @@ class TestPasswordHashing:
     def test_save_settings_stores_64char_hex_hash(self):
         """save_settings with _set_password must store a 64-char hex hash (PBKDF2)."""
         from api.config import save_settings, load_settings, SETTINGS_FILE
-        import json
 
         # Remember original content so we can restore it
         original = None
@@ -721,14 +713,13 @@ class TestENVLock:
     def test_env_lock_importable_in_routes(self):
         """api.routes must be able to import _ENV_LOCK from api.streaming."""
         # If routes.py fails to import, this will raise ImportError
-        import importlib
         import api.routes  # noqa: F401 -- just checking import works
         # No error means the circular import is OK
 
 
 # ── Fixture ────────────────────────────────────────────────────────────────
 
-import pytest
+import pytest  # noqa: E402
 
 
 @pytest.fixture(scope="module")

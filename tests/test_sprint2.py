@@ -1,5 +1,7 @@
 """Sprint 2 tests: image preview, file types, markdown. Uses cleanup_test_sessions fixture."""
-import io, json, uuid, urllib.request, urllib.error, pathlib
+import json
+import urllib.request
+import urllib.error
 
 from tests._pytest_port import BASE
 
@@ -24,7 +26,8 @@ def make_session_tracked(created_list, ws=None):
     """Create a session and register it with the cleanup fixture."""
     import pathlib as _pathlib
     body = {}
-    if ws: body["workspace"] = str(ws)
+    if ws:
+        body["workspace"] = str(ws)
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]
     created_list.append(sid)

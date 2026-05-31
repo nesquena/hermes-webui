@@ -117,6 +117,6 @@ class TestIssue1423ProfileFormAutocapitalize:
         html = self._profile_input_html('profileFormBaseUrl')
         assert html, "profileFormBaseUrl input not found"
         assert 'autocapitalize="none"' in html, \
-            f"profileFormBaseUrl missing autocapitalize=\"none\" (#1423)"
+            "profileFormBaseUrl missing autocapitalize=\"none\" (#1423)"
         assert 'spellcheck="false"' in html, \
-            f"profileFormBaseUrl missing spellcheck=\"false\" (#1423)"
+            "profileFormBaseUrl missing spellcheck=\"false\" (#1423)"

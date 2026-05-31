@@ -1,8 +1,6 @@
 """Tests for issue #1195: sessions must route to the correct profile directory
 even when that profile directory does not exist yet on disk."""
 
-import os
-import tempfile
 from pathlib import Path
 from unittest.mock import patch
 

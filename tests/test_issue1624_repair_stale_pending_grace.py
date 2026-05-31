@@ -15,10 +15,7 @@ treated as "old enough" to preserve current legacy-data recovery semantics.
 """
 
 import time
-import threading
-from unittest.mock import patch
 
-import pytest
 
 
 # ── _repair_stale_pending grace guard ───────────────────────────────────
@@ -110,7 +107,7 @@ def test_repair_fires_when_pending_started_at_missing(tmp_path, monkeypatch):
 def test_repair_fires_when_pending_started_at_zero(tmp_path, monkeypatch):
     """Falsy 0 must also be treated as 'old enough' (defense against accidental zeroing)."""
     import api.models as models
-    calls = _setup_repair_environment(monkeypatch, tmp_path)
+    _setup_repair_environment(monkeypatch, tmp_path)
 
     s = _FakeSession(pending_started_at=0)
     result = models._repair_stale_pending(s)
@@ -120,7 +117,7 @@ def test_repair_fires_when_pending_started_at_zero(tmp_path, monkeypatch):
 def test_repair_fires_when_pending_started_at_garbage(tmp_path, monkeypatch):
     """Garbage values (string, dict, etc.) shouldn't crash and shouldn't block repair."""
     import api.models as models
-    calls = _setup_repair_environment(monkeypatch, tmp_path)
+    _setup_repair_environment(monkeypatch, tmp_path)
 
     s = _FakeSession(pending_started_at="not-a-number")
     result = models._repair_stale_pending(s)

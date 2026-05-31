@@ -5,12 +5,9 @@ Covers:
 - .session-item.active .session-title uses var(--gold) instead of hardcoded #e8a030
 - The hardcoded amber color #e8a030 is NOT present in the active session title rule
 """
-import os
 import pathlib
-import re
 import sys
 import unittest
-from unittest import mock
 
 # Ensure repo is on sys.path so api.config can be imported
 _REPO_ROOT = pathlib.Path(__file__).parent.parent

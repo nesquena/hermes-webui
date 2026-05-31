@@ -15,15 +15,13 @@ All three fix the same "tokens-paid-for-data-loss" class of bug.
 
 import pathlib
 import queue
-import re
 import threading
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 
 import api.config as config
 import api.models as models
-import api.streaming as streaming
 from api.models import Session
 from api.streaming import cancel_stream
 
@@ -118,7 +116,7 @@ class TestCancelPreservesReasoningText:
         """Cancel during reasoning phase (no visible tokens) should persist reasoning."""
         sid = "test_1361_a1"
         stream_id = "stream_a1"
-        s = _make_session(session_id=sid)
+        _make_session(session_id=sid)
         _setup_cancel_state(sid, stream_id)
 
         # Simulate: reasoning was accumulated but no visible tokens
@@ -143,7 +141,7 @@ class TestCancelPreservesReasoningText:
         """Cancel mid-stream with both reasoning and some visible tokens."""
         sid = "test_1361_a2"
         stream_id = "stream_a2"
-        s = _make_session(session_id=sid)
+        _make_session(session_id=sid)
         _setup_cancel_state(sid, stream_id)
 
         reasoning = "Let me analyze the code..."
@@ -167,7 +165,7 @@ class TestCancelPreservesReasoningText:
         """If STREAM_REASONING_TEXT doesn't exist yet (pre-fix), cancel still works."""
         sid = "test_1361_a3"
         stream_id = "stream_a3"
-        s = _make_session(session_id=sid)
+        _make_session(session_id=sid)
         _setup_cancel_state(sid, stream_id)
 
         config.STREAM_PARTIAL_TEXT[stream_id] = "Some partial text"
@@ -198,7 +196,7 @@ class TestCancelPreservesToolCalls:
         """Cancel after tool execution should preserve the tool call info."""
         sid = "test_1361_b1"
         stream_id = "stream_b1"
-        s = _make_session(session_id=sid)
+        _make_session(session_id=sid)
         _setup_cancel_state(sid, stream_id)
 
         config.STREAM_PARTIAL_TEXT[stream_id] = ""
@@ -221,7 +219,7 @@ class TestCancelPreservesToolCalls:
         """Cancel after tools + partial text should keep both."""
         sid = "test_1361_b2"
         stream_id = "stream_b2"
-        s = _make_session(session_id=sid)
+        _make_session(session_id=sid)
         _setup_cancel_state(sid, stream_id)
 
         config.STREAM_PARTIAL_TEXT[stream_id] = "Here's what I found:"
@@ -255,7 +253,7 @@ class TestCancelWithReasoningOnlyNoText:
         """Cancel after reasoning-only output should still create a partial msg."""
         sid = "test_1361_c1"
         stream_id = "stream_c1"
-        s = _make_session(session_id=sid)
+        _make_session(session_id=sid)
         _setup_cancel_state(sid, stream_id)
 
         # Only reasoning, no visible tokens at all
@@ -277,7 +275,7 @@ class TestCancelWithReasoningOnlyNoText:
         """Cancel after tool-only output (no text, no reasoning) should still create a partial msg."""
         sid = "test_1361_c2"
         stream_id = "stream_c2"
-        s = _make_session(session_id=sid)
+        _make_session(session_id=sid)
         _setup_cancel_state(sid, stream_id)
 
         config.STREAM_PARTIAL_TEXT[stream_id] = ""
@@ -299,7 +297,7 @@ class TestCancelWithReasoningOnlyNoText:
         """Cancel with no reasoning and no tools and no text = only cancel marker (no change)."""
         sid = "test_1361_c3"
         stream_id = "stream_c3"
-        s = _make_session(session_id=sid)
+        _make_session(session_id=sid)
         _setup_cancel_state(sid, stream_id)
 
         config.STREAM_PARTIAL_TEXT[stream_id] = ""

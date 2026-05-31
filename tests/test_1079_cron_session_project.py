@@ -2,12 +2,9 @@
 
 import json
 import pathlib
-import shutil
-import tempfile
 
 import pytest
 
-from tests.conftest import TEST_STATE_DIR, _post, TEST_BASE
 
 pytestmark = pytest.mark.usefixtures("test_server")
 

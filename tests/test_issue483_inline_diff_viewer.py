@@ -1,5 +1,4 @@
 """Tests for issue #483 — inline diff/patch viewer."""
-import pytest
 
 
 class TestFencedDiffRenderer:

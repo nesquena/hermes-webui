@@ -2,7 +2,6 @@
 Sprint 37 Tests: Workspace panel open/closed state persists across refreshes via localStorage.
 """
 import pathlib
-import re
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 BOOT_JS   = (REPO_ROOT / "static" / "boot.js").read_text()

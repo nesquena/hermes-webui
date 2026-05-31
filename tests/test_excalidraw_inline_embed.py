@@ -1,5 +1,4 @@
 """Test: Excalidraw inline embed (#479)"""
-import re
 
 
 def test_excalidraw_extension_regex():

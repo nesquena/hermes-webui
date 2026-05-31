@@ -11,7 +11,6 @@ Two independent bugs were fixed:
      Docker volume mount outside the user's home directory.  Any path under
      the boot-time default should be trusted automatically.
 """
-from pathlib import Path
 
 import pytest
 

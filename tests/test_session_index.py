@@ -13,7 +13,6 @@ Validates:
 import json
 import os
 import threading
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -134,7 +133,6 @@ def test_incremental_patch_correctness():
 
     # We need to get the fixture values — but since it's autouse, the monkeypatch
     # has already been applied. Access the patched values directly.
-    session_dir = models.SESSION_DIR
     index_file = models.SESSION_INDEX_FILE
 
     # Create 3 sessions with different timestamps
@@ -180,7 +178,6 @@ def test_new_session_appended_to_index():
     """Pre-write index with sessions A, B. Call _write_session_index(updates=[C])
     where C is not in the existing index. Verify C appears in the index.
     """
-    session_dir = models.SESSION_DIR
     index_file = models.SESSION_INDEX_FILE
 
     sA = _make_session("sess_a", "Alpha", updated_at=100.0)
@@ -297,7 +294,6 @@ def test_first_call_full_rebuild():
     """When no index file exists, calling _write_session_index(updates=[session])
     should fall back to full rebuild and create the index.
     """
-    session_dir = models.SESSION_DIR
     index_file = models.SESSION_INDEX_FILE
 
     # No index file yet
@@ -324,7 +320,6 @@ def test_corrupt_index_fallback():
     _write_session_index(updates=[session]). Verify it falls back to
     full rebuild and the result is valid JSON with correct entries.
     """
-    session_dir = models.SESSION_DIR
     index_file = models.SESSION_INDEX_FILE
 
     # Write corrupt data
@@ -352,7 +347,6 @@ def test_concurrent_saves_dont_lose_data():
     with a pre-existing index. Use a threading.Event barrier to force them
     to run concurrently. Assert both updates are present in the final index.
     """
-    session_dir = models.SESSION_DIR
     index_file = models.SESSION_INDEX_FILE
 
     sA = _make_session("sess_a", "Alpha", updated_at=100.0)
@@ -413,7 +407,6 @@ def test_atomic_write_no_tmp_remains():
     in SESSION_DIR.
     """
     session_dir = models.SESSION_DIR
-    index_file = models.SESSION_INDEX_FILE
 
     sA = _make_session("sess_a", "Alpha", updated_at=100.0)
     sA.path.write_text(json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -442,7 +435,6 @@ def test_deadlock_guard_on_fallback():
     This tests that the fallback path (corrupt index -> full rebuild)
     is called outside the LOCK, so it doesn't deadlock.
     """
-    session_dir = models.SESSION_DIR
     index_file = models.SESSION_INDEX_FILE
 
     # Create a valid index file so the incremental path is attempted
@@ -497,7 +489,6 @@ def test_deadlock_guard_on_fallback():
 
 def test_incremental_index_disk_io_runs_outside_lock(monkeypatch):
     """Fast-path disk I/O (fsync/replace) must run after releasing LOCK."""
-    index_file = models.SESSION_INDEX_FILE
 
     sA = _make_session("sess_a", "Alpha", updated_at=100.0)
     sA.path.write_text(json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")

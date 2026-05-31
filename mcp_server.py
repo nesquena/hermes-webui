@@ -51,12 +51,11 @@ _args, _unknown = _parser.parse_known_args()
 _profile_arg = _args.profile
 
 # ── Import webui canonical modules (after path setup) ─────────────────────
-import api.config as _cfg
-from api.config import (
-    STATE_DIR, SESSION_DIR, SESSION_INDEX_FILE, PROJECTS_FILE, HOME,
+from api.config import (  # noqa: E402
+    SESSION_DIR, SESSION_INDEX_FILE,
 )
-from api.models import load_projects, save_projects
-from api.profiles import get_active_profile_name, _is_root_profile, _profiles_match
+from api.models import load_projects, save_projects  # noqa: E402
+from api.profiles import get_active_profile_name, _profiles_match  # noqa: E402
 
 # ── Apply --profile override before any module uses get_active_profile_name
 if _profile_arg is not None:

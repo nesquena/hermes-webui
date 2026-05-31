@@ -230,11 +230,11 @@ class TestRevealFailedTostIncludesPath:
 # ════════════════════════════════════════════════════════════════════
 
 
-import json
-import pathlib
-import sys
-import urllib.error
-import urllib.request
+import json  # noqa: E402
+import pathlib  # noqa: E402
+import sys  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.request  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 

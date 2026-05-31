@@ -64,7 +64,7 @@ class TestDockerfileUvPreinstall:
         which the hermeswebui user at runtime can't see.
         """
         lines = DOCKERFILE.splitlines()
-        uv_line_idx = next(i for i, l in enumerate(lines) if "uv/install.sh" in l)
+        uv_line_idx = next(i for i, ln in enumerate(lines) if "uv/install.sh" in ln)
         # Find the last USER directive before the uv install line
         user_before = None
         for i in range(uv_line_idx - 1, -1, -1):

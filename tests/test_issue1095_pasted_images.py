@@ -5,7 +5,6 @@ Bug 2: Chat history renders uploaded images as broken <img> (wrong endpoint / de
 """
 import os
 import re
-import pytest
 
 
 def _read_js(name):

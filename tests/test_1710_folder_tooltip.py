@@ -7,7 +7,6 @@ Folder rename is still reachable via the right-click context menu.
 """
 from pathlib import Path
 
-import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
