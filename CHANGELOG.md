@@ -6,6 +6,13 @@
 ### Added
 - The session action menu can regenerate conversation titles on demand from the saved transcript, updating the sidebar without touching conversation chronology and syncing the new title through to state.db when Insights sync is enabled (#3106).
 
+## [v0.51.185] — 2026-05-31 — Release FE (stage-batchE — clarify-card bug-fix batch: identical-prompt dedup + autofill guard + GBK startup crash)
+
+### Fixed
+- The clarify popup could remain visible with stale input state after sending a response when the next queued clarification prompt was text-identical to the previous one. The dedupe signature now includes the prompt's `clarify_id`, so a newly queued identical prompt is treated as new instead of being mistaken for the one already answered (#3245, closes #3241).
+- Chrome's password manager could autofill the clarify-card input with saved credentials (typically a provider base URL), causing a phantom "Clarification closed" toast on every session completion and injecting the saved URL into the main composer. The clarify input now carries `autocomplete="off"` plus a `readonly` guard that is lifted only when an actual clarification prompt is shown (or on focus), so the browser's heuristic autofill skips it (#3247).
+- Prevent a server startup crash on non-UTF-8 Windows locales (e.g. Chinese GBK codepage): `_run_git()` now decodes git subprocess output as UTF-8 with `errors='replace'` and defensively guards against `None` streams, instead of letting a `UnicodeDecodeError` on binary `git diff --binary` output leave `stdout=None` and take down `import api.updates` with an `AttributeError` (#3249).
+
 ## [v0.51.184] — 2026-05-31 — Release FD (stage-batchD — raw audio upload mode + scroll-preserve + non-POSIX test skip)
 
 ### Added
