@@ -107,6 +107,7 @@
       renderPromptPreflightEvidence(result && result.prompt_preflight) +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
       renderPackageProgressEvidence(result && result.progress_event, 'Template install progress') +
+      renderCompactionEvidence(result && (result.output_compaction || result.compaction)) +
       '</div>';
   }
 

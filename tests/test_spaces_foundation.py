@@ -19489,6 +19489,16 @@ def test_local_service_template_install_creates_safe_service_dashboard_widgets(m
     assert installed["autonomy_policy"]["prompt_preflight_status"] == "pass"
     assert installed["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
     assert installed["autonomy_policy"]["metadata_only"] is True
+    compaction = installed["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-template-install"
+    assert compaction["command"] == "space.template.install"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert "template_install: service" in compaction["text"]
+    assert f"space_id: {installed['space']['space_id']}" in compaction["text"]
+    assert "installed_widget_count: 4" in compaction["text"]
+    assert "prompt_preflight_status: pass" in compaction["text"]
+    assert "model_route_hint: hint:reasoning" in compaction["text"]
     serialized = json.dumps(installed).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized
@@ -19526,6 +19536,17 @@ def test_local_service_template_install_route_returns_safe_metadata(monkeypatch,
     assert body["progress_event"]["run_id"] == f"template.install:{body['space']['space_id']}"
     assert body["progress_event"]["space_id"] == body["space"]["space_id"]
     assert body["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = body["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-template-install"
+    assert compaction["command"] == "space.template.install"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert "template_install: service" in compaction["text"]
+    assert f"space_id: {body['space']['space_id']}" in compaction["text"]
+    assert "installed_widget_count: 4" in compaction["text"]
+    assert "prompt_preflight_status: pass" in compaction["text"]
+    assert "model_route_hint: hint:reasoning" in compaction["text"]
+    assert f"progress_run_id: template.install:{body['space']['space_id']}" in compaction["text"]
     serialized = json.dumps(body).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized
@@ -19579,6 +19600,17 @@ def test_space_tool_adapter_local_service_template_install_returns_policy_receip
     assert result["progress_event"]["run_id"] == "template.install:tool-service-demo"
     assert result["progress_event"]["space_id"] == "tool-service-demo"
     assert result["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = result["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-template-install"
+    assert compaction["command"] == "space.template.install"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert "template_install: service" in compaction["text"]
+    assert "space_id: tool-service-demo" in compaction["text"]
+    assert "installed_widget_count: 4" in compaction["text"]
+    assert "prompt_preflight_status: pass" in compaction["text"]
+    assert "model_route_hint: hint:reasoning" in compaction["text"]
+    assert "progress_run_id: template.install:tool-service-demo" in compaction["text"]
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
@@ -19633,6 +19665,16 @@ def test_install_model_setup_template_creates_safe_provider_setup_widgets(monkey
     assert installed["autonomy_policy"]["prompt_preflight_status"] == "pass"
     assert installed["autonomy_policy"]["model_route_hint"] == "hint:local"
     assert installed["autonomy_policy"]["metadata_only"] is True
+    compaction = installed["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-template-install"
+    assert compaction["command"] == "space.template.install"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert "template_install: model-setup" in compaction["text"]
+    assert f"space_id: {installed['space']['space_id']}" in compaction["text"]
+    assert "installed_widget_count: 4" in compaction["text"]
+    assert "prompt_preflight_status: pass" in compaction["text"]
+    assert "model_route_hint: hint:local" in compaction["text"]
     serialized = json.dumps(installed).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized
@@ -19670,6 +19712,17 @@ def test_model_setup_template_install_route_returns_safe_metadata(monkeypatch, t
     assert body["progress_event"]["run_id"] == f"template.install:{body['space']['space_id']}"
     assert body["progress_event"]["space_id"] == body["space"]["space_id"]
     assert body["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = body["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-template-install"
+    assert compaction["command"] == "space.template.install"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert "template_install: model-setup" in compaction["text"]
+    assert f"space_id: {body['space']['space_id']}" in compaction["text"]
+    assert "installed_widget_count: 4" in compaction["text"]
+    assert "prompt_preflight_status: pass" in compaction["text"]
+    assert "model_route_hint: hint:local" in compaction["text"]
+    assert f"progress_run_id: template.install:{body['space']['space_id']}" in compaction["text"]
     serialized = json.dumps(body).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized
@@ -19723,6 +19776,17 @@ def test_space_tool_adapter_model_setup_template_install_returns_policy_receipts
     assert result["progress_event"]["run_id"] == "template.install:tool-model-setup-demo"
     assert result["progress_event"]["space_id"] == "tool-model-setup-demo"
     assert result["progress_event"]["redaction_status"] == "metadata_only"
+    compaction = result["output_compaction"]
+    assert compaction["tool"] == "capy-spaces-template-install"
+    assert compaction["command"] == "space.template.install"
+    assert compaction["metadata_only"] is True
+    assert compaction["redaction_status"] == "metadata_only"
+    assert "template_install: model-setup" in compaction["text"]
+    assert "space_id: tool-model-setup-demo" in compaction["text"]
+    assert "installed_widget_count: 4" in compaction["text"]
+    assert "prompt_preflight_status: pass" in compaction["text"]
+    assert "model_route_hint: hint:local" in compaction["text"]
+    assert "progress_run_id: template.install:tool-model-setup-demo" in compaction["text"]
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized

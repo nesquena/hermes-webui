@@ -851,6 +851,59 @@ def _template_reset_action_policy_receipt(preflight_receipt: dict[str, Any]) -> 
     return receipt
 
 
+def _template_install_output_compaction_receipt(
+    *,
+    template: str,
+    space_id: str,
+    installed_widget_count: int,
+    prompt_preflight: dict[str, Any] | None = None,
+    autonomy_policy: dict[str, Any] | None = None,
+    progress_event: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return metadata-only compaction evidence for high-risk template installs."""
+    from api.capy_compaction import compact_output
+
+    safe_template = _payload_text_summary(template, 80) or "template"
+    safe_space_id = _context_value(space_id, 120) or "space"
+    safe_widget_count = max(0, int(installed_widget_count or 0))
+    lines = [
+        f"template_install: {safe_template}",
+        "metadata_only: true",
+        "raw_prompt_stored: false",
+        "action: space.template.install",
+        f"space_id: {safe_space_id}",
+        f"installed_widget_count: {safe_widget_count}",
+    ]
+    if isinstance(prompt_preflight, dict):
+        lines.append(f"prompt_preflight_status: {_payload_text_summary(prompt_preflight.get('status') or 'required', 40) or 'required'}")
+    if isinstance(autonomy_policy, dict):
+        lines.append(f"autonomy_action: {_payload_text_summary(autonomy_policy.get('action') or 'space.template.install', 120) or 'space.template.install'}")
+        lines.append(f"model_route_hint: {_payload_text_summary(autonomy_policy.get('model_route_hint') or 'hint:reasoning', 80) or 'hint:reasoning'}")
+    if isinstance(progress_event, dict):
+        lines.append(f"progress_run_id: {_payload_text_summary(progress_event.get('run_id') or f'template.install:{safe_space_id}', 160) or f'template.install:{safe_space_id}'}")
+        lines.append(f"progress_status: {_payload_text_summary(progress_event.get('status') or 'completed', 40) or 'completed'}")
+
+    receipt = compact_output(
+        "\n".join(lines),
+        tool="capy-spaces-template-install",
+        command="space.template.install",
+        exit_status=0,
+        max_chars=700,
+        artifact_handles=[
+            {
+                "kind": "template-install",
+                "handle": f"template.install:{safe_space_id}",
+                "label": safe_template,
+            }
+        ],
+    )
+    receipt["metadata_only"] = True
+    if receipt.get("redaction_status") == "none":
+        receipt["redaction_status"] = "metadata_only"
+    return receipt
+
+
+
 def _template_reset_output_compaction_receipt(
     *,
     space_id: str,
@@ -10882,6 +10935,15 @@ def install_template(template: str, *, space_id: str | None = None, record_progr
         preflight_receipt = _interactive_template_prompt_preflight_receipt(response_template)
         result["prompt_preflight"] = preflight_receipt
         result["autonomy_policy"] = _interactive_template_action_policy_receipt(response_template, preflight_receipt)
+    if isinstance(result.get("prompt_preflight"), dict) and isinstance(result.get("autonomy_policy"), dict):
+        result["output_compaction"] = _template_install_output_compaction_receipt(
+            template=response_template,
+            space_id=space["space_id"],
+            installed_widget_count=len(result["installed_widgets"]),
+            prompt_preflight=result.get("prompt_preflight"),
+            autonomy_policy=result.get("autonomy_policy"),
+            progress_event=result.get("progress_event"),
+        )
     return result
 
 

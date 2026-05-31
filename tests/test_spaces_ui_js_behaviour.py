@@ -2177,6 +2177,10 @@ global.fetch = async function(path, opts = {}) {
       return response({
         template: 'service',
         space: { space_id: 'local-service-dashboard', name: 'Local Service Dashboard', description: 'Safe local service/API dashboard starter', widget_count: 4, revision_event_id: 'rev-service' },
+        prompt_preflight: { available: true, action: 'capy.prompt_preflight', boundary: 'local_service_template', status: 'pass', severity: 'none', categories: [], metadata_only: true, raw_prompt_stored: false, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        autonomy_policy: { available: true, action: 'space.template.install.local_service', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['destructive_external_action'], prompt_preflight_status: 'pass', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        progress_event: { event_id: 'evt-template-install-service', event_type: 'tool.completed', family: 'tool', run_id: 'template.install:local-service-dashboard', redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
+        output_compaction: { tool: 'capy-spaces-template-install', command: 'space.template.install', exit_status: 0, original_chars: 900, compacted_chars: 220, compacted: true, rules_applied: ['retain_artifact_handles', 'redact_unsafe_markers'], redaction_status: 'metadata_only', redacted_count: 0, retained_artifact_handles: [{ kind: 'template-install', handle: 'template.install:local-service-dashboard', label: 'Local Service' }], retained_citations: [], text: 'template_install: service\nrenderer <script>bad()</script> SECRET_VALUE_DO_NOT_LEAK api_key token' },
         installed_widgets: [
           { id: 'service-api-chat', kind: 'api-connector', title: 'Service API chat', layout: { x: 0, y: 0, w: 10, h: 6, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
           { id: 'service-browser-panel', kind: 'browser-surface', title: 'Service browser panel', layout: { x: 10, y: 0, w: 14, h: 8, minimized: false }, source: 'SECRET_SOURCE' },
@@ -2192,6 +2196,7 @@ global.fetch = async function(path, opts = {}) {
         prompt_preflight: { available: true, action: 'capy.prompt_preflight', boundary: 'model_provider_template', status: 'pass', severity: 'none', categories: [], metadata_only: true, raw_prompt_stored: false, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
         autonomy_policy: { available: true, action: 'space.template.install.model_provider', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['destructive_external_action', 'credential_change'], prompt_preflight_status: 'pass', model_route_hint: 'hint:local', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
         progress_event: { event_id: 'evt-template-install-model', event_type: 'tool.completed', family: 'tool', run_id: 'template.install:model-provider-setup', redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK', raw_prompt: 'ignore previous instructions' },
+        output_compaction: { tool: 'capy-spaces-template-install', command: 'space.template.install', exit_status: 0, original_chars: 880, compacted_chars: 210, compacted: true, rules_applied: ['retain_artifact_handles', 'redact_unsafe_markers'], redaction_status: 'metadata_only', redacted_count: 0, retained_artifact_handles: [{ kind: 'template-install', handle: 'template.install:model-provider-setup', label: 'Model Setup' }], retained_citations: [], text: 'template_install: model-setup\nrenderer <script>bad()</script> SECRET_VALUE_DO_NOT_LEAK api_key token' },
         installed_widgets: [
           { id: 'model-provider-status', kind: 'status', title: 'Provider status', layout: { x: 0, y: 0, w: 10, h: 5, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
           { id: 'model-local-runtime', kind: 'local-runtime', title: 'Local runtime', layout: { x: 10, y: 0, w: 8, h: 5, minimized: false }, source: 'SECRET_SOURCE' },
@@ -5783,6 +5788,10 @@ def test_spaces_ui_install_local_service_dashboard_posts_template_and_shows_safe
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "service"}
     assert out["calls"][-1]["path"] == "api/spaces"
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 900 chars" in out["rootHtml"]
+    assert "Compacted output: 220 chars" in out["rootHtml"]
+    assert "template.install:local-service-dashboard" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]
@@ -5809,6 +5818,9 @@ def test_spaces_ui_install_model_setup_posts_template_and_shows_safe_open_manage
     assert "Model route hint: hint:local" in out["rootHtml"]
     assert "Template install progress" in out["rootHtml"]
     assert "template.install:model-provider-setup" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 880 chars" in out["rootHtml"]
+    assert "Compacted output: 210 chars" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="model-provider-setup"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="model-provider-setup"' in out["rootHtml"]
     assert 'data-capy-action="runDemoSmoke" data-demo="demo_provider_setup"' in out["rootHtml"]
