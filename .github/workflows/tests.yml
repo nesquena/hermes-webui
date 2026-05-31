@@ -7,6 +7,36 @@ on:
     branches: [master]
 
 jobs:
+  # Forward-looking Python lint gate (ruff). The Python twin of the ESLint runtime
+  # guard. Runs the curated [tool.ruff] ruleset (E9 + F + B) but only on lines this
+  # PR adds/modifies vs the merge-base — so it keeps NEW code clean without demanding
+  # a reformat of the existing tree's cosmetic backlog (#3273). Fast, fails early.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need history so the gate can diff against the merge-base with master.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Ensure origin/master ref is available for the diff gate
+        run: git fetch --no-tags --depth=1 origin master || true
+
+      - name: Ruff forward gate (new/changed lines only)
+        run: python3 scripts/ruff_lint.py --diff origin/master
+
+      - name: Ruff whole-tree report (informational — never blocks)
+        if: always()
+        run: python3 scripts/ruff_lint.py --all
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -41,6 +71,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install "pyyaml>=6.0" pytest pytest-timeout pytest-asyncio pytest-shard
+          # ruff is installed so tests/test_ruff_forward_lint.py runs its E9/F821
+          # tree-clean assertions in-suite (mirrors how eslint is available for
+          # tests/test_static_js_runtime_lint.py). If install fails the test
+          # skips cleanly — it never blocks the matrix.
+          pip install ruff || echo "ruff install failed — test_ruff_forward_lint.py will skip"
           # Install the `mcp` package so tests/test_mcp_server.py runs in CI.
           # The package is an optional runtime dep of mcp_server.py — users
           # who run the MCP integration install it themselves; CI installs

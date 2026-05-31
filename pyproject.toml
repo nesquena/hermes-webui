@@ -1,0 +1,56 @@
+# Hermes WebUI — Python tooling config.
+#
+# This project is NOT a packaged distribution. The app is a plain Python + vanilla
+# JavaScript server with no build step and no bundler (see AGENTS.md / README). This
+# file exists only to configure dev tooling — currently ruff, used as a curated,
+# forward-looking lint gate over the Python codebase. There is intentionally no
+# [build-system] section: nothing pip-installs this directory.
+#
+# The ruff gate is the Python twin of the ESLint runtime guard (package.json
+# `lint:runtime` + eslint.runtime-guard.config.mjs + tests/test_static_js_runtime_lint.py).
+# It is enforced on NEW/CHANGED code only — see scripts/ruff_lint.py and TESTING.md
+# > "Python lint gate (ruff)". The existing tree carries a cosmetic backlog (mostly
+# unused-import F401) that is deliberately NOT reformatted here; cleaning it is a
+# separate, maintainer-run, safe-fixes-only decision (tracked in #3273).
+
+[tool.ruff]
+# Match the Python versions exercised in CI (tests.yml matrix: 3.11–3.13).
+target-version = "py311"
+# Keep the linter scoped to the application + tests; never crawl vendored or
+# generated trees. (These are belt-and-suspenders; the gate passes explicit files.)
+extend-exclude = [
+    "node_modules",
+    "static",
+    ".git",
+    "scripts/windows",
+    "scripts/wsl",
+]
+
+[tool.ruff.lint]
+# Curated, correctness-leaning ruleset — high signal, low noise. We deliberately do
+# NOT enable the pure-style families (E1/E2/E5/E7 line-length & whitespace) so the
+# gate never demands a whitespace reformat of existing code.
+#
+#   E9  — syntax / IO / runtime errors (E999 etc). The whole tree is already clean
+#         of these and the in-suite test (tests/test_ruff_forward_lint.py) keeps it
+#         that way across every shard.
+#   F   — pyflakes: unused imports (F401), unused/undefined names (F841/F821),
+#         redefinitions (F811), f-strings with no placeholders (F541). The most
+#         valuable family for keeping NEW code clean.
+#   B   — flake8-bugbear: genuine latent-bug shapes — mutable default args (B006),
+#         raise-without-from (B904), loop-variable capture in closures (B023),
+#         zip-without-strict (B905). This is where the real future-regression-
+#         prevention value lives.
+select = ["E9", "F", "B"]
+
+# No global `ignore` of F401/F841/etc. The existing-tree backlog is handled by
+# line-scoping the gate to changed lines (scripts/ruff_lint.py), NOT by globally
+# disabling the rules — disabling them would blind the gate to the single most
+# common new-code defect (a stray unused import). Forward enforcement of the full
+# curated set is the whole point.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately use `assert False` as an explicit failure marker (B011) and
+# occasionally shadow loop vars in table-driven cases (B007); that's idiomatic in a
+# test suite and not a production-code risk.
+"tests/**" = ["B011", "B007"]

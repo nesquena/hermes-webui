@@ -2762,6 +2762,29 @@ function stopGatewayPollFallback(){
   }
 }
 
+function _gatewaySessionSnapshotKey(sessions){
+  return (Array.isArray(sessions)?sessions:[])
+    .filter(s=>s&&s.session_id)
+    .map(s=>`${s.session_id}:${s.updated_at||0}:${s.message_count||0}`)
+    .sort()
+    .join('|');
+}
+
+function _isGatewaySessionForSnapshot(session){
+  if(!session) return false;
+  if(typeof _isCliSession==='function'&&_isCliSession(session)) return true;
+  if(typeof _isMessagingSession==='function'&&_isMessagingSession(session)) return true;
+  const source=String(session.session_source||session.raw_source||session.source_tag||session.source||'').toLowerCase();
+  return !!source&&source!=='webui';
+}
+
+function _isDuplicateGatewaySessionSnapshot(sessions){
+  const incoming=(Array.isArray(sessions)?sessions:[]).filter(_isGatewaySessionForSnapshot);
+  const currentGatewaySessions=(Array.isArray(_allSessions)?_allSessions:[]).filter(_isGatewaySessionForSnapshot);
+  if(!incoming.length&&!currentGatewaySessions.length) return true;
+  return _gatewaySessionSnapshotKey(incoming)===_gatewaySessionSnapshotKey(currentGatewaySessions);
+}
+
 async function probeGatewaySSEStatus(){
   if(_gatewayProbeInFlight || !window._showCliSessions) return;
   _gatewayProbeInFlight = true;
@@ -2803,7 +2826,9 @@ function startGatewaySSE(){
         if(data.sessions){
           stopGatewayPollFallback();
           _gatewaySSEWarningShown = false;
-          renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render
+          if(!_isDuplicateGatewaySessionSnapshot(data.sessions)){
+            renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render
+          }
           // If the active session received new gateway messages, refresh the conversation view.
           // S.busy check prevents stomping on an in-progress WebUI response.
           // is_cli_session check ensures we only poll import_cli for CLI-originated sessions.
@@ -3348,11 +3373,12 @@ function _sessionTitleForForkParent(parentSid){
   return title;
 }
 
-function _sessionFullTitleTooltip(rawTitle, cleanTitle){
+function _sessionFullTitleTooltip(rawTitle, cleanTitle, session){
   const fallback=String(cleanTitle||'Untitled').trim()||'Untitled';
   const full=String(rawTitle||fallback).trim()||fallback;
-  if(full.startsWith('[SYSTEM:')) return fallback;
-  return full;
+  const title=full.startsWith('[SYSTEM:') ? fallback : full;
+  if(typeof t==='function'&&_isReadOnlySession(session)) return t('session_readonly_title_hint', title);
+  return title;
 }
 
 function _sessionForkTooltip(parentLabel){
@@ -3366,14 +3392,18 @@ function _sessionForkTooltip(parentLabel){
 
 function _sessionLineageBadgeTooltip(label, canExpand){
   const base=String(label||'Prior turns').trim()||'Prior turns';
-  return canExpand
-    ? `${base} — earlier context turns are collapsed here. Click to show or hide them.`
-    : `${base} — earlier context turns are collapsed here.`;
+  if(typeof t==='function'){
+    return canExpand
+      ? t('session_lineage_toggle_hint', base)
+      : t('session_lineage_static_hint', base);
+  }
+  return base;
 }
 
 function _sessionChildBadgeTooltip(label){
   const base=String(label||'Child sessions').trim()||'Child sessions';
-  return `${base} — child conversations spawned from this session. Click to show or hide them.`;
+  if(typeof t==='function') return t('session_child_toggle_hint', base);
+  return base;
 }
 
 function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
@@ -4106,7 +4136,7 @@ function renderSessionListFromCache(){
     const titleMatched=Boolean(searchQueryRaw&&displayTitle.toLowerCase().includes(searchQueryRaw.toLowerCase()));
     if(titleMatched) _appendHighlightedText(title,displayTitle,searchQueryRaw,'session-search-hit');
     else title.textContent=displayTitle;
-    title.title=_sessionFullTitleTooltip(rawTitle,cleanTitle);
+    title.title=_sessionFullTitleTooltip(rawTitle,cleanTitle,s);
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
     const hasAttentionState=isStreaming||hasUnread||Boolean(attention);

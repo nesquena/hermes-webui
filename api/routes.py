@@ -912,7 +912,7 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
     except Exception as e:
         logger.exception("Manual cron run failed for job %s", job_id)
         try:
-            _with_cron_home(profile_home, lambda: mark_job_run(job_id, False, str(e)))
+            _with_cron_home(profile_home, lambda: mark_job_run(job_id, False, str(e)))  # noqa: F821  e is bound by the enclosing `except ... as e` and the lambda runs synchronously here
         except Exception:
             logger.debug("Failed to mark manual cron run failure for %s", job_id)
     finally:
