@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): preflight source layout payloads`
+  - Added RED/GREEN backend coverage proving `space.spaces.saveSpaceLayout`, `space.current.saveLayout`, and `space.spaces.rearrangeWidgets` run prompt-injection preflight over raw prompt-bearing payload fields before persistence or widget layout mutation.
+  - Hostile prompt text is blocked before revisioning and is not persisted, while existing renderer/source/html/API-auth fixture redaction remains metadata-only.
+
 - `feat(spaces): preflight checkpoint receipts`
   - Added RED/GREEN backend coverage proving Space checkpoint tool responses now include a top-level metadata-only `prompt_preflight` receipt alongside existing action-policy, `checkpoint:<space_id>` progress, and output-compaction evidence.
   - Kept rollback anchors advisory and redacted: hostile checkpoint reasons, renderer/source/html/API-auth fields, scripts, prompts, and secret-looking fixture values remain absent from returned receipts and persisted revision details.

@@ -2088,10 +2088,23 @@ def _space_widget_mutation_action_policy_receipt(action: str, preflight_receipt:
 
 def _space_layout_prompt_preflight_receipt(layout: dict[str, Any]) -> dict[str, Any]:
     """Return metadata-only preflight evidence for sanitized layout metadata."""
+    return _space_layout_raw_prompt_preflight_receipt(layout, None)
+
+
+
+def _space_layout_raw_prompt_preflight_receipt(
+    layout: dict[str, Any], raw_payload: Any | None
+) -> dict[str, Any]:
+    """Preflight sanitized layout plus raw prompt-bearing source payload before mutation."""
     from api.capy_policy import prompt_preflight
 
+    preflight_payload: dict[str, Any] = {"layout": _payload_summary(layout)}
+    prompt_fragments = _space_widget_upsert_prompt_fragments(raw_payload) if raw_payload is not None else []
+    if prompt_fragments:
+        preflight_payload["prompt_fragment_count"] = len(prompt_fragments)
+        preflight_payload["prompt_fragments"] = prompt_fragments
     preflight_text = json.dumps(
-        _payload_summary(layout),
+        preflight_payload,
         ensure_ascii=True,
         sort_keys=True,
         default=str,
@@ -2149,7 +2162,7 @@ def _space_widget_upsert_prompt_fragments(value: Any, depth: int = 0) -> list[st
             fragments.extend(_space_widget_upsert_prompt_fragments(child, depth + 1))
         return [fragment for fragment in fragments if fragment]
     if isinstance(value, list):
-        for child in value[:20]:
+        for child in value:
             fragments.extend(_space_widget_upsert_prompt_fragments(child, depth + 1))
     return [fragment for fragment in fragments if fragment]
 
@@ -6340,7 +6353,9 @@ def save_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
     space_id = validate_space_id(_space_tool_space_id(payload))
     space = read_space(space_id)
     layout = _space_tool_layout_payload(payload)
-    prompt_preflight = _space_layout_prompt_preflight_receipt(layout)
+    prompt_preflight = _space_layout_raw_prompt_preflight_receipt(layout, payload)
+    if prompt_preflight.get("status") != "pass":
+        raise ValueError("Space layout prompt preflight blocked")
     space["layout"] = layout
     _space_tool_sanitize_widgets(space)
     saved = _write_manifest(space, "space.layout.updated", {"layout": _payload_summary(layout)})
@@ -7371,8 +7386,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         raw_widgets = data.get("widgets") or data.get("widgetLayouts") or data.get("widget_layouts") or []
         if not isinstance(raw_widgets, list):
             raise ValueError("widgets must be a list")
-        saved_widgets: list[dict[str, Any]] = []
-        revision_event_ids: list[str] = []
+        planned_layouts: list[dict[str, Any]] = []
         for raw_widget in raw_widgets:
             if not isinstance(raw_widget, dict):
                 raise ValueError("widget layout must be an object")
@@ -7386,7 +7400,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 "h": raw_widget.get("h", raw_widget.get("rows", size.get("h", 4))),
                 "minimized": raw_widget.get("minimized", False),
             }
-            result = patch_widget(space_id, widget_id, {"layout": layout})
+            planned_layouts.append({"widget_id": widget_id, "layout": layout})
+        prompt_preflight = _space_layout_raw_prompt_preflight_receipt({"widgets": planned_layouts}, data)
+        if prompt_preflight.get("status") != "pass":
+            raise ValueError("Space rearrange prompt preflight blocked")
+        saved_widgets: list[dict[str, Any]] = []
+        revision_event_ids: list[str] = []
+        for planned in planned_layouts:
+            widget_id = str(planned["widget_id"])
+            result = patch_widget(space_id, widget_id, {"layout": planned["layout"]})
             revision_event_ids.append(result["revision_event_id"])
             saved_widgets.append(read_widget_detail(space_id, widget_id))
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.rearrange")
@@ -7399,6 +7421,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widgets": saved_widgets,
             "widget_count": len(saved_widgets),
             "revision_event_ids": revision_event_ids,
+            "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
             "output_compaction": _space_tool_action_output_compaction_receipt(
