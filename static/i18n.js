@@ -25,6 +25,7 @@ const LOCALES = {
     // Composer voice buttons (#1488 — distinct labels for dictation vs voice mode)
     voice_dictate: 'Dictate',
     voice_dictate_active: 'Stop dictation',
+    voice_recording_active: 'Stop recording',
     voice_mode_toggle: 'Voice mode',
     voice_mode_toggle_active: 'Exit voice mode',
     // Turn-based voice mode (#1333)
@@ -806,6 +807,10 @@ const LOCALES = {
     // 'segment' in the default visible badge. User-facing copy remains
     // translatable for locales that prefer a different wording. (#2155)
     session_meta_segments: (n) => `${n} prior turn${n === 1 ? '' : 's'}`,
+    session_lineage_toggle_hint: '{0} — earlier context turns are collapsed here. Click to show or hide them.',
+    session_lineage_static_hint: '{0} — earlier context turns are collapsed here.',
+    session_child_toggle_hint: '{0} — child conversations spawned from this session. Click to show or hide them.',
+    session_readonly_title_hint: 'Read-only imported session — {0}',
     session_lineage_segment_untitled: 'Untitled segment',
     session_lineage_segment_open: 'Open lineage segment',
     new_profile: 'New profile',
@@ -1340,6 +1345,7 @@ const LOCALES = {
     // Composer voice buttons (#1488 — distinct labels for dictation vs voice mode)
     voice_dictate: 'Detta',
     voice_dictate_active: 'Interrompi dettatura',
+    voice_recording_active: 'Interrompi registrazione',
     voice_mode_toggle: 'Modalità vocale',
     voice_mode_toggle_active: 'Esci dalla modalità vocale',
     // Turn-based voice mode (#1333)
@@ -2113,6 +2119,10 @@ const LOCALES = {
     session_meta_messages: (n) => `${n} msg`,
     session_meta_children: (n) => `${n} figli${n === 1 ? 'o' : ''}`,
     session_meta_segments: (n) => `${n} segment${n === 1 ? 'o' : 'i'}`,
+    session_lineage_toggle_hint: '{0} — i turni di contesto precedenti sono compressi qui. Fai clic per mostrarli o nasconderli.',
+    session_lineage_static_hint: '{0} — i turni di contesto precedenti sono compressi qui.',
+    session_child_toggle_hint: '{0} — conversazioni figlie generate da questa sessione. Fai clic per mostrarle o nasconderle.',
+    session_readonly_title_hint: 'Sessione importata in sola lettura — {0}',
     session_lineage_segment_untitled: 'Segmento senza titolo',
     session_lineage_segment_open: 'Apri segmento genealogia',
     new_profile: 'Nuovo profilo',
@@ -2648,6 +2658,7 @@ const LOCALES = {
     // Composer voice buttons (#1488)
     voice_dictate: 'ディクテーション',
     voice_dictate_active: 'ディクテーション停止',
+    voice_recording_active: '録音を停止',
     voice_mode_toggle: '音声モード',
     voice_mode_toggle_active: '音声モードを終了',
     voice_listening: '聞き取り中…',
@@ -3425,6 +3436,10 @@ const LOCALES = {
     session_meta_messages: (n) => `${n} 件`,
     session_meta_children: (n) => `${n} 子`,
     session_meta_segments: (n) => `${n} セグメント`,
+    session_lineage_toggle_hint: '{0} — 以前のコンテキストターンはここに折りたたまれています。クリックして表示/非表示を切り替えます。',
+    session_lineage_static_hint: '{0} — 以前のコンテキストターンはここに折りたたまれています。',
+    session_child_toggle_hint: '{0} — このセッションから作成された子会話です。クリックして表示/非表示を切り替えます。',
+    session_readonly_title_hint: '読み取り専用のインポート済みセッション — {0}',
     session_lineage_segment_untitled: '無題のセグメント',
     session_lineage_segment_open: '系譜セグメントを開く',
     new_profile: '新規プロファイル',
@@ -3958,6 +3973,7 @@ const LOCALES = {
     // Composer voice buttons (#1488)
     voice_dictate: 'Диктовка',
     voice_dictate_active: 'Остановить диктовку',
+    voice_recording_active: 'Остановить запись',
     voice_mode_toggle: 'Голосовой режим',
     voice_mode_toggle_active: 'Выйти из голосового режима',
     voice_listening: 'Слушаю…',
@@ -4491,6 +4507,10 @@ const LOCALES = {
     session_meta_messages: (n) => `${n} сообщ.`,
     session_meta_children: (n) => `${n} ${n === 1 ? 'дочерн.' : 'дочерн.'}`,
     session_meta_segments: (n) => `${n} сегм.`,
+    session_lineage_toggle_hint: '{0} — предыдущие ходы контекста свернуты здесь. Нажмите, чтобы показать или скрыть их.',
+    session_lineage_static_hint: '{0} — предыдущие ходы контекста свернуты здесь.',
+    session_child_toggle_hint: '{0} — дочерние разговоры, созданные из этого сеанса. Нажмите, чтобы показать или скрыть их.',
+    session_readonly_title_hint: 'Импортированный сеанс только для чтения — {0}',
     session_lineage_segment_untitled: 'Сегмент без названия',
     session_lineage_segment_open: 'Открыть сегмент цепочки',
     new_profile: 'Новый профиль',
@@ -5736,6 +5756,10 @@ const LOCALES = {
     session_meta_messages: (n) => `${n} mens.`,
     session_meta_children: (n) => `${n} ${n === 1 ? 'hijo' : 'hijos'}`,
     session_meta_segments: (n) => `${n} ${n === 1 ? 'segmento' : 'segmentos'}`,
+    session_lineage_toggle_hint: '{0} — los turnos de contexto anteriores están contraídos aquí. Haz clic para mostrarlos u ocultarlos.',
+    session_lineage_static_hint: '{0} — los turnos de contexto anteriores están contraídos aquí.',
+    session_child_toggle_hint: '{0} — conversaciones hijas creadas desde esta sesión. Haz clic para mostrarlas u ocultarlas.',
+    session_readonly_title_hint: 'Sesión importada de solo lectura — {0}',
     session_lineage_segment_untitled: 'Segmento sin título',
     session_lineage_segment_open: 'Abrir segmento de linaje',
     new_profile: 'Nuevo perfil',
@@ -6424,7 +6448,8 @@ const LOCALES = {
     voice_thinking: 'Thinking…',  // TODO: translate
     // Composer voice buttons (#1488)
     voice_dictate: 'Dictate',  // TODO: translate
-    voice_dictate_active: 'Stop dictation',  // TODO: translate
+    voice_dictate_active: 'Stop dictation',
+    voice_recording_active: 'Detener grabación',  // TODO: translate
     voice_mode_toggle: 'Voice mode',  // TODO: translate
     voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
     subagent_children: 'Subagent sessions',  // TODO: translate
@@ -6954,6 +6979,10 @@ const LOCALES = {
     session_meta_messages: (n) => `${n} Nachr.`,
     session_meta_children: (n) => `${n} ${n === 1 ? 'Subagent' : 'Subagents'}`,
     session_meta_segments: (n) => `${n} Segment${n === 1 ? '' : 'e'}`,
+    session_lineage_toggle_hint: '{0} — frühere Kontext-Turns sind hier eingeklappt. Klicken, um sie ein- oder auszublenden.',
+    session_lineage_static_hint: '{0} — frühere Kontext-Turns sind hier eingeklappt.',
+    session_child_toggle_hint: '{0} — aus dieser Sitzung erzeugte Kind-Unterhaltungen. Klicken, um sie ein- oder auszublenden.',
+    session_readonly_title_hint: 'Schreibgeschützte importierte Sitzung — {0}',
     session_lineage_segment_untitled: 'Unbenanntes Segment',
     session_lineage_segment_open: 'Liniensegment öffnen',
     new_profile: 'Neues Profil',
@@ -7671,7 +7700,8 @@ const LOCALES = {
     voice_thinking: 'Thinking…',  // TODO: translate
     // Composer voice buttons (#1488)
     voice_dictate: 'Dictate',  // TODO: translate
-    voice_dictate_active: 'Stop dictation',  // TODO: translate
+    voice_dictate_active: 'Stop dictation',
+    voice_recording_active: 'Aufnahme stoppen',  // TODO: translate
     voice_mode_toggle: 'Voice mode',  // TODO: translate
     voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
     subagent_children: 'Subagent sessions',  // TODO: translate
@@ -8236,6 +8266,10 @@ const LOCALES = {
     session_meta_messages: (n) => `${n} 条消息`,
     session_meta_children: (n) => `${n} 子会话`,
     session_meta_segments: (n) => `${n} 段`,
+    session_lineage_toggle_hint: '{0} — 较早的上下文轮次已折叠在这里。点击显示或隐藏。',
+    session_lineage_static_hint: '{0} — 较早的上下文轮次已折叠在这里。',
+    session_child_toggle_hint: '{0} — 从此会话派生的子对话。点击显示或隐藏。',
+    session_readonly_title_hint: '只读导入会话 — {0}',
     session_lineage_segment_untitled: '未命名段',
     session_lineage_segment_open: '打开脉络段',
     new_profile: '新配置',
@@ -8912,6 +8946,7 @@ const LOCALES = {
     // Composer voice buttons (#1488)
     voice_dictate: '听写',
     voice_dictate_active: '停止听写',
+    voice_recording_active: '停止录音',
     voice_mode_toggle: '语音模式',
     voice_mode_toggle_active: '退出语音模式',
     subagent_children: '子代理会话',
@@ -9469,6 +9504,10 @@ const LOCALES = {
     session_meta_messages: (n) => `${n} 則訊息`,
     session_meta_children: (n) => `${n} 則子`,
     session_meta_segments: (n) => `${n} 段`,
+    session_lineage_toggle_hint: '{0} — 較早的上下文輪次已摺疊在這裡。點擊可顯示或隱藏。',
+    session_lineage_static_hint: '{0} — 較早的上下文輪次已摺疊在這裡。',
+    session_child_toggle_hint: '{0} — 從此工作階段衍生的子對話。點擊可顯示或隱藏。',
+    session_readonly_title_hint: '唯讀匯入工作階段 — {0}',
     session_lineage_segment_untitled: '未命名段',
     session_lineage_segment_open: '開啟脈絡段',
     new_profile: '\u65b0\u914d\u7f6e\u6a94',
@@ -10226,7 +10265,8 @@ const LOCALES = {
     voice_thinking: 'Thinking…',  // TODO: translate
     // Composer voice buttons (#1488)
     voice_dictate: 'Dictate',  // TODO: translate
-    voice_dictate_active: 'Stop dictation',  // TODO: translate
+    voice_dictate_active: 'Stop dictation',
+    voice_recording_active: '停止錄音',  // TODO: translate
     voice_mode_toggle: 'Voice mode',  // TODO: translate
     voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
     subagent_children: 'Subagent sessions',  // TODO: translate
@@ -10871,6 +10911,10 @@ const LOCALES = {
     session_meta_messages: (n) => `${n} msg${n === 1 ? '' : 's'}`,
     session_meta_children: (n) => `${n} child${n === 1 ? '' : 'ren'}`,
     session_meta_segments: (n) => `${n} segment${n === 1 ? '' : 's'}`,
+    session_lineage_toggle_hint: '{0} — turnos de contexto anteriores estão recolhidos aqui. Clique para mostrar ou ocultar.',
+    session_lineage_static_hint: '{0} — turnos de contexto anteriores estão recolhidos aqui.',
+    session_child_toggle_hint: '{0} — conversas filhas criadas a partir desta sessão. Clique para mostrar ou ocultar.',
+    session_readonly_title_hint: 'Sessão importada somente leitura — {0}',
     session_lineage_segment_untitled: 'Segmento sem título',
     session_lineage_segment_open: 'Abrir segmento de linhagem',
     new_profile: 'Novo perfil',
@@ -11349,7 +11393,8 @@ const LOCALES = {
     voice_thinking: 'Thinking…',  // TODO: translate
     // Composer voice buttons (#1488)
     voice_dictate: 'Dictate',  // TODO: translate
-    voice_dictate_active: 'Stop dictation',  // TODO: translate
+    voice_dictate_active: 'Stop dictation',
+    voice_recording_active: 'Parar gravação',  // TODO: translate
     voice_mode_toggle: 'Voice mode',  // TODO: translate
     voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
     subagent_children: 'Subagent sessions',  // TODO: translate
@@ -12080,6 +12125,10 @@ const LOCALES = {
     session_meta_messages: (n) => `${n} msg${n === 1 ? '' : 's'}`,
     session_meta_children: (n) => `${n} child${n === 1 ? '' : 'ren'}`,
     session_meta_segments: (n) => `${n} segment${n === 1 ? '' : 's'}`,
+    session_lineage_toggle_hint: '{0} — 이전 컨텍스트 턴이 여기에 접혀 있습니다. 클릭하여 표시하거나 숨기세요.',
+    session_lineage_static_hint: '{0} — 이전 컨텍스트 턴이 여기에 접혀 있습니다.',
+    session_child_toggle_hint: '{0} — 이 세션에서 생성된 하위 대화입니다. 클릭하여 표시하거나 숨기세요.',
+    session_readonly_title_hint: '읽기 전용으로 가져온 세션 — {0}',
     session_lineage_segment_untitled: '제목 없는 세그먼트',
     session_lineage_segment_open: '계보 세그먼트 열기',
     new_profile: 'New profile',
@@ -12649,7 +12698,8 @@ const LOCALES = {
     voice_thinking: 'Thinking…',  // TODO: translate
     // Composer voice buttons (#1488)
     voice_dictate: 'Dictate',  // TODO: translate
-    voice_dictate_active: 'Stop dictation',  // TODO: translate
+    voice_dictate_active: 'Stop dictation',
+    voice_recording_active: '녹음 중지',  // TODO: translate
     voice_mode_toggle: 'Voice mode',  // TODO: translate
     voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
     subagent_children: 'Subagent sessions',  // TODO: translate
@@ -12674,6 +12724,7 @@ const LOCALES = {
     mic_error: 'Erreur de saisie vocale :',
     voice_dictate: 'Dicter',
     voice_dictate_active: 'Arrêter la dictée',
+    voice_recording_active: 'Arrêter l’enregistrement',
     voice_mode_toggle: 'Mode vocal',
     voice_mode_toggle_active: 'Quitter le mode vocal',
     voice_listening: 'Écoute…',
@@ -13312,6 +13363,10 @@ const LOCALES = {
     insights_skill_usage_col_share: 'Usage %',  // TODO: translate
     insights_skill_usage_col_patches: 'Patches',  // TODO: translate
     workspace_desc: 'Ajoutez et changez d\'espace de travail pour vos sessions.',
+    session_lineage_toggle_hint: '{0} — les tours de contexte précédents sont repliés ici. Cliquez pour les afficher ou les masquer.',
+    session_lineage_static_hint: '{0} — les tours de contexte précédents sont repliés ici.',
+    session_child_toggle_hint: '{0} — conversations enfants créées depuis cette session. Cliquez pour les afficher ou les masquer.',
+    session_readonly_title_hint: 'Session importée en lecture seule — {0}',
     session_lineage_segment_untitled: 'Segment sans titre',
     session_lineage_segment_open: 'Segment de lignée ouverte',
     new_profile: 'Nouveau profil',
@@ -13915,6 +13970,7 @@ const LOCALES = {
     mic_error: 'Ses girişi hatası:',
     voice_dictate: 'Dikte',
     voice_dictate_active: 'Dikteyi durdur',
+    voice_recording_active: 'Kaydı durdur',
     voice_mode_toggle: 'Ses modu',
     voice_mode_toggle_active: 'Ses modundan çık',
     voice_listening: 'Dinleniyor\u2026',
@@ -14628,6 +14684,10 @@ const LOCALES = {
     session_meta_messages: (n) => `${n} mesaj${n === 1 ? '' : 'S'}`,
     session_meta_children: (n) => `${n} çocuk${n === 1 ? '' : 'ren'}`,
     session_meta_segments: (n) => `${n} segment${n === 1 ? '' : 'S'}`,
+    session_lineage_toggle_hint: '{0} — önceki bağlam turları burada daraltıldı. Göstermek veya gizlemek için tıklayın.',
+    session_lineage_static_hint: '{0} — önceki bağlam turları burada daraltıldı.',
+    session_child_toggle_hint: '{0} — bu oturumdan oluşturulan alt konuşmalar. Göstermek veya gizlemek için tıklayın.',
+    session_readonly_title_hint: 'Salt okunur içe aktarılmış oturum — {0}',
     session_lineage_segment_untitled: 'Başlıksız segment',
     session_lineage_segment_open: 'Soy segmentini aç',
     new_profile: 'Yeni profil',

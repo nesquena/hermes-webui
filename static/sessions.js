@@ -3348,11 +3348,12 @@ function _sessionTitleForForkParent(parentSid){
   return title;
 }
 
-function _sessionFullTitleTooltip(rawTitle, cleanTitle){
+function _sessionFullTitleTooltip(rawTitle, cleanTitle, session){
   const fallback=String(cleanTitle||'Untitled').trim()||'Untitled';
   const full=String(rawTitle||fallback).trim()||fallback;
-  if(full.startsWith('[SYSTEM:')) return fallback;
-  return full;
+  const title=full.startsWith('[SYSTEM:') ? fallback : full;
+  if(typeof t==='function'&&_isReadOnlySession(session)) return t('session_readonly_title_hint', title);
+  return title;
 }
 
 function _sessionForkTooltip(parentLabel){
@@ -3366,14 +3367,18 @@ function _sessionForkTooltip(parentLabel){
 
 function _sessionLineageBadgeTooltip(label, canExpand){
   const base=String(label||'Prior turns').trim()||'Prior turns';
-  return canExpand
-    ? `${base} — earlier context turns are collapsed here. Click to show or hide them.`
-    : `${base} — earlier context turns are collapsed here.`;
+  if(typeof t==='function'){
+    return canExpand
+      ? t('session_lineage_toggle_hint', base)
+      : t('session_lineage_static_hint', base);
+  }
+  return base;
 }
 
 function _sessionChildBadgeTooltip(label){
   const base=String(label||'Child sessions').trim()||'Child sessions';
-  return `${base} — child conversations spawned from this session. Click to show or hide them.`;
+  if(typeof t==='function') return t('session_child_toggle_hint', base);
+  return base;
 }
 
 function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
@@ -4106,7 +4111,7 @@ function renderSessionListFromCache(){
     const titleMatched=Boolean(searchQueryRaw&&displayTitle.toLowerCase().includes(searchQueryRaw.toLowerCase()));
     if(titleMatched) _appendHighlightedText(title,displayTitle,searchQueryRaw,'session-search-hit');
     else title.textContent=displayTitle;
-    title.title=_sessionFullTitleTooltip(rawTitle,cleanTitle);
+    title.title=_sessionFullTitleTooltip(rawTitle,cleanTitle,s);
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
     const hasAttentionState=isStreaming||hasUnread||Boolean(attention);
