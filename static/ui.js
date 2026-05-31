@@ -3110,6 +3110,17 @@ function renderMd(raw){
   // backticks for multiline code and break subsequent code-box rendering.
   const rawPreStash=[];
   s=s.replace(/(<pre\b[^>]*>[\s\S]*?<\/pre>)/gi,m=>{rawPreStash.push(m);return `\x00R${rawPreStash.length-1}\x00`;});
+  // Bare file:// artifact links → media. Some gateway/tool surfaces emit bare
+  // file:// links for local artifacts instead of MEDIA: tokens; browser clients
+  // cannot open the server filesystem directly, so route them through /api/media.
+  // Runs AFTER fenced-block (\x00P), inline-code (\x00F), AND raw-<pre> (\x00R)
+  // stashing so a file:// inside any code/preformatted region stays literal text
+  // (#3219/#3234). Only bare URLs (line-start or whitespace-delimited) match, so
+  // normal [label](file://...) markdown anchors keep the link path below.
+  s=s.replace(/(^|\s)(file:\/\/[^\s<>"')\]]+)/g,(_,lead,raw_ref)=>{
+    media_stash.push(raw_ref);
+    return lead+'\x00D'+(media_stash.length-1)+'\x00';
+  });
   s=s.replace(/<strong>([\s\S]*?)<\/strong>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<b>([\s\S]*?)<\/b>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>'*'+t+'*');
@@ -3449,7 +3460,7 @@ function renderMd(raw){
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
-    const ref=media_stash[+i];
+    let ref=media_stash[+i];
     // Keep this logic self-contained: some tests extract renderMd() alone and
     // execute it in node, without the top-level helper functions from ui.js.
     const mediaKindForName=(name='')=>{
@@ -3473,6 +3484,15 @@ function renderMd(raw){
       const safeName=esc(name||'image');
       return `<span class="msg-artifact-card msg-artifact-card--image"><img class="msg-media-img" src="${safeSrc}" alt="${safeName}" loading="lazy"><span class="msg-artifact-meta"><span class="msg-artifact-title">${safeName}</span><span class="msg-artifact-actions"><a class="msg-artifact-action" href="${safeSrc}" target="_blank" rel="noopener">${t('media_open')}</a><a class="msg-artifact-action" href="${safeSrc}" download="${safeName}">${t('media_download')}</a></span></span></span>`;
     };
+    if(/^file:\/\//i.test(ref)){
+      try{
+        const u=new URL(ref);
+        ref=decodeURIComponent(u.pathname||ref.replace(/^file:\/\//i,''));
+      }catch(_){
+        try{ref=decodeURIComponent(ref.replace(/^file:\/\//i,''));}
+        catch(__){ref=ref.replace(/^file:\/\//i,'');}
+      }
+    }
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){
       // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
