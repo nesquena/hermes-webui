@@ -4078,6 +4078,57 @@ def _handle_shutdown(handler) -> bool:
     return True
 
 
+def _handle_health_restart(handler) -> bool:
+    """Restart the Hermes messaging gateway service."""
+    # 1. Resolve HERMES_HOME for the active profile
+    from api.profiles import get_active_hermes_home
+    active_home = get_active_hermes_home()
+
+    # 2. Build the environment dictionary with the correct HERMES_HOME
+    import os
+    env = os.environ.copy()
+    env["HERMES_HOME"] = str(active_home)
+
+    # 3. Resolve the path to the hermes CLI binary
+    import shutil
+    import sys
+    from pathlib import Path
+
+    hermes_cmd = shutil.which("hermes")
+    if not hermes_cmd:
+        sys_exe = Path(sys.executable)
+        sibling = sys_exe.parent / "hermes"
+        if sibling.exists():
+            hermes_cmd = str(sibling)
+        else:
+            hermes_cmd = "hermes"
+
+    # 4. Run the restart command
+    import subprocess
+    logger.info("Restarting gateway service via CLI command: %s gateway restart (HERMES_HOME=%s)", hermes_cmd, active_home)
+    try:
+        res = subprocess.run(
+            [hermes_cmd, "gateway", "restart"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10.0
+        )
+        if res.returncode == 0:
+            logger.info("Gateway service restarted successfully: %s", res.stdout)
+            return j(handler, {"ok": True, "message": "Gateway service restarted successfully"})
+        else:
+            logger.error("Gateway service restart failed with code %d: %s", res.returncode, res.stderr)
+            return j(
+                handler,
+                {"ok": False, "error": f"Restart failed: {res.stderr.strip() or res.stdout.strip()}"},
+                status=500
+            )
+    except Exception as exc:
+        logger.exception("Failed to run gateway restart command")
+        return j(handler, {"ok": False, "error": f"Internal error running restart: {type(exc).__name__}: {exc}"}, status=500)
+
+
 def _serve_manifest(handler) -> bool:
     """Serve static/manifest.json with the correct PWA Content-Type.
 
@@ -5380,6 +5431,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
+
+    if parsed.path == "/api/health/restart":
+        return _handle_health_restart(handler)
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
