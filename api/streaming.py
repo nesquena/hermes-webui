@@ -3912,6 +3912,15 @@ def _run_agent_streaming(
     _live_prompt_exact_tokens = [0]
     _live_prompt_estimate_tool_delta_tokens = [0]
     _live_prompt_estimate_seen_ids = set()
+    # Per-stream cache for the real per-model context_length (#3256 perf).
+    # _live_usage_snapshot() runs on every metering tick (~10x/sec during
+    # streaming); recomputing get_model_context_length() there triggered a
+    # config read + potential metadata/network probe on every token for
+    # non-default models (e.g. claude-opus-4.7-1m), freezing the stream while
+    # the default model was unaffected. The value is constant for a given
+    # (model, base_url, provider) within one stream, so resolve it at most
+    # once. Sentinel: None=not computed, 0=not applicable/failed, >0=real cap.
+    _real_ctx_cache = [None]
 
     def _seed_live_prompt_estimate() -> int:
         """Capture the latest exact prompt size before adding live tool deltas."""
@@ -3994,40 +4003,50 @@ def _run_agent_streaming(
                     # applied unconditionally — for non-default models that
                     # value is the stale global cap (e.g. 232K). Drop it here
                     # so the live usage payload doesn't surface the wrong cap.
-                    try:
-                        from api.config import get_config as _gc_u
-                        _cfg_u = _gc_u()
-                        _mcfg_u = _cfg_u.get('model', {}) if isinstance(_cfg_u, dict) else {}
-                        if isinstance(_mcfg_u, dict):
-                            _def_u = str(_mcfg_u.get('default') or '').strip()
-                            _raw_u = _mcfg_u.get('context_length')
-                            try:
-                                _cl_u = int(_raw_u) if _raw_u is not None else 0
-                            except (TypeError, ValueError):
-                                _cl_u = 0
-                            _sm_u = str(getattr(_agent, 'model', '') or '').strip()
-                            if (
-                                _cl_u > 0
-                                and _cc_cl_u == _cl_u
-                                and _def_u
-                                and _sm_u
-                                and _def_u != _sm_u
-                            ):
-                                # Recompute from real per-model metadata.
+                    # PERF: resolve the real per-model cap at most once per
+                    # stream (cached in _real_ctx_cache). This snapshot runs on
+                    # every metering tick; doing the config read + metadata
+                    # lookup per tick froze non-default-model streams.
+                    if _real_ctx_cache[0] is None:
+                        _resolved_real = 0  # 0 = guard not applicable / failed
+                        try:
+                            from api.config import get_config as _gc_u
+                            _cfg_u = _gc_u()
+                            _mcfg_u = _cfg_u.get('model', {}) if isinstance(_cfg_u, dict) else {}
+                            if isinstance(_mcfg_u, dict):
+                                _def_u = str(_mcfg_u.get('default') or '').strip()
+                                _raw_u = _mcfg_u.get('context_length')
                                 try:
-                                    from agent.model_metadata import get_model_context_length as _g_u
-                                    _real_u = _g_u(
-                                        _sm_u,
-                                        getattr(_agent, 'base_url', '') or '',
-                                        config_context_length=None,
-                                        provider=getattr(_agent, 'provider', '') or '',
-                                    ) or 0
-                                    if _real_u:
-                                        _cc_cl_u = _real_u
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
+                                    _cl_u = int(_raw_u) if _raw_u is not None else 0
+                                except (TypeError, ValueError):
+                                    _cl_u = 0
+                                _sm_u = str(getattr(_agent, 'model', '') or '').strip()
+                                if (
+                                    _cl_u > 0
+                                    and _cc_cl_u == _cl_u
+                                    and _def_u
+                                    and _sm_u
+                                    and _def_u != _sm_u
+                                ):
+                                    # Recompute from real per-model metadata.
+                                    try:
+                                        from agent.model_metadata import get_model_context_length as _g_u
+                                        _real_u = _g_u(
+                                            _sm_u,
+                                            getattr(_agent, 'base_url', '') or '',
+                                            config_context_length=None,
+                                            provider=getattr(_agent, 'provider', '') or '',
+                                        ) or 0
+                                        if _real_u:
+                                            _resolved_real = _real_u
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            _resolved_real = 0
+                        _real_ctx_cache[0] = _resolved_real
+                    # Apply the cached real cap when the guard determined one.
+                    if _real_ctx_cache[0]:
+                        _cc_cl_u = _real_ctx_cache[0]
                     _usage['context_length'] = _cc_cl_u
                     _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
                     _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
