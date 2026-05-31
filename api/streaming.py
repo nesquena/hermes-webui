@@ -581,7 +581,11 @@ def _webui_session_context_message(config_data: Optional[dict] = None) -> dict:
 def _prefill_messages_with_webui_context(prefill_context: dict, config_data: Optional[dict] = None) -> list[dict]:
     """Combine recall prefill with WebUI's gateway-like session context."""
     messages = list(prefill_context.get("messages") or [])
-    messages.append(_webui_session_context_message(config_data))
+    # Session context is NOT added here as a user message — it is already
+    # injected via _webui_ephemeral_system_prompt / ephemeral_system_prompt
+    # in _run_agent_streaming.  Adding it a second time as a user message
+    # creates two consecutive user messages (prefill + actual turn) which
+    # strict chat templates (Mistral, Gemma) reject with a Jinja 500.
     return messages
 
 
@@ -2443,6 +2447,36 @@ def _is_reasoning_only_assistant_message(msg) -> bool:
     return _content_has_reasoning_only_parts(content)
 
 
+def _merge_consecutive_same_role_messages(messages):
+    """Merge consecutive user/user or assistant/assistant messages.
+
+    Strict chat templates (Mistral, Gemma) enforce alternating user/assistant
+    roles.  WebUI prefill can produce consecutive user messages (prefill + actual
+    turn) which triggers a Jinja 500 from those models.  Merging them preserves
+    all content without violating alternation.
+    """
+    if not messages:
+        return messages
+    merged = [messages[0]]
+    for msg in messages[1:]:
+        role = msg.get('role')
+        if role in ('user', 'assistant') and merged[-1].get('role') == role:
+            prev = merged[-1]
+            prev_content = str(prev.get('content') or '').strip()
+            cur_content = str(msg.get('content') or '').strip()
+            if prev_content and cur_content:
+                prev['content'] = prev_content + '\n\n' + cur_content
+            elif cur_content:
+                prev['content'] = cur_content
+            # Keep tool_calls from the first message if the second has none,
+            # otherwise the second message stays as a separate entry.
+            if not prev.get('tool_calls') and msg.get('tool_calls'):
+                prev['tool_calls'] = msg.get('tool_calls')
+        else:
+            merged.append(msg)
+    return merged
+
+
 def _sanitize_messages_for_api(messages, *, cfg: dict = None):
     """Return a deep copy of messages with only API-safe fields.
 
@@ -2507,7 +2541,7 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
             sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
         if sanitized.get('role'):
             clean.append(sanitized)
-    return clean
+    return _merge_consecutive_same_role_messages(clean)
 
 
 def _api_safe_message_positions(messages):
