@@ -17,6 +17,8 @@ def test_sse_import_cli_guard_skips_shorter_transcript_overwrite():
     assert "if (next.length < prev) return;" in sse_block
     assert "if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;" in sse_block
     assert "S.messages = next;" in sse_block
+    assert "S.session.message_count = next.length;" in sse_block
+    assert "renderMessages({preserveScroll:true});" in sse_block
 
 
 def test_sse_import_cli_refresh_prefix_helper_ignores_timestamps():
