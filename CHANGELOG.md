@@ -3,6 +3,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- Assistant messages can now render explicitly marked, sanitized HTML fragments for compact structured cards while fenced-code examples remain source-only.
+
+### Fixed
+
+- WebUI shell, login, and service-worker asset URLs now include static-file mtimes in their cache-busting token so local frontend hotfixes invalidate mobile/PWA caches without a package version bump.
+
+### Added
+
+- Assistant messages can now render explicitly marked, sanitized HTML fragments for compact structured cards while fenced-code examples remain source-only.
+
+### Fixed
+
+- WebUI shell, login, and service-worker asset URLs now include static-file mtimes in their cache-busting token so local frontend hotfixes invalidate mobile/PWA caches without a package version bump.
+
 ## [v0.51.185] — 2026-05-31 — Release FE (stage-batchE — clarify-card bug-fix batch: identical-prompt dedup + autofill guard + GBK startup crash)
 
 ### Fixed
