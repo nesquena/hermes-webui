@@ -22,13 +22,14 @@ frontend, the backend, AND the Hermes agent — with no lingering processes.
 
 from __future__ import annotations
 
+import http.client
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 # --- Configuration (overridable via environment) -----------------------------
@@ -88,6 +89,24 @@ def _stream_subprocess(cmd: list[str], **popen_kwargs) -> int:
     return proc.wait()
 
 
+def _port_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((HOST, port))
+            return True
+        except OSError:
+            return False
+
+
+def pick_port(start: int) -> int:
+    """Return the first free port at or above ``start`` (so a busy 8787 — e.g. a
+    leftover dev server — doesn't wedge first launch)."""
+    for p in range(start, start + 50):
+        if _port_free(p):
+            return p
+    return start
+
+
 def hermes_available() -> bool:
     if shutil.which("hermes"):
         return True
@@ -138,16 +157,34 @@ def start_webui() -> subprocess.Popen:
     )
 
 
+def _health_ok() -> bool:
+    """GET /health via http.client.
+
+    NB: do NOT use urllib.request here — the WebUI's HTTP server closes the
+    connection without a response for urllib's requests (works fine for
+    http.client, raw sockets, curl, and the WKWebView). urllib would make the
+    health check never succeed and wedge the app on "waiting for the server".
+    """
+    try:
+        conn = http.client.HTTPConnection(HOST, PORT, timeout=3)
+        conn.request("GET", "/health")
+        ok = conn.getresponse().status == 200
+        conn.close()
+        return ok
+    except Exception:
+        return False
+
+
 def wait_for_health(deadline: float) -> bool:
     while time.time() < deadline:
         if _stop_requested:
             return False
-        try:
-            with urllib.request.urlopen(HEALTH_URL, timeout=3) as resp:
-                if resp.status == 200:
-                    return True
-        except Exception:
-            pass
+        # Fail fast if the backend process died instead of polling for 4 minutes.
+        if _child is not None and _child.poll() is not None:
+            log(f"Backend exited early (code {_child.returncode}).")
+            return False
+        if _health_ok():
+            return True
         time.sleep(1.0)
     return False
 
@@ -211,6 +248,13 @@ def main() -> int:
         log(f"Agent install failed: {exc}")
         return 2
 
+    # Pick a free port so a busy 8787 (leftover dev server, another app) can't
+    # wedge launch. The shell loads whatever URL we report below, so the actual
+    # port doesn't matter to it.
+    global PORT, HEALTH_URL
+    PORT = pick_port(PORT)
+    HEALTH_URL = f"http://{HOST}:{PORT}/health"
+
     global _child
     progress("Starting Hermes backend…", force=True)
     _child = start_webui()
@@ -221,7 +265,13 @@ def main() -> int:
         log("WebUI is healthy.")
     else:
         if not _stop_requested:
-            log("WebUI did not become healthy in time.")
+            if _child.poll() is not None:
+                progress("Hermes backend failed to start — see Console.app → Hermes.",
+                         force=True)
+                log("WebUI process exited before becoming healthy.")
+            else:
+                progress("Hermes backend didn't respond in time.", force=True)
+                log("WebUI did not become healthy in time.")
             stop_everything()
             return 3
 
