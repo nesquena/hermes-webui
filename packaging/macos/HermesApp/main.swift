@@ -148,6 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var loadingLabel: NSTextField!
     private var spinner: NSProgressIndicator!
     private var loadingStack: NSStackView!
+    private var chromeTimer: Timer?
     private let supervisor = Supervisor()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -162,6 +163,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false)
         window.title = "Hermes"
+        // Seamless titlebar: transparent + no title text so it shows the window
+        // background, which we keep in sync with the page's chrome colour
+        // (--sidebar) below. Content still sits under the titlebar (no
+        // .fullSizeContentView), so nothing overlaps the traffic lights and the
+        // titlebar stays draggable.
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
         window.center()
         window.setFrameAutosaveName("HermesMainWindow")
@@ -232,11 +240,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             })
     }
 
+    // Keep the (transparent) titlebar matching the page's chrome colour so the
+    // window reads as one seamless surface, and track in-app theme switches.
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        syncChromeColor()
+        chromeTimer?.invalidate()
+        chromeTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            self?.syncChromeColor()
+        }
+    }
+
+    private func syncChromeColor() {
+        // The WebUI documents --sidebar as its chrome colour (light/dark aware).
+        let js = """
+        (function(){var cs=getComputedStyle(document.documentElement);
+        var c=(cs.getPropertyValue('--sidebar')||'').trim();
+        return c||getComputedStyle(document.body).backgroundColor;})()
+        """
+        webView.evaluateJavaScript(js) { [weak self] result, _ in
+            guard let self, let s = result as? String, let color = NSColor(cssString: s) else { return }
+            self.window.backgroundColor = color
+        }
+    }
+
     // Quitting when the window closes gives us a single, predictable teardown path.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
         supervisor.stop()
+    }
+}
+
+extension NSColor {
+    /// Parse a CSS colour string: `#rgb`, `#rrggbb`, or `rgb()/rgba()`.
+    convenience init?(cssString raw: String) {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("#") {
+            var hex = String(s.dropFirst())
+            if hex.count == 3 { hex = hex.map { "\($0)\($0)" }.joined() }
+            guard hex.count == 6, let v = Int(hex, radix: 16) else { return nil }
+            self.init(srgbRed: CGFloat((v >> 16) & 0xFF) / 255,
+                      green: CGFloat((v >> 8) & 0xFF) / 255,
+                      blue: CGFloat(v & 0xFF) / 255, alpha: 1)
+        } else if s.hasPrefix("rgb") {
+            let parts = s.components(separatedBy: CharacterSet(charactersIn: "0123456789.").inverted)
+                         .filter { !$0.isEmpty }
+            guard parts.count >= 3, let r = Double(parts[0]), let g = Double(parts[1]),
+                  let b = Double(parts[2]) else { return nil }
+            self.init(srgbRed: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1)
+        } else {
+            return nil
+        }
     }
 }
 
