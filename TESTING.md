@@ -36,6 +36,32 @@ npm run lint:runtime
 npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
 ```
 
+## Automated browser smoke (runtime brick-class gate)
+
+The ESLint guard above catches `const`-reassign / import-assign statically. The
+**browser smoke** catches the same brick class *dynamically* — plus anything else
+that throws only when a real browser executes the page (e.g. a `function X(){}` /
+`window.X = {}` name collision like #2715/#2771, which ESLint can't see).
+
+`tests/browser_smoke.py` boots the real `server.py` (agent-free, on an ephemeral
+port, with an isolated temp state dir) and loads the key pages in headless
+Chromium, failing if **any** console error or uncaught JS exception fires on load.
+It runs in CI (`.github/workflows/browser-smoke.yml`) on every PR and push to
+master, and locally:
+
+```bash
+pip install playwright && python -m playwright install chromium
+python tests/browser_smoke.py
+```
+
+It is intentionally **credential-free**: it strips every `*_API_KEY` from the
+environment before launching the server, needs no secrets, and does not drive a
+real model (it verifies the app *loads and initializes* cleanly — the brick class
+that breaks the page for everyone). A full chat golden-path E2E (send → stream →
+render → switch → reload) lives in the maintainer's private QA harness, which has
+the agent + a mock LLM provider available.
+
+
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
 and **skips gracefully** (clear message) when it isn't — so environments without the
 node toolchain aren't blocked, while the release gate (which installs eslint) enforces it.
