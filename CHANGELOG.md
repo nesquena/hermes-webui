@@ -6,6 +6,15 @@
 ### Added
 - Settings → System now includes a safe, read-only config.yaml viewer that redacts credential-looking values before rendering or copying the active profile config (#2929).
 
+## [v0.51.189] — 2026-05-31 — Release FI (stage-batch1 — ruff lint gate + SSE refresh dedupe + tooltip i18n)
+
+### Added
+- **Forward-looking Python lint gate (ruff).** A curated `[tool.ruff]` ruleset (E9 syntax/runtime + F pyflakes + B bugbear — high-signal correctness rules, no style/formatting families) now gates **new and changed Python code** in CI (`tests.yml` `lint` job) and as part of the maintainer pre-release pre-gate. It is the Python twin of the existing ESLint runtime guard for `static/*.js`. Crucially it is **line-scoped** (`scripts/ruff_lint.py --diff`): it flags violations only on lines a change adds or modifies, so it keeps incoming code clean **without** reformatting the existing tree's cosmetic backlog (a separate, deferred, maintainer-run decision). `tests/test_ruff_forward_lint.py` additionally holds the whole tree free of E9 errors and skips cleanly when ruff isn't installed. See TESTING.md > "Python lint gate (ruff)". Closes #3273 (#3275).
+
+### Fixed
+- Gateway SSE reconnect no longer triggers a phantom "new dialog created" sidebar refresh: the initial sessions snapshot pushed on every reconnect is now compared against the current gateway-session set and `renderSessionList()` is skipped when nothing changed (#3270, @PINKIIILQWQ).
+- Raw-audio recording mic tooltip now uses a recording-specific i18n key instead of the dictation "Stop" label; sidebar lineage/child tooltip suffixes are localized across the locale catalog; and the localized read-only title hover hint for imported sessions is restored. Closes #3242, #3214 (#3272, @ai-ag2026).
+
 ## [v0.51.188] — 2026-05-31 — Release FH (stage-batchH — configured runner-client boundary, default-off)
 
 ### Added
