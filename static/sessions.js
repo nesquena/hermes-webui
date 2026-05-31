@@ -2762,6 +2762,29 @@ function stopGatewayPollFallback(){
   }
 }
 
+function _gatewaySessionSnapshotKey(sessions){
+  return (Array.isArray(sessions)?sessions:[])
+    .filter(s=>s&&s.session_id)
+    .map(s=>`${s.session_id}:${s.updated_at||0}:${s.message_count||0}`)
+    .sort()
+    .join('|');
+}
+
+function _isGatewaySessionForSnapshot(session){
+  if(!session) return false;
+  if(typeof _isCliSession==='function'&&_isCliSession(session)) return true;
+  if(typeof _isMessagingSession==='function'&&_isMessagingSession(session)) return true;
+  const source=String(session.session_source||session.raw_source||session.source_tag||session.source||'').toLowerCase();
+  return !!source&&source!=='webui';
+}
+
+function _isDuplicateGatewaySessionSnapshot(sessions){
+  const incoming=(Array.isArray(sessions)?sessions:[]).filter(_isGatewaySessionForSnapshot);
+  const currentGatewaySessions=(Array.isArray(_allSessions)?_allSessions:[]).filter(_isGatewaySessionForSnapshot);
+  if(!incoming.length&&!currentGatewaySessions.length) return true;
+  return _gatewaySessionSnapshotKey(incoming)===_gatewaySessionSnapshotKey(currentGatewaySessions);
+}
+
 async function probeGatewaySSEStatus(){
   if(_gatewayProbeInFlight || !window._showCliSessions) return;
   _gatewayProbeInFlight = true;
@@ -2803,7 +2826,9 @@ function startGatewaySSE(){
         if(data.sessions){
           stopGatewayPollFallback();
           _gatewaySSEWarningShown = false;
-          renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render
+          if(!_isDuplicateGatewaySessionSnapshot(data.sessions)){
+            renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render
+          }
           // If the active session received new gateway messages, refresh the conversation view.
           // S.busy check prevents stomping on an in-progress WebUI response.
           // is_cli_session check ensures we only poll import_cli for CLI-originated sessions.
