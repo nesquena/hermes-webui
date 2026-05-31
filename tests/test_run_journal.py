@@ -4,6 +4,7 @@ from api.run_journal import (
     RunJournalWriter,
     append_run_event,
     find_run_summary,
+    latest_run_summary_for_session,
     latest_run_summary,
     read_run_events,
     stale_interrupted_event,
@@ -82,6 +83,20 @@ def test_latest_summary_and_find_run_summary_classify_terminal_state(tmp_path):
     assert summary["last_seq"] == 2
     assert found["session_id"] == "session_1"
     assert found["terminal_state"] == "interrupted-by-user"
+
+
+def test_latest_run_summary_for_session_picks_newest_journal_event(tmp_path):
+    append_run_event("session_1", "run_old", "done", {"session": {}}, session_dir=tmp_path, created_at=20)
+    append_run_event("session_1", "run_new", "token", {"text": "newer"}, session_dir=tmp_path, created_at=30)
+    append_run_event("session_2", "run_other", "done", {"session": {}}, session_dir=tmp_path, created_at=99)
+
+    summary = latest_run_summary_for_session("session_1", session_dir=tmp_path)
+
+    assert summary is not None
+    assert summary["session_id"] == "session_1"
+    assert summary["run_id"] == "run_new"
+    assert summary["event_count"] == 1
+    assert summary["last_created_at"] == 30.0
 
 
 def test_terminal_state_classification_distinguishes_crash_from_user_cancel(tmp_path):

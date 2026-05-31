@@ -5012,6 +5012,7 @@ function syncTopbar(){
     // Update profile chip even when no session is active (e.g. right after profile switch)
     const _profileLabel=$('profileChipLabel');
     if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
+    if(typeof refreshOperatorTruth === 'function') refreshOperatorTruth({reason:'syncTopbar'});
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -5123,6 +5124,7 @@ function syncTopbar(){
   // Update profile chip label
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(typeof refreshOperatorTruth === 'function') refreshOperatorTruth({reason:'syncTopbar'});
 }
 
 function msgContent(m){

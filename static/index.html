@@ -603,6 +603,36 @@
                 </button>
               </div>
             </div>
+            <div id="operatorTruthStrip" class="operator-truth-strip" aria-label="Operator truth status" role="group">
+              <button id="operatorTruthSummaryChip" class="operator-truth-chip state-unknown" type="button" title="Operator truth status unknown" onclick="refreshOperatorTruth({force:true,reason:'manual'})">
+                <span class="operator-truth-dot" aria-hidden="true"></span>
+                <span class="operator-truth-chip-label" id="operatorTruthSummaryLabel">Truth unknown</span>
+              </button>
+              <button id="operatorTruthBoardChip" class="operator-truth-chip state-unknown operator-truth-chip-secondary" type="button" onclick="refreshOperatorTruth({force:true,reason:'manual'})" hidden>
+                <span class="operator-truth-chip-label" id="operatorTruthBoardLabel">Board unknown</span>
+              </button>
+              <button id="operatorTruthScratchChip" class="operator-truth-chip state-unknown operator-truth-chip-secondary" type="button" onclick="refreshOperatorTruth({force:true,reason:'manual'})" hidden>
+                <span class="operator-truth-chip-label" id="operatorTruthScratchLabel">Scratch unknown</span>
+              </button>
+              <button id="operatorProposalChip" class="operator-truth-chip operator-proposal-chip state-unknown operator-truth-chip-secondary" type="button" onclick="toggleOperatorProposals({force:true})" title="Manual next-action proposals" hidden>
+                <span class="operator-truth-chip-label" id="operatorProposalLabel">Proposals</span>
+              </button>
+              <button id="operatorCommitmentChip" class="operator-truth-chip operator-commitment-chip state-unknown operator-truth-chip-secondary" type="button" onclick="toggleOperatorCommitments({force:true})" title="Local commitment cards" hidden>
+                <span class="operator-truth-chip-label" id="operatorCommitmentLabel">Commitments</span>
+              </button>
+              <button id="operatorMemorySkillReviewChip" class="operator-truth-chip operator-memory-skill-review-chip state-unknown operator-truth-chip-secondary" type="button" onclick="toggleOperatorMemorySkillReview({force:true})" title="Memory and skill review queue" hidden>
+                <span class="operator-truth-chip-label" id="operatorMemorySkillReviewLabel">Memory Review</span>
+              </button>
+              <button id="operatorSessionRecallChip" class="operator-truth-chip operator-session-recall-chip state-unknown operator-truth-chip-secondary" type="button" onclick="toggleOperatorSessionRecall()" title="Manual session recall" hidden>
+                <span class="operator-truth-chip-label" id="operatorSessionRecallLabel">Recall</span>
+              </button>
+              <button id="operatorDocsArtifactsChip" class="operator-truth-chip operator-docs-artifacts-chip state-unknown operator-truth-chip-secondary" type="button" onclick="toggleOperatorDocsArtifacts()" title="Manual docs and artifacts browser" hidden>
+                <span class="operator-truth-chip-label" id="operatorDocsArtifactsLabel">Docs</span>
+              </button>
+              <button id="operatorDeviceAdminChip" class="operator-truth-chip operator-device-admin-chip state-unknown operator-truth-chip-secondary" type="button" onclick="toggleOperatorDeviceAdmin()" title="Device admin foundations" hidden>
+                <span class="operator-truth-chip-label" id="operatorDeviceAdminLabel">Device Admin</span>
+              </button>
+            </div>
             <button class="icon-btn composer-mobile-config-btn" id="composerMobileConfigBtn" type="button" onclick="toggleMobileComposerConfig()" title="Workspace, model, reasoning, and context settings" aria-label="Workspace, model, reasoning, and context settings" aria-haspopup="true" aria-expanded="false" aria-controls="composerMobileConfigPanel">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
               <span class="composer-mobile-ctx-badge" id="composerMobileCtxBadge" aria-hidden="true" style="display:none">0</span>
@@ -728,6 +758,224 @@
             </div>
           </div>
           <div class="model-dropdown" id="composerModelDropdown"></div>
+          <div id="operatorProposalPopover" class="operator-proposal-popover" hidden aria-label="Manual next-action proposals">
+            <div class="operator-proposal-header">
+              <div>
+                <div class="operator-proposal-title">Proposals</div>
+                <div class="operator-proposal-subtitle" id="operatorProposalSubtitle">Not checked yet</div>
+              </div>
+              <button type="button" class="operator-proposal-close" onclick="hideOperatorProposals()" aria-label="Close proposals">×</button>
+            </div>
+            <div id="operatorProposalList" class="operator-proposal-list"></div>
+          </div>
+          <div id="operatorCommitmentPopover" class="operator-commitment-popover" hidden aria-label="Local commitment cards">
+            <div class="operator-commitment-header">
+              <div>
+                <div class="operator-commitment-title">Commitment Cards</div>
+                <div class="operator-commitment-subtitle" id="operatorCommitmentSubtitle">Not checked yet</div>
+              </div>
+              <button type="button" class="operator-commitment-close" onclick="hideOperatorCommitments()" aria-label="Close commitments">×</button>
+            </div>
+            <div id="operatorCommitmentList" class="operator-commitment-list"></div>
+            <form id="operatorCommitmentForm" class="operator-commitment-form" onsubmit="submitOperatorCommitmentForm(event)" hidden>
+              <input type="hidden" id="operatorCommitmentSource" name="source">
+              <input type="hidden" id="operatorCommitmentEvidence" name="evidence">
+              <div class="operator-commitment-form-title">Promote to commitment</div>
+              <label>Title <input id="operatorCommitmentTitle" name="title" maxlength="200" autocomplete="off"></label>
+              <label>Owner <input id="operatorCommitmentOwner" name="owner" maxlength="120" autocomplete="off" required></label>
+              <div class="operator-commitment-form-row">
+                <label>Deadline <input id="operatorCommitmentDeadline" name="deadline_at" type="date" required></label>
+                <label>Review <input id="operatorCommitmentReview" name="review_at" type="date"></label>
+              </div>
+              <label>Dispatch mechanism
+                <select id="operatorCommitmentDispatch" name="dispatch_mechanism">
+                  <option value="manual">manual</option>
+                  <option value="handoff">handoff</option>
+                  <option value="human_review">human_review</option>
+                </select>
+              </label>
+              <label>Acceptance criteria <textarea id="operatorCommitmentAcceptance" name="acceptance_criteria" rows="3" required></textarea></label>
+              <label>Halt policy <textarea id="operatorCommitmentHaltPolicy" name="halt_policy" rows="2" required></textarea></label>
+              <label>Status
+                <select id="operatorCommitmentStatus" name="status">
+                  <option value="active">active</option>
+                  <option value="blocked">blocked</option>
+                  <option value="halted">halted</option>
+                  <option value="superseded">superseded</option>
+                </select>
+              </label>
+              <div id="operatorCommitmentMissing" class="operator-commitment-missing" aria-live="polite"></div>
+              <div class="operator-commitment-actions">
+                <button type="button" class="operator-commitment-action" onclick="cancelOperatorCommitmentDraft()">Cancel</button>
+                <button type="submit" class="operator-commitment-action primary">Save local commitment</button>
+              </div>
+            </form>
+          </div>
+          <div id="operatorMemorySkillReviewPopover" class="operator-memory-skill-review-popover" hidden aria-label="Memory and skill review queue">
+            <div class="operator-memory-skill-review-header">
+              <div>
+                <div class="operator-memory-skill-review-title">Memory / Skill Review</div>
+                <div class="operator-memory-skill-review-subtitle" id="operatorMemorySkillReviewSubtitle">Not checked yet — local review only, no apply</div>
+              </div>
+              <div class="operator-memory-skill-review-header-actions">
+                <button type="button" id="operatorMemorySkillReviewRefresh" class="operator-memory-skill-review-refresh" onclick="refreshOperatorMemorySkillReview({force:true})">Refresh</button>
+                <button type="button" class="operator-memory-skill-review-close" onclick="hideOperatorMemorySkillReview()" aria-label="Close memory and skill review">×</button>
+              </div>
+            </div>
+            <div id="operatorMemorySkillReviewList" class="operator-memory-skill-review-list"></div>
+          </div>
+          <div id="operatorSessionRecallPopover" class="operator-session-recall-popover" hidden aria-label="Manual session recall">
+            <div class="operator-session-recall-header">
+              <div>
+                <div class="operator-session-recall-title">Session Recall</div>
+                <div class="operator-session-recall-subtitle" id="operatorSessionRecallStatus">Manual shell only — search not wired yet</div>
+              </div>
+              <button type="button" class="operator-session-recall-close" onclick="hideOperatorSessionRecall()" aria-label="Close session recall">×</button>
+            </div>
+            <div class="operator-session-recall-controls">
+              <input id="operatorSessionRecallInput" class="operator-session-recall-input" type="search" autocomplete="off" placeholder="Search saved sessions (coming next)">
+              <button type="button" id="operatorSessionRecallRefresh" class="operator-session-recall-action primary" onclick="refreshOperatorSessionRecall()">Search</button>
+            </div>
+            <div id="operatorSessionRecallMemoryProposalPanel" class="operator-session-recall-memory-proposal" hidden aria-label="Draft memory or skill review proposal">
+              <div class="operator-session-recall-memory-proposal-title">Draft memory/skill review proposal</div>
+              <form id="operatorSessionRecallMemoryProposalForm" class="operator-session-recall-memory-proposal-form" onsubmit="return submitOperatorSessionRecallMemoryProposal(event)">
+                <div class="operator-session-recall-memory-proposal-evidence">
+                  <div class="operator-session-recall-source"><span class="operator-session-recall-source-label">source_session_id</span><span id="operatorSessionRecallMemoryProposalEvidenceSessionId" class="operator-session-recall-source-value"></span></div>
+                  <div class="operator-session-recall-source"><span class="operator-session-recall-source-label">source_message_index</span><span id="operatorSessionRecallMemoryProposalEvidenceMessageIndex" class="operator-session-recall-source-value"></span></div>
+                  <div class="operator-session-recall-source"><span class="operator-session-recall-source-label">source_content_hash</span><span id="operatorSessionRecallMemoryProposalEvidenceContentHash" class="operator-session-recall-source-value"></span></div>
+                  <div class="operator-session-recall-source"><span class="operator-session-recall-source-label">source_quote</span><span id="operatorSessionRecallMemoryProposalEvidenceQuote" class="operator-session-recall-source-value"></span></div>
+                </div>
+                <div class="operator-session-recall-memory-proposal-grid">
+                  <label>Target kind
+                    <select id="operatorSessionRecallMemoryProposalTargetKind" name="target_kind" required>
+                      <option value="">Choose target kind</option>
+                      <option value="memory">memory</option>
+                      <option value="skill">skill</option>
+                    </select>
+                  </label>
+                  <label>Memory section
+                    <select id="operatorSessionRecallMemoryProposalTargetSection" name="target_section">
+                      <option value="">Choose memory section</option>
+                      <option value="memory">memory</option>
+                      <option value="user">user</option>
+                      <option value="soul">soul</option>
+                    </select>
+                  </label>
+                  <label>Skill name <input id="operatorSessionRecallMemoryProposalTargetName" name="target_name" type="text" autocomplete="off"></label>
+                  <label>Skill category <input id="operatorSessionRecallMemoryProposalTargetCategory" name="target_category" type="text" autocomplete="off"></label>
+                  <label>Operation
+                    <select id="operatorSessionRecallMemoryProposalOperation" name="operation" required>
+                      <option value="append">append</option>
+                      <option value="edit">edit</option>
+                      <option value="delete">delete</option>
+                    </select>
+                  </label>
+                  <label>Durability
+                    <select id="operatorSessionRecallMemoryProposalClassificationDurability" name="classification_durability" required>
+                      <option value="durable">durable</option>
+                      <option value="transient">transient</option>
+                      <option value="unknown">unknown</option>
+                    </select>
+                  </label>
+                  <label>Transient risk
+                    <select id="operatorSessionRecallMemoryProposalTransientRisk" name="classification_transient_risk" required>
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                    </select>
+                  </label>
+                  <label>Stale state
+                    <select id="operatorSessionRecallMemoryProposalStaleState" name="stale_state" required>
+                      <option value="current">current</option>
+                      <option value="review_required">review_required</option>
+                      <option value="expired">expired</option>
+                    </select>
+                  </label>
+                </div>
+                <label>Proposed summary <textarea id="operatorSessionRecallMemoryProposalSummary" name="proposed_summary" rows="2" required></textarea></label>
+                <label>Proposed content <textarea id="operatorSessionRecallMemoryProposalContent" name="proposed_content" rows="4" required></textarea></label>
+                <label>Classification reason <textarea id="operatorSessionRecallMemoryProposalClassificationReason" name="classification_reason" rows="2" required></textarea></label>
+                <label>Stale expires at <input id="operatorSessionRecallMemoryProposalExpiresAt" name="stale_expires_at" type="text" placeholder="YYYY-MM-DDTHH:MM:SSZ" required></label>
+                <label>Stale reason <textarea id="operatorSessionRecallMemoryProposalStaleReason" name="stale_reason" rows="2" required></textarea></label>
+                <div id="operatorSessionRecallMemoryProposalStatus" class="operator-session-recall-memory-proposal-status" aria-live="polite"></div>
+                <div class="operator-session-recall-memory-proposal-actions">
+                  <button type="button" class="operator-session-recall-action" onclick="cancelOperatorSessionRecallMemoryProposal()">Cancel</button>
+                  <button type="submit" class="operator-session-recall-action primary">Save local review proposal</button>
+                </div>
+              </form>
+            </div>
+            <div id="operatorSessionRecallList" class="operator-session-recall-list" aria-live="polite"></div>
+          </div>
+          <div id="operatorDocsArtifactsPopover" class="operator-docs-artifacts-popover" hidden aria-label="Manual docs and artifacts browser">
+            <div class="operator-docs-artifacts-header">
+              <div>
+                <div class="operator-docs-artifacts-title">Docs / Artifacts</div>
+                <div class="operator-docs-artifacts-subtitle" id="operatorDocsArtifactsStatus">Manual read-only browser — refresh to list allowlisted local sources</div>
+              </div>
+              <button type="button" class="operator-docs-artifacts-close" onclick="hideOperatorDocsArtifacts()" aria-label="Close docs and artifacts">×</button>
+            </div>
+            <div class="operator-docs-artifacts-controls" aria-label="Docs and artifacts filters">
+              <label class="operator-docs-artifacts-field">Search
+                <input id="operatorDocsArtifactsInput" class="operator-docs-artifacts-input" type="search" autocomplete="off" placeholder="Search docs or artifacts">
+              </label>
+              <label class="operator-docs-artifacts-field">Kind
+                <select id="operatorDocsArtifactsKind" class="operator-docs-artifacts-kind">
+                  <option value="all">All</option>
+                  <option value="meta_plan">Meta plan</option>
+                  <option value="plan">Plan</option>
+                  <option value="handoff">Handoff</option>
+                  <option value="brief">Brief</option>
+                  <option value="artifact_manifest">Artifact manifest</option>
+                  <option value="action_summary">Action summary</option>
+                  <option value="state_summary">State summary</option>
+                  <option value="changelog">Changelog</option>
+                </select>
+              </label>
+              <label class="operator-docs-artifacts-field">Root
+                <input id="operatorDocsArtifactsRoot" class="operator-docs-artifacts-root" type="text" autocomplete="off" placeholder="Optional root">
+              </label>
+              <button type="button" id="operatorDocsArtifactsRefresh" class="operator-docs-artifacts-action primary" onclick="refreshOperatorDocsArtifacts()">Refresh</button>
+            </div>
+            <div class="operator-docs-artifacts-body">
+              <div id="operatorDocsArtifactsList" class="operator-docs-artifacts-list" aria-live="polite"></div>
+              <div id="operatorDocsArtifactsPreview" class="operator-docs-artifacts-preview" aria-live="polite"></div>
+            </div>
+          </div>
+          <div id="operatorDeviceAdminPopover" class="operator-device-admin-popover" hidden aria-label="Device admin foundations">
+            <div class="operator-device-admin-header">
+              <div>
+                <div class="operator-device-admin-title">Device Admin Foundations</div>
+                <div class="operator-device-admin-subtitle" id="operatorDeviceAdminStatus">Manual foundations only — no execution</div>
+              </div>
+              <button type="button" class="operator-device-admin-close" onclick="hideOperatorDeviceAdmin()" aria-label="Close device admin">×</button>
+            </div>
+            <div class="operator-device-admin-controls" aria-label="Device admin filters">
+              <label class="operator-device-admin-field">Search
+                <input id="operatorDeviceAdminInput" class="operator-device-admin-input" type="search" autocomplete="off" placeholder="Search source-backed hosts, paths, or dry-runs">
+              </label>
+              <label class="operator-device-admin-field">Host
+                <select id="operatorDeviceAdminHost" class="operator-device-admin-host">
+                  <option value="all">All hosts</option>
+                </select>
+              </label>
+              <label class="operator-device-admin-field">Action
+                <select id="operatorDeviceAdminAction" class="operator-device-admin-action-select">
+                  <option value="all">All actions</option>
+                  <option value="copy">Copy preview</option>
+                  <option value="move">Move preview</option>
+                  <option value="delete">Delete preview</option>
+                  <option value="rename">Rename preview</option>
+                  <option value="mkdir">Mkdir preview</option>
+                  <option value="inventory">Inventory preview</option>
+                </select>
+              </label>
+              <button type="button" id="operatorDeviceAdminRefresh" class="operator-device-admin-action primary" onclick="refreshOperatorDeviceAdmin()">Refresh</button>
+            </div>
+            <div class="operator-device-admin-body">
+              <div id="operatorDeviceAdminList" class="operator-device-admin-list" aria-live="polite"></div>
+              <div id="operatorDeviceAdminPreview" class="operator-device-admin-preview" aria-live="polite"></div>
+            </div>
+          </div>
         </div>
         <div class="upload-bar-wrap" id="uploadBarWrap"><div class="upload-bar" id="uploadBar"></div></div>
       </div>
@@ -808,6 +1056,17 @@
           <button class="panel-head-btn has-tooltip has-tooltip--bottom kanban-nudge-dispatch-btn" id="btnKanbanPreviewDispatcher" onclick="nudgeKanbanDispatcher()" data-tooltip="Preview dispatcher (dry-run)" data-i18n-title="kanban_nudge_dispatcher" aria-label="Preview dispatcher (dry-run)">▶</button>
           <button class="panel-head-btn has-tooltip has-tooltip--bottom kanban-run-dispatch-btn" id="btnKanbanRunDispatcher" onclick="runKanbanDispatcher()" data-tooltip="Run dispatcher — claim Ready tasks" data-i18n-title="kanban_run_dispatcher" aria-label="Run dispatcher"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg></button>
         </div>
+      </div>
+      <div id="operatorKanbanPanel" class="operator-kanban-panel state-unknown" role="region" aria-label="Hermes operator Kanban safety panel" aria-live="polite">
+        <div class="operator-kanban-header">
+          <div>
+            <div class="operator-kanban-title">Operator Kanban</div>
+            <div class="operator-kanban-subtitle" id="operatorKanbanSubtitle">Not checked yet</div>
+          </div>
+          <button id="operatorKanbanRefresh" class="operator-kanban-refresh" type="button" onclick="refreshOperatorKanban({force:true,reason:'manual'})">Refresh</button>
+        </div>
+        <div class="operator-kanban-copy">read-only / no dispatch · hermes-operator only</div>
+        <div id="operatorKanbanBody" class="operator-kanban-body"></div>
       </div>
       <div class="kanban-task-preview" id="kanbanTaskPreview" style="display:none"></div>
       <div class="kanban-board-wrap">
@@ -1410,6 +1669,14 @@
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/operator_truth.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/operator_proposals.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/operator_kanban.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/operator_commitments.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/operator_memory_skill_review.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/operator_session_recall.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/operator_docs_artifacts.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/operator_device_admin.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 
 <!-- Kanban: create/rename board modal — used for both flows. -->

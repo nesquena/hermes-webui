@@ -824,6 +824,7 @@ async function cmdGoal(args){
     appendThinking();setBusy(true);
     setComposerStatus(t('goal_working_toward'));
     S.activeStreamId=r.stream_id;
+    if(typeof rememberSessionRunGraphRun==='function')rememberSessionRunGraphRun(activeSid,r.stream_id);
     if(S.session&&S.session.session_id===activeSid){
       S.session.active_stream_id=r.stream_id;
       if(typeof r.pending_started_at==='number')S.session.pending_started_at=r.pending_started_at;

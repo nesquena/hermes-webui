@@ -7,6 +7,7 @@ import html as _html
 import copy
 import io
 import gzip
+import ipaddress
 import json
 import logging
 import os
@@ -1283,6 +1284,12 @@ def _csrf_exempt_path(path: str) -> bool:
         "/api/auth/passkey/options",
         "/api/auth/passkey/login",
         "/api/csp-report",
+        # Slice 5 local review queue writes are protected by a stricter
+        # loopback/proxy-header guard below. Let that guard produce the
+        # authoritative would_execute:false denial payload instead of the
+        # broader public-origin CSRF path.
+        "/api/operator/memory-skill-review/propose",
+        "/api/operator/memory-skill-review/decision",
     }
 
 
@@ -1365,6 +1372,151 @@ def _check_csrf(handler) -> bool:
     if verify_csrf_token(cookie_val or "", submitted or ""):
         return True
     return _set_csrf_failure_reason(handler, "token_mismatch")
+
+
+def _operator_commitments_is_loopback_host(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    if text == "localhost":
+        return True
+    if text.startswith("[") and "]" in text:
+        text = text[1:text.index("]")]
+    elif ":" in text and text.count(":") == 1:
+        text = text.split(":", 1)[0]
+    try:
+        return ipaddress.ip_address(text).is_loopback
+    except ValueError:
+        return text == "localhost"
+
+
+def _operator_commitments_header_host(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("http://") or text.startswith("https://"):
+        try:
+            parsed = urlsplit(text)
+            if parsed.username or parsed.password:
+                return ""
+            return parsed.hostname or ""
+        except Exception:
+            return ""
+    if "@" in text:
+        return ""
+    return text
+
+
+def _operator_commitments_local_write_allowed(handler) -> bool:
+    """Slice 4 local write guard for commitment promotion.
+
+    CSRF can intentionally allow configured public origins. Commitment promotion is
+    narrower: it is a local state write and must stay loopback-only even behind a
+    reverse proxy.
+    """
+
+    try:
+        address = getattr(handler, "client_address", None)
+        client_ip = str(address[0]) if address else ""
+    except Exception:
+        client_ip = ""
+    if not _operator_commitments_is_loopback_host(client_ip):
+        return False
+
+    headers = getattr(handler, "headers", {})
+    forwarded_for = headers.get("X-Forwarded-For", "") if headers else ""
+    for part in str(forwarded_for or "").split(","):
+        item = part.strip()
+        if item and not _operator_commitments_is_loopback_host(item):
+            return False
+    for header in ("X-Real-IP", "X-Forwarded-Host", "X-Real-Host", "Host"):
+        value = headers.get(header, "") if headers else ""
+        if value and not _operator_commitments_is_loopback_host(_operator_commitments_header_host(value)):
+            return False
+    for header in ("Origin", "Referer"):
+        value = headers.get(header, "") if headers else ""
+        if value and not _operator_commitments_is_loopback_host(_operator_commitments_header_host(value)):
+            return False
+    return True
+
+
+def _operator_commitments_client_context(handler) -> dict[str, str]:
+    try:
+        address = getattr(handler, "client_address", None)
+        client_ip = str(address[0]) if address else "unknown"
+    except Exception:
+        client_ip = "unknown"
+    return {"client_ip": client_ip}
+
+
+def _operator_memory_skill_review_is_loopback_host(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    if text == "localhost":
+        return True
+    if text.startswith("[") and "]" in text:
+        text = text[1:text.index("]")]
+    elif ":" in text and text.count(":") == 1:
+        text = text.split(":", 1)[0]
+    try:
+        return ipaddress.ip_address(text).is_loopback
+    except ValueError:
+        return text == "localhost"
+
+
+def _operator_memory_skill_review_header_host(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.startswith("http://") or text.startswith("https://"):
+        try:
+            parsed = urlsplit(text)
+            if parsed.username or parsed.password:
+                return ""
+            return parsed.hostname or ""
+        except Exception:
+            return ""
+    if "@" in text:
+        return ""
+    return text
+
+
+def _operator_memory_skill_review_local_write_allowed(handler) -> bool:
+    """Slice 5 local write guard for memory/skill review queue state."""
+
+    try:
+        address = getattr(handler, "client_address", None)
+        client_ip = str(address[0]) if address else ""
+    except Exception:
+        client_ip = ""
+    if not _operator_memory_skill_review_is_loopback_host(client_ip):
+        return False
+
+    headers = getattr(handler, "headers", {})
+    forwarded_for = headers.get("X-Forwarded-For", "") if headers else ""
+    for part in str(forwarded_for or "").split(","):
+        item = part.strip()
+        if item and not _operator_memory_skill_review_is_loopback_host(item):
+            return False
+    for header in ("X-Real-IP", "X-Forwarded-Host", "X-Real-Host", "Host"):
+        value = headers.get(header, "") if headers else ""
+        if value and not _operator_memory_skill_review_is_loopback_host(_operator_memory_skill_review_header_host(value)):
+            return False
+    for header in ("Origin", "Referer"):
+        value = headers.get(header, "") if headers else ""
+        if value and not _operator_memory_skill_review_is_loopback_host(_operator_memory_skill_review_header_host(value)):
+            return False
+    return True
+
+
+def _operator_memory_skill_review_client_context(handler) -> dict[str, str]:
+    try:
+        address = getattr(handler, "client_address", None)
+        client_ip = str(address[0]) if address else "unknown"
+    except Exception:
+        client_ip = "unknown"
+    return {"client_ip": client_ip}
 
 
 def _client_ip_for_rate_limit(handler) -> str:
@@ -2487,9 +2639,11 @@ from api.streaming import (
 )
 from api.run_journal import (
     find_run_summary,
+    latest_run_summary_for_session,
     read_run_events,
     stale_interrupted_event,
 )
+from api.run_graph import build_run_graph
 from api.providers import get_providers, get_provider_quota, get_provider_cost_history, set_provider_key, remove_provider_key
 from api.onboarding import (
     apply_onboarding_setup,
@@ -3865,6 +4019,120 @@ def handle_get(handler, parsed) -> bool:
         j(handler, build_system_health_payload())
         return True
 
+    if parsed.path == "/api/operator/truth":
+        from api.operator_truth import build_operator_truth_payload
+
+        qs = parse_qs(parsed.query or "")
+        payload = build_operator_truth_payload(
+            session_id=(qs.get("session_id", [""])[0] or None),
+            ui_board_hint=(qs.get("ui_board", [""])[0] or None),
+        )
+        j(handler, payload)
+        return True
+
+    if parsed.path == "/api/operator/proposals":
+        from api.operator_proposals import build_operator_proposal_payload
+
+        qs = parse_qs(parsed.query or "")
+        payload = build_operator_proposal_payload(
+            session_id=(qs.get("session_id", [""])[0] or None),
+            ui_board_hint=(qs.get("ui_board", [""])[0] or None),
+        )
+        j(handler, payload)
+        return True
+
+    if parsed.path == "/api/operator/kanban":
+        from api.operator_kanban import build_operator_kanban_payload
+
+        qs = parse_qs(parsed.query or "")
+        payload = build_operator_kanban_payload(
+            board=(qs.get("board", [""])[0] or "hermes-operator"),
+            session_id=(qs.get("session_id", [""])[0] or None),
+            ui_board_hint=(qs.get("ui_board", [""])[0] or None),
+        )
+        j(handler, payload)
+        return True
+
+    if parsed.path == "/api/operator/commitments":
+        from api.operator_commitments import build_operator_commitments_payload
+
+        qs = parse_qs(parsed.query or "")
+        payload = build_operator_commitments_payload(
+            session_id=(qs.get("session_id", [""])[0] or None),
+            ui_board_hint=(qs.get("ui_board", [""])[0] or None),
+        )
+        j(handler, payload)
+        return True
+
+    if parsed.path == "/api/operator/memory-skill-review":
+        from api.operator_memory_skill_review import build_operator_memory_skill_review_payload
+
+        qs = parse_qs(parsed.query or "")
+        payload = build_operator_memory_skill_review_payload(
+            session_id=(qs.get("session_id", [""])[0] or None),
+            ui_board_hint=(qs.get("ui_board", [""])[0] or None),
+        )
+        j(handler, payload)
+        return True
+
+    if parsed.path == "/api/operator/session-recall":
+        from api.operator_session_recall import build_operator_session_recall_payload
+
+        qs = parse_qs(parsed.query or "")
+        all_profiles_raw = (qs.get("all_profiles", [""])[0] or "").strip().lower()
+        payload = build_operator_session_recall_payload(
+            query_text=qs.get("q", [""])[0],
+            limit=qs.get("limit", [20])[0],
+            per_session=qs.get("per_session", [2])[0],
+            all_profiles=all_profiles_raw in {"1", "true", "yes", "on"},
+        )
+        j(handler, payload)
+        return True
+
+    if parsed.path == "/api/operator/docs-artifacts":
+        from api.operator_docs_artifacts import build_operator_docs_artifacts_payload
+
+        qs = parse_qs(parsed.query or "")
+        payload = build_operator_docs_artifacts_payload(
+            query_text=qs.get("query", [""])[0],
+            kind=qs.get("kind", ["all"])[0],
+            root=qs.get("root", ["all"])[0],
+            limit=qs.get("limit", [50])[0],
+        )
+        j(handler, payload)
+        return True
+
+    if parsed.path == "/api/operator/docs-artifacts/open":
+        from api.operator_docs_artifacts import build_operator_docs_artifact_preview_payload
+
+        qs = parse_qs(parsed.query or "")
+        payload = build_operator_docs_artifact_preview_payload(
+            item_id=qs.get("id", [""])[0],
+        )
+        j(handler, payload)
+        return True
+
+    if parsed.path == "/api/operator/device-admin":
+        from api.operator_device_admin import build_operator_device_admin_payload
+
+        qs = parse_qs(parsed.query or "")
+        payload = build_operator_device_admin_payload(
+            query_text=qs.get("query", [""])[0],
+            host=qs.get("host", ["all"])[0],
+            action=qs.get("action", ["all"])[0],
+            limit=qs.get("limit", [50])[0],
+        )
+        j(handler, payload)
+        return True
+
+    if parsed.path == "/api/operator/device-admin/preview":
+        from api.operator_device_admin import build_operator_device_admin_preview_payload
+
+        qs = parse_qs(parsed.query or "")
+        payload = build_operator_device_admin_preview_payload(action_id=qs.get("id", [""])[0])
+        j(handler, payload)
+        return True
+
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
 
@@ -4584,6 +4852,47 @@ def handle_get(handler, parsed) -> bool:
             payload["journal"] = _run_journal_status_payload(journal, active=active)
         return j(handler, payload)
 
+    if parsed.path == "/api/run/latest":
+        qs = parse_qs(parsed.query)
+        session_id = qs.get("session_id", [""])[0].strip()
+        if not session_id:
+            return bad(handler, "session_id required")
+        try:
+            summary = latest_run_summary_for_session(session_id)
+        except ValueError as exc:
+            return bad(handler, str(exc))
+        except Exception:
+            logger.exception("/api/run/latest failed for session %s", session_id)
+            summary = None
+        if not summary:
+            return j(handler, {"found": False, "session_id": session_id, "run_id": None, "journal": None})
+        return j(
+            handler,
+            {
+                "found": True,
+                "session_id": summary.get("session_id"),
+                "run_id": summary.get("run_id"),
+                "journal": _run_journal_status_payload(summary, active=False),
+            },
+        )
+
+    if parsed.path == "/api/run/graph":
+        qs = parse_qs(parsed.query)
+        session_id = qs.get("session_id", [""])[0].strip()
+        run_id = qs.get("run_id", [""])[0].strip()
+        if not session_id:
+            return bad(handler, "session_id required")
+        if not run_id:
+            return bad(handler, "run_id required")
+        return j(
+            handler,
+            build_run_graph(
+                session_id,
+                run_id,
+                after_seq=_parse_run_journal_after_seq(qs),
+            ),
+        )
+
     if parsed.path == "/api/chat/cancel":
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
         if not stream_id:
@@ -4931,6 +5240,53 @@ def handle_post(handler, parsed) -> bool:
         from api.session_recovery import repair_safe_session_recovery
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
         return j(handler, result, status=200 if result.get("clean") else 409)
+
+    if parsed.path == "/api/operator/commitments/promote":
+        if not _operator_commitments_local_write_allowed(handler):
+            j(handler, {"error": "commitment promotion is loopback-only", "would_execute": False}, status=403)
+            return True
+        from api.operator_commitments import promote_operator_commitment
+
+        result = promote_operator_commitment(
+            body,
+            client_context=_operator_commitments_client_context(handler),
+        )
+        j(handler, result, status=201 if result.get("ok") else 400)
+        return True
+
+    if parsed.path == "/api/operator/memory-skill-review/propose":
+        if not _operator_memory_skill_review_local_write_allowed(handler):
+            j(
+                handler,
+                {"ok": False, "error": "memory/skill review queue writes are loopback-only", "would_execute": False},
+                status=403,
+            )
+            return True
+        from api.operator_memory_skill_review import propose_operator_memory_skill_review
+
+        result = propose_operator_memory_skill_review(
+            body,
+            client_context=_operator_memory_skill_review_client_context(handler),
+        )
+        j(handler, result, status=201 if result.get("ok") else 400)
+        return True
+
+    if parsed.path == "/api/operator/memory-skill-review/decision":
+        if not _operator_memory_skill_review_local_write_allowed(handler):
+            j(
+                handler,
+                {"ok": False, "error": "memory/skill review queue writes are loopback-only", "would_execute": False},
+                status=403,
+            )
+            return True
+        from api.operator_memory_skill_review import decide_operator_memory_skill_review
+
+        result = decide_operator_memory_skill_review(
+            body,
+            client_context=_operator_memory_skill_review_client_context(handler),
+        )
+        j(handler, result, status=200 if result.get("ok") else 400)
+        return True
 
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_post

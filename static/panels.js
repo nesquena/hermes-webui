@@ -2697,6 +2697,12 @@ async function loadKanbanBoards(){
     _kanbanSetSavedBoard('default');
   }
   _kanbanCurrentBoard = (active === 'default') ? null : active;
+  if (typeof refreshOperatorTruth === 'function') refreshOperatorTruth({force:true, reason:'kanban-board-load'});
+  try {
+    if (typeof refreshOperatorKanban === 'function') {
+      Promise.resolve(refreshOperatorKanban({force:true, reason:'kanban-board-load'})).catch(() => {});
+    }
+  } catch(_) {}
   // The switcher is visible whenever ≥1 non-default board exists OR the
   // current board is non-default. (If you only have 'default', a switcher
   // adds clutter without value.)

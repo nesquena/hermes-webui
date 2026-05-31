@@ -3,6 +3,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Slice 8 Device Admin Foundations: a manual, read-only operator surface for source-backed host/path allowlist state, dry-run previews, receipt-log visibility, and per-action approval requirements with execution disabled.
+- Added the Slice 7 Docs/Artifact Browser operator panel, a manual read-only browser for allowlisted local plans, briefs, action summaries, manifests, state summaries, and changelog entries with bounded previews, honest missing/stale/unknown states, no fake cards, and no apply path.
+- Added a manual read-only Session Recall operator panel for source-backed saved-session search, stale/historical proof labels, and local-only task or memory/skill review proposals with no apply path and no direct memory/skill mutation.
+- Added a local Memory + Skill Review operator queue for proposed memory/skill mutations, showing reviewable diffs, source evidence, durable/transient classification, stale/expiry state, approve/deny review status, and rollback context without applying changes or mutating memory/skill files.
+- Added a read-only Operator Kanban panel for the `hermes-operator` board that surfaces task status, scratch safety, blockers, receipt/completion metadata, and review state without dispatching or mutating tasks.
+- Added a manual read-only Reverse Prompt v0 proposal surface with `/api/operator/proposals`, source-backed next-action cards, and draft-only handoff controls that do not execute actions.
+- Added a read-only Operator Truth Strip proof layer with `/api/operator/truth` and compact composer chips for live/stale/unknown workspace, profile, WebUI state, Kanban board, and scratch-safety receipts.
+
+### Changed
+
+- Renamed the operator `Actions` chip to `Proposals` and clarified the empty Commitments state so the proposal-to-commitment workflow is discoverable.
+
 ## [v0.51.137] — 2026-05-25 — Release DI (stage-batch19 — 6-PR medium-risk batch)
 
 ### Added

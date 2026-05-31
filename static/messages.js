@@ -630,6 +630,7 @@ function closeOtherLiveStreams(activeSid){
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
+  if(typeof rememberSessionRunGraphRun==='function') rememberSessionRunGraphRun(activeSid, streamId);
   const reconnecting=!!options.reconnecting;
   if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
   else {

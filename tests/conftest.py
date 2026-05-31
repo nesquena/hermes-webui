@@ -471,7 +471,20 @@ def test_server():
     real_skills  = HERMES_HOME / 'skills'
     test_skills  = TEST_STATE_DIR / 'skills'
     if real_skills.exists() and not test_skills.exists():
-        test_skills.symlink_to(real_skills)
+        try:
+            test_skills.symlink_to(real_skills, target_is_directory=True)
+        except OSError as exc:
+            # Windows without Developer Mode/admin symlink privileges raises
+            # WinError 1314.  Tests should still run locally, so fall back to a
+            # real copy inside the isolated test home.  Keep this narrow: only
+            # test state is copied, never production state files.
+            if getattr(exc, 'winerror', None) != 1314:
+                raise
+            shutil.copytree(
+                real_skills,
+                test_skills,
+                ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '.git'),
+            )
 
     # Isolated cron state
     (TEST_STATE_DIR / 'cron').mkdir(parents=True, exist_ok=True)

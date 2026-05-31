@@ -216,6 +216,7 @@ def read_run_events(
 def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -> dict:
     ordered = [event for event in events if isinstance(event, dict)]
     last = ordered[-1] if ordered else None
+    first = ordered[0] if ordered else None
     terminal_events = [event for event in ordered if event.get("terminal")]
     terminal = next(
         (event for event in reversed(terminal_events) if event.get("event") != "stream_end"),
@@ -232,7 +233,19 @@ def _summary_from_events(session_id: str, run_id: str, events: Iterable[dict]) -
         "terminal": bool(terminal),
         "terminal_state": status,
         "last_event": (last or {}).get("event"),
+        "first_created_at": _event_created_at(first),
+        "last_created_at": _event_created_at(last),
     }
+
+
+def _event_created_at(event: dict | None) -> float | None:
+    if not isinstance(event, dict):
+        return None
+    try:
+        raw = event.get("created_at")
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def latest_run_summary(session_id: str, run_id: str, *, session_dir: Path | None = None) -> dict:
@@ -251,6 +264,38 @@ def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | 
         summary["path"] = str(path)
         return summary
     return None
+
+
+def latest_run_summary_for_session(session_id: str, *, session_dir: Path | None = None) -> dict | None:
+    """Return the newest non-empty run journal summary for one session."""
+    sid = _validate_id(session_id, "session_id")
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    session_journal_dir = root / RUN_JOURNAL_DIR_NAME / sid
+    if not session_journal_dir.exists():
+        return None
+
+    latest: dict | None = None
+    latest_key: tuple[float, int, str] | None = None
+    for path in session_journal_dir.glob("*.jsonl"):
+        try:
+            rid = _validate_id(path.stem, "run_id")
+        except ValueError:
+            continue
+        events, _malformed = _read_jsonl(path)
+        if not events:
+            continue
+        summary = _summary_from_events(sid, rid, events)
+        summary["path"] = str(path)
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = 0
+        latest_at = float(summary.get("last_created_at") or 0.0)
+        key: tuple[float, int, str] = (latest_at, int(mtime_ns), rid)
+        if latest_key is None or key > latest_key:
+            latest_key = key
+            latest = summary
+    return latest
 
 
 def stale_interrupted_event(session_id: str, run_id: str, *, after_seq: int | None = None) -> dict | None:

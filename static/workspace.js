@@ -141,6 +141,185 @@ if(typeof document !== 'undefined'){
   else _setWorkspacePanelTabDataset();
 }
 
+const RUN_GRAPH_LAST_RUN_KEY='hermes-webui-last-run-id-by-session';
+let _runGraphFetchToken=0;
+let _runGraphDisplayState={sessionId:'',runId:'',html:'',status:'idle'};
+
+function _runGraphLastRunStore(){
+  try{
+    const parsed=JSON.parse(localStorage.getItem(RUN_GRAPH_LAST_RUN_KEY)||'{}');
+    return parsed&&typeof parsed==='object'&&!Array.isArray(parsed)?parsed:{};
+  }catch(_){return {};}
+}
+
+function _saveRunGraphLastRunStore(store){
+  try{localStorage.setItem(RUN_GRAPH_LAST_RUN_KEY,JSON.stringify(store||{}));}catch(_){}
+}
+
+function _setRunGraphRememberedRun(sessionId,runId){
+  sessionId=String(sessionId||'').trim();
+  runId=String(runId||'').trim();
+  if(!sessionId||!runId) return false;
+  const store=_runGraphLastRunStore();
+  store[sessionId]=runId;
+  _saveRunGraphLastRunStore(store);
+  if(S.session&&S.session.session_id===sessionId){
+    S.lastRunId=runId;
+    S.lastRunSessionId=sessionId;
+  }
+  return true;
+}
+
+function rememberSessionRunGraphRun(sessionId, runId){
+  if(!_setRunGraphRememberedRun(sessionId,runId)) return;
+  if(_workspacePanelActiveTab==='artifacts') scheduleRenderSessionArtifacts();
+}
+
+async function _fetchLatestRunGraphRunId(sessionId){
+  sessionId=String(sessionId||'').trim();
+  if(!sessionId) return '';
+  const latest=await api(`/api/run/latest?session_id=${encodeURIComponent(sessionId)}`,{timeoutMs:8000});
+  const runId=String((latest&&latest.run_id)||(latest&&latest.journal&&latest.journal.run_id)||'').trim();
+  if(runId) _setRunGraphRememberedRun(sessionId,runId);
+  return runId;
+}
+
+function _runGraphRunId(session){
+  const sid=session&&session.session_id;
+  const inflight=sid&&INFLIGHT[sid];
+  const activeForSession=(S.session&&S.session.session_id===sid)?S.activeStreamId:'';
+  const stored=sid?_runGraphLastRunStore()[sid]:'';
+  const remembered=(S.lastRunSessionId===sid)?S.lastRunId:'';
+  return String(activeForSession||session&&session.active_stream_id||inflight&&inflight.streamId||remembered||stored||'').trim();
+}
+
+function _runGraphStatusClass(status){
+  const value=String(status||'unknown').trim().toLowerCase().replace(/[^a-z0-9_-]+/g,'-');
+  return value||'unknown';
+}
+
+function _runGraphValueText(value){
+  if(value===null||value===undefined||value==='') return '';
+  if(typeof value==='object'){
+    try{return JSON.stringify(value);}catch(_){return String(value);}
+  }
+  return String(value);
+}
+
+function _runGraphLatestHtml(latest){
+  const entries=Object.entries(latest&&typeof latest==='object'?latest:{}).filter(([,value])=>_runGraphValueText(value)).slice(0,4);
+  if(!entries.length) return '';
+  return `<div class="workspace-run-graph-latest">${entries.map(([key,value])=>`<span><b>${esc(key)}</b> ${esc(_runGraphValueText(value))}</span>`).join('')}</div>`;
+}
+
+function _runGraphNodeSeqText(node){
+  const first=Number(node&&node.first_seq||0);
+  const last=Number(node&&node.last_seq||0);
+  if(first&&last&&first!==last) return `seq ${first}–${last}`;
+  if(last) return `seq ${last}`;
+  return '';
+}
+
+function _runGraphNodeHtml(node){
+  node=node||{};
+  const status=_runGraphStatusClass(node.status);
+  const kind=String(node.kind||'event');
+  const count=Number(node.event_count||0);
+  const seq=_runGraphNodeSeqText(node);
+  const meta=[kind,count?`${count} event${count===1?'':'s'}`:'',seq].filter(Boolean).join(' · ');
+  return `<article class="workspace-run-graph-card status-${esc(status)}" data-run-graph-node-kind="${esc(kind)}" data-run-graph-node-status="${esc(status)}">
+    <div class="workspace-run-graph-card-head">
+      <span class="workspace-run-graph-node-label">${esc(node.label||kind)}</span>
+      <span class="workspace-run-graph-node-status">${esc(status)}</span>
+    </div>
+    <div class="workspace-run-graph-node-meta">${esc(meta)}</div>
+    ${_runGraphLatestHtml(node.latest)}
+  </article>`;
+}
+
+function _runGraphCardHtml(graph){
+  graph=graph||{};
+  const nodes=Array.isArray(graph.nodes)?graph.nodes:[];
+  const edges=Array.isArray(graph.edges)?graph.edges:[];
+  if(!nodes.length){
+    return '<div class="workspace-run-graph-empty">No run journal events found for this run yet.</div>';
+  }
+  const root=nodes.find(node=>node&&node.kind==='run')||nodes[0]||{};
+  const childNodes=nodes.filter(node=>node&&node!==root);
+  const status=_runGraphStatusClass(graph.status||root.status);
+  const eventCount=Number(graph.event_count||root.event_count||0);
+  const edgeHtml=edges.length?`<div class="workspace-run-graph-edge">${esc(edges.length)} edge${edges.length===1?'':'s'} projected from journal order</div>`:'';
+  return `<div class="workspace-run-graph-summary status-${esc(status)}">
+      <div>
+        <div class="workspace-run-graph-title">Run graph</div>
+        <div class="workspace-run-graph-subtitle">${esc(graph.run_id||'run')} · ${esc(status)} · ${eventCount} event${eventCount===1?'':'s'}</div>
+      </div>
+    </div>
+    <div class="workspace-run-graph-grid">
+      ${_runGraphNodeHtml(root)}
+      ${childNodes.map(_runGraphNodeHtml).join('')}
+    </div>
+    ${edgeHtml}`;
+}
+
+function _runGraphShellHtml(inner){
+  return `<section class="workspace-run-graph" id="workspaceRunGraph" aria-label="Run graph">${inner||''}</section>`;
+}
+
+function _runGraphPlaceholderHtml(message, tone='empty'){
+  return `<div class="workspace-run-graph-empty ${esc(tone)}">${esc(message||'No run graph available yet.')}</div>`;
+}
+
+function _currentRunGraphShellHtml(){
+  const session=S.session;
+  if(!session) return _runGraphShellHtml(_runGraphPlaceholderHtml('Open a conversation to see the run graph.'));
+  const sessionId=String(session.session_id||'');
+  const runId=_runGraphRunId(session);
+  if(!runId) return _runGraphShellHtml(_runGraphPlaceholderHtml('Looking up latest run graph…','loading'));
+  if(_runGraphDisplayState.sessionId===sessionId&&_runGraphDisplayState.runId===runId&&_runGraphDisplayState.html){
+    return _runGraphShellHtml(_runGraphDisplayState.html);
+  }
+  return _runGraphShellHtml(_runGraphPlaceholderHtml('Loading run graph…','loading'));
+}
+
+async function renderSessionRunGraph(force=false){
+  const root=$('workspaceRunGraph');
+  if(!root) return;
+  const session=S.session;
+  if(!session){root.innerHTML=_runGraphPlaceholderHtml('Open a conversation to see the run graph.');return;}
+  const sessionId=String(session.session_id||'').trim();
+  let runId=_runGraphRunId(session);
+  if(!sessionId){root.innerHTML=_runGraphPlaceholderHtml('No run graph yet. Start a run and journaled events will appear here.');return;}
+  if(!force&&_workspacePanelActiveTab!=='artifacts') return;
+  const token=++_runGraphFetchToken;
+  root.innerHTML=_runGraphDisplayState.sessionId===sessionId&&_runGraphDisplayState.runId===runId&&_runGraphDisplayState.html
+    ? _runGraphDisplayState.html
+    : _runGraphPlaceholderHtml(runId?'Loading run graph…':'Looking up latest run graph…','loading');
+  try{
+    if(!runId){
+      runId=await _fetchLatestRunGraphRunId(sessionId);
+      if(token!==_runGraphFetchToken) return;
+      if(!runId){
+        const html=_runGraphPlaceholderHtml('No run graph yet. Start a run and journaled events will appear here.');
+        _runGraphDisplayState={sessionId,runId:'',html,status:'empty'};
+        root.innerHTML=html;
+        return;
+      }
+    }
+    const graph=await api(`/api/run/graph?session_id=${encodeURIComponent(sessionId)}&run_id=${encodeURIComponent(runId)}`,{timeoutMs:8000});
+    if(token!==_runGraphFetchToken) return;
+    const html=_runGraphCardHtml(graph);
+    _runGraphDisplayState={sessionId,runId,html,status:'loaded'};
+    root.innerHTML=html;
+  }catch(e){
+    if(token!==_runGraphFetchToken) return;
+    const message=e&&e.message?e.message:'Run graph unavailable';
+    const html=_runGraphPlaceholderHtml(`Run graph unavailable: ${message}`,'error');
+    _runGraphDisplayState={sessionId,runId,html,status:'error'};
+    root.innerHTML=html;
+  }
+}
+
 function switchWorkspacePanelTab(tab){
   _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : 'files';
   _setWorkspacePanelTabDataset();
@@ -244,15 +423,17 @@ function renderSessionArtifacts(){
   if(!root) return;
   const items = collectSessionArtifacts();
   if(count) count.textContent = String(items.length);
+  const runGraphHtml = _currentRunGraphShellHtml();
   if(!S.session){
-    root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
+    root.innerHTML = runGraphHtml + '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
+    renderSessionRunGraph();
     return;
   }
-  if(!items.length){
-    root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
-    return;
-  }
-  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+  const artifactHtml = items.length
+    ? items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('')
+    : '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
+  root.innerHTML = runGraphHtml + artifactHtml;
+  renderSessionRunGraph();
 }
 
 function openArtifactPath(path){
