@@ -4327,6 +4327,11 @@ def handle_get(handler, parsed) -> bool:
         login_id = (query.get("login_id", [""])[0] or "").strip()
         return j(handler, weixin.poll_status(login_id))
 
+    # ── Platforms: Weixin pairing approval — list pending + approved (GET) ──
+    if parsed.path == "/api/platforms/weixin/pairing":
+        from api.platforms import weixin
+        return j(handler, weixin.pairing_list())
+
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
@@ -5667,6 +5672,23 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/platforms/weixin/login/start":
         from api.platforms import weixin
         return j(handler, weixin.start_login())
+
+    # ── Platforms: Weixin (微信 / 个人微信) unbind / logout ──
+    if parsed.path == "/api/platforms/weixin/unbind":
+        from api.platforms import weixin
+        return j(handler, weixin.unbind())
+
+    # ── Platforms: Weixin (微信 / 个人微信) pairing — approve by code ──
+    if parsed.path == "/api/platforms/weixin/pairing/approve":
+        from api.platforms import weixin
+        code = (body.get("code") or "").strip()
+        return j(handler, weixin.pairing_approve(code))
+
+    # ── Platforms: Weixin (微信 / 个人微信) pairing — revoke approved user ──
+    if parsed.path == "/api/platforms/weixin/pairing/revoke":
+        from api.platforms import weixin
+        user_id = (body.get("user_id") or "").strip()
+        return j(handler, weixin.pairing_revoke(user_id))
 
     # ── Platforms: Weixin (微信 / 个人微信) access-policy save (+ optional restart) ──
     if parsed.path == "/api/platforms/weixin":

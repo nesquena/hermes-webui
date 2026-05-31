@@ -474,6 +474,159 @@ def poll_status(login_id: str) -> dict:
     return {"state": "waiting", "detail": f"status={status}"}
 
 
+# ── Unbind / logout ─────────────────────────────────────────────────────────
+
+# Every WEIXIN_* key written by the connection flow + access policies. Unbind
+# clears all of these so get_config() falls back to a clean "not configured"
+# state. Listed explicitly (rather than scanning the .env) so we never touch an
+# unrelated key that merely shares the prefix.
+_WEIXIN_ENV_KEYS = (
+    "WEIXIN_ACCOUNT_ID",
+    "WEIXIN_TOKEN",
+    "WEIXIN_BASE_URL",
+    "WEIXIN_CDN_BASE_URL",
+    "WEIXIN_DM_POLICY",
+    "WEIXIN_ALLOWED_USERS",
+    "WEIXIN_GROUP_POLICY",
+    "WEIXIN_GROUP_ALLOWED_USERS",
+    "WEIXIN_HOME_CHANNEL",
+)
+
+
+def unbind() -> dict:
+    """Disconnect Weixin: clear all WEIXIN_* keys + cached accounts, restart.
+
+    Removes every credential and access-policy key from the active-profile
+    ``.env`` (via ``_write_env_file`` with ``None`` sentinels), deletes the
+    per-account cache directory ``<hermes_home>/weixin/accounts/`` (tolerant of
+    a missing dir), then restarts the gateway so the platform unloads. Always
+    returns ``{unbound: True, restart: {...}}`` — the .env/dir clearing never
+    raises for an operational failure.
+    """
+    # 1) Strip every WEIXIN_* key from the active-profile .env.
+    _write_env_file(_env_path(), {k: None for k in _WEIXIN_ENV_KEYS})
+
+    # 2) Drop the cached account store (best-effort — absence is not an error).
+    shutil.rmtree(_accounts_dir(), ignore_errors=True)
+
+    # 3) Restart the gateway so it unloads the Weixin platform.
+    restart = restart_gateway()
+
+    return {"unbound": True, "restart": restart}
+
+
+# ── Pairing approval (defensive reuse of the agent's PairingStore) ───────────
+
+_WEIXIN_PLATFORM = "weixin"
+
+
+def _get_pairing_store():
+    """Return a fresh ``PairingStore`` instance, or ``None`` on an older agent.
+
+    The agent's ``gateway.pairing.PairingStore`` locates its own hermes_home /
+    pairing directory, so we construct it with no args. Any import/construction
+    failure (older agent without pairing support) degrades to ``None`` so the
+    callers can return ``{available: False}`` instead of crashing.
+    """
+    try:
+        from gateway.pairing import PairingStore  # type: ignore  # noqa: PLC0415
+    except Exception:
+        return None
+    try:
+        return PairingStore()
+    except Exception:
+        return None
+
+
+def pairing_list() -> dict:
+    """List pending + approved Weixin pairing requests.
+
+    Returns ``{available: True, pending: [...], approved: [...]}`` when the
+    agent supports pairing, else ``{available: False}``. The pending entries
+    deliberately OMIT the (hashed) ``code`` field — only ``user_id`` /
+    ``user_name`` / ``age_minutes`` are surfaced so admins can see who is
+    requesting access without ever exposing pairing-code material.
+    """
+    store = _get_pairing_store()
+    if store is None:
+        return {"available": False}
+
+    try:
+        raw_pending = store.list_pending(_WEIXIN_PLATFORM) or []
+    except Exception:
+        raw_pending = []
+    try:
+        raw_approved = store.list_approved(_WEIXIN_PLATFORM) or []
+    except Exception:
+        raw_approved = []
+
+    pending = [
+        {
+            "user_id": str(item.get("user_id", "") or ""),
+            "user_name": str(item.get("user_name", "") or ""),
+            "age_minutes": int(item.get("age_minutes", 0) or 0),
+        }
+        for item in raw_pending
+        if isinstance(item, dict)
+    ]
+    approved = [
+        {
+            "user_id": str(item.get("user_id", "") or ""),
+            "user_name": str(item.get("user_name", "") or ""),
+        }
+        for item in raw_approved
+        if isinstance(item, dict)
+    ]
+    return {"available": True, "pending": pending, "approved": approved}
+
+
+def pairing_approve(code: str) -> dict:
+    """Approve a Weixin pairing request by its admin-supplied code.
+
+    Returns ``{ok: True, user: {...}}`` on success, ``{ok: False, error: ...}``
+    on an invalid/expired code or an unsupported agent.
+    """
+    if not code or not isinstance(code, str) or not code.strip():
+        return {"ok": False, "error": "code is required"}
+
+    store = _get_pairing_store()
+    if store is None:
+        return {"ok": False, "error": "pairing is unavailable in the current agent version"}
+
+    try:
+        result = store.approve_code(_WEIXIN_PLATFORM, code.strip())
+    except Exception as exc:
+        return {"ok": False, "error": f"approve failed: {exc}"}
+
+    if not result:
+        return {"ok": False, "error": "invalid or expired pairing code"}
+
+    return {
+        "ok": True,
+        "user": {
+            "user_id": str(result.get("user_id", "") or ""),
+            "user_name": str(result.get("user_name", "") or ""),
+        },
+    }
+
+
+def pairing_revoke(user_id: str) -> dict:
+    """Revoke an approved Weixin user. Returns ``{ok: bool}`` (+ error on fail)."""
+    if not user_id or not isinstance(user_id, str) or not user_id.strip():
+        return {"ok": False, "error": "user_id is required"}
+
+    store = _get_pairing_store()
+    if store is None:
+        return {"ok": False, "error": "pairing is unavailable in the current agent version"}
+
+    try:
+        ok = bool(store.revoke(_WEIXIN_PLATFORM, user_id.strip()))
+    except Exception as exc:
+        return {"ok": False, "error": f"revoke failed: {exc}"}
+
+    return {"ok": ok}
+
+
 def restart_gateway() -> dict:
     """Run ``hermes gateway restart`` targeting the active profile.
 

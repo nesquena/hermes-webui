@@ -7185,6 +7185,49 @@ function _buildWeixinCard(cfg){
   };
   body.appendChild(scanBtn);
 
+  // ── Unbind / logout button (only when already connected) ──
+  if(configured){
+    const unbindBtn=document.createElement('button');
+    unbindBtn.type='button';
+    unbindBtn.className='provider-card-btn provider-card-btn-danger';
+    unbindBtn.style.marginTop='10px';
+    unbindBtn.textContent=t('weixin_btn_unbind');
+    unbindBtn.onclick=async()=>{
+      const ok=await showConfirmDialog({
+        title:t('weixin_btn_unbind'),
+        message:t('weixin_unbind_confirm'),
+        confirmLabel:t('weixin_btn_unbind'),
+        danger:true,
+        focusCancel:true,
+      });
+      if(!ok) return;
+      stopPolling();
+      unbindBtn.disabled=true;
+      connLine.style.color='var(--muted)';
+      connLine.textContent=t('weixin_unbinding');
+      try{
+        const res=await api('/api/platforms/weixin/unbind',{method:'POST',body:JSON.stringify({})});
+        if(res&&res.unbound){
+          showToast(t('weixin_unbound'));
+          setTimeout(()=>loadMessagingPanel(),600);
+        }else{
+          const msg=(res&&res.error)||t('weixin_login_failed_generic');
+          connLine.style.color='var(--error)';
+          connLine.textContent=t('weixin_unbind_failed',msg);
+          showToast(t('weixin_unbind_failed',msg));
+          unbindBtn.disabled=false;
+        }
+      }catch(e){
+        const msg=e&&e.message?e.message:String(e);
+        connLine.style.color='var(--error)';
+        connLine.textContent=t('weixin_unbind_failed',msg);
+        showToast(t('weixin_unbind_failed',msg));
+        unbindBtn.disabled=false;
+      }
+    };
+    body.appendChild(unbindBtn);
+  }
+
   // ── Access-policy fields ──
   const policyGroup=document.createElement('div');
   policyGroup.style.marginTop='6px';
@@ -7196,6 +7239,18 @@ function _buildWeixinCard(cfg){
     {value:'disabled',labelKey:'weixin_dm_policy_disabled'},
   ]);
   policyGroup.appendChild(dmPolicy.field);
+
+  // ── Pairing approval panel (visible only when DM policy = pairing) ──
+  const pairingPanel=_buildWeixinPairingPanel();
+  const _syncPairingVisible=()=>{
+    const on=dmPolicy.select.value==='pairing';
+    pairingPanel.root.style.display=on?'block':'none';
+    if(on && !pairingPanel.loaded){ pairingPanel.refresh(); }
+  };
+  dmPolicy.select.addEventListener('change',_syncPairingVisible);
+  policyGroup.appendChild(pairingPanel.root);
+  // Initial visibility based on the saved policy.
+  _syncPairingVisible();
 
   const allowedUsers=_feishuField('weixin_allowed_users',cfg.allowed_users||'',{placeholder:t('weixin_allowed_users_placeholder')});
   policyGroup.appendChild(allowedUsers.field);
@@ -7281,6 +7336,209 @@ function _buildWeixinCard(cfg){
     card.classList.toggle('open');
   });
   return card;
+}
+
+// ── Weixin pairing approval panel ────────────────────────────────────────────
+// A self-contained sub-panel: lists pending requests (visibility only — admins
+// approve by pasting the user-supplied pairing code, since the pending list
+// only carries hashed codes), lists approved users with a remove button, and a
+// refresh button. On an older agent that lacks pairing support the backend
+// returns {available:false} and we render a CLI-fallback hint instead.
+function _buildWeixinPairingPanel(){
+  const root=document.createElement('div');
+  root.style.cssText='display:none;margin:10px 0 4px;padding:12px;border:1px solid var(--border,#ddd);border-radius:8px;background:var(--surface-2,rgba(0,0,0,0.02))';
+
+  const head=document.createElement('div');
+  head.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px';
+  const title=document.createElement('div');
+  title.style.cssText='font-size:13px;font-weight:600;color:var(--text)';
+  title.textContent=t('weixin_pairing_title');
+  const refreshBtn=document.createElement('button');
+  refreshBtn.type='button';
+  refreshBtn.className='provider-card-btn';
+  refreshBtn.style.cssText='padding:2px 10px;font-size:12px';
+  refreshBtn.textContent=t('weixin_pairing_refresh');
+  head.appendChild(title);
+  head.appendChild(refreshBtn);
+  root.appendChild(head);
+
+  // Status / fallback message line.
+  const statusLine=document.createElement('div');
+  statusLine.style.cssText='font-size:12px;color:var(--muted);min-height:14px;margin-bottom:6px';
+  root.appendChild(statusLine);
+
+  // Pending requests section.
+  const pendingHeading=document.createElement('div');
+  pendingHeading.style.cssText='font-size:12px;font-weight:600;color:var(--muted);margin-top:4px';
+  pendingHeading.textContent=t('weixin_pairing_pending_heading');
+  const pendingList=document.createElement('div');
+  pendingList.style.cssText='margin:4px 0 8px';
+  root.appendChild(pendingHeading);
+  root.appendChild(pendingList);
+
+  // Approve-by-code row.
+  const approveRow=document.createElement('div');
+  approveRow.style.cssText='display:flex;gap:6px;margin:6px 0 10px';
+  const codeInput=document.createElement('input');
+  codeInput.type='text';
+  codeInput.placeholder=t('weixin_pairing_code_placeholder');
+  codeInput.style.cssText='flex:1;min-width:0;padding:5px 8px;font-size:13px;border:1px solid var(--border,#ccc);border-radius:6px;background:var(--surface,#fff);color:var(--text)';
+  const approveBtn=document.createElement('button');
+  approveBtn.type='button';
+  approveBtn.className='provider-card-btn provider-card-btn-primary';
+  approveBtn.style.cssText='padding:5px 12px;font-size:13px;white-space:nowrap';
+  approveBtn.textContent=t('weixin_pairing_approve_btn');
+  approveRow.appendChild(codeInput);
+  approveRow.appendChild(approveBtn);
+  root.appendChild(approveRow);
+
+  // Approved users section.
+  const approvedHeading=document.createElement('div');
+  approvedHeading.style.cssText='font-size:12px;font-weight:600;color:var(--muted)';
+  approvedHeading.textContent=t('weixin_pairing_approved_heading');
+  const approvedList=document.createElement('div');
+  approvedList.style.cssText='margin-top:4px';
+  root.appendChild(approvedHeading);
+  root.appendChild(approvedList);
+
+  const api_=(typeof api==='function')?api:null;
+
+  const _shortId=(id)=>{
+    const s=String(id||'');
+    return s.length>12?s.slice(0,12)+'…':s;
+  };
+
+  const _setUnavailable=()=>{
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('weixin_pairing_unavailable');
+    pendingHeading.style.display='none';
+    pendingList.style.display='none';
+    approveRow.style.display='none';
+    approvedHeading.style.display='none';
+    approvedList.style.display='none';
+  };
+
+  const _setAvailable=()=>{
+    pendingHeading.style.display='';
+    pendingList.style.display='';
+    approveRow.style.display='flex';
+    approvedHeading.style.display='';
+    approvedList.style.display='';
+  };
+
+  const _renderPending=(items)=>{
+    pendingList.innerHTML='';
+    if(!items||!items.length){
+      const empty=document.createElement('div');
+      empty.style.cssText='font-size:12px;color:var(--muted)';
+      empty.textContent=t('weixin_pairing_pending_empty');
+      pendingList.appendChild(empty);
+      return;
+    }
+    items.forEach(it=>{
+      const row=document.createElement('div');
+      row.style.cssText='font-size:12px;color:var(--text);padding:2px 0';
+      const name=it.user_name||it.user_id||'';
+      const age=t('weixin_pairing_age',it.age_minutes||0);
+      row.textContent=`${name} · ${_shortId(it.user_id)} · ${age}`;
+      pendingList.appendChild(row);
+    });
+  };
+
+  const _renderApproved=(items)=>{
+    approvedList.innerHTML='';
+    if(!items||!items.length){
+      const empty=document.createElement('div');
+      empty.style.cssText='font-size:12px;color:var(--muted)';
+      empty.textContent=t('weixin_pairing_approved_empty');
+      approvedList.appendChild(empty);
+      return;
+    }
+    items.forEach(it=>{
+      const row=document.createElement('div');
+      row.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 0';
+      const label=document.createElement('span');
+      label.style.cssText='font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis';
+      label.textContent=`${it.user_name||it.user_id||''} · ${_shortId(it.user_id)}`;
+      const rm=document.createElement('button');
+      rm.type='button';
+      rm.className='provider-card-btn provider-card-btn-danger';
+      rm.style.cssText='padding:2px 10px;font-size:12px;white-space:nowrap';
+      rm.textContent=t('weixin_pairing_revoke_btn');
+      rm.onclick=async()=>{
+        rm.disabled=true;
+        try{
+          const res=await api_('/api/platforms/weixin/pairing/revoke',{method:'POST',body:JSON.stringify({user_id:it.user_id})});
+          if(res&&res.ok){
+            showToast(t('weixin_pairing_revoked_ok'));
+            panel.refresh();
+          }else{
+            const msg=(res&&res.error)||'';
+            showToast(t('weixin_pairing_revoke_failed',msg));
+            rm.disabled=false;
+          }
+        }catch(e){
+          showToast(t('weixin_pairing_revoke_failed',e&&e.message?e.message:String(e)));
+          rm.disabled=false;
+        }
+      };
+      row.appendChild(label);
+      row.appendChild(rm);
+      approvedList.appendChild(row);
+    });
+  };
+
+  const refresh=async()=>{
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent='';
+    let res;
+    try{
+      res=await api_('/api/platforms/weixin/pairing');
+    }catch(e){
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('weixin_pairing_load_failed');
+      return;
+    }
+    panel.loaded=true;
+    if(!res||res.available!==true){
+      _setUnavailable();
+      return;
+    }
+    _setAvailable();
+    statusLine.textContent='';
+    _renderPending(res.pending||[]);
+    _renderApproved(res.approved||[]);
+  };
+
+  refreshBtn.onclick=()=>refresh();
+
+  approveBtn.onclick=async()=>{
+    const code=(codeInput.value||'').trim();
+    if(!code){
+      showToast(t('weixin_pairing_approve_empty'));
+      return;
+    }
+    approveBtn.disabled=true;
+    try{
+      const res=await api_('/api/platforms/weixin/pairing/approve',{method:'POST',body:JSON.stringify({code})});
+      if(res&&res.ok){
+        const uname=(res.user&&(res.user.user_name||res.user.user_id))||'';
+        showToast(t('weixin_pairing_approved_ok',uname));
+        codeInput.value='';
+        await refresh();
+      }else{
+        const msg=(res&&res.error)||'';
+        showToast(t('weixin_pairing_approve_failed',msg));
+      }
+    }catch(e){
+      showToast(t('weixin_pairing_approve_failed',e&&e.message?e.message:String(e)));
+    }finally{
+      approveBtn.disabled=false;
+    }
+  };
+
+  const panel={root,refresh,loaded:false};
+  return panel;
 }
 
 async function _refreshProviderQuota(card,button){
