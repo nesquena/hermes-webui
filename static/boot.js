@@ -442,6 +442,13 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
   let _forceMediaRecorder=!SpeechRecognition||localStorage.getItem(_micForceMediaRecorderKey)==='1';
 
+  // Raw audio mode preference: send audio file instead of transcribing
+  let _rawAudioMode = localStorage.getItem('hermes-raw-audio-mode') === 'true';
+  // Capture backend pinned at recording start ('speech' | 'media' | null) so
+  // _stopMic / onstop act on the backend that actually started, even if the
+  // raw-audio toggle changes mid-recording (#3169 Codex review).
+  let _activeCaptureMode = null;
+
   const btn=$('btnMic');
   const status=$('micStatus');
   const ta=$('msg');
@@ -456,15 +463,52 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   let _prefix='';
   let _isRecording=false;
 
+  function _setButtonTooltipAndKey(btn, key){
+    const text = t(key);
+    btn.setAttribute('data-i18n-title', key);
+    if(btn.hasAttribute('data-tooltip')){
+      btn.setAttribute('data-tooltip', text);
+      if(btn.hasAttribute('title')) btn.removeAttribute('title');
+    } else {
+      btn.title = text;
+    }
+  }
+
   function _setRecording(on){
     window._micActive=on;
     btn.classList.toggle('recording',on);
     // Active-state title flips so the tooltip is honest about what
     // pressing the button will do (#1488).
-    _setButtonTooltip(btn, on ? t('voice_dictate_active') : t('voice_dictate'));
+    _setButtonTooltipAndKey(btn, on ? 'voice_dictate_active' : (_rawAudioMode ? 'voice_send_raw' : 'voice_dictate'));
     status.style.display=on?'':'none';
     if(statusText) statusText.textContent=on?'Listening':'Listening';
     if(!on){ _finalText=''; _prefix=''; }
+  }
+
+  function _updateMicTooltip(){
+    if(!window._micActive){
+      _setButtonTooltipAndKey(btn, _rawAudioMode ? 'voice_send_raw' : 'voice_dictate');
+    }
+  }
+
+  async function _sendRawAudio(blob){
+    const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
+    const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
+    S.pendingFiles.push(file);
+    renderTray();
+    // An explicit Send-button click while recording sets _micPendingSend — that
+    // is an unambiguous send intent, so honor it even when the composer already
+    // has text (mirrors the transcribe path). Otherwise (manual mic-stop): send
+    // immediately only if the composer is empty, else just attach + toast so the
+    // user can keep composing.
+    if(window._micPendingSend){
+      window._micPendingSend=false;
+      send();
+    }else if(!ta.value.trim()){
+      send();
+    }else{
+      showToast(t('voice_raw_attached'));
+    }
   }
 
   function _commitTranscript(text){
@@ -509,7 +553,11 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
 
   function _stopMic(){
     if(!window._micActive) return;
-    if(recognition){
+    // Stop the backend that was ACTIVE WHEN RECORDING STARTED — not whatever
+    // _rawAudioMode says now. The user can toggle Settings → Sound mid-recording,
+    // which would otherwise make us stop the wrong backend and orphan the other
+    // (#3169 Codex review). _activeCaptureMode is pinned at start.
+    if(recognition && _activeCaptureMode==='speech'){
       recognition.stop();
       return;
     }
@@ -589,7 +637,8 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     _isRecording=true;
     _finalText='';
     _prefix=ta.value;
-    if(recognition && !_forceMediaRecorder){
+    if(recognition && !_forceMediaRecorder && !_rawAudioMode){
+      _activeCaptureMode='speech';
       recognition.start();
       _setRecording(true);
       return;
@@ -618,11 +667,18 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
         const blob=new Blob(audioChunks,{type:mediaRecorder.mimeType||mimeType||'audio/webm'});
         _setRecording(false);
         _stopTracks();
-        if(blob.size){ await _transcribeBlob(blob); }
+        if(blob.size){
+          if(_activeCaptureMode==='media-raw'){
+            await _sendRawAudio(blob);
+          }else{
+            await _transcribeBlob(blob);
+          }
+        }
         else if(window._micPendingSend){
           window._micPendingSend=false;
         }
       };
+      _activeCaptureMode=_rawAudioMode?'media-raw':'media-transcribe';
       mediaRecorder.start();
       _setRecording(true);
     }catch(err){
@@ -632,6 +688,18 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
       showToast(t('mic_denied'));
     }
   };
+
+  // Wire up the settings checkbox
+  const rawAudioCheckbox = document.getElementById('settingsRawAudio');
+  if(rawAudioCheckbox){
+    rawAudioCheckbox.checked = _rawAudioMode;
+    rawAudioCheckbox.addEventListener('change', function(){
+      _rawAudioMode = this.checked;
+      localStorage.setItem('hermes-raw-audio-mode', _rawAudioMode ? 'true' : 'false');
+      _updateMicTooltip();
+    });
+  }
+  _updateMicTooltip();
 })();
 window._micActive=window._micActive||false;
 window._micPendingSend=window._micPendingSend||false;

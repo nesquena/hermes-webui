@@ -664,3 +664,5 @@ class TestClarifyCardTimerLogic:
         body = m.group(0)
         assert 'JSON.stringify' in body, 'showClarifyCard must compute a signature via JSON.stringify'
         assert '_clarifySignature' in body, 'showClarifyCard must check/set _clarifySignature'
+        assert 'clarify_id: pending.clarify_id || null' in body, \
+            'showClarifyCard signature must include clarify_id so a newly queued identical prompt is not mistaken for the previous one'
