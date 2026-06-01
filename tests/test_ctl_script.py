@@ -110,6 +110,7 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
             "FAKE_PYTHON_LOG": str(fake_log),
             "HERMES_WEBUI_HOST": "0.0.0.0",
             "HERMES_WEBUI_PORT": "18991",
+            "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
         },
     )
 
@@ -166,6 +167,7 @@ def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
             "HERMES_WEBUI_PYTHON": str(fake_python),
             "FAKE_PYTHON_LOG": str(fake_log),
             "HERMES_WEBUI_HOST": "0.0.0.0",
+            "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
         },
         repo_root=repo_root,
     )
@@ -194,6 +196,116 @@ def test_stale_pid_file_is_removed_without_killing_unrelated_process(tmp_path):
         assert sleeper.poll() is None, "ctl.sh must not kill unrelated PIDs"
         assert not pid_file.exists()
     finally:
+        sleeper.terminate()
+        try:
+            sleeper.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            sleeper.kill()
+
+
+def _write_fake_launchctl(fake_bin, pid):
+    launchctl = fake_bin / "launchctl"
+    launchctl.write_text(
+        textwrap.dedent(
+            f"""
+            #!/usr/bin/env bash
+            if [[ "$1" == "print" ]]; then
+              printf '\\tpid = {pid}\\n'
+              exit 0
+            fi
+            exit 1
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    launchctl.chmod(0o755)
+
+
+def _write_fake_lsof(fake_bin, listening):
+    """Fake lsof: exit 0 (PID listens on the port) iff `listening` is True."""
+    lsof = fake_bin / "lsof"
+    lsof.write_text(
+        "#!/usr/bin/env bash\n" + ("exit 0\n" if listening else "exit 1\n"),
+        encoding="utf-8",
+    )
+    lsof.chmod(0o755)
+
+
+def test_start_refuses_second_instance_when_launchd_job_owns_the_port(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    _write_fake_launchctl(fake_bin, sleeper.pid)
+    # launchd-owned PID IS listening on the requested (default) port → real conflict.
+    _write_fake_lsof(fake_bin, listening=True)
+
+    try:
+        result = run_ctl(
+            tmp_path,
+            "start",
+            env={
+                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+                "HERMES_WEBUI_LAUNCHD_LABEL": "com.parantoux.hermes-webui",
+            },
+        )
+        assert result.returncode == 2
+        combined = result.stdout + result.stderr
+        assert "Refusing to start a second Hermes WebUI" in combined
+        assert "launchctl kickstart -k" in combined
+        assert not (tmp_path / ".hermes" / "webui.pid").exists()
+    finally:
+        sleeper.terminate()
+        try:
+            sleeper.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            sleeper.kill()
+
+
+def test_start_allows_alternate_port_while_launchd_job_runs_on_default(tmp_path):
+    """A second instance on a DIFFERENT port must not be blocked by the launchd
+    guard, even while the launchd-managed default instance is alive (#3291 fix /
+    Codex regression-gate finding for v0.51.191)."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    _write_fake_launchctl(fake_bin, sleeper.pid)
+    # launchd-owned PID is alive but NOT listening on our (alternate) port → no conflict.
+    _write_fake_lsof(fake_bin, listening=False)
+
+    # A fake python so `start` "launches" without needing the real server.
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\ntrap 'exit 0' TERM INT\nwhile true; do sleep 1; done\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    started_pid = None
+    try:
+        result = run_ctl(
+            tmp_path,
+            "start",
+            env={
+                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+                "HERMES_WEBUI_LAUNCHD_LABEL": "com.parantoux.hermes-webui",
+                "HERMES_WEBUI_PORT": "18992",
+                "HERMES_WEBUI_PYTHON": str(fake_python),
+            },
+        )
+        combined = result.stdout + result.stderr
+        assert "Refusing to start a second Hermes WebUI" not in combined, combined
+        assert result.returncode == 0, combined
+        pid_file = tmp_path / ".hermes" / "webui.pid"
+        if pid_file.exists():
+            started_pid = int(pid_file.read_text().strip())
+    finally:
+        if started_pid:
+            try:
+                os.kill(started_pid, 15)
+            except ProcessLookupError:
+                pass
         sleeper.terminate()
         try:
             sleeper.wait(timeout=3)
