@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Same-session external refresh now preserves the already-loaded transcript width for long conversations instead of collapsing the view back to the default tail window mid-read (#3239).
+
 ## [v0.51.195] — 2026-06-01 — Release FO (stage-batch7 — hide attachment path markers in chat UI)
 
 ### Fixed
