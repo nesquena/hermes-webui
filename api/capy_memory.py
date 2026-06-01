@@ -90,6 +90,12 @@ _REFRESH_BLOCKED_VALUE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_REFRESH_TITLE_BLOCKED_VALUE_RE = re.compile(
+    r"https?://|www\.|(?:^|[^A-Za-z0-9._%+-])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/|\b)|"
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+    re.IGNORECASE,
+)
+
 _SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS sources (
@@ -1425,9 +1431,12 @@ def _github_commit_message_title(payload: dict[str, Any]) -> str:
     raw_message = commit.get("message")
     if not isinstance(raw_message, _PUBLIC_SCALAR_TYPES):
         return ""
-    if _REFRESH_BLOCKED_VALUE_RE.search(str(raw_message)):
+    message = str(raw_message)
+    if _refresh_value_is_blocked(message):
         return ""
-    first_line = str(raw_message).splitlines()[0] if str(raw_message).splitlines() else ""
+    first_line = message.splitlines()[0] if message.splitlines() else ""
+    if _refresh_value_is_blocked(first_line) or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(first_line):
+        return ""
     return _safe_text(first_line, limit=200)
 
 
@@ -1602,6 +1611,93 @@ def _github_branches_refresh_summary(origin_uri: str, payload: list[Any]) -> str
         if sha:
             branch_parts.append(f"commit: {sha[:12]}")
         parts.append("; ".join(branch_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_commits_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or lowered[4] != "commits"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_commit_list_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    sha = _safe_public_text(row.get("sha"), limit=80).lower()
+    if not re.fullmatch(r"[a-f0-9]{40}", sha):
+        return False
+    commit = row.get("commit")
+    if not isinstance(commit, dict):
+        return False
+    if not _github_commit_message_title(row):
+        return False
+    raw_author = commit.get("author")
+    author: dict[str, Any] = raw_author if isinstance(raw_author, dict) else {}
+    if not _safe_iso_timestamp(author.get("date")):
+        return False
+    raw_committer = commit.get("committer")
+    committer: dict[str, Any] = raw_committer if isinstance(raw_committer, dict) else {}
+    if committer.get("date") is not None and not _safe_iso_timestamp(committer.get("date")):
+        return False
+    parents = row.get("parents")
+    if parents is not None:
+        if not isinstance(parents, list):
+            return False
+        for parent in parents:
+            if not isinstance(parent, dict):
+                return False
+            parent_sha = _safe_public_text(parent.get("sha"), limit=80)
+            if not re.fullmatch(r"[A-Fa-f0-9]{40}", parent_sha):
+                return False
+    for raw_value in (row.get("sha"), commit.get("message"), author.get("date"), committer.get("date")):
+        if isinstance(raw_value, _PUBLIC_SCALAR_TYPES) and _REFRESH_BLOCKED_VALUE_RE.search(str(raw_value)):
+            return False
+    return True
+
+
+def _json_payload_is_github_commits_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_commits_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_commit_list_row_is_safe(row) for row in payload)
+
+
+def _github_commits_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_commits_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_commit_list_row_is_safe(row)]
+    parts = [f"GitHub commits for {repo}", f"commit count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        sha = _safe_public_text(row.get("sha"), limit=80).lower()
+        title = _github_commit_message_title(row)
+        raw_commit = row.get("commit")
+        commit: dict[str, Any] = raw_commit if isinstance(raw_commit, dict) else {}
+        raw_author = commit.get("author")
+        author: dict[str, Any] = raw_author if isinstance(raw_author, dict) else {}
+        author_date = _safe_iso_timestamp(author.get("date"))
+        parents = row.get("parents") if isinstance(row.get("parents"), list) else []
+        row_parts = [f"commit: {sha[:12]}"]
+        if title:
+            row_parts.append(f"message: {title}")
+        if author_date:
+            row_parts.append(f"author date: {author_date}")
+        row_parts.append(f"parents: {len(parents)}")
+        parts.append("; ".join(row_parts))
     return _bounded_refresh_summary("; ".join(parts))
 
 
@@ -2081,6 +2177,15 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
     if _json_payload_is_github_contributors_metadata(origin_uri, payload):
         title = f"GitHub contributors {(_github_contributors_path_repo(origin_uri) or source_id)}"
         summary = _github_contributors_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _json_payload_is_github_commits_metadata(origin_uri, payload):
+        title = f"GitHub commits {(_github_commits_path_repo(origin_uri) or source_id)}"
+        summary = _github_commits_refresh_summary(origin_uri, payload)
         return {
             "metadata_only": True,
             "title": title,
