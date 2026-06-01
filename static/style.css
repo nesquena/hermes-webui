@@ -3448,6 +3448,18 @@ main.main.showing-logs > #mainLogs{display:flex;}
 }
 
 
+/* ── Messaging platforms (Feishu / Lark, WeCom / 企业微信) ── */
+#messagingPlatformsList{gap:12px;}
+.provider-card-badge.messaging-platform-badge-off{
+  background:rgba(232,160,48,.12);
+  color:#b9760a;
+}
+:root.dark .provider-card-badge.messaging-platform-badge-off{background:rgba(232,160,48,.18);color:#e8a030;}
+.messaging-platform-reveal{display:none;}
+.messaging-platform-toggle input[type="checkbox"]{accent-color:var(--accent);width:15px;height:15px;flex-shrink:0;}
+.messaging-platform-toggle span{line-height:1.3;}
+.messaging-platform-status:empty{display:none;}
+
 /* ── Plugin visibility cards ── */
 #pluginsList{gap:12px;}
 .plugin-card .provider-card-body{display:block;}

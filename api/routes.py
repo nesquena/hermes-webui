@@ -4378,6 +4378,33 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/providers":
         return j(handler, get_providers())
 
+    # ── Platforms: Feishu (飞书 / Lark) config (GET) ──
+    if parsed.path == "/api/platforms/feishu":
+        from api.platforms import feishu
+        return j(handler, feishu.get_config())
+
+    # ── Platforms: WeCom (企业微信 / WeChat Work) config (GET) ──
+    if parsed.path == "/api/platforms/wecom":
+        from api.platforms import wecom
+        return j(handler, wecom.get_config())
+
+    # ── Platforms: Weixin (微信 / 个人微信 / iLink Bot) config (GET) ──
+    if parsed.path == "/api/platforms/weixin":
+        from api.platforms import weixin
+        return j(handler, weixin.get_config())
+
+    # ── Platforms: Weixin QR login status poll (GET ?login_id=...) ──
+    if parsed.path == "/api/platforms/weixin/login/status":
+        from api.platforms import weixin
+        query = parse_qs(parsed.query)
+        login_id = (query.get("login_id", [""])[0] or "").strip()
+        return j(handler, weixin.poll_status(login_id))
+
+    # ── Platforms: Weixin pairing approval — list pending + approved (GET) ──
+    if parsed.path == "/api/platforms/weixin/pairing":
+        from api.platforms import weixin
+        return j(handler, weixin.pairing_list())
+
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
@@ -5691,6 +5718,80 @@ def handle_post(handler, parsed) -> bool:
         result = remove_provider_key(provider_id)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+
+    # ── Platforms: Feishu (飞书 / Lark) credential probe ──
+    if parsed.path == "/api/platforms/feishu/validate":
+        from api.platforms import feishu
+        app_id = (body.get("app_id") or "").strip()
+        # app_secret may be the masked sentinel when re-validating saved creds;
+        # the route stays thin and passes it straight to validate() (the probe
+        # simply fails for a sentinel, returning {ok: False, ...}).
+        app_secret = body.get("app_secret")
+        domain = (body.get("domain") or "feishu").strip()
+        return j(handler, feishu.validate(app_id, app_secret, domain))
+
+    # ── Platforms: Feishu (飞书 / Lark) config save (+ optional restart) ──
+    if parsed.path == "/api/platforms/feishu":
+        from api.platforms import feishu
+        try:
+            result = feishu.save(body)
+        except feishu.FeishuConfigError as exc:  # ValueError subclass
+            return bad(handler, str(exc), status=400)
+        if body.get("restart") is True:
+            result = {**result, "restart": feishu.restart_gateway()}
+        return j(handler, result)
+
+    # ── Platforms: WeCom (企业微信 / WeChat Work) credential probe ──
+    if parsed.path == "/api/platforms/wecom/validate":
+        from api.platforms import wecom
+        # Secrets may be the masked sentinel when re-validating saved creds; the
+        # route stays thin and passes the body straight to validate() (the basic
+        # check simply fails for a sentinel, returning {ok: False, ...}).
+        return j(handler, wecom.validate(body))
+
+    # ── Platforms: WeCom (企业微信 / WeChat Work) config save (+ optional restart) ──
+    if parsed.path == "/api/platforms/wecom":
+        from api.platforms import wecom
+        try:
+            result = wecom.save(body)
+        except wecom.WecomConfigError as exc:  # ValueError subclass
+            return bad(handler, str(exc), status=400)
+        if body.get("restart") is True:
+            result = {**result, "restart": wecom.restart_gateway()}
+        return j(handler, result)
+
+    # ── Platforms: Weixin (微信 / 个人微信) QR login — start ──
+    if parsed.path == "/api/platforms/weixin/login/start":
+        from api.platforms import weixin
+        return j(handler, weixin.start_login())
+
+    # ── Platforms: Weixin (微信 / 个人微信) unbind / logout ──
+    if parsed.path == "/api/platforms/weixin/unbind":
+        from api.platforms import weixin
+        return j(handler, weixin.unbind())
+
+    # ── Platforms: Weixin (微信 / 个人微信) pairing — approve by code ──
+    if parsed.path == "/api/platforms/weixin/pairing/approve":
+        from api.platforms import weixin
+        code = (body.get("code") or "").strip()
+        return j(handler, weixin.pairing_approve(code))
+
+    # ── Platforms: Weixin (微信 / 个人微信) pairing — revoke approved user ──
+    if parsed.path == "/api/platforms/weixin/pairing/revoke":
+        from api.platforms import weixin
+        user_id = (body.get("user_id") or "").strip()
+        return j(handler, weixin.pairing_revoke(user_id))
+
+    # ── Platforms: Weixin (微信 / 个人微信) access-policy save (+ optional restart) ──
+    if parsed.path == "/api/platforms/weixin":
+        from api.platforms import weixin
+        try:
+            result = weixin.save(body)
+        except weixin.WeixinConfigError as exc:  # ValueError subclass
+            return bad(handler, str(exc), status=400)
+        if body.get("restart") is True:
+            result = {**result, "restart": weixin.restart_gateway()}
         return j(handler, result)
 
     if parsed.path == "/api/reasoning":

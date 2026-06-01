@@ -5690,16 +5690,16 @@ function _toggleTabVisibilityChip(panel){
 }
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='messaging'||name==='plugins'||name==='system')?name:'conversation';
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',messaging:'Messaging',plugins:'Plugins',system:'System'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','system'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','messaging','plugins','system'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -5708,6 +5708,7 @@ function switchSettingsSection(name){
   if(dd && dd.value!==section) dd.value=section;
   // Lazy-load integration panels when their tabs are opened
   if(section==='providers') loadProvidersPanel();
+  if(section==='messaging') loadMessagingPanel();
   if(section==='plugins') loadPluginsPanel();
 }
 
@@ -6464,6 +6465,1095 @@ async function loadProvidersPanel(){
   }catch(e){
     list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load providers: '+esc(e.message||String(e))+'</div>';
   }
+}
+
+// ── Messaging platforms (Feishu / Lark) ──────────────────────────────────────
+// Matches the backend sentinel in api/platforms/feishu.py (MASKED_SENTINEL).
+const FEISHU_MASKED_SECRET='__FEISHU_SECRET_SET__';
+// Matches the backend sentinel in api/platforms/wecom.py (MASKED_SENTINEL).
+const WECOM_MASKED_SECRET='__WECOM_SECRET_SET__';
+
+async function loadMessagingPanel(){
+  const list=$('messagingPlatformsList');
+  if(!list) return;
+  list.innerHTML='';
+  const loading=document.createElement('div');
+  loading.style.cssText='color:var(--muted);padding:12px;font-size:13px';
+  loading.textContent=t('messaging_loading');
+  list.appendChild(loading);
+  try{
+    const [feishuCfg,wecomCfg,weixinCfg]=await Promise.all([
+      api('/api/platforms/feishu'),
+      api('/api/platforms/wecom'),
+      api('/api/platforms/weixin'),
+    ]);
+    list.innerHTML='';
+    list.appendChild(_buildFeishuCard(feishuCfg||{}));
+    list.appendChild(_buildWecomCard(wecomCfg||{}));
+    list.appendChild(_buildWeixinCard(weixinCfg||{}));
+  }catch(e){
+    list.innerHTML='';
+    const err=document.createElement('div');
+    err.style.cssText='color:var(--error);padding:12px;font-size:13px';
+    err.textContent=t('messaging_load_failed',e&&e.message?e.message:String(e));
+    list.appendChild(err);
+  }
+}
+
+// Small helper: a labelled text/password input field (provider-card styling).
+function _feishuField(labelKey,value,opts){
+  const o=opts||{};
+  const field=document.createElement('div');
+  field.className='provider-card-field';
+  field.style.marginTop='10px';
+  const label=document.createElement('label');
+  label.className='provider-card-label';
+  label.textContent=t(labelKey);
+  field.appendChild(label);
+  const input=document.createElement('input');
+  input.type=o.type||'text';
+  input.className='provider-card-input';
+  input.autocomplete='off';
+  if(o.placeholder) input.placeholder=o.placeholder;
+  if(value!=null) input.value=String(value);
+  field.appendChild(input);
+  return {field,input};
+}
+
+// Labelled <select> field.
+function _feishuSelect(labelKey,value,options){
+  const field=document.createElement('div');
+  field.className='provider-card-field';
+  field.style.marginTop='10px';
+  const label=document.createElement('label');
+  label.className='provider-card-label';
+  label.textContent=t(labelKey);
+  field.appendChild(label);
+  const select=document.createElement('select');
+  select.className='provider-card-input';
+  for(const opt of options){
+    const o=document.createElement('option');
+    o.value=opt.value;
+    o.textContent=t(opt.labelKey);
+    if(opt.value===value) o.selected=true;
+    select.appendChild(o);
+  }
+  field.appendChild(select);
+  return {field,select};
+}
+
+// Labelled checkbox (toggle) row.
+function _feishuCheckbox(labelKey,checked){
+  const row=document.createElement('label');
+  row.className='messaging-platform-toggle';
+  row.style.cssText='display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;font-size:12px;color:var(--text)';
+  const input=document.createElement('input');
+  input.type='checkbox';
+  input.checked=!!checked;
+  const span=document.createElement('span');
+  span.textContent=t(labelKey);
+  row.appendChild(input);
+  row.appendChild(span);
+  return {row,input};
+}
+
+function _buildFeishuCard(cfg){
+  const card=document.createElement('div');
+  card.className='provider-card';
+  card.dataset.platform='feishu';
+
+  const configured=cfg.configured===true;
+
+  // ── Header with status chip ──
+  const header=document.createElement('button');
+  header.type='button';
+  header.className='provider-card-header';
+  const info=document.createElement('div');
+  info.className='provider-card-info';
+  const name=document.createElement('div');
+  name.className='provider-card-name';
+  name.textContent=t('feishu_card_name');
+  const meta=document.createElement('div');
+  meta.className='provider-card-meta';
+  meta.textContent=t('feishu_card_meta');
+  info.appendChild(name);
+  info.appendChild(meta);
+  header.appendChild(info);
+  const badge=document.createElement('span');
+  badge.className='provider-card-badge'+(configured?'':' messaging-platform-badge-off');
+  badge.textContent=configured?t('messaging_status_configured'):t('messaging_status_not_configured');
+  header.appendChild(badge);
+  const chevron=document.createElement('span');
+  chevron.innerHTML='<svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>';
+  header.appendChild(chevron.firstChild);
+  card.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='provider-card-body';
+
+  // ── Core credentials ──
+  const appId=_feishuField('feishu_app_id',cfg.app_id||'',{placeholder:'cli_xxxxxxxx'});
+  body.appendChild(appId.field);
+
+  const secretSet=cfg.app_secret_set===true;
+  const appSecret=_feishuField('feishu_app_secret','',{
+    type:'password',
+    placeholder:secretSet?t('feishu_secret_configured'):'',
+  });
+  body.appendChild(appSecret.field);
+
+  const domain=_feishuSelect('feishu_domain',cfg.domain||'feishu',[
+    {value:'feishu',labelKey:'feishu_domain_feishu'},
+    {value:'lark',labelKey:'feishu_domain_lark'},
+  ]);
+  body.appendChild(domain.field);
+
+  // ── Connection mode + webhook reveal ──
+  const mode=_feishuSelect('feishu_connection_mode',cfg.connection_mode||'websocket',[
+    {value:'websocket',labelKey:'feishu_mode_websocket'},
+    {value:'webhook',labelKey:'feishu_mode_webhook'},
+  ]);
+  body.appendChild(mode.field);
+
+  const webhookGroup=document.createElement('div');
+  webhookGroup.className='messaging-platform-reveal';
+  const webhookHost=_feishuField('feishu_webhook_host',cfg.webhook_host||'',{placeholder:'127.0.0.1'});
+  const webhookPort=_feishuField('feishu_webhook_port',cfg.webhook_port||'',{placeholder:'8765'});
+  const webhookPath=_feishuField('feishu_webhook_path',cfg.webhook_path||'',{placeholder:'/feishu/webhook'});
+  const verifTokenSet=cfg.verification_token_set===true;
+  const verifToken=_feishuField('feishu_verification_token','',{
+    type:'password',
+    placeholder:verifTokenSet?t('feishu_secret_configured'):'',
+  });
+  const encryptKeySet=cfg.encrypt_key_set===true;
+  const encryptKey=_feishuField('feishu_encrypt_key','',{
+    type:'password',
+    placeholder:encryptKeySet?t('feishu_secret_configured'):'',
+  });
+  webhookGroup.appendChild(webhookHost.field);
+  webhookGroup.appendChild(webhookPort.field);
+  webhookGroup.appendChild(webhookPath.field);
+  webhookGroup.appendChild(verifToken.field);
+  webhookGroup.appendChild(encryptKey.field);
+  body.appendChild(webhookGroup);
+
+  const syncReveal=()=>{webhookGroup.style.display=mode.select.value==='webhook'?'block':'none';};
+  syncReveal();
+  mode.select.addEventListener('change',syncReveal);
+
+  // ── DM access ──
+  const allowAll=_feishuCheckbox('feishu_allow_all_users',cfg.allow_all_users===true);
+  body.appendChild(allowAll.row);
+  const allowedUsers=_feishuField('feishu_allowed_users',cfg.allowed_users||'',{placeholder:t('feishu_allowed_users_placeholder')});
+  body.appendChild(allowedUsers.field);
+
+  // ── Group policy + require mention ──
+  const groupPolicy=_feishuSelect('feishu_group_policy',cfg.group_policy||'open',[
+    {value:'open',labelKey:'feishu_group_policy_open'},
+    {value:'disabled',labelKey:'feishu_group_policy_disabled'},
+  ]);
+  body.appendChild(groupPolicy.field);
+  const requireMention=_feishuCheckbox('feishu_require_mention',cfg.require_mention!==false);
+  body.appendChild(requireMention.row);
+
+  // ── Home channel ──
+  const homeChannel=_feishuField('feishu_home_channel',cfg.home_channel||'',{placeholder:t('feishu_home_channel_placeholder')});
+  body.appendChild(homeChannel.field);
+
+  // ── Restart-after-save toggle ──
+  const restartToggle=_feishuCheckbox('feishu_restart_after_save',true);
+  body.appendChild(restartToggle.row);
+
+  // ── Status / result line ──
+  const statusLine=document.createElement('div');
+  statusLine.className='messaging-platform-status';
+  statusLine.style.cssText='font-size:12px;margin-top:10px;min-height:16px;color:var(--muted)';
+  body.appendChild(statusLine);
+
+  // Resolve the value to send for a secret field honoring the masked rule.
+  const secretValue=(input,isSet)=>{
+    const v=input.value;
+    if(v) return v;
+    return isSet?FEISHU_MASKED_SECRET:'';
+  };
+
+  // ── Buttons ──
+  const btnRow=document.createElement('div');
+  btnRow.className='provider-card-row';
+  btnRow.style.marginTop='12px';
+
+  const validateBtn=document.createElement('button');
+  validateBtn.type='button';
+  validateBtn.className='provider-card-btn provider-card-btn-ghost';
+  validateBtn.textContent=t('feishu_btn_validate');
+  validateBtn.onclick=async()=>{
+    const appIdVal=appId.input.value.trim();
+    if(!appIdVal){
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('feishu_validate_need_app_id');
+      return;
+    }
+    validateBtn.disabled=true;
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('feishu_validating');
+    try{
+      const res=await api('/api/platforms/feishu/validate',{method:'POST',body:JSON.stringify({
+        app_id:appIdVal,
+        app_secret:secretValue(appSecret.input,secretSet),
+        domain:domain.select.value,
+      })});
+      if(res&&res.ok){
+        const botName=res.bot_name||t('feishu_validate_ok_generic');
+        statusLine.style.color='var(--success,#16a34a)';
+        statusLine.textContent=t('feishu_validate_ok',botName);
+        showToast(t('feishu_validate_ok',botName));
+      }else{
+        const msg=(res&&res.error)||t('feishu_validate_failed_generic');
+        statusLine.style.color='var(--error)';
+        statusLine.textContent=t('feishu_validate_failed',msg);
+        showToast(t('feishu_validate_failed',msg));
+      }
+    }catch(e){
+      const msg=e&&e.message?e.message:String(e);
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('feishu_validate_failed',msg);
+      showToast(t('feishu_validate_failed',msg));
+    }finally{
+      validateBtn.disabled=false;
+    }
+  };
+
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='provider-card-btn provider-card-btn-primary';
+  saveBtn.textContent=t('feishu_btn_save');
+  saveBtn.onclick=async()=>{
+    saveBtn.disabled=true;
+    validateBtn.disabled=true;
+    const wantRestart=restartToggle.input.checked;
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('feishu_saving');
+    const payload={
+      app_id:appId.input.value.trim(),
+      app_secret:secretValue(appSecret.input,secretSet),
+      domain:domain.select.value,
+      connection_mode:mode.select.value,
+      webhook_host:webhookHost.input.value.trim(),
+      webhook_port:webhookPort.input.value.trim(),
+      webhook_path:webhookPath.input.value.trim(),
+      verification_token:secretValue(verifToken.input,verifTokenSet),
+      encrypt_key:secretValue(encryptKey.input,encryptKeySet),
+      allow_all_users:allowAll.input.checked,
+      allowed_users:allowedUsers.input.value.trim(),
+      group_policy:groupPolicy.select.value,
+      require_mention:requireMention.input.checked,
+      home_channel:homeChannel.input.value.trim(),
+      restart:wantRestart,
+    };
+    try{
+      const res=await api('/api/platforms/feishu',{method:'POST',body:JSON.stringify(payload)});
+      if(res&&res.saved){
+        statusLine.style.color='var(--success,#16a34a)';
+        statusLine.textContent=t('feishu_saved');
+        showToast(t('feishu_saved'));
+        if(res.restart){
+          const ok=res.restart.ok===true;
+          const detail=res.restart.detail||'';
+          showToast(ok?t('feishu_restart_ok',detail):t('feishu_restart_failed',detail));
+        }
+        // Reload so masked placeholders and the status chip reflect saved state.
+        await loadMessagingPanel();
+      }else{
+        const msg=(res&&res.error)||t('feishu_save_failed_generic');
+        statusLine.style.color='var(--error)';
+        statusLine.textContent=t('feishu_save_failed',msg);
+        showToast(t('feishu_save_failed',msg));
+        saveBtn.disabled=false;
+        validateBtn.disabled=false;
+      }
+    }catch(e){
+      const msg=e&&e.message?e.message:String(e);
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('feishu_save_failed',msg);
+      showToast(t('feishu_save_failed',msg));
+      saveBtn.disabled=false;
+      validateBtn.disabled=false;
+    }
+  };
+
+  btnRow.appendChild(validateBtn);
+  btnRow.appendChild(saveBtn);
+  body.appendChild(btnRow);
+
+  card.appendChild(body);
+  if(configured) card.classList.add('open');
+  header.addEventListener('click',e=>{
+    if(e.target.closest('.provider-card-body')) return;
+    card.classList.toggle('open');
+  });
+  return card;
+}
+
+function _buildWecomCard(cfg){
+  const card=document.createElement('div');
+  card.className='provider-card';
+  card.dataset.platform='wecom';
+
+  const configured=cfg.configured===true;
+
+  // ── Header with status chip ──
+  const header=document.createElement('button');
+  header.type='button';
+  header.className='provider-card-header';
+  const info=document.createElement('div');
+  info.className='provider-card-info';
+  const name=document.createElement('div');
+  name.className='provider-card-name';
+  name.textContent=t('wecom_card_name');
+  const meta=document.createElement('div');
+  meta.className='provider-card-meta';
+  meta.textContent=t('wecom_card_meta');
+  info.appendChild(name);
+  info.appendChild(meta);
+  header.appendChild(info);
+  const badge=document.createElement('span');
+  badge.className='provider-card-badge'+(configured?'':' messaging-platform-badge-off');
+  badge.textContent=configured?t('messaging_status_configured'):t('messaging_status_not_configured');
+  header.appendChild(badge);
+  const chevron=document.createElement('span');
+  chevron.innerHTML='<svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>';
+  header.appendChild(chevron.firstChild);
+  card.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='provider-card-body';
+
+  // ── Mode switch (WebSocket bot vs. callback self-built app) ──
+  const initialMode=(cfg.mode==='wecom_callback')?'wecom_callback':'wecom';
+  const mode=_feishuSelect('wecom_mode',initialMode,[
+    {value:'wecom',labelKey:'wecom_mode_websocket'},
+    {value:'wecom_callback',labelKey:'wecom_mode_callback'},
+  ]);
+  body.appendChild(mode.field);
+
+  // ── Mode A: WebSocket smart bot ──
+  const wsGroup=document.createElement('div');
+  wsGroup.className='messaging-platform-reveal';
+  const botId=_feishuField('wecom_bot_id',cfg.bot_id||'',{placeholder:'bot_xxxxxxxx'});
+  const secretSet=cfg.secret_set===true;
+  const secret=_feishuField('wecom_secret','',{
+    type:'password',
+    placeholder:secretSet?t('wecom_secret_configured'):'',
+  });
+  const wsUrl=_feishuField('wecom_websocket_url',cfg.websocket_url||'',{placeholder:'wss://openws.work.weixin.qq.com'});
+  const dmPolicy=_feishuSelect('wecom_dm_policy',cfg.dm_policy||'open',[
+    {value:'open',labelKey:'wecom_dm_policy_open'},
+    {value:'allowlist',labelKey:'wecom_dm_policy_allowlist'},
+    {value:'disabled',labelKey:'wecom_dm_policy_disabled'},
+    {value:'pairing',labelKey:'wecom_dm_policy_pairing'},
+  ]);
+  const allowedUsers=_feishuField('wecom_allowed_users',cfg.allowed_users||'',{placeholder:t('wecom_allowed_users_placeholder')});
+  const groupPolicy=_feishuSelect('wecom_group_policy',cfg.group_policy||'open',[
+    {value:'open',labelKey:'wecom_group_policy_open'},
+    {value:'allowlist',labelKey:'wecom_group_policy_allowlist'},
+    {value:'disabled',labelKey:'wecom_group_policy_disabled'},
+  ]);
+  const homeChannel=_feishuField('wecom_home_channel',cfg.home_channel||'',{placeholder:t('wecom_home_channel_placeholder')});
+  wsGroup.appendChild(botId.field);
+  wsGroup.appendChild(secret.field);
+  wsGroup.appendChild(wsUrl.field);
+  wsGroup.appendChild(dmPolicy.field);
+  wsGroup.appendChild(allowedUsers.field);
+  wsGroup.appendChild(groupPolicy.field);
+  wsGroup.appendChild(homeChannel.field);
+  body.appendChild(wsGroup);
+
+  // ── Mode B: callback self-built app ──
+  const cbGroup=document.createElement('div');
+  cbGroup.className='messaging-platform-reveal';
+  const corpId=_feishuField('wecom_callback_corp_id',cfg.callback_corp_id||'',{placeholder:'ww_xxxxxxxx'});
+  const corpSecretSet=cfg.callback_corp_secret_set===true;
+  const corpSecret=_feishuField('wecom_callback_corp_secret','',{
+    type:'password',
+    placeholder:corpSecretSet?t('wecom_secret_configured'):'',
+  });
+  const agentId=_feishuField('wecom_callback_agent_id',cfg.callback_agent_id||'',{placeholder:'1000002'});
+  const cbTokenSet=cfg.callback_token_set===true;
+  const cbToken=_feishuField('wecom_callback_token','',{
+    type:'password',
+    placeholder:cbTokenSet?t('wecom_secret_configured'):'',
+  });
+  const aesSet=cfg.callback_encoding_aes_key_set===true;
+  const aesKey=_feishuField('wecom_callback_encoding_aes_key','',{
+    type:'password',
+    placeholder:aesSet?t('wecom_secret_configured'):'',
+  });
+  const cbHost=_feishuField('wecom_callback_host',cfg.callback_host||'',{placeholder:'0.0.0.0'});
+  const cbPort=_feishuField('wecom_callback_port',cfg.callback_port||'',{placeholder:'8645'});
+  cbGroup.appendChild(corpId.field);
+  cbGroup.appendChild(corpSecret.field);
+  cbGroup.appendChild(agentId.field);
+  cbGroup.appendChild(cbToken.field);
+  cbGroup.appendChild(aesKey.field);
+  cbGroup.appendChild(cbHost.field);
+  cbGroup.appendChild(cbPort.field);
+  body.appendChild(cbGroup);
+
+  const syncReveal=()=>{
+    const m=mode.select.value;
+    wsGroup.style.display=m==='wecom'?'block':'none';
+    cbGroup.style.display=m==='wecom_callback'?'block':'none';
+  };
+  syncReveal();
+  mode.select.addEventListener('change',syncReveal);
+
+  // ── Restart-after-save toggle ──
+  const restartToggle=_feishuCheckbox('wecom_restart_after_save',true);
+  body.appendChild(restartToggle.row);
+
+  // ── Status / result line ──
+  const statusLine=document.createElement('div');
+  statusLine.className='messaging-platform-status';
+  statusLine.style.cssText='font-size:12px;margin-top:10px;min-height:16px;color:var(--muted)';
+  body.appendChild(statusLine);
+
+  // Resolve the value to send for a secret field honoring the masked rule.
+  const secretValue=(input,isSet)=>{
+    const v=input.value;
+    if(v) return v;
+    return isSet?WECOM_MASKED_SECRET:'';
+  };
+
+  // Build the request payload for the active mode.
+  const buildPayload=()=>{
+    const m=mode.select.value;
+    if(m==='wecom_callback'){
+      return {
+        mode:'wecom_callback',
+        callback_corp_id:corpId.input.value.trim(),
+        callback_corp_secret:secretValue(corpSecret.input,corpSecretSet),
+        callback_agent_id:agentId.input.value.trim(),
+        callback_token:secretValue(cbToken.input,cbTokenSet),
+        callback_encoding_aes_key:secretValue(aesKey.input,aesSet),
+        callback_host:cbHost.input.value.trim(),
+        callback_port:cbPort.input.value.trim(),
+      };
+    }
+    return {
+      mode:'wecom',
+      bot_id:botId.input.value.trim(),
+      secret:secretValue(secret.input,secretSet),
+      websocket_url:wsUrl.input.value.trim(),
+      dm_policy:dmPolicy.select.value,
+      allowed_users:allowedUsers.input.value.trim(),
+      group_policy:groupPolicy.select.value,
+      home_channel:homeChannel.input.value.trim(),
+    };
+  };
+
+  // ── Buttons ──
+  const btnRow=document.createElement('div');
+  btnRow.className='provider-card-row';
+  btnRow.style.marginTop='12px';
+
+  const validateBtn=document.createElement('button');
+  validateBtn.type='button';
+  validateBtn.className='provider-card-btn provider-card-btn-ghost';
+  validateBtn.textContent=t('wecom_btn_validate');
+  validateBtn.onclick=async()=>{
+    const m=mode.select.value;
+    const needId=m==='wecom_callback'?corpId.input.value.trim():botId.input.value.trim();
+    if(!needId){
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('wecom_validate_need_id');
+      return;
+    }
+    validateBtn.disabled=true;
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('wecom_validating');
+    try{
+      const res=await api('/api/platforms/wecom/validate',{method:'POST',body:JSON.stringify(buildPayload())});
+      if(res&&res.ok){
+        statusLine.style.color='var(--success,#16a34a)';
+        statusLine.textContent=t('wecom_validate_ok');
+        showToast(t('wecom_validate_ok'));
+      }else{
+        const msg=(res&&res.error)||t('wecom_validate_failed_generic');
+        statusLine.style.color='var(--error)';
+        statusLine.textContent=t('wecom_validate_failed',msg);
+        showToast(t('wecom_validate_failed',msg));
+      }
+    }catch(e){
+      const msg=e&&e.message?e.message:String(e);
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('wecom_validate_failed',msg);
+      showToast(t('wecom_validate_failed',msg));
+    }finally{
+      validateBtn.disabled=false;
+    }
+  };
+
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='provider-card-btn provider-card-btn-primary';
+  saveBtn.textContent=t('wecom_btn_save');
+  saveBtn.onclick=async()=>{
+    saveBtn.disabled=true;
+    validateBtn.disabled=true;
+    const wantRestart=restartToggle.input.checked;
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('wecom_saving');
+    const payload={...buildPayload(),restart:wantRestart};
+    try{
+      const res=await api('/api/platforms/wecom',{method:'POST',body:JSON.stringify(payload)});
+      if(res&&res.saved){
+        statusLine.style.color='var(--success,#16a34a)';
+        statusLine.textContent=t('wecom_saved');
+        showToast(t('wecom_saved'));
+        if(res.restart){
+          const ok=res.restart.ok===true;
+          const detail=res.restart.detail||'';
+          showToast(ok?t('wecom_restart_ok',detail):t('wecom_restart_failed',detail));
+        }
+        // Reload so masked placeholders and the status chip reflect saved state.
+        await loadMessagingPanel();
+      }else{
+        const msg=(res&&res.error)||t('wecom_save_failed_generic');
+        statusLine.style.color='var(--error)';
+        statusLine.textContent=t('wecom_save_failed',msg);
+        showToast(t('wecom_save_failed',msg));
+        saveBtn.disabled=false;
+        validateBtn.disabled=false;
+      }
+    }catch(e){
+      const msg=e&&e.message?e.message:String(e);
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('wecom_save_failed',msg);
+      showToast(t('wecom_save_failed',msg));
+      saveBtn.disabled=false;
+      validateBtn.disabled=false;
+    }
+  };
+
+  btnRow.appendChild(validateBtn);
+  btnRow.appendChild(saveBtn);
+  body.appendChild(btnRow);
+
+  card.appendChild(body);
+  if(configured) card.classList.add('open');
+  header.addEventListener('click',e=>{
+    if(e.target.closest('.provider-card-body')) return;
+    card.classList.toggle('open');
+  });
+  return card;
+}
+
+function _buildWeixinCard(cfg){
+  const card=document.createElement('div');
+  card.className='provider-card';
+  card.dataset.platform='weixin';
+
+  const configured=cfg.configured===true;
+  const accountId=cfg.account_id||'';
+
+  // ── Header with status chip ──
+  const header=document.createElement('button');
+  header.type='button';
+  header.className='provider-card-header';
+  const info=document.createElement('div');
+  info.className='provider-card-info';
+  const name=document.createElement('div');
+  name.className='provider-card-name';
+  name.textContent=t('weixin_card_name');
+  const meta=document.createElement('div');
+  meta.className='provider-card-meta';
+  meta.textContent=t('weixin_card_meta');
+  info.appendChild(name);
+  info.appendChild(meta);
+  header.appendChild(info);
+  const badge=document.createElement('span');
+  badge.className='provider-card-badge'+(configured?'':' messaging-platform-badge-off');
+  badge.textContent=configured?t('messaging_status_configured'):t('messaging_status_not_configured');
+  header.appendChild(badge);
+  const chevron=document.createElement('span');
+  chevron.innerHTML='<svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>';
+  header.appendChild(chevron.firstChild);
+  card.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='provider-card-body';
+
+  // ── Connection status line ──
+  const connLine=document.createElement('div');
+  connLine.className='messaging-platform-status';
+  connLine.style.cssText='font-size:13px;margin-top:4px;min-height:18px;color:var(--text)';
+  if(configured){
+    connLine.style.color='var(--success,#16a34a)';
+    connLine.textContent=accountId?t('weixin_connected_account',accountId):t('weixin_connected_generic');
+  }else{
+    connLine.style.color='var(--muted)';
+    connLine.textContent=t('weixin_not_logged_in');
+  }
+  body.appendChild(connLine);
+
+  // ── QR login area (hidden until "Scan to login" is clicked) ──
+  const loginArea=document.createElement('div');
+  loginArea.style.cssText='margin-top:12px;display:none;flex-direction:column;align-items:center;gap:10px';
+  const qrImg=document.createElement('img');
+  qrImg.alt='QR';
+  qrImg.style.cssText='width:220px;height:220px;image-rendering:pixelated;border:1px solid var(--border,#ccc);border-radius:8px;background:#fff;display:none';
+  const qrLink=document.createElement('a');
+  qrLink.target='_blank';
+  qrLink.rel='noopener';
+  qrLink.style.cssText='font-size:12px;word-break:break-all;color:var(--accent,#2563eb);display:none;max-width:320px;text-align:center';
+  const qrStatus=document.createElement('div');
+  qrStatus.style.cssText='font-size:13px;min-height:18px;color:var(--muted);text-align:center';
+  loginArea.appendChild(qrImg);
+  loginArea.appendChild(qrLink);
+  loginArea.appendChild(qrStatus);
+  body.appendChild(loginArea);
+
+  // Poll loop state (so we can cancel on re-render / success).
+  let pollTimer=null;
+  const stopPolling=()=>{ if(pollTimer){ clearTimeout(pollTimer); pollTimer=null; } };
+
+  const pollOnce=async(loginId)=>{
+    let res;
+    try{
+      res=await api('/api/platforms/weixin/login/status?login_id='+encodeURIComponent(loginId));
+    }catch(e){
+      qrStatus.style.color='var(--muted)';
+      qrStatus.textContent=t('weixin_login_waiting');
+      pollTimer=setTimeout(()=>pollOnce(loginId),2000);
+      return;
+    }
+    const state=(res&&res.state)||'error';
+    if(state==='waiting'){
+      qrStatus.style.color='var(--muted)';
+      qrStatus.textContent=t('weixin_login_waiting');
+      pollTimer=setTimeout(()=>pollOnce(loginId),2000);
+    }else if(state==='scanned'){
+      qrStatus.style.color='var(--text)';
+      qrStatus.textContent=t('weixin_login_scanned');
+      pollTimer=setTimeout(()=>pollOnce(loginId),2000);
+    }else if(state==='confirmed'){
+      stopPolling();
+      qrStatus.style.color='var(--success,#16a34a)';
+      qrStatus.textContent=t('weixin_login_confirmed');
+      showToast(t('weixin_login_confirmed'));
+      setTimeout(()=>loadMessagingPanel(),900);
+    }else if(state==='expired'){
+      stopPolling();
+      qrStatus.style.color='var(--error)';
+      qrStatus.textContent=t('weixin_login_expired');
+    }else{
+      stopPolling();
+      const msg=(res&&(res.error||res.detail))||t('weixin_login_failed_generic');
+      qrStatus.style.color='var(--error)';
+      qrStatus.textContent=t('weixin_login_failed',msg);
+    }
+  };
+
+  // ── Scan-to-login button (only when not logged in) ──
+  const scanBtn=document.createElement('button');
+  scanBtn.type='button';
+  scanBtn.className='provider-card-btn provider-card-btn-primary';
+  scanBtn.style.marginTop='12px';
+  scanBtn.textContent=configured?t('weixin_btn_relogin'):t('weixin_btn_login');
+  scanBtn.onclick=async()=>{
+    stopPolling();
+    scanBtn.disabled=true;
+    loginArea.style.display='flex';
+    qrImg.style.display='none';
+    qrLink.style.display='none';
+    qrStatus.style.color='var(--muted)';
+    qrStatus.textContent=t('weixin_login_starting');
+    let res;
+    try{
+      res=await api('/api/platforms/weixin/login/start',{method:'POST',body:JSON.stringify({})});
+    }catch(e){
+      qrStatus.style.color='var(--error)';
+      qrStatus.textContent=t('weixin_login_failed',e&&e.message?e.message:String(e));
+      scanBtn.disabled=false;
+      return;
+    }
+    if(!res||res.error||!res.login_id){
+      qrStatus.style.color='var(--error)';
+      qrStatus.textContent=(res&&res.error)||t('weixin_login_failed_generic');
+      scanBtn.disabled=false;
+      return;
+    }
+    if(res.qr_png){
+      qrImg.src='data:image/png;base64,'+res.qr_png;
+      qrImg.style.display='block';
+    }
+    if(res.qr_url){
+      qrLink.href=res.qr_url;
+      qrLink.textContent=res.qr_url;
+      // Only show the text link when we have no rendered image.
+      qrLink.style.display=res.qr_png?'none':'block';
+    }
+    qrStatus.style.color='var(--muted)';
+    qrStatus.textContent=t('weixin_login_waiting');
+    scanBtn.disabled=false;
+    pollOnce(res.login_id);
+  };
+  body.appendChild(scanBtn);
+
+  // ── Unbind / logout button (only when already connected) ──
+  if(configured){
+    const unbindBtn=document.createElement('button');
+    unbindBtn.type='button';
+    unbindBtn.className='provider-card-btn provider-card-btn-danger';
+    unbindBtn.style.marginTop='10px';
+    unbindBtn.textContent=t('weixin_btn_unbind');
+    unbindBtn.onclick=async()=>{
+      const ok=await showConfirmDialog({
+        title:t('weixin_btn_unbind'),
+        message:t('weixin_unbind_confirm'),
+        confirmLabel:t('weixin_btn_unbind'),
+        danger:true,
+        focusCancel:true,
+      });
+      if(!ok) return;
+      stopPolling();
+      unbindBtn.disabled=true;
+      connLine.style.color='var(--muted)';
+      connLine.textContent=t('weixin_unbinding');
+      try{
+        const res=await api('/api/platforms/weixin/unbind',{method:'POST',body:JSON.stringify({})});
+        if(res&&res.unbound){
+          showToast(t('weixin_unbound'));
+          setTimeout(()=>loadMessagingPanel(),600);
+        }else{
+          const msg=(res&&res.error)||t('weixin_login_failed_generic');
+          connLine.style.color='var(--error)';
+          connLine.textContent=t('weixin_unbind_failed',msg);
+          showToast(t('weixin_unbind_failed',msg));
+          unbindBtn.disabled=false;
+        }
+      }catch(e){
+        const msg=e&&e.message?e.message:String(e);
+        connLine.style.color='var(--error)';
+        connLine.textContent=t('weixin_unbind_failed',msg);
+        showToast(t('weixin_unbind_failed',msg));
+        unbindBtn.disabled=false;
+      }
+    };
+    body.appendChild(unbindBtn);
+  }
+
+  // ── Access-policy fields ──
+  const policyGroup=document.createElement('div');
+  policyGroup.style.marginTop='6px';
+
+  const dmPolicy=_feishuSelect('weixin_dm_policy',cfg.dm_policy||'open',[
+    {value:'open',labelKey:'weixin_dm_policy_open'},
+    {value:'pairing',labelKey:'weixin_dm_policy_pairing'},
+    {value:'allowlist',labelKey:'weixin_dm_policy_allowlist'},
+    {value:'disabled',labelKey:'weixin_dm_policy_disabled'},
+  ]);
+  policyGroup.appendChild(dmPolicy.field);
+
+  // ── Pairing approval panel (visible only when DM policy = pairing) ──
+  const pairingPanel=_buildWeixinPairingPanel();
+  const _syncPairingVisible=()=>{
+    const on=dmPolicy.select.value==='pairing';
+    pairingPanel.root.style.display=on?'block':'none';
+    if(on && !pairingPanel.loaded){ pairingPanel.refresh(); }
+  };
+  dmPolicy.select.addEventListener('change',_syncPairingVisible);
+  policyGroup.appendChild(pairingPanel.root);
+  // Initial visibility based on the saved policy.
+  _syncPairingVisible();
+
+  const allowedUsers=_feishuField('weixin_allowed_users',cfg.allowed_users||'',{placeholder:t('weixin_allowed_users_placeholder')});
+  policyGroup.appendChild(allowedUsers.field);
+
+  const groupPolicy=_feishuSelect('weixin_group_policy',cfg.group_policy||'disabled',[
+    {value:'disabled',labelKey:'weixin_group_policy_disabled'},
+    {value:'open',labelKey:'weixin_group_policy_open'},
+    {value:'allowlist',labelKey:'weixin_group_policy_allowlist'},
+  ]);
+  policyGroup.appendChild(groupPolicy.field);
+
+  const groupAllowed=_feishuField('weixin_group_allowed_users',cfg.group_allowed_users||'',{placeholder:t('weixin_group_allowed_users_placeholder')});
+  policyGroup.appendChild(groupAllowed.field);
+
+  const homeChannel=_feishuField('weixin_home_channel',cfg.home_channel||'',{placeholder:t('weixin_home_channel_placeholder')});
+  policyGroup.appendChild(homeChannel.field);
+
+  const restartToggle=_feishuCheckbox('weixin_restart_after_save',true);
+  policyGroup.appendChild(restartToggle.row);
+
+  body.appendChild(policyGroup);
+
+  // ── Save status line ──
+  const statusLine=document.createElement('div');
+  statusLine.className='messaging-platform-status';
+  statusLine.style.cssText='font-size:12px;margin-top:10px;min-height:16px;color:var(--muted)';
+  body.appendChild(statusLine);
+
+  // ── Save button ──
+  const btnRow=document.createElement('div');
+  btnRow.className='provider-card-row';
+  btnRow.style.marginTop='12px';
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='provider-card-btn provider-card-btn-primary';
+  saveBtn.textContent=t('weixin_btn_save');
+  saveBtn.onclick=async()=>{
+    saveBtn.disabled=true;
+    const wantRestart=restartToggle.input.checked;
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('weixin_saving');
+    const payload={
+      dm_policy:dmPolicy.select.value,
+      allowed_users:allowedUsers.input.value.trim(),
+      group_policy:groupPolicy.select.value,
+      group_allowed_users:groupAllowed.input.value.trim(),
+      home_channel:homeChannel.input.value.trim(),
+      restart:wantRestart,
+    };
+    try{
+      const res=await api('/api/platforms/weixin',{method:'POST',body:JSON.stringify(payload)});
+      if(res&&res.saved){
+        statusLine.style.color='var(--success,#16a34a)';
+        statusLine.textContent=t('weixin_saved');
+        showToast(t('weixin_saved'));
+        if(res.restart){
+          const ok=res.restart.ok===true;
+          const detail=res.restart.detail||'';
+          showToast(ok?t('weixin_restart_ok',detail):t('weixin_restart_failed',detail));
+        }
+      }else{
+        const msg=(res&&res.error)||t('weixin_save_failed_generic');
+        statusLine.style.color='var(--error)';
+        statusLine.textContent=t('weixin_save_failed',msg);
+        showToast(t('weixin_save_failed',msg));
+      }
+    }catch(e){
+      const msg=e&&e.message?e.message:String(e);
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('weixin_save_failed',msg);
+      showToast(t('weixin_save_failed',msg));
+    }finally{
+      saveBtn.disabled=false;
+    }
+  };
+  btnRow.appendChild(saveBtn);
+  body.appendChild(btnRow);
+
+  card.appendChild(body);
+  if(!configured) card.classList.add('open');
+  header.addEventListener('click',e=>{
+    if(e.target.closest('.provider-card-body')) return;
+    card.classList.toggle('open');
+  });
+  return card;
+}
+
+// ── Weixin pairing approval panel ────────────────────────────────────────────
+// A self-contained sub-panel: lists pending requests (visibility only — admins
+// approve by pasting the user-supplied pairing code, since the pending list
+// only carries hashed codes), lists approved users with a remove button, and a
+// refresh button. On an older agent that lacks pairing support the backend
+// returns {available:false} and we render a CLI-fallback hint instead.
+function _buildWeixinPairingPanel(){
+  const root=document.createElement('div');
+  root.style.cssText='display:none;margin:10px 0 4px;padding:12px;border:1px solid var(--border,#ddd);border-radius:8px;background:var(--surface-2,rgba(0,0,0,0.02))';
+
+  const head=document.createElement('div');
+  head.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px';
+  const title=document.createElement('div');
+  title.style.cssText='font-size:13px;font-weight:600;color:var(--text)';
+  title.textContent=t('weixin_pairing_title');
+  const refreshBtn=document.createElement('button');
+  refreshBtn.type='button';
+  refreshBtn.className='provider-card-btn';
+  refreshBtn.style.cssText='padding:2px 10px;font-size:12px';
+  refreshBtn.textContent=t('weixin_pairing_refresh');
+  head.appendChild(title);
+  head.appendChild(refreshBtn);
+  root.appendChild(head);
+
+  // Status / fallback message line.
+  const statusLine=document.createElement('div');
+  statusLine.style.cssText='font-size:12px;color:var(--muted);min-height:14px;margin-bottom:6px';
+  root.appendChild(statusLine);
+
+  // Pending requests section.
+  const pendingHeading=document.createElement('div');
+  pendingHeading.style.cssText='font-size:12px;font-weight:600;color:var(--muted);margin-top:4px';
+  pendingHeading.textContent=t('weixin_pairing_pending_heading');
+  const pendingList=document.createElement('div');
+  pendingList.style.cssText='margin:4px 0 8px';
+  root.appendChild(pendingHeading);
+  root.appendChild(pendingList);
+
+  // Approve-by-code row.
+  const approveRow=document.createElement('div');
+  approveRow.style.cssText='display:flex;gap:6px;margin:6px 0 10px';
+  const codeInput=document.createElement('input');
+  codeInput.type='text';
+  codeInput.placeholder=t('weixin_pairing_code_placeholder');
+  codeInput.style.cssText='flex:1;min-width:0;padding:5px 8px;font-size:13px;border:1px solid var(--border,#ccc);border-radius:6px;background:var(--surface,#fff);color:var(--text)';
+  const approveBtn=document.createElement('button');
+  approveBtn.type='button';
+  approveBtn.className='provider-card-btn provider-card-btn-primary';
+  approveBtn.style.cssText='padding:5px 12px;font-size:13px;white-space:nowrap';
+  approveBtn.textContent=t('weixin_pairing_approve_btn');
+  approveRow.appendChild(codeInput);
+  approveRow.appendChild(approveBtn);
+  root.appendChild(approveRow);
+
+  // Approved users section.
+  const approvedHeading=document.createElement('div');
+  approvedHeading.style.cssText='font-size:12px;font-weight:600;color:var(--muted)';
+  approvedHeading.textContent=t('weixin_pairing_approved_heading');
+  const approvedList=document.createElement('div');
+  approvedList.style.cssText='margin-top:4px';
+  root.appendChild(approvedHeading);
+  root.appendChild(approvedList);
+
+  const api_=(typeof api==='function')?api:null;
+
+  const _shortId=(id)=>{
+    const s=String(id||'');
+    return s.length>12?s.slice(0,12)+'…':s;
+  };
+
+  const _setUnavailable=()=>{
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('weixin_pairing_unavailable');
+    pendingHeading.style.display='none';
+    pendingList.style.display='none';
+    approveRow.style.display='none';
+    approvedHeading.style.display='none';
+    approvedList.style.display='none';
+  };
+
+  const _setAvailable=()=>{
+    pendingHeading.style.display='';
+    pendingList.style.display='';
+    approveRow.style.display='flex';
+    approvedHeading.style.display='';
+    approvedList.style.display='';
+  };
+
+  const _renderPending=(items)=>{
+    pendingList.innerHTML='';
+    if(!items||!items.length){
+      const empty=document.createElement('div');
+      empty.style.cssText='font-size:12px;color:var(--muted)';
+      empty.textContent=t('weixin_pairing_pending_empty');
+      pendingList.appendChild(empty);
+      return;
+    }
+    items.forEach(it=>{
+      const row=document.createElement('div');
+      row.style.cssText='font-size:12px;color:var(--text);padding:2px 0';
+      const name=it.user_name||it.user_id||'';
+      const age=t('weixin_pairing_age',it.age_minutes||0);
+      row.textContent=`${name} · ${_shortId(it.user_id)} · ${age}`;
+      pendingList.appendChild(row);
+    });
+  };
+
+  const _renderApproved=(items)=>{
+    approvedList.innerHTML='';
+    if(!items||!items.length){
+      const empty=document.createElement('div');
+      empty.style.cssText='font-size:12px;color:var(--muted)';
+      empty.textContent=t('weixin_pairing_approved_empty');
+      approvedList.appendChild(empty);
+      return;
+    }
+    items.forEach(it=>{
+      const row=document.createElement('div');
+      row.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:8px;padding:3px 0';
+      const label=document.createElement('span');
+      label.style.cssText='font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis';
+      label.textContent=`${it.user_name||it.user_id||''} · ${_shortId(it.user_id)}`;
+      const rm=document.createElement('button');
+      rm.type='button';
+      rm.className='provider-card-btn provider-card-btn-danger';
+      rm.style.cssText='padding:2px 10px;font-size:12px;white-space:nowrap';
+      rm.textContent=t('weixin_pairing_revoke_btn');
+      rm.onclick=async()=>{
+        rm.disabled=true;
+        try{
+          const res=await api_('/api/platforms/weixin/pairing/revoke',{method:'POST',body:JSON.stringify({user_id:it.user_id})});
+          if(res&&res.ok){
+            showToast(t('weixin_pairing_revoked_ok'));
+            panel.refresh();
+          }else{
+            const msg=(res&&res.error)||'';
+            showToast(t('weixin_pairing_revoke_failed',msg));
+            rm.disabled=false;
+          }
+        }catch(e){
+          showToast(t('weixin_pairing_revoke_failed',e&&e.message?e.message:String(e)));
+          rm.disabled=false;
+        }
+      };
+      row.appendChild(label);
+      row.appendChild(rm);
+      approvedList.appendChild(row);
+    });
+  };
+
+  const refresh=async()=>{
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent='';
+    let res;
+    try{
+      res=await api_('/api/platforms/weixin/pairing');
+    }catch(e){
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('weixin_pairing_load_failed');
+      return;
+    }
+    panel.loaded=true;
+    if(!res||res.available!==true){
+      _setUnavailable();
+      return;
+    }
+    _setAvailable();
+    statusLine.textContent='';
+    _renderPending(res.pending||[]);
+    _renderApproved(res.approved||[]);
+  };
+
+  refreshBtn.onclick=()=>refresh();
+
+  approveBtn.onclick=async()=>{
+    const code=(codeInput.value||'').trim();
+    if(!code){
+      showToast(t('weixin_pairing_approve_empty'));
+      return;
+    }
+    approveBtn.disabled=true;
+    try{
+      const res=await api_('/api/platforms/weixin/pairing/approve',{method:'POST',body:JSON.stringify({code})});
+      if(res&&res.ok){
+        const uname=(res.user&&(res.user.user_name||res.user.user_id))||'';
+        showToast(t('weixin_pairing_approved_ok',uname));
+        codeInput.value='';
+        await refresh();
+      }else{
+        const msg=(res&&res.error)||'';
+        showToast(t('weixin_pairing_approve_failed',msg));
+      }
+    }catch(e){
+      showToast(t('weixin_pairing_approve_failed',e&&e.message?e.message:String(e)));
+    }finally{
+      approveBtn.disabled=false;
+    }
+  };
+
+  const panel={root,refresh,loaded:false};
+  return panel;
 }
 
 async function _refreshProviderQuota(card,button){
