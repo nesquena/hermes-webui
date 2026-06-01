@@ -2094,6 +2094,61 @@ def _strip_provider_hint_for_reasoning(model_id: str) -> str:
     return model
 
 
+def _reasoning_name_candidates(model_id: str) -> list[str]:
+    """Return normalized model-name candidates for heuristic capability checks."""
+    bare = str(model_id or "").strip().lower().rsplit("/", 1)[-1]
+    if not bare:
+        return []
+
+    candidates: list[str] = []
+
+    def _add(value: str) -> None:
+        candidate = str(value or "").strip().lower()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    _add(bare)
+
+    dot_parts = [part for part in bare.split(".") if part]
+    if len(dot_parts) > 1:
+        # Try progressively stripping dot-separated vendor namespaces so inputs like
+        # "moonshotai.kimi-k2.5" and "vendor.deepseek.v3.2" both surface the real
+        # model family rather than treating every dot as part of the provider slug.
+        for index in range(1, len(dot_parts)):
+            suffix = ".".join(dot_parts[index:])
+            if any(ch.isalpha() for ch in suffix):
+                _add(suffix)
+
+    for candidate in list(candidates):
+        normalized = re.sub(r"[^a-z0-9]+", "-", candidate).strip("-")
+        _add(normalized)
+
+    return candidates
+
+
+def _candidate_supports_reasoning(candidate: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(candidate or "").strip().lower()).strip("-")
+    if not normalized:
+        return False
+
+    tokens = [token for token in normalized.split("-") if token]
+    token_set = set(tokens)
+
+    if "thinking" in token_set or "reasoning" in token_set:
+        return True
+    if normalized in {"o1", "o3", "o4"} or normalized.startswith(("o1-", "o3-", "o4-")):
+        return True
+    if normalized.startswith(("kimi-k2", "kimi-thinking", "claude-3", "claude-4")):
+        return True
+    if normalized.startswith("qwen3") or "qwen3" in token_set:
+        return True
+    if normalized.startswith(("deepseek-v3", "deepseek-v4", "deepseek-r1", "deepseek-r2")):
+        return True
+    if len(tokens) >= 2 and tokens[0] == "deepseek" and tokens[1] in {"v3", "v4", "r1", "r2"}:
+        return True
+    return False
+
+
 def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     """Fallback when hermes_cli is unavailable."""
     model = _strip_provider_hint_for_reasoning(model_id).lower()
@@ -2123,31 +2178,11 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     )
     if any(model.startswith(prefix) for prefix in prefixes):
         return list(VALID_REASONING_EFFORTS)
-    # Custom API aggregators (e.g. New API, One API) use non-standard model naming:
-    # bare names like "deepseek-v4-flash" or dot-separated "moonshotai.kimi-k2.5"
-    # rather than the OpenRouter-style "vendor/model" that the prefix list targets.
-    # Strip a dot-vendor prefix (e.g. "moonshotai.kimi-k2.5" → "kimi-k2.5") and
-    # check both the original bare name and the stripped suffix.
-    bare_after_dot = bare.split(".", 1)[-1] if "." in bare else bare
-    thinking_bare_prefixes = (
-        "deepseek-v4",
-        "deepseek-r1",
-        "deepseek-r2",
-        "kimi-k2",
-        "kimi-thinking",
-        "qwen3",
-        "claude-3",
-        "claude-4",
-        "o1-",
-        "o3-",
-        "o4-",
-    )
-    if any(
-        bare.startswith(p) or bare_after_dot.startswith(p)
-        for p in thinking_bare_prefixes
-    ):
-        return list(VALID_REASONING_EFFORTS)
-    if "thinking" in bare or "reasoning" in bare:
+    # Named custom providers often rewrite model ids with dots, underscores, or
+    # extra vendor namespaces. Normalize those shapes before applying family-level
+    # reasoning heuristics so "deepseek.v3.2", "deepseek_v4_flash", and
+    # "vendor.deepseek.v3.2" are treated consistently.
+    if any(_candidate_supports_reasoning(candidate) for candidate in _reasoning_name_candidates(bare)):
         return list(VALID_REASONING_EFFORTS)
     return []
 

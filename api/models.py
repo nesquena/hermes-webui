@@ -637,18 +637,6 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def _maybe_clear_truncation_watermark(self) -> None:
-        watermark = _message_timestamp_as_float({"timestamp": self.truncation_watermark})
-        if watermark is None:
-            return
-        max_message_timestamp = None
-        for msg in self.messages or []:
-            timestamp = _message_timestamp_as_float(msg)
-            if timestamp is not None:
-                max_message_timestamp = timestamp if max_message_timestamp is None else max(max_message_timestamp, timestamp)
-        if max_message_timestamp is not None and max_message_timestamp > watermark:
-            self.truncation_watermark = None
-
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
@@ -671,7 +659,6 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
-        self._maybe_clear_truncation_watermark()
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -2655,6 +2642,68 @@ def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict
     return out
 
 
+def state_db_has_session(sid: str) -> bool:
+    """Return True when ``sid`` exists in the active state.db sessions table.
+
+    Used by file-manager handlers to fall back to a state.db lookup when
+    ``get_session`` raises ``KeyError`` because the session was created by
+    Telegram/CLI (external) rather than the WebUI (issue #3280). The state.db
+    schema stores only metadata (id/title/model/source/...), not a workspace
+    path — the workspace is shared across session storage backends and is
+    resolved separately via ``get_last_workspace()``.
+    """
+    if not sid:
+        return False
+    try:
+        import sqlite3
+    except ImportError:
+        return False
+    db_path = _active_state_db_path()
+    if not db_path.exists():
+        return False
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (str(sid),))
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+class _ExternalSessionView:
+    """Minimal session-shaped view for external (Telegram/CLI) sessions.
+
+    Only exposes the fields file-manager handlers need (``session_id`` and
+    ``workspace``). The workspace falls back to the WebUI's last-used
+    workspace because state.db does not persist a per-session workspace path
+    and the file browser is intentionally workspace-scoped, not
+    session-storage-scoped (issue #3280).
+    """
+
+    __slots__ = ("session_id", "workspace")
+
+    def __init__(self, session_id: str, workspace: str):
+        self.session_id = session_id
+        self.workspace = workspace
+
+
+def get_session_for_file_ops(sid: str):
+    """Return a session-like object for file-manager handlers.
+
+    Tries ``get_session`` first (preserves all existing behavior for WebUI
+    sessions). If that raises ``KeyError``, checks state.db; when the session
+    exists there, returns an ``_ExternalSessionView`` whose ``workspace`` is
+    the active WebUI workspace. If neither has the session, re-raises
+    ``KeyError`` so callers continue to return their existing 404.
+    """
+    try:
+        return get_session(sid, metadata_only=True)
+    except KeyError:
+        if state_db_has_session(sid):
+            return _ExternalSessionView(str(sid), str(get_last_workspace()))
+        raise
+
+
 def _active_state_db_path() -> Path:
     """Return state.db for the active Hermes profile, degrading to HERMES_HOME."""
     try:
@@ -4007,11 +4056,41 @@ def merge_session_messages_append_only(
                     skipped_state_visible_counts.get(matched_visible_key, 0) + 1
                 )
             continue
+        # Skip rows ABOVE the watermark only while the sidecar has NOT advanced
+        # past the watermark. Because Session.save() no longer auto-clears the
+        # watermark, an unconditional `timestamp > watermark` skip would become
+        # permanent and silently drop legitimate future state.db-only recovery
+        # rows once the session moves forward past the edit boundary. Once the
+        # sidecar's own max timestamp is beyond the watermark (the session has
+        # advanced), allow state rows newer than the sidecar tail to merge.
+        sidecar_advanced_past_watermark = (
+            watermark_timestamp is not None
+            and max_sidecar_timestamp is not None
+            and max_sidecar_timestamp > watermark_timestamp
+        )
         if (
             watermark_timestamp is not None
             and timestamp is not None
             and timestamp > watermark_timestamp
             and key not in seen_message_keys
+            and (
+                not sidecar_advanced_past_watermark
+                or (max_sidecar_timestamp is not None and timestamp <= max_sidecar_timestamp)
+            )
+        ):
+            continue
+        # When a truncation watermark is active, state.db may contain original
+        # messages that were replaced by Edit (old content with old timestamp).
+        # The timestamp-based filter above catches messages AFTER the watermark,
+        # but messages BEFORE it (like the original pre-edit content) slip through.
+        # If a state.db message's content is not present in the sidecar and its
+        # timestamp is before the watermark, it's a replaced/stale row — skip it.
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp < watermark_timestamp
+            and key not in seen_message_keys
+            and _session_message_content_key(msg) not in seen_content_keys
         ):
             continue
         if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:

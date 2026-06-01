@@ -6,6 +6,30 @@
 ### Fixed
 - Gateway-backed chat now backfills model-context turns into the visible transcript before saving the latest reply while keeping hidden context-compaction markers out of the visible transcript, so sidebar/header message counts no longer show a two-message conversation while the assistant is responding to hidden prior context.
 
+## [v0.51.198] — 2026-06-01 — Release FR (stage-batch10 — custom-provider reasoning model-id normalize + profile skill counts + run-adapter RFC slice)
+
+### Fixed
+- Reasoning-effort detection for named `custom:*` providers now normalizes non-slash model ids before applying its fallback family heuristics, so separator variants such as `deepseek.v3.2`, `deepseek_v4_flash`, and vendor-namespaced ids like `vendor.deepseek.v3.2` resolve the same way as `deepseek-v4-flash`. The keyword fallback is now token-aware rather than substring-based, preserving names like `model-thinking-preview` without falsely enabling reasoning for unrelated prefixes such as `thinkinghub.llama-3.1-70b` (#3327, @Carry00).
+- Profile cards now show enabled vs compatible skill counts (computed with an 8s TTL cache that clears on profile switch) instead of a single ambiguous count. Closes #3339 (#3341, @b3nw).
+
+### Changed
+- The #1925 runtime-adapter RFC now marks the configured runner-client boundary as shipped in v0.51.188 (#3073 / #3274) and defines the next Slice 4g gate for a supervised local runner process harness: real runner-owned `AIAgent` execution, restart/reattach proof, bounded runner health diagnostics, and no new WebUI runtime-surrogate globals (#3334, @Michaelyklam).
+
+## [v0.51.197] — 2026-06-01 — Release FQ (stage-batch9 — stop agent replaying edited/undone messages)
+
+### Fixed
+- Editing or undoing a message no longer lets the agent replay the original pre-edit content from `state.db`: the truncation-watermark filter now also skips replaced/stale rows whose timestamp sorts *below* the watermark, and `POST /api/session/truncate` truncates `context_messages` in sync with `messages` so the agent's context matches the visible transcript after Edit/Regenerate. The earlier `_clamp_context_to_watermark()` approach (which turned the watermark into a permanent ceiling that dropped every new turn) is removed. Closes #2914 (#3102, @AlexeyDsov).
+
+## [v0.51.196] — 2026-06-01 — Release FP (stage-batch8 — file-manager external sessions + artifacts tool metadata + edge-toggle icon + type hints)
+
+### Fixed
+- File manager (folder download, raw file fetch, and related handlers) now falls back to a `state.db` lookup for sessions created by Telegram/CLI rather than the WebUI, resolving them against the active WebUI workspace instead of returning a 404. Closes #3280 (#3314, @Sanjays2402).
+- Artifacts tab now detects files from structured `tool_calls` (OpenAI format) and `tool_use` content blocks (Anthropic format) on messages, not just text-mined diff fences, so artifacts surface even when `S.toolCalls` is cleared after a reload; display paths are trimmed of the workspace prefix (#3329, @mysoul12138).
+- Workspace panel edge-toggle chevron now points left (toward the panel it reveals) instead of right (#3318, @xz-dev).
+
+### Internal
+- `api/state_sync.py` now uses `Optional[T]` annotations for parameters defaulting to `None` instead of the implicit `T = None` form (#3323, @kuishou68).
+
 ## [v0.51.195] — 2026-06-01 — Release FO (stage-batch7 — hide attachment path markers in chat UI)
 
 ### Fixed

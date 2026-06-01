@@ -2801,6 +2801,7 @@ def _keep_latest_messaging_session_per_source(
 from api.models import (
     Session,
     get_session,
+    get_session_for_file_ops,
     new_session,
     all_sessions,
     title_from,
@@ -6057,13 +6058,28 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         keep = int(body["keep_count"])
         with _get_session_agent_lock(body["session_id"]):
+            old_msg_count = len(s.messages or [])
+            old_ctx_count = len(getattr(s, 'context_messages', None) or [])
             s.messages = s.messages[:keep]
+            # Truncate context_messages in sync with messages so the agent's
+            # model-facing context doesn't retain rows the user removed via
+            # Edit / Regenerate.  Without this, context_messages still contains
+            # the full pre-truncation history and the agent sees "deleted"
+            # turns on the next turn (#2914).
+            if isinstance(getattr(s, 'context_messages', None), list):
+                s.context_messages = s.context_messages[:keep]
             try:
                 from api.session_ops import _truncation_watermark_for
                 s.truncation_watermark = _truncation_watermark_for(s.messages)
             except Exception:
                 s.truncation_watermark = 0.0
             s.save()
+            logger.info(
+                "truncate %s: messages %d→%d, context_messages %d→%d, watermark=%.2f",
+                body["session_id"], old_msg_count, len(s.messages or []),
+                old_ctx_count, len(getattr(s, 'context_messages', None) or []),
+                s.truncation_watermark or 0,
+            )
         return j(
             handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
         )
@@ -8579,7 +8595,7 @@ def _handle_folder_download(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
     try:
-        s = get_session(sid)
+        s = get_session_for_file_ops(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
 
@@ -8652,7 +8668,7 @@ def _handle_file_raw(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
     try:
-        s = get_session(sid)
+        s = get_session_for_file_ops(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]
@@ -8691,7 +8707,7 @@ def _handle_file_read(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
     try:
-        s = get_session(sid)
+        s = get_session_for_file_ops(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]
@@ -11012,7 +11028,7 @@ def _handle_file_delete(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session(body["session_id"])
+        s = get_session_for_file_ops(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -11036,7 +11052,7 @@ def _handle_file_save(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session(body["session_id"])
+        s = get_session_for_file_ops(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -11059,7 +11075,7 @@ def _handle_file_create(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session(body["session_id"])
+        s = get_session_for_file_ops(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -11081,7 +11097,7 @@ def _handle_file_rename(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session(body["session_id"])
+        s = get_session_for_file_ops(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -11107,7 +11123,7 @@ def _handle_create_dir(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session(body["session_id"])
+        s = get_session_for_file_ops(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -11128,7 +11144,7 @@ def _handle_file_reveal(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session(body["session_id"])
+        s = get_session_for_file_ops(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -11175,7 +11191,7 @@ def _handle_file_path(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session(body["session_id"])
+        s = get_session_for_file_ops(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
@@ -11205,7 +11221,7 @@ def _handle_file_open_vscode(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        s = get_session(body["session_id"])
+        s = get_session_for_file_ops(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
