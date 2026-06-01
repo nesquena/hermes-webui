@@ -21,6 +21,7 @@ Recent safe adapter progress:
 Recently landed:
 
 - GitHub deployment-list source-refresh metadata now has a narrow metadata-only parser for allow-listed `/repos/{owner}/{repo}/deployments` API payloads, making deployment freshness/source summaries visible without storing deployment descriptions, payloads, status URLs, creator URLs, API-auth fields, prompts, scripts, renderer/source fields, or secret-looking fixture values.
+- GitHub deployment-status source-refresh metadata now has a narrow metadata-only parser for allow-listed `/repos/{owner}/{repo}/deployments/{deployment_id}/statuses` API payloads, making deployment outcome/status freshness visible without storing status descriptions, target/log/deployment/repository/environment URLs, payloads, API-auth fields, prompts, scripts, renderer/source fields, or secret-looking fixture values.
 - Source-style Space list/collection/current read helpers now include metadata-only output-compaction receipts beside sanitized Space summaries/details, keeping long collection/read outputs bounded without exposing renderer/source/API-auth markers or widget bodies.
 - Source-style Space revision/history list tool responses now include metadata-only required prompt-preflight and autonomy-policy receipts, and their compaction evidence carries the preflight/model-route summary without exposing renderer/source/API-auth/script/secret request markers.
 

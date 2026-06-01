@@ -2271,6 +2271,116 @@ def _github_deployments_refresh_summary(origin_uri: str, payload: list[Any]) -> 
     return _bounded_refresh_summary("; ".join(parts))
 
 
+_GITHUB_DEPLOYMENT_STATUS_STATES = {"error", "failure", "inactive", "in_progress", "queued", "pending", "success"}
+
+
+def _github_deployment_statuses_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "deployments"
+        or path[6] != "statuses"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", int(path[5])
+
+
+def _github_deployment_statuses_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    path = parts.path.split("/")
+    return (
+        len(path) == 7
+        and path[0] == ""
+        and path[1] == "repos"
+        and path[4] == "deployments"
+        and path[6] == "statuses"
+    )
+
+
+def _github_deployment_status_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    status_id = _safe_optional_nonnegative_int(row.get("id"))
+    if status_id is None or status_id <= 0:
+        return False
+    state = _safe_public_text(row.get("state"), limit=40).lower()
+    if state not in _GITHUB_DEPLOYMENT_STATUS_STATES:
+        return False
+    raw_environment = row.get("environment")
+    if _is_present_public_value(raw_environment) and not _github_deployment_text_is_safe(raw_environment, limit=80):
+        return False
+    creator = row.get("creator")
+    if creator is not None:
+        if not isinstance(creator, dict):
+            return False
+        raw_login = creator.get("login")
+        if _is_present_public_value(raw_login) and not _github_comment_login_is_safe(raw_login):
+            return False
+    for field in ("created_at", "updated_at"):
+        raw_timestamp = row.get(field)
+        if _is_present_public_value(raw_timestamp) and not _safe_iso_timestamp(raw_timestamp):
+            return False
+    for raw_value in (row.get("id"), row.get("state"), raw_environment, row.get("created_at"), row.get("updated_at")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_deployment_statuses_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_deployment_statuses_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_deployment_status_row_is_safe(row) for row in payload)
+
+
+def _github_deployment_statuses_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo, deployment_id = _github_deployment_statuses_path_info(origin_uri) or ("repository", 0)
+    safe_rows = [row for row in payload if _github_deployment_status_row_is_safe(row)]
+    state_counts: dict[str, int] = {}
+    for row in safe_rows:
+        state = _safe_public_text(row.get("state"), limit=40).lower()
+        state_counts[state] = state_counts.get(state, 0) + 1
+    parts = [f"GitHub deployment #{deployment_id} statuses for {repo}", f"status count: {len(payload)}"]
+    for state in sorted(state_counts):
+        parts.append(f"state {state}: {state_counts[state]}")
+    for row in safe_rows[:5]:
+        status_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        state = _safe_public_text(row.get("state"), limit=40).lower()
+        environment = _safe_public_text(row.get("environment"), limit=80)
+        creator = row.get("creator") if isinstance(row.get("creator"), dict) else {}
+        creator_login = _safe_public_text(creator.get("login") if isinstance(creator, dict) else "", limit=80)
+        created = _safe_iso_timestamp(row.get("created_at")) if row.get("created_at") is not None else ""
+        updated = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
+        row_parts = [f"status #{status_id}", f"state: {state}"]
+        if environment:
+            row_parts.append(f"environment: {environment}")
+        if creator_login:
+            row_parts.append(f"creator: {creator_login}")
+        if created:
+            row_parts.append(f"created: {created}")
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 _GITHUB_MILESTONE_STATES = {"open", "closed"}
 
 
@@ -3090,6 +3200,19 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    deployment_statuses_info = _github_deployment_statuses_path_info(origin_uri)
+    if deployment_statuses_info is not None:
+        if not _json_payload_is_github_deployment_statuses_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        repo, deployment_id = deployment_statuses_info
+        title = f"GitHub deployment #{deployment_id} statuses {repo}"
+        summary = _github_deployment_statuses_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_deployments_metadata(origin_uri, payload):
         repo = _github_deployments_path_repo(origin_uri) or source_id
         title = f"GitHub deployments {repo}"
@@ -3353,6 +3476,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_pulls_path_matches(safe_origin_uri) and (
             not _github_pulls_path_repo(safe_origin_uri)
+            or content_type not in {"application/json", "application/feed+json"}
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_deployment_statuses_path_matches(safe_origin_uri) and (
+            _github_deployment_statuses_path_info(safe_origin_uri) is None
             or content_type not in {"application/json", "application/feed+json"}
         ):
             raise RuntimeError("refresh fetcher disabled")
