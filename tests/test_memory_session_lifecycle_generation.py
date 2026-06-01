@@ -329,8 +329,12 @@ def test_lru_eviction_commits_outside_cache_lock():
     assert "commit_session_memory" not in locked_section
     assert "_lifecycle_commit" not in locked_section
     assert "SESSION_AGENT_CACHE.popitem" in locked_section
-    assert "_lifecycle_commit" in outside_section
-    assert "wait=True" in outside_section
+    assert "_close_evicted_agent_at_session_boundary" in outside_section
+    helper_start = src.index("def _close_evicted_agent_at_session_boundary")
+    helper_end = src.index("\ndef _refresh_cached_agent_runtime", helper_start)
+    helper_section = src[helper_start:helper_end]
+    assert "_lifecycle_commit_session_memory" in helper_section
+    assert "wait=True" in helper_section
     assert "outside the cache lock" in outside_section
 
 

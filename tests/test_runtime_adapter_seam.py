@@ -1,4 +1,5 @@
 import importlib
+import io
 import queue
 
 from tests.conftest import requires_agent_modules
@@ -573,8 +574,12 @@ def test_rfc_defines_slice4f_supervised_local_runner_client_gate():
     rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
 
     assert "#### Slice 4f: Supervised local runner client backend gate" in rfc
+    assert "Status as of 2026-05-28: client transport proposed in #3073 behind" in rfc
+    assert "it should be described as under review until a\nrelease PR actually ships it" in rfc
     assert "replace the bounded 501 path under the existing\nfeature flag" in rfc
     assert "durable runner-owned run id plus session-to-run lookup" in rfc
+    assert "the configured\nrunner must emit events that are already compatible with the browser SSE event\nnames/payloads" in rfc
+    assert "a later runner-owned normalization layer must translate\nHermes runtime families such as `token.delta`, `tool.started`, and `done`" in rfc
     assert "cancel as the first required live control" in rfc
     assert "501 path replaced only when configured" in rfc
     assert "Restart/reattach proves ownership moved" in rfc
@@ -582,6 +587,71 @@ def test_rfc_defines_slice4f_supervised_local_runner_client_gate():
     assert "Successful chat-start responses remain limited\n   to the legacy-compatible field whitelist" in rfc
     assert "Unsupported runner controls return safe\n   `unsupported`, `not-active`, or `conflict` results" in rfc
     assert "no permanent WebUI-owned active-run discovery cache" in rfc
+
+def test_runtime_runner_client_factory_stays_bounded_until_endpoint_configured(monkeypatch):
+    routes = importlib.import_module("api.routes")
+
+    monkeypatch.delenv("HERMES_WEBUI_RUNNER_BASE_URL", raising=False)
+    try:
+        routes._runtime_runner_client_factory()
+    except NotImplementedError as exc:
+        assert "runner-local chat backend is not configured" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("runner-local should remain bounded without an endpoint")
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNNER_BASE_URL", "http://runner.local/")
+    client = routes._runtime_runner_client_factory()
+
+    assert client.base_url == "http://runner.local"
+
+
+def test_configured_runner_sse_stream_observes_runner_without_process_maps(monkeypatch):
+    routes = importlib.import_module("api.routes")
+    calls = []
+
+    class FakeRunnerClient:
+        def observe_run(self, run_id, *, cursor=None):
+            calls.append((run_id, cursor))
+            return {
+                "run_id": run_id,
+                "cursor": "7",
+                "events": [
+                    {"event": "message", "payload": {"content": "hello"}, "event_id": "run-1:6"},
+                    {"event": "stream_end", "payload": {"ok": True}, "event_id": "run-1:7"},
+                ],
+            }
+
+    class FakeHandler:
+        def __init__(self):
+            self.status = None
+            self.headers = []
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.headers.append((key, value))
+
+        def end_headers(self):
+            self.headers.append(("__end__", ""))
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setattr(routes, "_runtime_runner_client_factory", lambda: FakeRunnerClient())
+    handler = FakeHandler()
+
+    assert routes._stream_runner_run_events(handler, "run-1", "5") is True
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert handler.status == 200
+    assert calls == [("run-1", "5")]
+    assert "event: message" in body
+    assert "id: run-1:6" in body
+    assert 'data: {"content": "hello"}' in body
+    assert "event: stream_end" in body
+    assert "STREAMS" not in routes._stream_runner_run_events.__code__.co_names
+
+
 
 def test_runner_runtime_adapter_passes_explicit_start_payload_without_env_mutation(monkeypatch):
     runtime = importlib.import_module("api.runtime_adapter")

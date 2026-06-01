@@ -1,3 +1,5 @@
+import os
+
 from api.turn_journal import (
     append_turn_journal_event,
     append_turn_journal_event_for_stream,
@@ -36,3 +38,16 @@ def test_append_turn_journal_event_for_stream_falls_back_to_new_turn_for_missing
     assert event["stream_id"] == "stream-missing"
     assert event["turn_id"]
     assert event["event"] == "interrupted"
+
+
+def test_append_turn_journal_event_skips_directory_fsync_without_o_directory(tmp_path, monkeypatch):
+    monkeypatch.delattr(os, "O_DIRECTORY", raising=False)
+
+    event = append_turn_journal_event(
+        "sid-windows",
+        {"event": "submitted", "content": "hello"},
+        session_dir=tmp_path,
+    )
+
+    assert event["event"] == "submitted"
+    assert (tmp_path / "_turn_journal" / "sid-windows.jsonl").is_file()

@@ -15,6 +15,7 @@ from api.gateway_chat import (
     _gateway_http_error_event,
     _gateway_sse_delta,
     _gateway_stream_usage,
+    _gateway_tool_progress_event,
     gateway_chat_config_status,
     webui_chat_backend_mode,
     webui_gateway_chat_enabled,
@@ -95,6 +96,41 @@ def test_gateway_stream_usage_normalizes_token_names():
         "estimated_cost": 0.01,
     }
     assert _gateway_stream_usage({}) == {}
+
+
+def test_gateway_tool_progress_event_translates_gateway_lifecycle_payloads():
+    assert _gateway_tool_progress_event(
+        {
+            "tool": "terminal",
+            "label": "terminal: pytest",
+            "toolCallId": "call-1",
+            "status": "running",
+        }
+    ) == (
+        "tool",
+        {
+            "event_type": "tool.started",
+            "name": "terminal",
+            "preview": "terminal: pytest",
+            "args": {},
+            "is_error": False,
+            "tid": "call-1",
+        },
+    )
+    assert _gateway_tool_progress_event(
+        {"tool": "terminal", "toolCallId": "call-1", "status": "completed"}
+    ) == (
+        "tool_complete",
+        {
+            "event_type": "tool.completed",
+            "name": "terminal",
+            "preview": None,
+            "args": {},
+            "is_error": False,
+            "tid": "call-1",
+        },
+    )
+    assert _gateway_tool_progress_event({"tool": "_thinking", "status": "running"}) is None
 
 
 def test_gateway_http_401_reports_gateway_auth_not_provider_key():
@@ -190,7 +226,11 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
             return False
 
         def __iter__(self):
+            yield b'event: hermes.tool.progress\n'
+            yield b'data: {"tool":"terminal","label":"terminal: pytest","toolCallId":"call-1","status":"running"}\n\n'
             yield b'data: {"choices":[{"delta":{"content":"hel"}}]}\n\n'
+            yield b'event: hermes.tool.progress\n'
+            yield b'data: {"tool":"terminal","toolCallId":"call-1","status":"completed"}\n\n'
             yield b'data: {"choices":[{"delta":{"content":"lo"}}],"usage":{"prompt_tokens":4,"completion_tokens":2}}\n\n'
             yield b'data: [DONE]\n\n'
 
@@ -213,7 +253,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     s.pending_attachments = []
     s.pending_started_at = 123
     s.save()
-    STREAMS[stream_id] = create_stream_channel()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
 
     gateway_chat._run_gateway_chat_streaming(
         s.session_id,
@@ -243,6 +285,25 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "webui session context",
         "Say hello",
     ]
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    assert ("tool", {
+        "event_type": "tool.started",
+        "name": "terminal",
+        "preview": "terminal: pytest",
+        "args": {},
+        "is_error": False,
+        "tid": "call-1",
+    }) in events
+    assert ("tool_complete", {
+        "event_type": "tool.completed",
+        "name": "terminal",
+        "preview": None,
+        "args": {},
+        "is_error": False,
+        "tid": "call-1",
+    }) in events
 
 
 def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_path, monkeypatch):
