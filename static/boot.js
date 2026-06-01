@@ -1479,6 +1479,7 @@ let _systemThemeMq=null;
 let _onSystemThemeChange=null;
 let _systemThemePollTimer=null;
 let _lastResolvedThemeIsDark=null;
+const _SYSTEM_THEME_PAGESHOW_EVENT='pageshow';
 
 function _customLogoCachePayload(settings){
   return {
@@ -1608,7 +1609,7 @@ function _installSystemThemeFallbacks(){
   _systemThemePollTimer=setInterval(_syncSystemThemeFromMedia,250);
   window.addEventListener('focus',_syncSystemThemeFromMedia);
   document.addEventListener('visibilitychange',_syncSystemThemeFromMedia);
-  window.addEventListener('pageshow',_syncSystemThemeFromMedia);
+  window.addEventListener(_SYSTEM_THEME_PAGESHOW_EVENT,_syncSystemThemeFromMedia);
 }
 
 function _removeSystemThemeFallbacks(){
@@ -1618,7 +1619,7 @@ function _removeSystemThemeFallbacks(){
   }
   window.removeEventListener('focus',_syncSystemThemeFromMedia);
   document.removeEventListener('visibilitychange',_syncSystemThemeFromMedia);
-  window.removeEventListener('pageshow',_syncSystemThemeFromMedia);
+  window.removeEventListener(_SYSTEM_THEME_PAGESHOW_EVENT,_syncSystemThemeFromMedia);
 }
 
 function _applyTheme(name){
@@ -1845,6 +1846,9 @@ function applyCustomLogo(settings){
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
+    // Persist default workspace so the blank new-chat page can show it
+    // and workspace actions (New file/folder) work before the first session (#804).
+    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._customLogoEnabled=!!s.custom_logo_enabled;
     window._customLogoDarkMode=!!s.custom_logo_dark_mode;
     window._customLogoLightPath=s.custom_logo_light_path||'';
@@ -1860,9 +1864,6 @@ function applyCustomLogo(settings){
     window._showPreviousMessagingSessions=!!s.show_previous_messaging_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
-    // Persist default workspace so the blank new-chat page can show it
-    // and workspace actions (New file/folder) work before the first session (#804).
-    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
