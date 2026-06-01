@@ -84,6 +84,55 @@ def test_ensure_messages_loaded_consumes_snapshot_then_clears_it():
     )
 
 
+def _load_older_messages_body() -> str:
+    start = SESSIONS_JS.index("async function _loadOlderMessages")
+    return SESSIONS_JS[start: start + 6000]
+
+
+def _start_gateway_sse_body() -> str:
+    start = SESSIONS_JS.index("function startGatewaySSE")
+    return SESSIONS_JS[start: start + 4000]
+
+
+def test_load_older_messages_tail_match_carries_forward():
+    """#3306 follow-up: _loadOlderMessages does a wholesale `S.messages = nextMessages`
+    on the tail-match path. Without carry-forward this drops ephemeral turn fields
+    (the intermittent "badge appears then disappears" symptom flagged in review)."""
+    body = _load_older_messages_body()
+    cf_idx = body.find("_carryForwardEphemeralTurnFields(S.messages || [], nextMessages)")
+    assign_idx = body.find("S.messages = nextMessages;")
+    assert cf_idx != -1, (
+        "#3306: _loadOlderMessages must carry forward ephemeral turn fields "
+        "into nextMessages before the wholesale S.messages assignment"
+    )
+    assert assign_idx != -1, "S.messages = nextMessages assignment not found"
+    assert cf_idx < assign_idx, (
+        "#3306: carry-forward call must precede `S.messages = nextMessages` "
+        "in _loadOlderMessages, otherwise the fields are already gone"
+    )
+
+
+def test_start_gateway_sse_import_cli_carries_forward():
+    """#3306 follow-up: the gateway SSE → import_cli refresh path also does a
+    wholesale `S.messages = next` for CLI sessions; it must carry forward
+    ephemeral turn fields too."""
+    body = _start_gateway_sse_body()
+    cf_idx = body.find("_carryForwardEphemeralTurnFields(S.messages || [], next)")
+    assign_idx = body.find("S.messages = _nextToAssign;")
+    assert cf_idx != -1, (
+        "#3306: startGatewaySSE import_cli branch must carry forward "
+        "ephemeral turn fields before assigning S.messages"
+    )
+    assert assign_idx != -1, (
+        "expected `S.messages = _nextToAssign;` after carry-forward in "
+        "startGatewaySSE import_cli branch"
+    )
+    assert cf_idx < assign_idx, (
+        "#3306: carry-forward call must precede the S.messages assignment "
+        "in the startGatewaySSE import_cli branch"
+    )
+
+
 def test_carry_forward_call_still_present():
     """If the #3018 carry-forward is ever removed, this fix becomes moot —
     flag that explicitly so reviewers reconsider the snapshot machinery."""

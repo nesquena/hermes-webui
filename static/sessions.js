@@ -1538,6 +1538,12 @@ async function _loadOlderMessages() {
     // Use $('messages') — the scrollable container (#msgInner is not scrollable).
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
+    // Carry forward ephemeral turn fields (_turnUsage/_turnDuration/_turnTps/
+    // _gatewayRouting/_statusCard) before the wholesale replace so the badge
+    // does not briefly appear and disappear during older-message expansion.
+    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+      nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
+    }
     S.messages = nextMessages;
     _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
     // renderMessages() windows long transcripts from the end. If we do not
@@ -2880,7 +2886,14 @@ function startGatewaySSE(){
                     const next = res.session.messages.filter(m => m && m.role);
                     if (next.length < prev) return;
                     if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;
-                    S.messages = next;
+                    // Carry forward ephemeral turn fields (_turnUsage/
+                    // _turnDuration/_turnTps/_gatewayRouting/_statusCard) so
+                    // gateway-driven CLI refreshes do not drop the badge.
+                    let _nextToAssign = next;
+                    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+                      _nextToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], next);
+                    }
+                    S.messages = _nextToAssign;
                     if(S.session && S.session.session_id === activeSid){
                       S.session.message_count = next.length;
                       const newest = next.length ? next[next.length - 1] : null;
