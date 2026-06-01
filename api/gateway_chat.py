@@ -247,13 +247,17 @@ def _run_gateway_chat_streaming(
         cfg = get_config()
         try:
             from api.streaming import (
+                _WEBUI_PROGRESS_PROMPT,
                 _load_webui_prefill_context,
                 _prefill_messages_with_webui_context,
                 _public_prefill_context_status,
             )
 
             prefill_context = _load_webui_prefill_context(cfg)
-            prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
+            prefill_messages = [
+                {"role": "system", "content": _WEBUI_PROGRESS_PROMPT},
+                *_prefill_messages_with_webui_context(prefill_context, cfg),
+            ]
             put_gateway_event("context_status", {
                 "session_id": session_id,
                 "prefill": _public_prefill_context_status(prefill_context),

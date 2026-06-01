@@ -201,9 +201,14 @@ def test_gateway_auth_label_i18n_key_exists_for_every_locale():
 
 
 def test_gateway_chat_health_payload_is_documented_as_operator_diagnostic_only():
-    readme = Path("README.md").read_text(encoding="utf-8")
+    # The Gateway-backed-chat operator docs moved out of the README into
+    # docs/advanced-chat-setup.md during the v0.51.192 README IA pass (it's a
+    # niche self-hosted feature). The contract — that gateway_chat is documented
+    # as an operator-only diagnostic, not a user-facing banner — now lives there.
+    # CHANGELOG keeps its release-note entry. (Contract test moved with content.)
+    advanced = Path("docs/advanced-chat-setup.md").read_text(encoding="utf-8")
     changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-    for text in (readme, changelog):
+    for text in (advanced, changelog):
         assert "gateway_chat" in text
         assert "operator diagnostic" in text
         assert "not currently rendered as a user-facing health banner" in text
@@ -281,10 +286,14 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
     assert [m["content"] for m in payload["messages"]] == [
+        streaming._WEBUI_PROGRESS_PROMPT,
         "prefill",
         "webui session context",
         "Say hello",
     ]
+    assert payload["messages"][0]["role"] == "system"
+    assert "Final visible assistant replies" in payload["messages"][0]["content"]
+    assert "Need script" in payload["messages"][0]["content"]
     events = []
     while not subscriber.empty():
         events.append(subscriber.get_nowait())
@@ -419,7 +428,9 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     )
 
     content = captured["body"]["messages"][-1]["content"]
-    assert captured["body"]["messages"][0] == {"role": "user", "content": "webui session context"}
+    assert captured["body"]["messages"][0]["role"] == "system"
+    assert "Final visible assistant replies" in captured["body"]["messages"][0]["content"]
+    assert captured["body"]["messages"][1] == {"role": "user", "content": "webui session context"}
     assert content[0] == {"type": "text", "text": "What is in this image?"}
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
