@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 import api.config as config
+import api.paths as paths
 
 
 class _WindowsOSShim:
@@ -62,8 +63,8 @@ def windows_env(monkeypatch, tmp_path):
     legacy_home = home / ".hermes"
     new_home = localappdata / "hermes"
 
-    monkeypatch.setattr(config, "HOME", home)
-    monkeypatch.setattr(config, "os", _WindowsOSShim())
+    monkeypatch.setattr(paths, "HOME", home)
+    monkeypatch.setattr(paths, "os", _WindowsOSShim())
     monkeypatch.setenv("LOCALAPPDATA", str(localappdata))
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.delenv("HERMES_BASE_HOME", raising=False)
@@ -135,7 +136,8 @@ def test_does_nothing_on_posix(monkeypatch, tmp_path):
     regardless of any LOCALAPPDATA value — the fix is Windows-only."""
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setattr(config, "HOME", home)
+    monkeypatch.setattr(paths, "HOME", home)
+    monkeypatch.setattr(paths, "os", os)
     # real os.name is 'posix' on CI; do NOT swap in the Windows shim
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "lad"))
     monkeypatch.delenv("HERMES_HOME", raising=False)
@@ -165,23 +167,23 @@ class TestHermesHomeHasWebuiState:
     """Unit coverage for the marker-detection helper."""
 
     def test_empty_or_missing_dir_is_not_state(self, tmp_path):
-        assert config._hermes_home_has_webui_state(tmp_path / "nope") is False
+        assert paths._hermes_home_has_webui_state(tmp_path / "nope") is False
         empty = tmp_path / "empty"
         empty.mkdir()
-        assert config._hermes_home_has_webui_state(empty) is False
+        assert paths._hermes_home_has_webui_state(empty) is False
 
     def test_webui_sessions_marker_counts(self, tmp_path):
         (tmp_path / "webui" / "sessions").mkdir(parents=True)
-        assert config._hermes_home_has_webui_state(tmp_path) is True
+        assert paths._hermes_home_has_webui_state(tmp_path) is True
 
     def test_webui_settings_marker_counts(self, tmp_path):
         (tmp_path / "webui").mkdir()
         (tmp_path / "webui" / "settings.json").write_text("{}", encoding="utf-8")
-        assert config._hermes_home_has_webui_state(tmp_path) is True
+        assert paths._hermes_home_has_webui_state(tmp_path) is True
 
     def test_webui_dir_alone_counts(self, tmp_path):
         (tmp_path / "webui").mkdir()
-        assert config._hermes_home_has_webui_state(tmp_path) is True
+        assert paths._hermes_home_has_webui_state(tmp_path) is True
 
     def test_agent_only_artifacts_do_not_count(self, tmp_path):
         """A home with ONLY agent files (config.yaml / auth.json) and no webui/
@@ -189,17 +191,17 @@ class TestHermesHomeHasWebuiState:
         installing WebUI fresh would be wrongly diverted to the legacy dir."""
         (tmp_path / "config.yaml").write_text("model: x\n", encoding="utf-8")
         (tmp_path / "auth.json").write_text("{}", encoding="utf-8")
-        assert config._hermes_home_has_webui_state(tmp_path) is False
+        assert paths._hermes_home_has_webui_state(tmp_path) is False
 
 
-def test_profiles_base_home_delegates_to_config(monkeypatch, tmp_path):
-    """profiles._resolve_base_hermes_home() must share config's resolution so
+def test_profiles_base_home_uses_shared_path_helper(monkeypatch, tmp_path):
+    """profiles._resolve_base_hermes_home() must share config's path helper so
     the active-profile pointer never diverges from config.STATE_DIR (#2905)."""
     import api.profiles as profiles
 
     sentinel = tmp_path / "sentinel-home"
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.delenv("HERMES_BASE_HOME", raising=False)
-    monkeypatch.setattr(config, "_platform_default_hermes_home", lambda: sentinel)
+    monkeypatch.setattr(paths, "_platform_default_hermes_home", lambda: sentinel)
 
     assert profiles._resolve_base_hermes_home() == sentinel

@@ -28,6 +28,7 @@ ensure_home() {
 }
 
 _load_repo_dotenv_preserving_env() {
+  [[ "${HERMES_WEBUI_NO_DOTENV:-0}" == "1" ]] && return 0
   local env_file="${REPO_ROOT}/.env"
   [[ -f "${env_file}" ]] || return 0
 
