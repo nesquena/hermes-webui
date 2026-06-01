@@ -4663,35 +4663,42 @@ function _hydrateTodosFromSession(session){
   const inflightOk=!!(inflight&&Array.isArray(inflight.todos)&&inflight.todoStateMeta);
   const coldTs=coldOk?(Number(cold.ts)||0):0;
   const inflightTs=inflightOk?(Number(inflight.todoStateMeta&&inflight.todoStateMeta.ts)||0):0;
+  // Whether a live stream currently owns this session. This is the signal
+  // that disambiguates a ts-less cold-load (see below); it comes from the
+  // session GET payload (mirrors sessions.js `S.session.active_stream_id`).
+  const streamActive=!!(session&&session.active_stream_id);
   if(coldOk&&inflightOk){
     // Reconcile the server's settled cold-load snapshot against the
     // locally-persisted INFLIGHT snapshot.
     //
-    // coldTs===0 means the cold-load carries NO usable timestamp. This
-    // is NOT "infinitely old": derive_todo_state (api/todo_state.py)
-    // reverse-scans the FULL settled message list, so the cold-load is
-    // always the authoritative latest-by-position view. A todo tool
-    // message can legitimately lose its `timestamp` during context
-    // compression/rebuild (the on-disk message ends up timestamp=None),
-    // so derive_todo_state returns the correct latest todos but omits
-    // `ts`. The old "strict >" comparison then treated coldTs=0 as
-    // older than ANY timestamped INFLIGHT snapshot — including a STALE
-    // earlier todo list from a prior turn persisted in the same tab —
-    // so the panel showed a historical list. That is the "shows an old
-    // todo list" bug.
+    // coldTs===0 means the cold-load carries NO usable timestamp, so we
+    // cannot order it against INFLIGHT by recency. A todo tool message can
+    // legitimately lose its `timestamp` during context compression/rebuild
+    // (the on-disk message ends up timestamp=None), and derive_todo_state
+    // (api/todo_state.py) then returns the correct latest-by-POSITION todos
+    // but omits `ts`. The tie-break depends on who owns the INFLIGHT tail:
     //
-    // When coldTs===0 we trust the settled view and let cold win. If
-    // the stream is still live and a newer list is in flight, the next
-    // `todo_state` SSE event reconciles forward: its drop guard is
-    // `incomingTs && currentTs && incomingTs < currentTs`, and with
-    // currentTs=0 that guard short-circuits to false, so the event is
-    // always applied. The regression is self-healing (at most a brief
-    // flicker), which is strictly better than persistently rendering a
-    // stale list.
+    //   - stream ACTIVE → INFLIGHT is the live tail. The most recent todo
+    //     write may still be in flight and not yet settled into the message
+    //     list derive_todo_state scans, so a ts-less cold-load can be an
+    //     OLDER (pre-latest-write) view. Letting cold win here rolls the
+    //     panel back to a stale list, and since the stream may have just
+    //     ended on that very write there is no guaranteed forward SSE event
+    //     to self-heal. So prefer INFLIGHT. If cold is in fact newer, the
+    //     reattach replay (sessions.js attachLiveStream, reconnecting) re-
+    //     emits the journaled `todo_state` events which reconcile forward by
+    //     ts, so any transient discrepancy corrects itself.
     //
-    // When coldTs>0 the original recency rule stands: strict ">", and
-    // on a tie prefer INFLIGHT for the freshest in-tab edits.
-    const coldWins=(coldTs===0)||(coldTs>inflightTs);
+    //   - stream IDLE → INFLIGHT is leftover from a finished/crashed stream
+    //     (idle sessions purge it shortly after, sessions.js), and there is
+    //     no replay to correct anything. The settled cold-load is the
+    //     authoritative latest-by-position view, so prefer cold. This also
+    //     preserves the original fix for the "shows an old todo list" bug,
+    //     where a stale prior-turn INFLIGHT must not beat a ts-less cold-load.
+    //
+    // When coldTs>0 the original recency rule stands: strict ">", and on a
+    // tie prefer INFLIGHT for the freshest in-tab edits.
+    const coldWins=(coldTs===0)?(!streamActive):(coldTs>inflightTs);
     if(coldWins){
       S.todos=cold.todos;
       S.todoStateMeta={
