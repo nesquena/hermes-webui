@@ -429,6 +429,24 @@ def test_inline_math_regex_requires_non_space_boundaries():
         f"Inline math regex must exclude spaces at boundaries to prevent false "
         f"positives on currency like $5. Found: {inline_line[:120]}"
     )
+def test_inline_math_regex_rejects_digit_after_opening_dollar():
+    """The $...$ inline regex must reject $ followed by a digit.
+
+    Currency like '$1,000 xuống ~$95' must NOT be parsed as math.
+    The opening $ followed by a digit (0-9) is a strong currency signal.
+    Aligns with smd's se() guard which also rejects $ + digit.
+    """
+    inline_push_idx = UI_JS.find("type:'inline',src:m")
+    assert inline_push_idx != -1
+    line_start = UI_JS.rfind('\n', 0, inline_push_idx) + 1
+    inline_line = UI_JS[line_start:inline_push_idx + 50]
+    # The regex character class for the first char must exclude \d
+    assert '\\d' in inline_line, (
+        f"Inline math regex must exclude digits at opening boundary to prevent "
+        f"false positives on currency like $1,000. Found: {inline_line[:120]}"
+    )
+
+
 def test_display_math_stashed_before_inline():
     """$$...$$ display math must be stashed before $...$ inline math.
 
