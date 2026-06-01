@@ -99,8 +99,8 @@ def _validate_upload(body: bytes, filename: str = "") -> tuple[bytes, str]:
         # PNG
         try:
             w, h = _png_dimensions(body)
-        except ValueError:
-            raise ValueError("Invalid PNG: could not parse dimensions")
+        except ValueError as err:
+            raise ValueError("Invalid PNG: could not parse dimensions") from err
         issues = []
         if size_issue:
             issues.append(f"{size_issue}")
@@ -136,8 +136,8 @@ def _validate_upload(body: bytes, filename: str = "") -> tuple[bytes, str]:
         if ext == ".png":
             try:
                 w, h = _png_dimensions(body)
-            except ValueError:
-                raise ValueError("Invalid PNG: could not parse dimensions")
+            except ValueError as err:
+                raise ValueError("Invalid PNG: could not parse dimensions") from err
             issues = []
             if size_issue:
                 issues.append(f"{size_issue}")
