@@ -24,6 +24,11 @@
 - SSE handlers now arm a 20s socket write deadline once per connection so a slow/backgrounded tab whose recv window fills no longer pins its HTTP worker thread indefinitely, applied uniformly to the 6 long-lived SSE endpoints (chat-stream, terminal, gateway, approval, clarify, session). (#2968)
 - Focused background-task completion viewers still emit `/api/bg-task-complete-ack` for server cleanup/diagnostics while keeping the focused-session toast suppressed. (#2979)
 
+## [v0.51.195] — 2026-06-01 — Release FO (stage-batch7 — hide attachment path markers in chat UI)
+
+### Fixed
+- Uploaded image attachment path context (`[Attached files: …]`) remains available to the agent in the stored message, but the chat transcript, sidebar display title, and server-derived provisional titles no longer show the raw path suffix to the user (#3296, @AJV20).
+
 ## [v0.51.194] — 2026-06-01 — Release FN (stage-batch6 — profiles config-import-cycle fix)
 
 ### Fixed

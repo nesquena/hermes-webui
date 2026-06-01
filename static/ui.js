@@ -3564,6 +3564,10 @@ function renderMd(raw){
   return s;
 }
 
+function _stripAttachedFilesMarkerForDisplay(text){
+  return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
+}
+
 function setStatus(t){
   if(!t)return;
   showToast(t, 4000);
@@ -6530,7 +6534,7 @@ function renderMessages(options){
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
-    const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;
+    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
     if(thinkingText&&!isUser){
       thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent);
     }

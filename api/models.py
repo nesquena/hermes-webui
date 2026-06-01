@@ -2858,6 +2858,10 @@ def all_sessions(diag=None):
     return result
 
 
+def _strip_attached_files_marker(text: str) -> str:
+    return re.sub(r"\n\n\[Attached files: [^\]]+\]$", "", str(text or "")).strip()
+
+
 def title_from(messages, fallback: str='Untitled'):
     """Derive a session title from the first user message."""
     for m in messages:
@@ -2865,7 +2869,7 @@ def title_from(messages, fallback: str='Untitled'):
             c = m.get('content', '')
             if isinstance(c, list):
                 c = ' '.join(p.get('text', '') for p in c if isinstance(p, dict) and p.get('type') == 'text')
-            text = str(c).strip()
+            text = _strip_attached_files_marker(str(c))
             if text:
                 return text[:64]
     return fallback
