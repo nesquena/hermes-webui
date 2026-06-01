@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- `ctl.sh` now honors `HERMES_WEBUI_NO_DOTENV=1`, letting tests and scripted launches opt out of repo-local `.env` loading so host-specific `HERMES_WEBUI_STATE_DIR` values do not make the ctl test suite flaky (#3246).
+
 ## [v0.51.192] — 2026-05-31 — Release FL (stage-batch4 — per-model context_length default-only guard)
 
 ### Fixed

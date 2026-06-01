@@ -17,6 +17,7 @@ def run_ctl(
     env: dict[str, str] | None = None,
     timeout: float = 5.0,
     repo_root: Path = REPO_ROOT,
+    load_dotenv: bool = False,
 ):
     merged = os.environ.copy()
     for key in (
@@ -27,6 +28,7 @@ def run_ctl(
         "HERMES_WEBUI_PID_FILE",
         "HERMES_WEBUI_LOG_FILE",
         "HERMES_WEBUI_CTL_STATE_FILE",
+        "HERMES_WEBUI_NO_DOTENV",
     ):
         merged.pop(key, None)
     merged.update(
@@ -34,6 +36,7 @@ def run_ctl(
             "HOME": str(home),
             "HERMES_HOME": str(home / ".hermes"),
             "PATH": os.environ.get("PATH", ""),
+            "HERMES_WEBUI_NO_DOTENV": "0" if load_dotenv else "1",
         }
     )
     if env:
@@ -146,6 +149,42 @@ def test_start_uses_nohup_so_daemon_survives_launcher_exit():
     assert 'exec nohup "${python_exe}"' in ctl_text
 
 
+def test_start_can_ignore_repo_dotenv_for_authoritative_test_env(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    shutil.copy2(CTL, repo_root / "ctl.sh")
+    (repo_root / "bootstrap.py").write_text("# fake bootstrap target\n", encoding="utf-8")
+    (repo_root / ".env").write_text(
+        f"HERMES_WEBUI_STATE_DIR={tmp_path / 'host-specific-webui'}\n",
+        encoding="utf-8",
+    )
+    fake_python = tmp_path / "fake-python"
+    fake_log = tmp_path / "fake-python.log"
+    write_fake_python(fake_python)
+
+    result = run_ctl(
+        tmp_path,
+        "start",
+        env={
+            "HERMES_WEBUI_PYTHON": str(fake_python),
+            "FAKE_PYTHON_LOG": str(fake_log),
+            "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
+        },
+        repo_root=repo_root,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    pid = wait_for_pid_file(tmp_path / ".hermes" / "webui.pid")
+    try:
+        fake_output = wait_for_file_text(fake_log)
+        assert str(tmp_path / ".hermes" / "webui") in fake_output
+        assert "host-specific-webui" not in fake_output
+    finally:
+        stop = run_ctl(tmp_path, "stop", repo_root=repo_root)
+        assert stop.returncode == 0, stop.stderr + stop.stdout
+        assert_process_exits(pid)
+
+
 def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
@@ -170,6 +209,7 @@ def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
             "HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT": "1",
         },
         repo_root=repo_root,
+        load_dotenv=True,
     )
     assert result.returncode == 0, result.stderr + result.stdout
     pid = wait_for_pid_file(tmp_path / ".hermes" / "webui.pid")
