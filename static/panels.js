@@ -3258,10 +3258,13 @@ function _renderSystemHealthPanel() {
 function _renderLlmWikiStatus(d) {
   const status = d || {status:'error'};
   const isReady = status.available && status.status === 'ready';
+  const isConfigured = status.available && status.status === 'configured';
   const isEmpty = status.available && status.status === 'empty';
   const isError = status.status === 'error';
-  const badgeClass = isReady ? 'ok' : isError ? 'err' : isEmpty ? 'warn' : 'muted';
-  const badgeText = isReady ? 'Available' : isError ? 'Error' : isEmpty ? 'Empty' : 'Unavailable';
+  const isNotesSource = status.path_source === 'notes' || status.path_source === 'joplin';
+  const sourceLabel = status.source_label || (status.path_source === 'joplin' ? 'Joplin' : 'Notes');
+  const badgeClass = isReady ? 'ok' : isConfigured ? 'warn' : isError ? 'err' : isEmpty ? 'warn' : 'muted';
+  const badgeText = isReady ? (isNotesSource ? sourceLabel : 'Available') : isConfigured ? 'Configured' : isError ? 'Error' : isEmpty ? 'Empty' : 'Unavailable';
   const rawDocsUrl = status.docs_url || 'https://hermes-agent.nousresearch.com/docs/user-guide/skills/bundled/research/research-llm-wiki';
   // Guard against unsafe URL schemes (e.g. js: / data:) if docs_url ever
   // becomes config-driven. esc() HTML-escapes but doesn't validate URL scheme.
@@ -3270,12 +3273,18 @@ function _renderLlmWikiStatus(d) {
     ? 'Toggle available from configured Hermes Agent setting.'
     : (status.toggle_reason || 'No stable LLM Wiki on/off config flag was detected, so this panel is read-only.');
   const statusNote = isReady
-    ? 'LLM Wiki is configured and page metadata is visible without exposing wiki content.'
-    : isEmpty
-      ? 'LLM Wiki exists but has no entity, concept, comparison, or query pages yet.'
-      : isError
-        ? `Unable to inspect LLM Wiki status${status.error ? ': ' + status.error : ''}.`
-        : 'No LLM Wiki directory was found. Set WIKI_PATH or skills.config.wiki.path to enable status visibility.';
+    ? (isNotesSource
+      ? `${sourceLabel} is configured as the knowledge-base source; metadata is visible without exposing note bodies.`
+      : 'LLM Wiki is configured and page metadata is visible without exposing wiki content.')
+    : isConfigured
+      ? `${sourceLabel} is configured as a knowledge-base source; detailed counts depend on provider-specific support.`
+      : isEmpty
+        ? (isNotesSource
+          ? `${sourceLabel} is connected but the configured knowledge source has no notes yet.`
+          : 'LLM Wiki exists but has no entity, concept, comparison, or query pages yet.')
+        : isError
+          ? `Unable to inspect LLM Wiki status${status.error ? ': ' + status.error : ''}.`
+          : 'No LLM Wiki directory or third-party notes knowledge source was found. Set WIKI_PATH, skills.config.wiki.path, or configure a notes source.';
   return `
     <div class="insights-card wiki-status-card" id="llmWikiStatusCard">
       <div class="wiki-status-head">
@@ -3290,7 +3299,7 @@ function _renderLlmWikiStatus(d) {
         <div><span>Enabled</span><strong>${status.enabled ? 'Yes' : 'No'}</strong></div>
         <div><span>Entries</span><strong>${Number(status.entry_count || 0).toLocaleString()}</strong></div>
         <div><span>Pages</span><strong>${Number(status.page_count || 0).toLocaleString()}</strong></div>
-        <div><span>raw/ files</span><strong>${Number(status.raw_source_count || 0).toLocaleString()}</strong></div>
+        <div><span>${isNotesSource ? 'Raw notes' : 'raw/ files'}</span><strong>${Number(status.raw_source_count || 0).toLocaleString()}</strong></div>
         <div><span>Last updated</span><strong>${esc(_formatLlmWikiTimestamp(status.last_updated))}</strong></div>
         <div><span>Last writer</span><strong>${esc(status.last_writer || 'Not available')}</strong></div>
       </div>
