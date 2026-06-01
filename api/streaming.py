@@ -3912,6 +3912,15 @@ def _run_agent_streaming(
     _live_prompt_exact_tokens = [0]
     _live_prompt_estimate_tool_delta_tokens = [0]
     _live_prompt_estimate_seen_ids = set()
+    # Per-stream cache for the real per-model context_length (#3256 perf).
+    # _live_usage_snapshot() runs on every metering tick (~10x/sec during
+    # streaming); recomputing get_model_context_length() there triggered a
+    # config read + potential metadata/network probe on every token for
+    # non-default models (e.g. claude-opus-4.7-1m), freezing the stream while
+    # the default model was unaffected. The value is constant for a given
+    # (model, base_url, provider) within one stream, so resolve it at most
+    # once. Sentinel: None=not computed, 0=not applicable/failed, >0=real cap.
+    _real_ctx_cache = [None]
 
     def _seed_live_prompt_estimate() -> int:
         """Capture the latest exact prompt size before adding live tool deltas."""
@@ -3988,9 +3997,76 @@ def _run_agent_streaming(
             try:
                 _cc = getattr(_agent, 'context_compressor', None)
                 if _cc:
-                    _usage['context_length'] = getattr(_cc, 'context_length', 0) or 0
-                    _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
-                    _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+                    _cc_cl_u = getattr(_cc, 'context_length', 0) or 0
+                    # Default-only guard (#3256): the agent-side compressor is
+                    # built in agent_init with the global model.context_length
+                    # applied unconditionally — for non-default models that
+                    # value is the stale global cap (e.g. 232K). Drop it here
+                    # so the live usage payload doesn't surface the wrong cap.
+                    # PERF: resolve the real per-model cap at most once per
+                    # stream (cached in _real_ctx_cache). This snapshot runs on
+                    # every metering tick; doing the config read + metadata
+                    # lookup per tick froze non-default-model streams.
+                    if _real_ctx_cache[0] is None:
+                        _resolved_real = 0  # 0 = guard not applicable / failed
+                        try:
+                            from api.config import get_config as _gc_u
+                            _cfg_u = _gc_u()
+                            _mcfg_u = _cfg_u.get('model', {}) if isinstance(_cfg_u, dict) else {}
+                            if isinstance(_mcfg_u, dict):
+                                _def_u = str(_mcfg_u.get('default') or '').strip()
+                                _raw_u = _mcfg_u.get('context_length')
+                                try:
+                                    _cl_u = int(_raw_u) if _raw_u is not None else 0
+                                except (TypeError, ValueError):
+                                    _cl_u = 0
+                                _sm_u = str(getattr(_agent, 'model', '') or '').strip()
+                                from api.routes import _model_matches_configured_default as _mmcd_u
+                                if (
+                                    _cl_u > 0
+                                    and _cc_cl_u == _cl_u
+                                    and _def_u
+                                    and _sm_u
+                                    and not _mmcd_u(_sm_u, _def_u, getattr(_agent, 'provider', '') or '')
+                                ):
+                                    # Recompute from real per-model metadata.
+                                    try:
+                                        from agent.model_metadata import get_model_context_length as _g_u
+                                        _real_u = _g_u(
+                                            _sm_u,
+                                            getattr(_agent, 'base_url', '') or '',
+                                            config_context_length=None,
+                                            provider=getattr(_agent, 'provider', '') or '',
+                                        ) or 0
+                                        if _real_u:
+                                            _resolved_real = _real_u
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            _resolved_real = 0
+                        _real_ctx_cache[0] = _resolved_real
+                    # Apply the cached real cap when the guard determined one.
+                    if _real_ctx_cache[0]:
+                        # Also rescale threshold_tokens by the same ratio so the
+                        # auto-compress trigger reflects the real window, not
+                        # the stale global cap (e.g. 197.2k @ 232K cap → ~850k
+                        # @ 1M real cap).
+                        _orig_cc_cl = getattr(_cc, 'context_length', 0) or 0
+                        _orig_thresh = getattr(_cc, 'threshold_tokens', 0) or 0
+                        _cc_cl_u = _real_ctx_cache[0]
+                        if _orig_cc_cl > 0 and _orig_thresh > 0:
+                            _scaled_thresh = int(_orig_thresh * _real_ctx_cache[0] / _orig_cc_cl)
+                            _usage['context_length'] = _cc_cl_u
+                            _usage['threshold_tokens'] = _scaled_thresh
+                            _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+                        else:
+                            _usage['context_length'] = _cc_cl_u
+                            _usage['threshold_tokens'] = _orig_thresh
+                            _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+                    else:
+                        _usage['context_length'] = _cc_cl_u
+                        _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
+                        _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
             except Exception:
                 pass
 
@@ -5793,8 +5869,45 @@ def _run_agent_streaming(
                 # block writes them to the session itself so GET /api/session
                 # returns them on reload instead of falling back to 0.
                 _cc_for_save = getattr(agent, 'context_compressor', None)
+                # Initialized before the compressor block so the #3256/#3263
+                # threshold-rescale below is safe even when there is no
+                # compressor (fresh agent / interrupted stream): _skip_cc_cl
+                # stays False and _cc_cl stays 0, so the rescale is a no-op.
+                _skip_cc_cl = False
+                _cc_cl = 0
                 if _cc_for_save:
-                    s.context_length = getattr(_cc_for_save, 'context_length', 0) or 0
+                    _cc_cl = getattr(_cc_for_save, 'context_length', 0) or 0
+                    # Same guard as routes._resolve_context_length_for_session_model:
+                    # the agent-side context_compressor was constructed with the
+                    # global model.context_length applied to EVERY model. If the
+                    # session's model isn't model.default, that value is a stale
+                    # cap (e.g. 232K) that would clobber the real 1M metadata
+                    # on every stream end. In that case skip the compressor
+                    # value and let the fallback resolver below recompute.
+                    _skip_cc_cl = False
+                    try:
+                        _model_cfg_cc = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
+                        if isinstance(_model_cfg_cc, dict):
+                            _cfg_default_cc = str(_model_cfg_cc.get('default') or '').strip()
+                            _raw_cfg_cl_cc = _model_cfg_cc.get('context_length')
+                            try:
+                                _cfg_cl_cc = int(_raw_cfg_cl_cc) if _raw_cfg_cl_cc is not None else 0
+                            except (TypeError, ValueError):
+                                _cfg_cl_cc = 0
+                            _sess_model_cc = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                            from api.routes import _model_matches_configured_default as _mmcd_cc
+                            if (
+                                _cfg_cl_cc > 0
+                                and _cc_cl == _cfg_cl_cc
+                                and _cfg_default_cc
+                                and _sess_model_cc
+                                and not _mmcd_cc(_sess_model_cc, _cfg_default_cc, resolved_provider or '')
+                            ):
+                                _skip_cc_cl = True
+                    except Exception:
+                        pass
+                    if not _skip_cc_cl:
+                        s.context_length = _cc_cl
                     s.threshold_tokens = getattr(_cc_for_save, 'threshold_tokens', 0) or 0
                     s.last_prompt_tokens = getattr(_cc_for_save, 'last_prompt_tokens', 0) or 0
                 # Fallback: if the compressor didn't report a context_length
@@ -5812,7 +5925,14 @@ def _run_agent_streaming(
                 # window in the persisted session and the SSE payload —
                 # which then trips LCM auto-compress at ~25% of the wrong
                 # value, cascading into 429 floods.
-                if not getattr(s, 'context_length', 0):
+                #
+                # #3256/#3263: ALSO run this fallback when _skip_cc_cl is true
+                # (non-default model whose compressor carried the stale global
+                # cap). Without this, a session that already had a stale 232K
+                # context_length persisted keeps it forever — skipping the
+                # compressor write removes the re-clobber but never recomputes
+                # the real per-model window. Recompute and overwrite in that case.
+                if (not getattr(s, 'context_length', 0)) or _skip_cc_cl:
                     try:
                         from agent.model_metadata import get_model_context_length
                         _cfg_ctx_len = None
@@ -5821,7 +5941,20 @@ def _run_agent_streaming(
                             _model_cfg_for_ctx = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
                             if isinstance(_model_cfg_for_ctx, dict):
                                 _raw_cfg_ctx = _model_cfg_for_ctx.get('context_length')
-                                if _raw_cfg_ctx is not None:
+                                # Default-only guard: only apply the global
+                                # model.context_length cap when the session
+                                # model equals model.default. Otherwise the
+                                # cap (e.g. 232K set for the default model)
+                                # silently shrinks other models' real metadata.
+                                _cfg_default_ctx = str(_model_cfg_for_ctx.get('default') or '').strip()
+                                _sess_model_ctx = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                                from api.routes import _model_matches_configured_default as _mmcd_ctx
+                                _apply_cfg_ctx = (
+                                    not _cfg_default_ctx
+                                    or not _sess_model_ctx
+                                    or _mmcd_ctx(_sess_model_ctx, _cfg_default_ctx, resolved_provider or '')
+                                )
+                                if _raw_cfg_ctx is not None and _apply_cfg_ctx:
                                     try:
                                         _parsed_cfg_ctx = int(_raw_cfg_ctx)
                                         if _parsed_cfg_ctx > 0:
@@ -5863,6 +5996,23 @@ def _run_agent_streaming(
                         # Older hermes-agent builds may not expose this helper.
                         # Better to leave context_length=0 than crash the save.
                         pass
+                # #3256/#3263: when we skipped the stale compressor cap for a
+                # non-default model and recomputed the real per-model window
+                # above, rescale the persisted threshold_tokens to that real cap
+                # so the auto-compress trigger and the reloaded context-ring
+                # match the live snapshot (which already rescales). Without this,
+                # a reload shows a smaller compression trigger than streaming did.
+                # Only rescale when both the original cap and threshold are
+                # positive; otherwise clear the threshold to 0 (consistent with
+                # the live-snapshot path) rather than leave a stale value.
+                if _skip_cc_cl:
+                    _orig_cap = _cc_cl  # the stale global cap the compressor reported
+                    _orig_thresh = getattr(s, 'threshold_tokens', 0) or 0
+                    _real_cap = getattr(s, 'context_length', 0) or 0
+                    if _real_cap > 0 and _orig_cap > 0 and _orig_thresh > 0:
+                        s.threshold_tokens = int(_orig_thresh * _real_cap / _orig_cap)
+                    else:
+                        s.threshold_tokens = 0
                 if not ephemeral and s.messages:
                     _latest_assistant_idx = next(
                         (idx for idx in range(len(s.messages) - 1, -1, -1)
@@ -5991,7 +6141,45 @@ def _run_agent_streaming(
             # survive a page reload; this block only populates the live SSE usage payload.
             _cc = getattr(agent, 'context_compressor', None)
             if _cc:
-                usage['context_length'] = getattr(_cc, 'context_length', 0) or 0
+                _cc_cl_sse = getattr(_cc, 'context_length', 0) or 0
+                # #3256/#3263: remember the original compressor cap + threshold
+                # so that if we drop the stale cap below and the fallback
+                # resolves the real per-model window, we can rescale the
+                # threshold consistently (the live snapshot already does this).
+                _orig_cc_cl_sse = _cc_cl_sse
+                _orig_cc_thresh_sse = getattr(_cc, 'threshold_tokens', 0) or 0
+                _dropped_stale_cap_sse = False
+                # Default-only guard (#3256): the agent-side context_compressor
+                # is constructed in agent_init with the global model.context_length
+                # applied unconditionally, so for non-default models its
+                # context_length is the stale global cap (e.g. 232K) — surfacing
+                # it via SSE makes the indicator show the wrong window even
+                # after the session was correctly resized. Drop the compressor
+                # value in that case and let the fallback resolver below recompute.
+                try:
+                    _model_cfg_sse = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
+                    if isinstance(_model_cfg_sse, dict):
+                        _cfg_default_sse = str(_model_cfg_sse.get('default') or '').strip()
+                        _raw_cfg_cl_sse = _model_cfg_sse.get('context_length')
+                        try:
+                            _cfg_cl_sse = int(_raw_cfg_cl_sse) if _raw_cfg_cl_sse is not None else 0
+                        except (TypeError, ValueError):
+                            _cfg_cl_sse = 0
+                        _sess_model_sse = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                        from api.routes import _model_matches_configured_default as _mmcd_sse
+                        if (
+                            _cfg_cl_sse > 0
+                            and _cc_cl_sse == _cfg_cl_sse
+                            and _cfg_default_sse
+                            and _sess_model_sse
+                            and not _mmcd_sse(_sess_model_sse, _cfg_default_sse, resolved_provider or '')
+                        ):
+                            _cc_cl_sse = 0
+                            _dropped_stale_cap_sse = True
+                except Exception:
+                    pass
+                if _cc_cl_sse:
+                    usage['context_length'] = _cc_cl_sse
                 usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
             # Fallback: when the compressor is absent or reports context_length=0,
@@ -6013,7 +6201,19 @@ def _run_agent_streaming(
                         _model_cfg_for_ctx = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
                         if isinstance(_model_cfg_for_ctx, dict):
                             _raw_cfg_ctx = _model_cfg_for_ctx.get('context_length')
-                            if _raw_cfg_ctx is not None:
+                            # Default-only guard (see #3256): the global
+                            # model.context_length cap only applies to
+                            # model.default; other models keep their real
+                            # metadata.
+                            _cfg_default_ctx = str(_model_cfg_for_ctx.get('default') or '').strip()
+                            _sess_model_ctx = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                            from api.routes import _model_matches_configured_default as _mmcd_sfb
+                            _apply_cfg_ctx = (
+                                not _cfg_default_ctx
+                                or not _sess_model_ctx
+                                or _mmcd_sfb(_sess_model_ctx, _cfg_default_ctx, resolved_provider or '')
+                            )
+                            if _raw_cfg_ctx is not None and _apply_cfg_ctx:
                                 try:
                                     _parsed_cfg_ctx = int(_raw_cfg_ctx)
                                     if _parsed_cfg_ctx > 0:
@@ -6041,6 +6241,15 @@ def _run_agent_streaming(
                         )
                     if _fb_cl:
                         usage['context_length'] = _fb_cl
+                        # #3256/#3263: if we dropped the stale compressor cap
+                        # for a non-default model, the threshold_tokens written
+                        # above is still the stale compressor value. Rescale it
+                        # to the real resolved window so the terminal `done`
+                        # payload matches the live snapshot (which rescales) —
+                        # otherwise messages.js overwrites S.lastUsage with the
+                        # stale threshold and the indicator reverts on stream end.
+                        if _dropped_stale_cap_sse and _orig_cc_cl_sse > 0 and _orig_cc_thresh_sse > 0:
+                            usage['threshold_tokens'] = int(_orig_cc_thresh_sse * _fb_cl / _orig_cc_cl_sse)
                 except Exception:
                     pass
             # Fallback: when last_prompt_tokens is missing (no compressor), use the
