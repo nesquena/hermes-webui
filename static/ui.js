@@ -7371,12 +7371,51 @@ function buildToolCard(tc){
           Object.entries(tc.args).map(([k,v])=>`<div><span class="tool-arg-key">${esc(k)}</span> <span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
-          <pre>${esc(displaySnippet)}</pre>
-          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?this.dataset.moreLabel:this.dataset.lessLabel">${esc(moreLabel)}</button>`:''}
+          <pre>${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?`<code class="diff-block" data-highlighted="1">${_colorDiffLines(displaySnippet)}</code>`:esc(displaySnippet)}</pre>
+          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-is-diff="${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?1:0}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();_toggleToolDiff(this)">${esc(moreLabel)}</button>`:''}
         </div>`:''}
       </div>`:''}
     </div>`;
   return row;
+}
+
+function _colorDiffLines(text){
+  if(typeof text !== 'string') return esc(String(text||''));
+  return esc(text).split('\n').map(line=>{
+    if(line.startsWith('@@')) return `<span class="diff-line diff-hunk">${line}</span>`;
+    if(line.startsWith('+')&&!line.startsWith('+++')) return `<span class="diff-line diff-plus">${line}</span>`;
+    if(line.startsWith('-')&&!line.startsWith('---')) return `<span class="diff-line diff-minus">${line}</span>`;
+    return `<span class="diff-line">${line}</span>`;
+  }).join('\n');
+}
+
+// Detect if text looks like a unified diff (has @@ hunk headers and +/- lines).
+function _snippetLooksLikeDiff(text){
+  if(typeof text!=='string'||text.length<10) return false;
+  if(!/^@@\s/.test(text)) return false;
+  const lines=text.split('\n');
+  let plusMinus=0;
+  for(let i=0;i<lines.length&&i<50;i++){
+    const l=lines[i];
+    if(l.startsWith('+')||l.startsWith('-')) plusMinus++;
+  }
+  return plusMinus>=2;
+}
+
+function _toggleToolDiff(btn){
+  const pre=btn.closest('.tool-card-result')?.querySelector('pre');
+  if(!pre) return;
+  const isDiff=btn.dataset.isDiff==='1';
+  const expanded=btn.textContent===btn.dataset.moreLabel;
+  const raw=expanded?btn.dataset.full:btn.dataset.short;
+  if(isDiff){
+    let code=pre.querySelector('code');
+    if(!code){code=document.createElement('code');code.className='diff-block';pre.textContent='';pre.appendChild(code);}
+    code.innerHTML=_colorDiffLines(raw);
+  }else{
+    pre.textContent=raw;
+  }
+  btn.textContent=expanded?btn.dataset.lessLabel:btn.dataset.moreLabel;
 }
 
 function _syncToolCallGroupSummary(group){
