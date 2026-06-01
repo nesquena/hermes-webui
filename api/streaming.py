@@ -4634,6 +4634,14 @@ def _run_agent_streaming(
                     # `result` kwarg from modern Hermes builds; fall
                     # back to the truncated `preview` only when the
                     # callback was invoked without one (older builds).
+                    #
+                    # Graceful degradation on old builds: `preview` is a
+                    # truncated snippet, so its JSON is usually unparseable.
+                    # parse_todo_tool_result() then returns None and NO
+                    # todo_state event is emitted — live panel updates are
+                    # silently unavailable on pre-`result` builds. This is
+                    # intended: the panel still hydrates via cold-load on the
+                    # next session GET; it just won't update mid-stream.
                     emit_todo_state(
                         put,
                         name=name,

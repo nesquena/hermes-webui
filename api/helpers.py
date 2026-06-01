@@ -387,6 +387,12 @@ def redact_session_data(session_dict: dict) -> dict:
         result['messages'] = _redact_value(result['messages'], _enabled=_enabled)
     if 'tool_calls' in result:
         result['tool_calls'] = _redact_value(result['tool_calls'], _enabled=_enabled)
+    # todo_state is derived from a tool result (see api/todo_state.py). The same
+    # content is redacted inside messages[] above, so the snapshot must be
+    # redacted too — otherwise the cold-load Todos panel becomes a redaction
+    # bypass for any credential an agent wrote into a todo item's content.
+    if 'todo_state' in result:
+        result['todo_state'] = _redact_value(result['todo_state'], _enabled=_enabled)
     return result
 
 

@@ -74,6 +74,17 @@ def _normalize_snapshot(data: Any) -> Optional[dict]:
 
     The detector is intentionally loose so it stays symmetric with the
     agent's hydration logic — see the module docstring.
+
+    **Empty list is a valid snapshot.** ``todos == []`` returns a normal
+    snapshot (not ``None``), so the latest write wins even when it cleared
+    the list. This is deliberately symmetric with the agent: its
+    ``_hydrate_todo_store`` (run_agent.py) breaks at the most-recent todo
+    message and, because ``if last_todo_response:`` is falsy for ``[]``,
+    leaves its TodoStore empty — i.e. agent shows empty, panel shows empty.
+    Do NOT reintroduce a ``len(todos) > 0`` guard here or in the frontend
+    fallback (``_legacyTodosFromMessages``): that was the pre-Phase-2
+    behavior that kept scanning past an empty write to an older non-empty
+    list, diverging from the agent and showing a stale "cleared" list.
     """
     if not isinstance(data, dict):
         return None
@@ -199,6 +210,32 @@ def _max_timestamp_through(messages: "Sequence[Any]", upto_idx: int) -> float:
     return best
 
 
+def _redact_snapshot(snapshot: dict) -> dict:
+    """Redact credential-shaped text from a todo snapshot before it leaves the process.
+
+    The live SSE path (:func:`emit_todo_state`) does NOT pass through
+    ``redact_session_data`` (api/helpers.py) the way the cold-load session
+    GET response does, so emission must redact the same content that path
+    would — otherwise the live Todos panel (and the run-journal replay that
+    persists every SSE event) becomes a redaction bypass for any credential
+    an agent wrote into a todo item's ``content``. The live event also
+    carries the FULL untruncated todos, a wider exposure surface than the
+    truncated ``preview`` the sibling ``tool``/``tool_complete`` events send.
+
+    ``_redact_value`` is imported lazily to keep the dependency direction
+    one-way (helpers must never import todo_state) and to avoid paying the
+    import cost on the cold-load path, which redacts via ``redact_session_data``.
+
+    Returns a new, redacted snapshot. Raises on failure so the caller fails
+    closed (no emission) rather than leaking an unredacted payload.
+    """
+    from typing import cast
+    from api.helpers import _redact_value
+    # ``_redact_value`` preserves container shape (dict in → dict out); the
+    # cast narrows its broad recursive union back to dict for the type checker.
+    return cast(dict, _redact_value(snapshot))
+
+
 def emit_todo_state(
     put: Callable[[str, dict], Any],
     *,
@@ -224,7 +261,9 @@ def emit_todo_state(
                 future callers may use ``'compression-refresh'`` etc.
 
     The full snapshot is always sent — idempotent re-application is safe
-    under SSE replay through the run journal.
+    under SSE replay through the run journal. The snapshot is redacted
+    before emission (see :func:`_redact_snapshot`); if redaction fails the
+    event is dropped (fail-closed) rather than leaking an unredacted payload.
     """
     if name != "todo":
         return False
@@ -232,6 +271,7 @@ def emit_todo_state(
         snapshot = parse_todo_tool_result(function_result)
         if snapshot is None:
             return False
+        snapshot = _redact_snapshot(snapshot)
         put(EVENT_NAME, {
             "session_id": session_id,
             "stream_id": stream_id,
@@ -243,6 +283,7 @@ def emit_todo_state(
     except Exception:
         # Per-call debug logging — a flood would mean the queue is
         # broken, in which case the rest of the stream is already dead.
+        # Redaction failure also lands here and correctly drops the event.
         logger.debug("todo_state emit failed (name=%s)", name, exc_info=True)
         return False
 
