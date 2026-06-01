@@ -1818,6 +1818,77 @@ def _github_workflows_refresh_summary(origin_uri: str, payload: dict[str, Any]) 
     return _bounded_refresh_summary("; ".join(parts))
 
 
+_GITHUB_PULL_FILE_STATUSES = {"added", "removed", "modified", "renamed", "copied", "changed", "unchanged"}
+
+
+def _github_pull_files_path_number(origin_uri: str) -> int | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or lowered[4] != "pulls"
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+        or lowered[6] != "files"
+    ):
+        return None
+    return int(path[5])
+
+
+def _github_pull_file_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    status = _safe_public_text(row.get("status"), limit=40).lower()
+    if status not in _GITHUB_PULL_FILE_STATUSES:
+        return False
+    for field in ("additions", "deletions", "changes"):
+        if _safe_optional_nonnegative_int(row.get(field)) is None:
+            return False
+    return True
+
+
+def _json_payload_is_github_pull_files_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_pull_files_path_number(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_pull_file_row_is_safe(row) for row in payload)
+
+
+def _github_pull_files_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    number = _github_pull_files_path_number(origin_uri) or 0
+    safe_rows = [row for row in payload if _github_pull_file_row_is_safe(row)]
+    status_counts: dict[str, int] = {}
+    additions = 0
+    deletions = 0
+    changes = 0
+    for row in safe_rows:
+        status = _safe_public_text(row.get("status"), limit=40).lower()
+        status_counts[status] = status_counts.get(status, 0) + 1
+        additions += int(row.get("additions"))
+        deletions += int(row.get("deletions"))
+        changes += int(row.get("changes"))
+    parts = [
+        f"GitHub pull request #{number} file changes",
+        f"file count: {len(payload)}",
+        f"additions: {additions}",
+        f"deletions: {deletions}",
+        f"changes: {changes}",
+    ]
+    for status in sorted(status_counts):
+        parts.append(f"status {status}: {status_counts[status]}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -1836,6 +1907,15 @@ def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
 
 
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
+    if _json_payload_is_github_pull_files_metadata(origin_uri, payload):
+        title = f"GitHub PR files #{(_github_pull_files_path_number(origin_uri) or 0)}"
+        summary = _github_pull_files_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_branches_metadata(origin_uri, payload):
         title = f"GitHub branches {(_github_branches_path_repo(origin_uri) or source_id)}"
         summary = _github_branches_refresh_summary(origin_uri, payload)
