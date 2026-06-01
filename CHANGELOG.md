@@ -3,10 +3,14 @@
 
 ## [Unreleased]
 
+### Fixed
+- Model picker no longer snaps to the wrong model when multiple multi-slash model IDs from the same proxy provider share the same base name. Exact-match priority in `_findModelInDropdown` and first-segment-only stripping in `_normalizeConfiguredModelKey` / `_norm_model_id` prevent collisions in selection, badge assignment, and configured-entry dedup (#3360).
+
 ## [v0.51.206] — 2026-06-02 — Release FZ (workspace file upload + drag-and-drop with archive extraction)
 
 ### Added
 - Workspace file panel: an **Upload** button and drag-and-drop that POST to a new `/api/workspace/upload` endpoint. Files land in the session workspace (resolved via the trusted-workspace guard), are de-duplicated with `-1`/`-2` suffixes, and archives (`.zip`/`.tar.*`) are auto-extracted into the target subdirectory with zip-bomb (size-cap + member-count-cap) and zip-slip (path-containment) protections. The extraction size cap is tunable via `HERMES_WEBUI_MAX_EXTRACTED_MB` (defaults to 10× the upload cap). Extraction errors are surfaced to the frontend instead of being silently swallowed, and the archive is removed on failure (#3104, @antoniocarlos97ss).
+
 
 ## [v0.51.205] — 2026-06-01 — Release FY (stage-hi1 — workspace syntax highlighting + generated-image cards + manual title regeneration)
 

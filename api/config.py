@@ -3076,9 +3076,9 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
             if m.get("label") and _norm(str(m.get("id", ""))) == norm_lookup:
                 return m["label"]
 
-    # Fall back: capitalize each hyphen-separated word, preserve dots in version numbers.
-    # The catalog lookup above handles well-known models; this only fires for unlisted IDs.
-    bare = lookup_id.split("/")[-1] if "/" in lookup_id else lookup_id
+    # Fall back: strip only the first slash-segment (provider prefix),
+    # preserving vendor hierarchy for multi-slash IDs (#3360).
+    bare = lookup_id.split("/", 1)[1] if "/" in lookup_id else lookup_id
     return " ".join(
         w.upper() if (len(w) <= 3 and w.replace(".", "").isalnum() and not w.isdigit()) else w.capitalize()
         for w in bare.replace("_", "-").split("-")
@@ -3231,11 +3231,14 @@ def get_available_models() -> dict:
             if s.startswith("@") and ":" in s:
                 parts = s.split(":")
                 s = parts[-1] or s
-            # Strip provider/model prefix (e.g., custom:jingdong/GLM-5 -> GLM-5).
-            # Same trailing-empty guard.
+            # Strip only the first slash-segment (provider prefix), preserving
+            # any remaining vendor hierarchy.  Using parts[-1] here previously
+            # discarded ALL segments except the last, collapsing distinct
+            # multi-slash IDs like 'vendor_a/deepseek-v4-pro' and
+            # 'vendor_b/deepseek/deepseek-v4-pro' to the same key (#3360).
             if "/" in s:
-                parts = s.split("/")
-                s = parts[-1] or s
+                stripped = s.split("/", 1)[1]
+                s = stripped or s
             return s.replace("-", ".")
 
         def _build_configured_model_badges() -> dict[str, dict[str, str]]:

@@ -1060,6 +1060,20 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   const options=Array.from(sel.options);
   const opts=options.map(o=>o.value);
+  // 0. Exact match — highest priority when it doesn't conflict with a
+  // cross-provider preference (#3360, guarded for #1228/#1313).
+  // When all models share the same provider (e.g. a custom proxy),
+  // normalization can collapse distinct multi-slash IDs to the same key
+  // and options.find() returns whichever appears first in the DOM instead
+  // of the exact value.  But when the exact option belongs to a *different*
+  // provider than the preferred one, we must fall through to the provider-
+  // aware match so rehydration doesn't snap to the wrong provider row.
+  if(opts.includes(modelId)){
+    const exactOpt=options.find(o=>o.value===modelId);
+    const exactProv=exactOpt?_getOptionProviderId(exactOpt).toLowerCase():'';
+    const pref=String(preferredProviderId||'').toLowerCase();
+    if(!pref || !exactProv || exactProv===pref) return modelId;
+  }
   // 1. Normalize: lowercase, strip namespace prefix, replace hyphens→dots.
   // Also strip @provider: prefix from deduplicated model IDs (#1228, #1313).
   const norm=s=>s.toLowerCase().replace(/^[^/]+\//,'').replace(/^@([^:]+:)+/,'').replace(/-/g,'.');
@@ -1074,8 +1088,7 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     const providerMatch=options.find(o=>norm(o.value)===target && _getOptionProviderId(o).toLowerCase()===preferred);
     if(providerMatch) return providerMatch.value;
   }
-  // 2. Exact match
-  if(opts.includes(modelId)) return modelId;
+  // 2. Normalized match
   const exact=opts.find(o=>norm(o)===target);
   if(exact) return exact;
   // If the request is provider-qualified (either explicit @provider:model or
@@ -1418,7 +1431,21 @@ function _normalizeConfiguredModelKey(modelId){
   // Defensive: trailing-colon / trailing-slash falls back to the original key
   // so malformed configs don't collapse distinct ids to '' (matches backend _norm_model_id).
   if(s.startsWith('@')&&s.includes(':')){const last=s.split(':').pop();s=last||s;}
-  if(s.includes('/')){const last=s.split('/').pop();s=last||s;}
+  // Strip provider-qualified prefixes that contain colons before the first
+  // slash (e.g. 'custom:llm-proxy/model' → 'model').  Without this, badge-
+  // key variants like 'custom:llm-proxy/opencode_go/deepseek-v4-pro' and the
+  // bare 'opencode_go/deepseek-v4-pro' produce different normalized keys and
+  // aren't deduped in the configured section (#3360).
+  if(s.includes('/')&&s.indexOf(':')!==-1&&s.indexOf(':')<s.indexOf('/')){
+    s=s.slice(s.indexOf('/')+1)||s;
+  }
+  // Strip only the first slash-segment (provider prefix), preserving any
+  // remaining vendor hierarchy. Using split('/').pop() here previously
+  // discarded ALL segments except the last, collapsing distinct multi-slash
+  // IDs like 'vendor_a/deepseek-v4-pro' and 'vendor_b/deepseek/deepseek-v4-pro'
+  // to the same key, causing badge misattribution and configured-entry
+  // suppression (#3360).
+  if(s.includes('/')) s=s.replace(/^[^/]+\//, '')||s;
   return s.replace(/-/g,'.');
 }
 
@@ -2860,7 +2887,7 @@ function getModelLabel(modelId){
   if(rawId.startsWith('@custom:')){
     const rest=rawId.slice('@custom:'.length);
     if(rest.includes(':')) return rest.slice(rest.lastIndexOf(':')+1)||rawId;
-    if(rest.includes('/')) return rest.split('/').pop()||rawId;
+    if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
     return rest||rawId;
   }
   // Check dynamic labels first, then fall back to splitting the ID
@@ -2868,8 +2895,9 @@ function getModelLabel(modelId){
   // Static fallback for common models
   const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-v4-flash':'DeepSeek V4 Flash','deepseek/deepseek-v4-pro':'DeepSeek V4 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3 (legacy)','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
-  // Safe Ollama-tag fallback formatter before generic split('/').pop()
-  let _last = modelId.split('/').pop() || modelId;
+  // Safe Ollama-tag fallback: strip only the first slash-segment (provider
+  // prefix) so multi-slash IDs preserve their vendor hierarchy (#3360).
+  let _last = modelId.includes('/') ? (modelId.slice(modelId.indexOf('/')+1) || modelId) : modelId;
   // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
   if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
   const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
