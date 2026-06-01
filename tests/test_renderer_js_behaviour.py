@@ -33,7 +33,8 @@ _DRIVER_SRC = r"""
 const fs = require('fs');
 const src = fs.readFileSync(process.argv[2], 'utf8');
 global.window = {};
-global.document = { createElement: () => ({ innerHTML: '', textContent: '' }) };
+global.document = { createElement: () => ({ innerHTML: '', textContent: '' }), baseURI: 'http://localhost/app/' };
+function _sessionUrlForSid(sid) { return '/app/session/' + encodeURIComponent(String(sid || '')); }
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
@@ -85,6 +86,29 @@ def _render(driver_path, markdown: str) -> str:
         raise RuntimeError(f"node driver failed: {result.stderr}")
     return result.stdout
 
+
+
+class TestSessionInternalLinks:
+    """Drive renderMd() so session:// hardening covers the real sanitizer path."""
+
+    def test_session_scheme_renders_same_origin_internal_anchor(self, driver_path):
+        out = _render(driver_path, "[Open session](session://abc123)")
+        assert 'class="session-link"' in out
+        assert 'href="/app/session/abc123"' in out
+        assert 'target="_blank"' not in out
+        assert 'rel="noopener"' not in out
+
+    def test_hostile_session_scheme_collapses_to_encoded_session_path(self, driver_path):
+        out = _render(driver_path, "[bad](session://javascript:alert(1))")
+        assert 'class="session-link"' in out
+        assert 'href="/app/session/javascript%3Aalert(1"' in out
+        assert 'href="javascript:' not in out
+        assert 'target="_blank"' not in out
+
+    def test_unrelated_same_origin_session_segment_is_not_allowlisted(self, driver_path):
+        out = _render(driver_path, '<a class="session-link" href="/anything/foo/session/abc">bad</a>')
+        assert 'href="/anything/foo/session/abc"' not in out
+        assert '<a>bad</a>' in out
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Blockquote prefix strip — the bug commit 04e7b53 introduced was a one-char
@@ -678,3 +702,33 @@ class TestHeadingLevelsH1ThroughH6:
         assert "<h4><strong>bold</strong> in h4</h4>" in out, (
             f"inline markdown inside h4 must still render: {out!r}"
         )
+
+
+class TestBareFileUrlMediaRendering:
+    """#3219/#3234: bare file:// artifact links render as media, but file://
+    inside fenced/inline code stays literal (the new pass runs AFTER code-stash)."""
+
+    def test_bare_file_url_becomes_media(self, driver_path):
+        out = _render(driver_path, "Here is the screenshot file:///tmp/shot.png done")
+        # Routed through /api/media as an inline image, not left as a raw path.
+        assert "api/media?path=" in out
+        assert "msg-media-img" in out or "<img" in out
+
+    def test_file_url_inside_fenced_code_stays_literal(self, driver_path):
+        out = _render(driver_path, "```\nfile:///tmp/shot.png\n```")
+        # Inside a code fence it must remain literal text, NOT become an <img>.
+        assert "file:///tmp/shot.png" in out
+        assert "<img" not in out
+        assert "api/media?path=" not in out
+
+    def test_file_url_inside_inline_code_stays_literal(self, driver_path):
+        out = _render(driver_path, "run `open file:///tmp/shot.png` now")
+        assert "file:///tmp/shot.png" in out
+        assert "<img" not in out
+        assert "api/media?path=" not in out
+
+    def test_markdown_anchor_file_link_uses_link_path_not_media(self, driver_path):
+        out = _render(driver_path, "[the file](file:///tmp/shot.png)")
+        # Labeled anchors keep the normal link path (routed to /api/media as a link,
+        # not auto-loaded as an <img>).
+        assert "<img" not in out

@@ -138,7 +138,31 @@ def test_joplin_get_note_validates_id_and_truncates_body(monkeypatch):
     assert "Preview truncated" in note["body"]
 
 
-def test_joplin_api_get_uses_authorization_header(monkeypatch):
+def test_joplin_api_get_converts_bare_timeout_to_valueerror(monkeypatch):
+    """Regression (#3210 review): a bare socket TimeoutError from urlopen must
+    surface as a ValueError, not propagate.
+
+    `urlopen(timeout=8)` can raise a bare ``TimeoutError`` (not URLError-wrapped)
+    on a slow/unreachable Joplin server. After the consolidated client-disconnect
+    handling landed, ``TimeoutError`` is in the request dispatch's
+    ``_CLIENT_DISCONNECT_ERRORS`` set — so if it escaped ``_joplin_api_get`` it
+    would be swallowed as a fake client disconnect (silent empty response, no
+    log). It must be converted to a "not reachable" ValueError at the route.
+    """
+    import pytest
+    from api import routes
+
+    def fake_urlopen(request, timeout):
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(routes, "_joplin_connection_from_config", lambda: ("http://127.0.0.1:41184", "secret-token"))
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(ValueError, match="not reachable"):
+        routes._joplin_api_get("/search", {"query": "hello world"})
+
+
+def test_joplin_api_get_sends_header_and_query_token_for_clip_search_compat(monkeypatch):
     from api import routes
 
     captured = {}
@@ -162,10 +186,40 @@ def test_joplin_api_get_uses_authorization_header(monkeypatch):
     monkeypatch.setattr(routes, "_joplin_connection_from_config", lambda: ("http://127.0.0.1:41184", "secret-token"))
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
-    data = routes._joplin_api_get("/notes", {"query": "hello world"})
+    data = routes._joplin_api_get("/search", {"query": "hello world"})
 
     assert data == {"ok": True}
     assert captured["timeout"] == 8
+    assert "token=secret-token" in captured["url"]
+    assert "query=hello+world" in captured["url"]
+    assert captured["authorization"] == "token secret-token"
+
+
+def test_joplin_api_get_keeps_non_search_token_out_of_url(monkeypatch):
+    from api import routes
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit):
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["authorization"] = request.get_header("Authorization")
+        return FakeResponse()
+
+    monkeypatch.setattr(routes, "_joplin_connection_from_config", lambda: ("http://127.0.0.1:41184", "secret-token"))
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    routes._joplin_api_get("/notes", {"query": "hello world"})
+
     assert "token=" not in captured["url"]
     assert "query=hello+world" in captured["url"]
     assert captured["authorization"] == "token secret-token"

@@ -5,6 +5,9 @@ import time
 
 import pytest
 
+if os.name != "posix":
+    pytest.skip("terminal process cleanup tests require POSIX terminal support", allow_module_level=True)
+
 import api.terminal as terminal
 
 

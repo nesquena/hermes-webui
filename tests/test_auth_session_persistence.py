@@ -81,7 +81,11 @@ class TestSessionPersistence(unittest.TestCase):
     def test_sessions_file_permissions(self) -> None:
         """Sessions file must be owner-read-only (0600)."""
         auth.create_session()
-        sessions_file = _TEST_STATE / '.sessions.json'
+        # Check the path auth actually writes to (auth._SESSIONS_FILE is computed
+        # from api.config.STATE_DIR at import time). Asserting against a local
+        # _TEST_STATE assumption is fragile under sharded / reordered runs where
+        # this module may import before api.config.STATE_DIR resolves to _TEST_STATE.
+        sessions_file = auth._SESSIONS_FILE
         self.assertTrue(sessions_file.exists(), ".sessions.json was not created")
         mode = oct(sessions_file.stat().st_mode & 0o777)
         self.assertEqual(mode, oct(0o600),

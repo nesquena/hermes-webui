@@ -305,6 +305,16 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
         self.assertNotEqual(title, 'Session Bilder')
         self.assertIn('Warum', title)
 
+    def test_code_only_first_message_does_not_trigger_german_language_guard(self):
+        """Code-only starts should fall through to the neutral/default title path."""
+        from api.streaming import _detect_title_language, _title_language_mismatch, _title_prompt_language_rule
+
+        code_only = "print('hello')\nfor i in range(3):\n    print(i)"
+
+        self.assertEqual(_detect_title_language(code_only), '')
+        self.assertEqual(_title_prompt_language_rule(code_only), 'Match the language of the user question.\n')
+        self.assertFalse(_title_language_mismatch(code_only, 'Python Hello Loop'))
+
     def test_configured_api_key_is_not_sent_to_caller_supplied_route(self):
         """Regression: title task keys must not leak to explicit fallback routes.
 

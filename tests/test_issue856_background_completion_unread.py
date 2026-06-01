@@ -100,7 +100,9 @@ def test_sidebar_cache_completion_handles_compression_session_rotation():
 
     assert "function _markSessionCompletedInList(session, previousSid = null)" in helper_block
     assert "const finalSid = session.session_id || previousSid;" in helper_block
-    assert "s.session_id === finalSid || s.session_id === previousSid" in helper_block
+    assert "const finalIdx = _allSessions.findIndex(s => s && s.session_id === finalSid);" in helper_block
+    assert "const previousIdx = previousSid ? _allSessions.findIndex(s => s && s.session_id === previousSid) : -1;" in helper_block
+    assert "const idx = finalIdx >= 0 ? finalIdx : previousIdx;" in helper_block
     assert "const {messages: _messages, tool_calls: _toolCalls, ...sessionMeta} = session;" in helper_block
     assert "...sessionMeta" in helper_block
     assert "session_id: finalSid" in helper_block
@@ -121,7 +123,9 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     )
     render_idx = SESSIONS_JS.find("async function renderSessionList")
     assert render_idx != -1, "renderSessionList not found"
-    render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("// ── Gateway session SSE", render_idx)]
+    refresh_idx = SESSIONS_JS.find("async function _runRenderSessionListRefresh")
+    assert refresh_idx != -1, "_runRenderSessionListRefresh not found"
+    refresh_block = SESSIONS_JS[refresh_idx:SESSIONS_JS.find("async function _drainRenderSessionListQueue", refresh_idx)]
 
     apply_idx = SESSIONS_JS.find("function _applySessionListPayload(")
     assert apply_idx != -1, "_applySessionListPayload not found"
@@ -136,7 +140,7 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     )
     assert "_markSessionCompletionUnread(sid, s.message_count);" in transition_block
     assert "_sessionStreamingById.set(sid, isStreaming);" in transition_block
-    assert "_applySessionListPayload(sessData,projData);" in render_block
+    assert "_applySessionListPayload(sessData,projData);" in refresh_block
     assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block
 
 
@@ -310,7 +314,7 @@ def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     active_guard_idx = done_block.find("if(isActiveSession){", viewed_const_idx)
     session_update_idx = done_block.find("S.session=d.session", active_guard_idx)
     render_idx = done_block.find("renderMessages(", active_guard_idx)
-    load_dir_idx = done_block.find("loadDir('.')", active_guard_idx)
+    load_dir_idx = done_block.find("preservePreview", active_guard_idx)
     mark_viewed_idx = done_block.find("if(isSessionViewed) _markSessionViewed(completedSid", active_guard_idx)
 
     assert active_const_idx != -1, "done handler must compute active/current pane separately"

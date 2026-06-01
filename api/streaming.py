@@ -28,7 +28,7 @@ from api.config import (
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
-    LOCK, SESSIONS, SESSION_DIR,
+    LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     register_active_run, update_active_run, unregister_active_run,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
@@ -203,6 +203,7 @@ WebUI progress guidance:
 - Each update should say what you are about to check, what you just confirmed, or why the next tool call is needed.
 - Keep updates concise, factual, and in the user's language. One or two short sentences are enough.
 - Do not reveal hidden reasoning, chain-of-thought, private scratchpads, secrets, raw logs, or long tool output.
+- Do not include terse planning fragments or scratchpad shorthand in visible assistant text. Avoid fragments like "Need check logs", "Need inspect email", or "maybe invite"; either omit them or rewrite them as clear user-facing progress.
 - For direct answers or very short tasks, skip progress updates and answer normally.
 """.strip()
 
@@ -222,7 +223,9 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         "WebUI session context:",
         "- This browser session is not the same live transcript as Telegram, Discord, Slack, or other messaging surfaces.",
         "- Use durable memory, saved sessions, and available tools for cross-surface recall instead of assuming those transcripts are in this browser chat.",
-        "- Do not copy or dump this browser transcript into external notes or durable memory by default. Save only explicit captures, durable user preferences, decisions, blockers, runbook-worthy workflows, or other clearly reusable signals.",
+        "- Do not copy or dump this browser transcript into external notes or durable memory by default.",
+        "- Write to external notes or durable memory only for explicit captures, durable user preferences, decisions, blockers/open issues, runbook-worthy workflows, or other clearly reusable signals; otherwise leave notes unchanged.",
+        "- When you do write or update a durable note, briefly tell the user what note/section changed so the write is reviewable.",
     ]
     fields = (
         ("source", "Source"),
@@ -2262,7 +2265,9 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
         if next_title:
             with _get_session_agent_lock(session_id):
                 with LOCK:
-                    s = SESSIONS.get(session_id, s)
+                    cached_session = SESSIONS.get(session_id)
+                    if cached_session is not None and getattr(cached_session, 'session_id', None) == session_id:
+                        s = cached_session
                     effective_title = str(s.title or '').strip()
                     invalid_existing_now = _looks_invalid_generated_title(s.title)
                     still_auto = (
@@ -2337,7 +2342,9 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             return
         with _get_session_agent_lock(session_id):
             with LOCK:
-                s = SESSIONS.get(session_id, s)
+                cached_session = SESSIONS.get(session_id)
+                if cached_session is not None and getattr(cached_session, 'session_id', None) == session_id:
+                    s = cached_session
                 # Re-check: user may have renamed while we were generating
                 if str(s.title or '').strip() != current_title:
                     _put_title_status(put_event, session_id, 'skipped', 'manual_title', str(s.title or '').strip())
@@ -2385,8 +2392,10 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             # pre-existing parent_session_id lineage.
             saved_sid = s.session_id
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
+            saved_pinned = bool(getattr(s, 'pinned', False))
             s.session_id = old_sid
             s.pre_compression_snapshot = True
+            s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
             # archived snapshot so the sidebar does not reopen the parent as
             # a permanently-running session while the child already holds the
@@ -2413,6 +2422,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             finally:
                 s.session_id = saved_sid
                 s.pre_compression_snapshot = saved_snapshot
+                s.pinned = saved_pinned
                 s.active_stream_id = saved_active_stream_id
                 s.pending_user_message = saved_pending_user_message
                 s.pending_attachments = saved_pending_attachments
@@ -2425,6 +2435,7 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         snapshot = Session.load(old_sid)
         if snapshot:
             snapshot.pre_compression_snapshot = True
+            snapshot.pinned = False
             # Stage-359 Opus SHOULD-FIX: clear runtime fields on the loaded
             # snapshot too. If the disk snapshot was last persisted while the
             # parent was live, it could carry a stale active_stream_id /
@@ -3713,8 +3724,11 @@ def _attempt_credential_self_heal(
             return None
 
         # 2. Evict the cached agent for this session
+        _evicted_entry = None
         with SESSION_AGENT_CACHE_LOCK:
-            SESSION_AGENT_CACHE.pop(session_id, None)
+            _evicted_entry = SESSION_AGENT_CACHE.pop(session_id, None)
+        if _evicted_entry is not None:
+            _close_cached_agent_entry_at_session_boundary(session_id, _evicted_entry)
 
         # 3. Invalidate the credential pool for this provider
         invalidate_credential_pool_cache(provider_id)
@@ -3751,6 +3765,75 @@ def _agent_cache_api_key_sig(resolved_api_key, credential_pool) -> str:
         return 'credential-pool'
     import hashlib as _hashlib
     return _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16]
+
+
+def _lifecycle_commit_session_memory(session_id: str, *, agent=None, wait: bool = False) -> bool:
+    from api.session_lifecycle import commit_session_memory
+
+    return commit_session_memory(session_id, agent=agent, wait=wait)
+
+
+def _lifecycle_has_uncommitted_work(session_id: str) -> bool:
+    from api.session_lifecycle import has_uncommitted_work
+
+    return has_uncommitted_work(session_id)
+
+
+def _lifecycle_unregister_agent(session_id: str) -> None:
+    from api.session_lifecycle import unregister_agent
+
+    unregister_agent(session_id)
+
+
+def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
+    """Commit and tear down an evicted cached agent at a WebUI session boundary.
+
+    WebUI keeps AIAgent instances in an LRU cache so memory providers can carry
+    state across turns. When an agent is evicted, commit pending memory first;
+    if the lifecycle entry is clean afterwards, unregister and call
+    shutdown_memory_provider(messages) so provider-owned clients such as
+    Hindsight's aiohttp session are closed instead of being garbage-collected
+    later. Passing the cached transcript mirrors gateway cleanup semantics for
+    providers that use on_session_end(messages) during shutdown.
+    """
+    if agent is None:
+        return True
+
+    should_close_evicted_agent = True
+    try:
+        _lifecycle_commit_session_memory(session_id, agent=agent, wait=True)
+        if not _lifecycle_has_uncommitted_work(session_id):
+            _lifecycle_unregister_agent(session_id)
+        else:
+            should_close_evicted_agent = False
+    except Exception:
+        should_close_evicted_agent = False
+        logger.debug("Lifecycle commit on eviction failed for %s", session_id, exc_info=True)
+
+    if not should_close_evicted_agent:
+        return False
+
+    try:
+        shutdown_memory_provider = getattr(agent, 'shutdown_memory_provider', None)
+        if callable(shutdown_memory_provider):
+            session_messages = vars(agent).get('_session_messages', [])
+            shutdown_memory_provider(session_messages)
+    except Exception:
+        logger.debug("Failed to shut down evicted agent memory provider for session %s", session_id, exc_info=True)
+
+    try:
+        session_db = getattr(agent, '_session_db', None)
+        if session_db is not None:
+            session_db.close()
+    except Exception:
+        logger.debug("Failed to close evicted agent session DB for session %s", session_id, exc_info=True)
+    return True
+
+
+def _close_cached_agent_entry_at_session_boundary(session_id: str, cache_entry) -> bool:
+    """Commit and tear down a popped SESSION_AGENT_CACHE entry outside the cache lock."""
+    agent = cache_entry[0] if isinstance(cache_entry, tuple) else None
+    return _close_evicted_agent_at_session_boundary(session_id, agent)
 
 
 def _refresh_cached_agent_runtime(agent, agent_kwargs: dict) -> bool:
@@ -3827,6 +3910,33 @@ def _refresh_cached_agent_runtime(agent, agent_kwargs: dict) -> bool:
     except Exception:
         logger.debug('[webui] Failed to refresh cached agent runtime credentials', exc_info=True)
         return False
+
+
+def _cached_agent_session_identity(agent) -> str | None:
+    """Best-effort session id carried by a cached AIAgent.
+
+    The cache key is only safe when it agrees with the object's own session
+    identity. Some old/fake agents may not expose an identity; keep those
+    backwards-compatible and treat them as unverifiable rather than mismatched.
+    """
+    if agent is None:
+        return None
+    for attr in ('session_id', '_session_id'):
+        value = getattr(agent, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    session_db = getattr(agent, '_session_db', None)
+    if session_db is not None:
+        for attr in ('session_id', '_session_id'):
+            value = getattr(session_db, attr, None)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _cached_agent_matches_session(agent, session_id: str) -> bool:
+    identity = _cached_agent_session_identity(agent)
+    return identity is None or identity == str(session_id)
 
 
 def _refresh_cached_agent_primary_runtime_snapshot(agent) -> None:
@@ -3949,6 +4059,15 @@ def _run_agent_streaming(
     _live_prompt_exact_tokens = [0]
     _live_prompt_estimate_tool_delta_tokens = [0]
     _live_prompt_estimate_seen_ids = set()
+    # Per-stream cache for the real per-model context_length (#3256 perf).
+    # _live_usage_snapshot() runs on every metering tick (~10x/sec during
+    # streaming); recomputing get_model_context_length() there triggered a
+    # config read + potential metadata/network probe on every token for
+    # non-default models (e.g. claude-opus-4.7-1m), freezing the stream while
+    # the default model was unaffected. The value is constant for a given
+    # (model, base_url, provider) within one stream, so resolve it at most
+    # once. Sentinel: None=not computed, 0=not applicable/failed, >0=real cap.
+    _real_ctx_cache = [None]
 
     def _seed_live_prompt_estimate() -> int:
         """Capture the latest exact prompt size before adding live tool deltas."""
@@ -4025,9 +4144,76 @@ def _run_agent_streaming(
             try:
                 _cc = getattr(_agent, 'context_compressor', None)
                 if _cc:
-                    _usage['context_length'] = getattr(_cc, 'context_length', 0) or 0
-                    _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
-                    _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+                    _cc_cl_u = getattr(_cc, 'context_length', 0) or 0
+                    # Default-only guard (#3256): the agent-side compressor is
+                    # built in agent_init with the global model.context_length
+                    # applied unconditionally — for non-default models that
+                    # value is the stale global cap (e.g. 232K). Drop it here
+                    # so the live usage payload doesn't surface the wrong cap.
+                    # PERF: resolve the real per-model cap at most once per
+                    # stream (cached in _real_ctx_cache). This snapshot runs on
+                    # every metering tick; doing the config read + metadata
+                    # lookup per tick froze non-default-model streams.
+                    if _real_ctx_cache[0] is None:
+                        _resolved_real = 0  # 0 = guard not applicable / failed
+                        try:
+                            from api.config import get_config as _gc_u
+                            _cfg_u = _gc_u()
+                            _mcfg_u = _cfg_u.get('model', {}) if isinstance(_cfg_u, dict) else {}
+                            if isinstance(_mcfg_u, dict):
+                                _def_u = str(_mcfg_u.get('default') or '').strip()
+                                _raw_u = _mcfg_u.get('context_length')
+                                try:
+                                    _cl_u = int(_raw_u) if _raw_u is not None else 0
+                                except (TypeError, ValueError):
+                                    _cl_u = 0
+                                _sm_u = str(getattr(_agent, 'model', '') or '').strip()
+                                from api.routes import _model_matches_configured_default as _mmcd_u
+                                if (
+                                    _cl_u > 0
+                                    and _cc_cl_u == _cl_u
+                                    and _def_u
+                                    and _sm_u
+                                    and not _mmcd_u(_sm_u, _def_u, getattr(_agent, 'provider', '') or '')
+                                ):
+                                    # Recompute from real per-model metadata.
+                                    try:
+                                        from agent.model_metadata import get_model_context_length as _g_u
+                                        _real_u = _g_u(
+                                            _sm_u,
+                                            getattr(_agent, 'base_url', '') or '',
+                                            config_context_length=None,
+                                            provider=getattr(_agent, 'provider', '') or '',
+                                        ) or 0
+                                        if _real_u:
+                                            _resolved_real = _real_u
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            _resolved_real = 0
+                        _real_ctx_cache[0] = _resolved_real
+                    # Apply the cached real cap when the guard determined one.
+                    if _real_ctx_cache[0]:
+                        # Also rescale threshold_tokens by the same ratio so the
+                        # auto-compress trigger reflects the real window, not
+                        # the stale global cap (e.g. 197.2k @ 232K cap → ~850k
+                        # @ 1M real cap).
+                        _orig_cc_cl = getattr(_cc, 'context_length', 0) or 0
+                        _orig_thresh = getattr(_cc, 'threshold_tokens', 0) or 0
+                        _cc_cl_u = _real_ctx_cache[0]
+                        if _orig_cc_cl > 0 and _orig_thresh > 0:
+                            _scaled_thresh = int(_orig_thresh * _real_ctx_cache[0] / _orig_cc_cl)
+                            _usage['context_length'] = _cc_cl_u
+                            _usage['threshold_tokens'] = _scaled_thresh
+                            _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+                        else:
+                            _usage['context_length'] = _cc_cl_u
+                            _usage['threshold_tokens'] = _orig_thresh
+                            _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+                    else:
+                        _usage['context_length'] = _cc_cl_u
+                        _usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
+                        _usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
             except Exception:
                 pass
 
@@ -4956,12 +5142,23 @@ def _run_agent_streaming(
                 _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
 
                 agent = None
+                _identity_mismatch_entry = None
                 with SESSION_AGENT_CACHE_LOCK:
                     _cached = SESSION_AGENT_CACHE.get(session_id)
                     if _cached and _cached[1] == _agent_sig:
-                        agent = _cached[0]
-                        SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
-                        logger.debug('[webui] Reusing cached agent for session %s', session_id)
+                        _cached_agent = _cached[0]
+                        if _cached_agent_matches_session(_cached_agent, session_id):
+                            agent = _cached_agent
+                            SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
+                            logger.debug('[webui] Reusing cached agent for session %s', session_id)
+                        else:
+                            _identity_mismatch_entry = SESSION_AGENT_CACHE.pop(session_id, None)
+                            logger.warning(
+                                '[webui] Evicted cached agent with mismatched session identity: cache_key=%s agent_session_id=%s',
+                                session_id,
+                                _cached_agent_session_identity(_cached_agent),
+                            )
+                    if agent is not None:
                         # Reopened/cache-hit sessions must register the agent
                         # so later lifecycle commits can find it.
                         try:
@@ -4969,6 +5166,12 @@ def _run_agent_streaming(
                             register_agent(session_id, agent)
                         except Exception:
                             logger.debug("Lifecycle register_agent failed for cached session %s", session_id, exc_info=True)
+
+                if _identity_mismatch_entry is not None:
+                    try:
+                        _close_cached_agent_entry_at_session_boundary(session_id, _identity_mismatch_entry)
+                    except Exception:
+                        logger.debug("Failed to close identity-mismatched cached agent for session %s", session_id, exc_info=True)
 
                 if agent is not None:
                     # Refresh volatile runtime credentials selected from provider
@@ -4978,13 +5181,14 @@ def _run_agent_streaming(
                             '[webui] Cached agent runtime could not be safely refreshed; rebuilding agent for session %s',
                             session_id,
                         )
-                        try:
-                            if getattr(agent, '_session_db', None) is not None:
-                                agent._session_db.close()
-                        except Exception:
-                            pass
+                        _stale_runtime_entry = None
                         with SESSION_AGENT_CACHE_LOCK:
-                            SESSION_AGENT_CACHE.pop(session_id, None)
+                            _stale_runtime_entry = SESSION_AGENT_CACHE.pop(session_id, None)
+                        if _stale_runtime_entry is not None:
+                            try:
+                                _close_cached_agent_entry_at_session_boundary(session_id, _stale_runtime_entry)
+                            except Exception:
+                                logger.debug("Failed to close stale-runtime cached agent for session %s", session_id, exc_info=True)
                         agent = None
 
                 if agent is not None:
@@ -5047,24 +5251,7 @@ def _run_agent_streaming(
                     for _evicted_sid, _evicted_entry in _evicted_items:
                         try:
                             _evicted_agent = _evicted_entry[0] if isinstance(_evicted_entry, tuple) else None
-                            _should_close_evicted_agent = True
-                            if _evicted_agent is not None:
-                                try:
-                                    from api.session_lifecycle import (
-                                        commit_session_memory as _lifecycle_commit,
-                                        has_uncommitted_work as _lifecycle_has_uncommitted_work,
-                                        unregister_agent as _lifecycle_unregister_agent,
-                                    )
-                                    _lifecycle_commit(_evicted_sid, agent=_evicted_agent, wait=True)
-                                    if not _lifecycle_has_uncommitted_work(_evicted_sid):
-                                        _lifecycle_unregister_agent(_evicted_sid)
-                                    else:
-                                        _should_close_evicted_agent = False
-                                except Exception:
-                                    _should_close_evicted_agent = False
-                                    logger.debug("Lifecycle commit on eviction failed for %s", _evicted_sid, exc_info=True)
-                            if _should_close_evicted_agent and _evicted_agent is not None and getattr(_evicted_agent, '_session_db', None) is not None:
-                                _evicted_agent._session_db.close()
+                            _close_evicted_agent_at_session_boundary(_evicted_sid, _evicted_agent)
                         except Exception:
                             logger.debug("Failed to close evicted agent for session %s", _evicted_sid, exc_info=True)
                         logger.debug('[webui] Evicted LRU agent from cache: %s', _evicted_sid)
@@ -5615,8 +5802,22 @@ def _run_agent_streaming(
                     # parent, losing access to the recoverable history in old_sid.json.
                     s.parent_session_id = old_sid
                     with LOCK:
-                        if old_sid in SESSIONS:
-                            SESSIONS[new_sid] = SESSIONS.pop(old_sid)
+                        cached_old_session = SESSIONS.pop(old_sid, None)
+                        if cached_old_session is not None and cached_old_session is not s:
+                            cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
+                            if cached_old_sid == str(old_sid):
+                                SESSIONS[old_sid] = cached_old_session
+                            else:
+                                logger.warning(
+                                    "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
+                                    old_sid,
+                                    new_sid,
+                                    cached_old_sid or None,
+                                )
+                        SESSIONS[new_sid] = s
+                        SESSIONS.move_to_end(new_sid)
+                        while len(SESSIONS) > SESSIONS_MAX:
+                            SESSIONS.popitem(last=False)
                     # Migrate the per-session lock: alias new_sid to the held
                     # _agent_lock reference directly (not via old_sid lookup),
                     # then remove the old_sid entry to prevent a leak.
@@ -5626,10 +5827,26 @@ def _run_agent_streaming(
                     # Migrate cached agent to the new session ID so the turn
                     # count survives context compression.
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                    _skipped_agent_migration_entry = None
                     with SESSION_AGENT_CACHE_LOCK:
                         _cached_entry = SESSION_AGENT_CACHE.pop(old_sid, None)
                         if _cached_entry:
-                            SESSION_AGENT_CACHE[new_sid] = _cached_entry
+                            _cached_agent = _cached_entry[0]
+                            if _cached_agent_matches_session(_cached_agent, new_sid):
+                                SESSION_AGENT_CACHE[new_sid] = _cached_entry
+                            else:
+                                _skipped_agent_migration_entry = _cached_entry
+                                logger.warning(
+                                    '[webui] Skipped cached agent migration with mismatched session identity: old_sid=%s new_sid=%s agent_session_id=%s',
+                                    old_sid,
+                                    new_sid,
+                                    _cached_agent_session_identity(_cached_agent),
+                                )
+                    if _skipped_agent_migration_entry is not None:
+                        try:
+                            _close_cached_agent_entry_at_session_boundary(old_sid, _skipped_agent_migration_entry)
+                        except Exception:
+                            logger.debug("Failed to close skipped compression-migration cached agent for session %s", old_sid, exc_info=True)
                     _compressed = True
                 # Also detect compression via the result dict or compressor state
                 if not _compressed:
@@ -5822,8 +6039,45 @@ def _run_agent_streaming(
                 # block writes them to the session itself so GET /api/session
                 # returns them on reload instead of falling back to 0.
                 _cc_for_save = getattr(agent, 'context_compressor', None)
+                # Initialized before the compressor block so the #3256/#3263
+                # threshold-rescale below is safe even when there is no
+                # compressor (fresh agent / interrupted stream): _skip_cc_cl
+                # stays False and _cc_cl stays 0, so the rescale is a no-op.
+                _skip_cc_cl = False
+                _cc_cl = 0
                 if _cc_for_save:
-                    s.context_length = getattr(_cc_for_save, 'context_length', 0) or 0
+                    _cc_cl = getattr(_cc_for_save, 'context_length', 0) or 0
+                    # Same guard as routes._resolve_context_length_for_session_model:
+                    # the agent-side context_compressor was constructed with the
+                    # global model.context_length applied to EVERY model. If the
+                    # session's model isn't model.default, that value is a stale
+                    # cap (e.g. 232K) that would clobber the real 1M metadata
+                    # on every stream end. In that case skip the compressor
+                    # value and let the fallback resolver below recompute.
+                    _skip_cc_cl = False
+                    try:
+                        _model_cfg_cc = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
+                        if isinstance(_model_cfg_cc, dict):
+                            _cfg_default_cc = str(_model_cfg_cc.get('default') or '').strip()
+                            _raw_cfg_cl_cc = _model_cfg_cc.get('context_length')
+                            try:
+                                _cfg_cl_cc = int(_raw_cfg_cl_cc) if _raw_cfg_cl_cc is not None else 0
+                            except (TypeError, ValueError):
+                                _cfg_cl_cc = 0
+                            _sess_model_cc = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                            from api.routes import _model_matches_configured_default as _mmcd_cc
+                            if (
+                                _cfg_cl_cc > 0
+                                and _cc_cl == _cfg_cl_cc
+                                and _cfg_default_cc
+                                and _sess_model_cc
+                                and not _mmcd_cc(_sess_model_cc, _cfg_default_cc, resolved_provider or '')
+                            ):
+                                _skip_cc_cl = True
+                    except Exception:
+                        pass
+                    if not _skip_cc_cl:
+                        s.context_length = _cc_cl
                     s.threshold_tokens = getattr(_cc_for_save, 'threshold_tokens', 0) or 0
                     s.last_prompt_tokens = getattr(_cc_for_save, 'last_prompt_tokens', 0) or 0
                 # Fallback: if the compressor didn't report a context_length
@@ -5841,7 +6095,14 @@ def _run_agent_streaming(
                 # window in the persisted session and the SSE payload —
                 # which then trips LCM auto-compress at ~25% of the wrong
                 # value, cascading into 429 floods.
-                if not getattr(s, 'context_length', 0):
+                #
+                # #3256/#3263: ALSO run this fallback when _skip_cc_cl is true
+                # (non-default model whose compressor carried the stale global
+                # cap). Without this, a session that already had a stale 232K
+                # context_length persisted keeps it forever — skipping the
+                # compressor write removes the re-clobber but never recomputes
+                # the real per-model window. Recompute and overwrite in that case.
+                if (not getattr(s, 'context_length', 0)) or _skip_cc_cl:
                     try:
                         from agent.model_metadata import get_model_context_length
                         _cfg_ctx_len = None
@@ -5850,7 +6111,20 @@ def _run_agent_streaming(
                             _model_cfg_for_ctx = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
                             if isinstance(_model_cfg_for_ctx, dict):
                                 _raw_cfg_ctx = _model_cfg_for_ctx.get('context_length')
-                                if _raw_cfg_ctx is not None:
+                                # Default-only guard: only apply the global
+                                # model.context_length cap when the session
+                                # model equals model.default. Otherwise the
+                                # cap (e.g. 232K set for the default model)
+                                # silently shrinks other models' real metadata.
+                                _cfg_default_ctx = str(_model_cfg_for_ctx.get('default') or '').strip()
+                                _sess_model_ctx = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                                from api.routes import _model_matches_configured_default as _mmcd_ctx
+                                _apply_cfg_ctx = (
+                                    not _cfg_default_ctx
+                                    or not _sess_model_ctx
+                                    or _mmcd_ctx(_sess_model_ctx, _cfg_default_ctx, resolved_provider or '')
+                                )
+                                if _raw_cfg_ctx is not None and _apply_cfg_ctx:
                                     try:
                                         _parsed_cfg_ctx = int(_raw_cfg_ctx)
                                         if _parsed_cfg_ctx > 0:
@@ -5892,6 +6166,23 @@ def _run_agent_streaming(
                         # Older hermes-agent builds may not expose this helper.
                         # Better to leave context_length=0 than crash the save.
                         pass
+                # #3256/#3263: when we skipped the stale compressor cap for a
+                # non-default model and recomputed the real per-model window
+                # above, rescale the persisted threshold_tokens to that real cap
+                # so the auto-compress trigger and the reloaded context-ring
+                # match the live snapshot (which already rescales). Without this,
+                # a reload shows a smaller compression trigger than streaming did.
+                # Only rescale when both the original cap and threshold are
+                # positive; otherwise clear the threshold to 0 (consistent with
+                # the live-snapshot path) rather than leave a stale value.
+                if _skip_cc_cl:
+                    _orig_cap = _cc_cl  # the stale global cap the compressor reported
+                    _orig_thresh = getattr(s, 'threshold_tokens', 0) or 0
+                    _real_cap = getattr(s, 'context_length', 0) or 0
+                    if _real_cap > 0 and _orig_cap > 0 and _orig_thresh > 0:
+                        s.threshold_tokens = int(_orig_thresh * _real_cap / _orig_cap)
+                    else:
+                        s.threshold_tokens = 0
                 if not ephemeral and s.messages:
                     _latest_assistant_idx = next(
                         (idx for idx in range(len(s.messages) - 1, -1, -1)
@@ -6020,7 +6311,45 @@ def _run_agent_streaming(
             # survive a page reload; this block only populates the live SSE usage payload.
             _cc = getattr(agent, 'context_compressor', None)
             if _cc:
-                usage['context_length'] = getattr(_cc, 'context_length', 0) or 0
+                _cc_cl_sse = getattr(_cc, 'context_length', 0) or 0
+                # #3256/#3263: remember the original compressor cap + threshold
+                # so that if we drop the stale cap below and the fallback
+                # resolves the real per-model window, we can rescale the
+                # threshold consistently (the live snapshot already does this).
+                _orig_cc_cl_sse = _cc_cl_sse
+                _orig_cc_thresh_sse = getattr(_cc, 'threshold_tokens', 0) or 0
+                _dropped_stale_cap_sse = False
+                # Default-only guard (#3256): the agent-side context_compressor
+                # is constructed in agent_init with the global model.context_length
+                # applied unconditionally, so for non-default models its
+                # context_length is the stale global cap (e.g. 232K) — surfacing
+                # it via SSE makes the indicator show the wrong window even
+                # after the session was correctly resized. Drop the compressor
+                # value in that case and let the fallback resolver below recompute.
+                try:
+                    _model_cfg_sse = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
+                    if isinstance(_model_cfg_sse, dict):
+                        _cfg_default_sse = str(_model_cfg_sse.get('default') or '').strip()
+                        _raw_cfg_cl_sse = _model_cfg_sse.get('context_length')
+                        try:
+                            _cfg_cl_sse = int(_raw_cfg_cl_sse) if _raw_cfg_cl_sse is not None else 0
+                        except (TypeError, ValueError):
+                            _cfg_cl_sse = 0
+                        _sess_model_sse = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                        from api.routes import _model_matches_configured_default as _mmcd_sse
+                        if (
+                            _cfg_cl_sse > 0
+                            and _cc_cl_sse == _cfg_cl_sse
+                            and _cfg_default_sse
+                            and _sess_model_sse
+                            and not _mmcd_sse(_sess_model_sse, _cfg_default_sse, resolved_provider or '')
+                        ):
+                            _cc_cl_sse = 0
+                            _dropped_stale_cap_sse = True
+                except Exception:
+                    pass
+                if _cc_cl_sse:
+                    usage['context_length'] = _cc_cl_sse
                 usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
             # Fallback: when the compressor is absent or reports context_length=0,
@@ -6042,7 +6371,19 @@ def _run_agent_streaming(
                         _model_cfg_for_ctx = _cfg.get('model', {}) if isinstance(_cfg, dict) else {}
                         if isinstance(_model_cfg_for_ctx, dict):
                             _raw_cfg_ctx = _model_cfg_for_ctx.get('context_length')
-                            if _raw_cfg_ctx is not None:
+                            # Default-only guard (see #3256): the global
+                            # model.context_length cap only applies to
+                            # model.default; other models keep their real
+                            # metadata.
+                            _cfg_default_ctx = str(_model_cfg_for_ctx.get('default') or '').strip()
+                            _sess_model_ctx = str(getattr(agent, 'model', resolved_model or '') or '').strip()
+                            from api.routes import _model_matches_configured_default as _mmcd_sfb
+                            _apply_cfg_ctx = (
+                                not _cfg_default_ctx
+                                or not _sess_model_ctx
+                                or _mmcd_sfb(_sess_model_ctx, _cfg_default_ctx, resolved_provider or '')
+                            )
+                            if _raw_cfg_ctx is not None and _apply_cfg_ctx:
                                 try:
                                     _parsed_cfg_ctx = int(_raw_cfg_ctx)
                                     if _parsed_cfg_ctx > 0:
@@ -6070,6 +6411,15 @@ def _run_agent_streaming(
                         )
                     if _fb_cl:
                         usage['context_length'] = _fb_cl
+                        # #3256/#3263: if we dropped the stale compressor cap
+                        # for a non-default model, the threshold_tokens written
+                        # above is still the stale compressor value. Rescale it
+                        # to the real resolved window so the terminal `done`
+                        # payload matches the live snapshot (which rescales) —
+                        # otherwise messages.js overwrites S.lastUsage with the
+                        # stale threshold and the indicator reverts on stream end.
+                        if _dropped_stale_cap_sse and _orig_cc_cl_sse > 0 and _orig_cc_thresh_sse > 0:
+                            usage['threshold_tokens'] = int(_orig_cc_thresh_sse * _fb_cl / _orig_cc_cl_sse)
                 except Exception:
                     pass
             # Fallback: when last_prompt_tokens is missing (no compressor), use the
@@ -6541,8 +6891,24 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not text:
         return bad(handler, "text required")
 
+    evicted_cached_entry = None
     with _cfg.SESSION_AGENT_CACHE_LOCK:
         cached = _cfg.SESSION_AGENT_CACHE.get(sid)
+        if cached:
+            agent = cached[0]
+            if not _cached_agent_matches_session(agent, sid):
+                evicted_cached_entry = _cfg.SESSION_AGENT_CACHE.pop(sid, None)
+                logger.warning(
+                    '[webui] Evicted cached agent before steer due to mismatched session identity: cache_key=%s agent_session_id=%s',
+                    sid,
+                    _cached_agent_session_identity(agent),
+                )
+                cached = None
+    if evicted_cached_entry is not None:
+        try:
+            _close_cached_agent_entry_at_session_boundary(sid, evicted_cached_entry)
+        except Exception:
+            logger.debug("Failed to close steer identity-mismatched cached agent for session %s", sid, exc_info=True)
     if not cached:
         # No active agent for this session — caller falls back to interrupt
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
