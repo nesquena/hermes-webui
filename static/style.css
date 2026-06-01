@@ -1957,6 +1957,7 @@
   .preview-area.visible{display:flex;opacity:1;}
   .preview-path{font-size:11px;color:var(--muted);padding-bottom:8px;border-bottom:1px solid var(--border);flex-shrink:0;}
   .preview-code{font-family:"SF Mono","Fira Code",ui-monospace,monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;color:var(--pre-text);}
+  .preview-code code[class*="language-"]{background:var(--code-bg) !important;}
   /* Image preview */
   .preview-img-wrap{display:flex;align-items:center;justify-content:center;flex:1;padding:8px 0;min-height:0;}
   .preview-img{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.4);}
