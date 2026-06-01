@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Profile startup now shares platform-default Hermes home resolution through a small path helper instead of importing the full config module from `api.profiles`, so importing profiles before config no longer skips active-profile initialization (#3283).
+
 ## [v0.51.192] — 2026-05-31 — Release FL (stage-batch4 — per-model context_length default-only guard)
 
 ### Fixed
