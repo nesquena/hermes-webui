@@ -10,6 +10,8 @@ these combinations, hiding the reasoning effort selector in the UI even though
 the underlying models fully support thinking/reasoning.
 """
 
+import pytest
+
 import api.config as cfg
 
 
@@ -31,6 +33,26 @@ def test_deepseek_r1_bare_name_custom_provider():
         provider_id="custom:newapi",
     )
     assert set(efforts) >= {"low", "medium", "high"}
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "deepseek.v3.2",
+        "deepseek_v3_2",
+        "vendor.deepseek.v3.2",
+        "deepseek.v4-flash",
+        "deepseek_v4_flash",
+    ],
+)
+def test_deepseek_separator_variants_custom_provider(model_id):
+    efforts = cfg.resolve_model_reasoning_efforts(
+        model_id,
+        provider_id="custom:newapi",
+    )
+    assert set(efforts) >= {"low", "medium", "high"}, (
+        f"{model_id} via custom provider should expose reasoning efforts"
+    )
 
 
 # ── dot-separated model names (vendor.model) ─────────────────────────────────
@@ -87,6 +109,20 @@ def test_plain_llm_bare_name_custom_provider_no_reasoning():
 def test_plain_llm_dot_separated_custom_provider_no_reasoning():
     assert cfg.resolve_model_reasoning_efforts(
         "meta.llama-3.1-70b",
+        provider_id="custom:newapi",
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "thinkinghub.llama-3.1-70b",
+        "reasoninghub.llama-3.1-70b",
+    ],
+)
+def test_vendor_prefix_keyword_does_not_trigger_reasoning(model_id):
+    assert cfg.resolve_model_reasoning_efforts(
+        model_id,
         provider_id="custom:newapi",
     ) == []
 

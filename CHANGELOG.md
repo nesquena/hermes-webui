@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Reasoning-effort detection for named `custom:*` providers now normalizes non-slash model ids before applying its fallback family heuristics, so separator variants such as `deepseek.v3.2`, `deepseek_v4_flash`, and vendor-namespaced ids like `vendor.deepseek.v3.2` resolve the same way as `deepseek-v4-flash`. The keyword fallback is now token-aware rather than substring-based, which preserves support for names like `model-thinking-preview` without falsely enabling reasoning for unrelated prefixes such as `thinkinghub.llama-3.1-70b`.
+
 ## [v0.51.195] — 2026-06-01 — Release FO (stage-batch7 — hide attachment path markers in chat UI)
 
 ### Fixed
