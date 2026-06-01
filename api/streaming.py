@@ -2630,15 +2630,6 @@ def _restore_display_reasoning_metadata(previous_messages, updated_messages):
     return updated_messages
 
 
-def _clamp_context_to_watermark(session, messages: list) -> list:
-    """Return messages unchanged — the merge-side watermark filter in
-    merge_session_messages_append_only already handles #2914 for the
-    state.db replay path.  Clamping here was a permanent ceiling that
-    dropped legitimate new turns after Edit/Retry/Undo.
-    """
-    return messages
-
-
 def _session_context_messages(session):
     """Return model-facing history without assuming it matches the UI transcript."""
     context_messages = getattr(session, 'context_messages', None)
@@ -5345,7 +5336,6 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _next_context_messages,
                 )
-                _next_context_messages = _clamp_context_to_watermark(s, _next_context_messages)
                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                 s.messages = _merge_display_messages_after_agent_result(
                     _previous_messages,
@@ -5493,7 +5483,6 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
-                                _next_context_messages = _clamp_context_to_watermark(s, _next_context_messages)
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,
@@ -6534,7 +6523,6 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _next_context_messages,
                                 )
-                                _next_context_messages = _clamp_context_to_watermark(s, _next_context_messages)
                                 s.context_messages = _deduplicate_context_messages(_next_context_messages)
                                 s.messages = _merge_display_messages_after_agent_result(
                                     _previous_messages,

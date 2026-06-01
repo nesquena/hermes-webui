@@ -299,80 +299,6 @@ def test_edit_then_new_turn_then_undo_leaks_original_via_state_db(monkeypatch, t
     assert "light speed" not in contents
 
 
-# ── _clamp_context_to_watermark is no-op (merge-side filter handles #2914) ──
-
-
-def test_clamp_context_to_watermark_is_no_op():
-    """_clamp_context_to_watermark must pass all messages through unchanged.
-
-    The merge-side watermark filter in merge_session_messages_append_only
-    already handles #2914 for the state.db replay path.  Clamping in the
-    streaming finalize path was a permanent ceiling that dropped legitimate
-    new turns after Edit/Retry/Undo.
-    """
-    from api.streaming import _clamp_context_to_watermark
-
-    class FakeSession:
-        session_id = "clamp-test"
-        truncation_watermark = 2.0
-
-    messages = [
-        _msg("user", "first", 1.0, "u1"),
-        _msg("assistant", "reply", 2.0, "a1"),
-        _msg("user", "new turn", 3.0, "u2"),
-        _msg("assistant", "new reply", 4.0, "a2"),
-    ]
-
-    result = _clamp_context_to_watermark(FakeSession(), messages)
-    assert result is messages  # same object — no filtering
-
-
-def test_clamp_context_to_watermark_no_watermark_passes_all():
-    """When truncation_watermark is None, _clamp_context_to_watermark returns all messages unchanged."""
-    from api.streaming import _clamp_context_to_watermark
-
-    class FakeSession:
-        session_id = "clamp-none"
-        truncation_watermark = None
-
-    messages = [
-        _msg("user", "first", 1.0, "u1"),
-        _msg("assistant", "reply", 2.0, "a1"),
-    ]
-
-    result = _clamp_context_to_watermark(FakeSession(), messages)
-    assert result is messages
-
-
-def test_clamp_context_to_watermark_zero_watermark_passes_all():
-    """Even with truncation_watermark = 0.0, _clamp_context_to_watermark passes all through."""
-    from api.streaming import _clamp_context_to_watermark
-
-    class FakeSession:
-        session_id = "clamp-zero"
-        truncation_watermark = 0.0
-
-    messages = [
-        _msg("user", "first", 1.0, "u1"),
-        _msg("assistant", "reply", 2.0, "a1"),
-    ]
-
-    result = _clamp_context_to_watermark(FakeSession(), messages)
-    assert result is messages
-
-
-def test_clamp_context_to_watermark_empty_messages():
-    """_clamp_context_to_watermark with empty list returns empty list."""
-    from api.streaming import _clamp_context_to_watermark
-
-    class FakeSession:
-        session_id = "clamp-empty"
-        truncation_watermark = 2.0
-
-    result = _clamp_context_to_watermark(FakeSession(), [])
-    assert result == []
-
-
 # ── save() watermark invariant ─────────────────────────────────────────────
 
 
@@ -411,89 +337,7 @@ def test_save_does_not_auto_clear_truncation_watermark(monkeypatch, tmp_path):
         f"Watermark was cleared on save! Got {loaded.truncation_watermark}"
 
 
-# ── Streaming finalize regression: watermark must not become permanent ceiling ──
-
-
-def test_edit_then_two_turns_agent_sees_all_turns():
-    """Regression: after Edit sets watermark, subsequent turns must NOT be
-    clamped out of context_messages by the streaming finalize path (#2914).
-
-    Scenario (reproduces the brick-class regression caught by pre-release gate):
-    1. Edit → watermark = 101.0
-    2. Turn 1: user asks "square" (ts=200), agent replies "360°" (ts=201)
-    3. Turn 2: user asks "list all" (ts=300), agent replies "square, list" (ts=301)
-    4. Agent on Turn 2 must see Turn 1 in context — otherwise agent 'forgets'
-       everything after the Edit point permanently.
-
-    Root cause: _clamp_context_to_watermark() drops ALL messages with
-    timestamp > watermark, including legitimate new turns. Combined with
-    _maybe_clear_truncation_watermark() being removed from save(), the
-    watermark becomes a permanent ceiling.
-    """
-    from api.streaming import _clamp_context_to_watermark
-
-    class FakeSession:
-        session_id = "post-edit-streaming"
-        # Watermark set by Edit at ts=101
-        truncation_watermark = 101.0
-
-    # After Turn 1, agent returns full context including new turn:
-    # [pre-edit messages at ts=100/101, new turn at ts=200/201]
-    _next_context_after_turn1 = [
-        _msg("user", "square", 100.0, "ctx-u1"),
-        _msg("assistant", "360°", 101.0, "ctx-a1"),
-        _msg("user", "what is circle", 200.0, "ctx-u2"),
-        _msg("assistant", "360 degrees", 201.0, "ctx-a2"),
-    ]
-
-    # _clamp_context_to_watermark is called on every streaming finalize.
-    # After Turn 1, context_messages should still contain the new turn.
-    result = _clamp_context_to_watermark(FakeSession(), _next_context_after_turn1)
-    contents = [m["content"] for m in result]
-
-    # NEW TURN must be preserved — this is the regression:
-    # _clamp_context_to_watermark drops ts=200/201 because 200 > 101 (watermark)
-    assert "what is circle" in contents, \
-        f"Turn 1 was clamped out of context! Contents: {contents}"
-    assert "360 degrees" in contents, \
-        f"Turn 1 reply was clamped out of context! Contents: {contents}"
-
-
-def test_edit_then_two_turns_second_turn_sees_first():
-    """End-to-end streaming simulation: Edit → Turn 1 → Turn 2.
-
-    After Turn 1 is finalized, context_messages is saved.
-    On Turn 2, the agent's result includes Turn 1 + Turn 2.
-    _clamp_context_to_watermark must NOT drop Turn 1 from Turn 2's context.
-    """
-    from api.streaming import _clamp_context_to_watermark
-
-    class FakeSession:
-        session_id = "two-turns-post-edit"
-        truncation_watermark = 101.0
-
-    # Turn 2: agent returns context with Turn 1 + Turn 2
-    _next_context_after_turn2 = [
-        _msg("user", "square", 100.0, "ctx-u1"),
-        _msg("assistant", "360°", 101.0, "ctx-a1"),
-        _msg("user", "what is circle", 200.0, "ctx-u2"),   # Turn 1
-        _msg("assistant", "360 degrees", 201.0, "ctx-a2"),  # Turn 1 reply
-        _msg("user", "list all shapes", 300.0, "ctx-u3"),   # Turn 2
-        _msg("assistant", "square, circle", 301.0, "ctx-a3"), # Turn 2 reply
-    ]
-
-    result = _clamp_context_to_watermark(FakeSession(), _next_context_after_turn2)
-    contents = [m["content"] for m in result]
-
-    # Both Turn 1 and Turn 2 must be preserved
-    assert "what is circle" in contents, \
-        f"Turn 1 was clamped out! Contents: {contents}"
-    assert "360 degrees" in contents, \
-        f"Turn 1 reply was clamped out! Contents: {contents}"
-    assert "list all shapes" in contents, \
-        f"Turn 2 was clamped out! Contents: {contents}"
-    assert "square, circle" in contents, \
-        f"Turn 2 reply was clamped out! Contents: {contents}"
+# ── Streaming finalize: watermark must not become permanent ceiling ──
 
 
 def test_streaming_finalize_preserves_new_turns_after_edit(monkeypatch, tmp_path):
@@ -503,7 +347,7 @@ def test_streaming_finalize_preserves_new_turns_after_edit(monkeypatch, tmp_path
 
     This exercises the actual finalize chain:
       _restore_reasoning_metadata → _dedupe_replayed_context_messages
-      → _clamp_context_to_watermark → _deduplicate_context_messages
+      → _deduplicate_context_messages
 
     Scenario:
     1. Edit sets watermark = 101.0, context_messages = [pre-edit messages]
@@ -516,7 +360,6 @@ def test_streaming_finalize_preserves_new_turns_after_edit(monkeypatch, tmp_path
     from api.streaming import (
         _restore_reasoning_metadata,
         _dedupe_replayed_context_messages,
-        _clamp_context_to_watermark,
         _deduplicate_context_messages,
     )
 
@@ -553,7 +396,6 @@ def test_streaming_finalize_preserves_new_turns_after_edit(monkeypatch, tmp_path
     # Run the finalize chain
     _next = _restore_reasoning_metadata(_previous_context, _result_messages_turn1)
     _next = _dedupe_replayed_context_messages(_previous_context, _next)
-    _next = _clamp_context_to_watermark(session, _next)
     session.context_messages = _deduplicate_context_messages(_next)
 
     # Turn 1: context must contain the new turn
@@ -577,7 +419,6 @@ def test_streaming_finalize_preserves_new_turns_after_edit(monkeypatch, tmp_path
     # Run the finalize chain again
     _next = _restore_reasoning_metadata(_previous_context, _result_messages_turn2)
     _next = _dedupe_replayed_context_messages(_previous_context, _next)
-    _next = _clamp_context_to_watermark(session, _next)
     session.context_messages = _deduplicate_context_messages(_next)
 
     # Turn 2: context must contain BOTH Turn 1 and Turn 2
@@ -590,3 +431,168 @@ def test_streaming_finalize_preserves_new_turns_after_edit(monkeypatch, tmp_path
         f"Turn 2 lost after finalize! Contents: {turn2_contents}"
     assert "square, circle" in turn2_contents, \
         f"Turn 2 reply lost after finalize! Contents: {turn2_contents}"
+
+
+def test_streaming_finalize_does_not_leak_original_after_edit(monkeypatch, tmp_path):
+    """After Edit, the original replaced message must NOT appear in context_messages
+    after streaming finalize (#2914).
+
+    This exercises the actual finalize chain:
+      _restore_reasoning_metadata → _dedupe_replayed_context_messages
+      → _deduplicate_context_messages
+
+    Scenario:
+    1. Edit sets watermark = 101.0, context_messages = [pre-edit messages]
+    2. Turn 1: agent returns [pre-edit + Turn 1] → finalize
+    3. Turn 2: agent returns [pre-edit + Turn 1 + Turn 2] → finalize
+    4. Assert context_messages after Turn 2 contains Turn 1 + Turn 2
+    """
+    import api.models as models
+    from api.models import Session
+    from api.streaming import (
+        _restore_reasoning_metadata,
+        _dedupe_replayed_context_messages,
+        _deduplicate_context_messages,
+    )
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    models.SESSIONS.clear()
+
+    # Pre-Edit context (after Edit, watermark = 101.0)
+    pre_edit = [
+        _msg("user", "square", 100.0, "ctx-u1"),
+        _msg("assistant", "360°", 101.0, "ctx-a1"),
+    ]
+
+    session = Session(
+        session_id="finalize_two_turns",
+        messages=list(pre_edit),
+        context_messages=list(pre_edit),
+        truncation_watermark=101.0,
+    )
+    session.save()
+    models.SESSIONS["finalize_two_turns"] = session
+
+    # ── Turn 1: agent returns [pre-edit + Turn 1] ──
+    _previous_context = list(session.context_messages)
+    _result_messages_turn1 = [
+        _msg("user", "square", 100.0, "ctx-u1"),
+        _msg("assistant", "360°", 101.0, "ctx-a1"),
+        _msg("user", "what is circle", 200.0, "ctx-u2"),
+        _msg("assistant", "360 degrees", 201.0, "ctx-a2"),
+    ]
+
+    # Run the finalize chain
+    _next = _restore_reasoning_metadata(_previous_context, _result_messages_turn1)
+    _next = _dedupe_replayed_context_messages(_previous_context, _next)
+    session.context_messages = _deduplicate_context_messages(_next)
+
+    # Turn 1: context must contain the new turn
+    turn1_contents = [m["content"] for m in session.context_messages]
+    assert "what is circle" in turn1_contents, \
+        f"Turn 1 lost after finalize! Contents: {turn1_contents}"
+    assert "360 degrees" in turn1_contents, \
+        f"Turn 1 reply lost after finalize! Contents: {turn1_contents}"
+
+    # ── Turn 2: agent returns [pre-edit + Turn 1 + Turn 2] ──
+    _previous_context = list(session.context_messages)
+    _result_messages_turn2 = [
+        _msg("user", "square", 100.0, "ctx-u1"),
+        _msg("assistant", "360°", 101.0, "ctx-a1"),
+        _msg("user", "what is circle", 200.0, "ctx-u2"),
+        _msg("assistant", "360 degrees", 201.0, "ctx-a2"),
+        _msg("user", "list all shapes", 300.0, "ctx-u3"),
+        _msg("assistant", "square, circle", 301.0, "ctx-a3"),
+    ]
+
+    # Run the finalize chain again
+    _next = _restore_reasoning_metadata(_previous_context, _result_messages_turn2)
+    _next = _dedupe_replayed_context_messages(_previous_context, _next)
+    session.context_messages = _deduplicate_context_messages(_next)
+
+    # Turn 2: context must contain BOTH Turn 1 and Turn 2
+    turn2_contents = [m["content"] for m in session.context_messages]
+    assert "what is circle" in turn2_contents, \
+        f"Turn 1 lost after Turn 2 finalize! Contents: {turn2_contents}"
+    assert "360 degrees" in turn2_contents, \
+        f"Turn 1 reply lost after Turn 2 finalize! Contents: {turn2_contents}"
+    assert "list all shapes" in turn2_contents, \
+        f"Turn 2 lost after finalize! Contents: {turn2_contents}"
+    assert "square, circle" in turn2_contents, \
+        f"Turn 2 reply lost after finalize! Contents: {turn2_contents}"
+
+
+def test_edit_does_not_leak_original_message_into_context_via_reconcile(monkeypatch, tmp_path):
+    """After Edit, the original replaced message must NOT appear in agent context
+    when reconciling state.db with sidecar (#2914).
+
+    This is the core regression: Edit replaces message content but state.db
+    keeps the original forever. Without the sub-watermark filter in
+    merge_session_messages_append_only, the original message leaks back
+    into context_messages on the next turn.
+
+    Scenario:
+    1. Send "triangle" (ts=100) → agent replies "180°" (ts=101)
+    2. Edit to "square" (ts=200) → agent replies "360°" (ts=201), watermark=200
+    3. Send "list all" (ts=300) → agent replies "square, list" (ts=301)
+    4. Reconcile state.db (which has both "triangle" and "square") with sidecar
+    5. Assert "triangle" does NOT appear in merged context
+    """
+    import api.models as models
+    from api.models import Session, reconciled_state_db_messages_for_session
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    models.SESSIONS.clear()
+
+    # After Edit + new turn, sidecar has:
+    # - "square" (edited, ts=200)
+    # - "360°" (ts=201)
+    # - "list all" (ts=300)
+    # - "square, list" (ts=301)
+    # Watermark = 301.0 (covers everything in sidecar)
+    sidecar = [
+        _msg("user", "square", 200.0, "side-u1"),
+        _msg("assistant", "360°", 201.0, "side-a1"),
+        _msg("user", "list all", 300.0, "side-u2"),
+        _msg("assistant", "square, list", 301.0, "side-a2"),
+    ]
+
+    session = Session(
+        session_id="edit_no_leak",
+        messages=list(sidecar),
+        context_messages=list(sidecar),
+        truncation_watermark=301.0,
+    )
+    session.save()
+
+    # state.db has BOTH original "triangle" AND edited "square"
+    state_db = [
+        _msg("user", "triangle", 100.0, "state-u1"),  # original, ts < watermark
+        _msg("assistant", "180°", 101.0, "state-a1"),  # original, ts < watermark
+        _msg("user", "square", 200.0, "state-u2"),     # edited, ts <= watermark
+        _msg("assistant", "360°", 201.0, "state-a2"),  # edited, ts <= watermark
+        _msg("user", "list all", 300.0, "state-u3"),   # new turn
+        _msg("assistant", "square, list", 301.0, "state-a4"),
+    ]
+
+    merged = reconciled_state_db_messages_for_session(
+        session, state_messages=state_db, prefer_context=True,
+    )
+
+    contents = [m["content"] for m in merged]
+
+    # "triangle" must NOT leak — it was replaced by "square" via Edit
+    assert "triangle" not in contents, \
+        f"Original 'triangle' leaked into context! Contents: {contents}"
+    # "square" must be present
+    assert "square" in contents
+    # All sidecar messages must be present
+    assert "360°" in contents
+    assert "list all" in contents
+    assert "square, list" in contents
