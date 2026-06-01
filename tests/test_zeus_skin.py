@@ -46,4 +46,4 @@ def test_zeus_modals_are_not_navy():
 def test_zeus_i18n_lists_skin_in_all_locales():
     # Zeus is the last skin in each locale's cmd_theme string, so it appears
     # as `…/zeus)` rather than `/zeus/`. There are 10 locales.
-    assert I18N_JS.count("zeus)") >= 9
+    assert I18N_JS.count("zeus)") == 10
