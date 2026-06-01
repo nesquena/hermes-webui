@@ -369,7 +369,9 @@ def handle_workspace_upload(handler):
             safe_name = _sanitize_upload_name(filename)
             dest = safe_resolve_ws(target_dir, safe_name)
 
-            # Path traversal guard
+            # Path traversal guard (belt-and-suspenders: safe_resolve_ws above is
+            # the authoritative guard and raises ValueError on traversal; this
+            # check catches any edge case where the resolved path escapes).
             if not dest.resolve().is_relative_to(workspace.resolve()):
                 return j(handler, {'error': f'Path traversal blocked: {safe_name}'}, status=403)
 
@@ -390,12 +392,41 @@ def handle_workspace_upload(handler):
             dest.write_bytes(file_bytes)
             mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
 
-            # For archives, optionally extract
+            # For archives, optionally extract into the target directory
             is_archive = safe_name.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar.bz2', '.tar.xz'))
             if is_archive:
+                import zipfile, tarfile, traceback as _extract_tb
                 try:
-                    extract_archive(file_bytes, safe_name, workspace)
-                    # Remove the archive file after extraction
+                    extraction = extract_archive(file_bytes, safe_name, target_dir)
+                    # Remove the archive file after successful extraction
+                    dest.unlink(missing_ok=True)
+                    results.append({
+                        'filename': safe_name,
+                        'path': str(extraction.get('dest', target_dir)),
+                        'size': len(file_bytes),
+                        'is_image': False,
+                        'extracted': True,
+                        'extracted_files': extraction.get('files', []),
+                        'extracted_count': extraction.get('extracted', 0),
+                    })
+                    continue
+                except (zipfile.BadZipFile, tarfile.TarError, ValueError) as e:
+                    # Extraction failed — remove the archive file (no partial
+                    # content left behind) and surface the error to the user.
+                    dest.unlink(missing_ok=True)
+                    print(f'[webui] workspace upload extract error: {e}', flush=True)
+                    results.append({
+                        'filename': safe_name,
+                        'path': str(target_dir),
+                        'size': len(file_bytes),
+                        'mime': mime,
+                        'is_image': False,
+                        'extracted': False,
+                        'extract_error': str(e) or 'Archive extraction failed',
+                    })
+                    continue
+                except Exception:
+                    print('[webui] workspace upload extract error: ' + _extract_tb.format_exc(), flush=True)
                     dest.unlink(missing_ok=True)
                     results.append({
                         'filename': safe_name,
@@ -403,12 +434,10 @@ def handle_workspace_upload(handler):
                         'size': len(file_bytes),
                         'mime': mime,
                         'is_image': False,
-                        'extracted': True,
+                        'extracted': False,
+                        'extract_error': 'Archive extraction failed',
                     })
                     continue
-                except (ValueError, Exception) as e:
-                    # If extraction fails, keep the archive file
-                    pass
 
             results.append({
                 'filename': safe_name,

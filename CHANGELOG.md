@@ -3,6 +3,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Workspace file-panel: upload button and drag-drop that POST to a new
+  `/api/workspace/upload` endpoint. Files land in the session workspace
+  (resolved via `resolve_trusted_workspace`), get deduplicated with
+  `-1`/`-2` suffixes, and archives (`.zip`/`.tar.*`) are auto-extracted
+  into the target subdirectory with zip-bomb and zip-slip protections.
+  Extraction errors are surfaced to the frontend (not silently swallowed)
+  and the archive is removed on failure. (#3104)
+
 ## [v0.51.152] — 2026-05-28 — Release DX (stage-batch34 — single-PR optional gateway-backed browser chat)
 
 ### Added
