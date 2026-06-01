@@ -1840,6 +1840,98 @@ def _github_tags_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+_GITHUB_MILESTONE_STATES = {"open", "closed"}
+
+
+def _github_milestones_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "milestones"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_milestone_title_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    title = _safe_public_text(value, limit=200)
+    if not title or title != value.strip():
+        return False
+    if _refresh_value_is_blocked(title) or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(title):
+        return False
+    return True
+
+
+def _github_milestone_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    number = _safe_optional_nonnegative_int(row.get("number"))
+    if number is None or number <= 0:
+        return False
+    if not _github_milestone_title_is_safe(row.get("title")):
+        return False
+    state = _safe_public_text(row.get("state"), limit=40).lower()
+    if not state or state not in _GITHUB_MILESTONE_STATES:
+        return False
+    for field in ("open_issues", "closed_issues"):
+        raw_count = row.get(field)
+        if raw_count is not None and _safe_optional_nonnegative_int(raw_count) is None:
+            return False
+    for field in ("due_on", "updated_at"):
+        raw_timestamp = row.get(field)
+        if raw_timestamp is not None and not _safe_iso_timestamp(raw_timestamp):
+            return False
+    for raw_value in (row.get("number"), row.get("title"), row.get("state"), row.get("due_on"), row.get("updated_at")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_milestones_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_milestones_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_milestone_row_is_safe(row) for row in payload)
+
+
+def _github_milestones_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_milestones_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_milestone_row_is_safe(row)]
+    parts = [f"GitHub milestones for {repo}", f"milestone count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        number = _safe_optional_nonnegative_int(row.get("number")) or 0
+        title = _safe_public_text(row.get("title"), limit=200)
+        state = _safe_public_text(row.get("state"), limit=40).lower()
+        open_issues = _safe_optional_nonnegative_int(row.get("open_issues"))
+        closed_issues = _safe_optional_nonnegative_int(row.get("closed_issues"))
+        due_on = _safe_iso_timestamp(row.get("due_on")) if row.get("due_on") is not None else ""
+        updated = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
+        row_parts = [f"milestone #{number}: {title}", f"state: {state}"]
+        if open_issues is not None:
+            row_parts.append(f"open issues: {open_issues}")
+        if closed_issues is not None:
+            row_parts.append(f"closed issues: {closed_issues}")
+        if due_on:
+            row_parts.append(f"due: {due_on}")
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_labels_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -2416,6 +2508,16 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
     if _json_payload_is_github_branches_metadata(origin_uri, payload):
         title = f"GitHub branches {(_github_branches_path_repo(origin_uri) or source_id)}"
         summary = _github_branches_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _json_payload_is_github_milestones_metadata(origin_uri, payload):
+        repo = _github_milestones_path_repo(origin_uri) or source_id
+        title = f"GitHub milestones {repo}"
+        summary = _github_milestones_refresh_summary(origin_uri, payload)
         return {
             "metadata_only": True,
             "title": title,
