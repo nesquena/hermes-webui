@@ -84,6 +84,7 @@ _REFRESH_BLOCKED_VALUE_RE = re.compile(
     r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
     r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
     r"renderer|rendercode|generated[_ -]?code|raw\s+prompt|raw\s+fetched\s+body|"
+    r"javascript\s*:|"
     r"ignore\s+previous\s+instructions|credential|password|secret(?!ary)|token(?!ization)|"
     r"authorization|cookie|"
     r"(?:^|[._/\s])on(?:click|load|error|submit|change|mouseover|focus|blur)(?:$|[._/\s])",
@@ -967,6 +968,107 @@ def _github_issue_refresh_summary(payload: dict[str, Any], *, origin_uri: str) -
         parts.append(f"labels: {', '.join(labels)}")
     if updated:
         parts.append(f"updated: {updated}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_issues_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or lowered[4] != "issues"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_issue_list_value_has_query_fragment_marker(text: str) -> bool:
+    return bool(re.search(r"\?[A-Za-z0-9_.~%+-]+(?:=|&|$)|#[A-Za-z0-9_.~%+-]+", text))
+
+
+def _github_issue_list_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    number = _safe_optional_nonnegative_int(row.get("number"))
+    if number is None or number <= 0 or number > 9_999_999:
+        return False
+    title = _safe_public_text(row.get("title"), limit=200)
+    if (
+        not title
+        or _refresh_value_is_blocked(row.get("title"))
+        or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(title)
+        or _github_issue_list_value_has_query_fragment_marker(title)
+    ):
+        return False
+    raw_state = row.get("state")
+    if _is_present_public_value(raw_state):
+        state = _safe_public_text(raw_state, limit=40).lower()
+        if not state or state not in {"open", "closed"}:
+            return False
+    raw_updated = row.get("updated_at")
+    if _is_present_public_value(raw_updated) and not _safe_iso_timestamp(raw_updated):
+        return False
+    raw_labels = row.get("labels")
+    if raw_labels is not None:
+        if not isinstance(raw_labels, list):
+            return False
+        for item in raw_labels:
+            raw_label = item.get("name") if isinstance(item, dict) else item
+            label = _safe_public_text(raw_label, limit=60)
+            if (
+                not label
+                or _refresh_value_is_blocked(raw_label)
+                or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(label)
+                or _github_issue_list_value_has_query_fragment_marker(label)
+            ):
+                return False
+    return True
+
+
+def _json_payload_is_github_issues_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_issues_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_issue_list_row_is_safe(row) for row in payload)
+
+
+def _github_issues_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_issues_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_issue_list_row_is_safe(row)]
+    parts = [f"GitHub issues for {repo}", f"issue count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        number = _safe_optional_nonnegative_int(row.get("number")) or 0
+        title = _safe_public_text(row.get("title"), limit=200)
+        kind = "pull request" if isinstance(row.get("pull_request"), dict) else "issue"
+        parts.append(f"{kind} #{number}: {title}")
+        state = _safe_public_text(row.get("state"), limit=40).lower()
+        if state:
+            parts.append(f"state: {state}")
+        labels: list[str] = []
+        raw_labels = row.get("labels")
+        if isinstance(raw_labels, list):
+            for item in raw_labels[:8]:
+                label = _safe_public_text(item.get("name") if isinstance(item, dict) else item, limit=60)
+                if label and not _refresh_value_is_blocked(label):
+                    labels.append(label)
+                if len(labels) >= 5:
+                    break
+        if labels:
+            parts.append(f"labels: {', '.join(labels)}")
+        updated = _safe_iso_timestamp(row.get("updated_at"))
+        if updated:
+            parts.append(f"updated: {updated}")
     return _bounded_refresh_summary("; ".join(parts))
 
 
@@ -2604,6 +2706,16 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         kind, number = comments_path_info
         title = f"GitHub {kind} #{number} comments"
         summary = _github_issue_comments_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _json_payload_is_github_issues_metadata(origin_uri, payload):
+        repo = _github_issues_path_repo(origin_uri) or source_id
+        title = f"GitHub issues {repo}"
+        summary = _github_issues_refresh_summary(origin_uri, payload)
         return {
             "metadata_only": True,
             "title": title,
