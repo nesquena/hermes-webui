@@ -28,10 +28,7 @@ from __future__ import annotations
 
 import socket
 import threading
-import time
 from pathlib import Path
-
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -45,7 +42,7 @@ def test_server_turn_streams_to_session_channel(monkeypatch):
     `server_turn_started` {stream_id} frame onto a subscribed SessionChannel
     so an open tab can attach its existing renderer to the server-created
     stream. Closed-tab path is unaffected (no subscriber → no-op)."""
-    from api import background_process as bp, config as cfg
+    from api import background_process as bp
     import api.routes as routes
 
     sid = "sess-optz-liveview-fanout"
