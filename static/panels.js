@@ -3640,6 +3640,19 @@ function _stripYamlFrontmatter(content) {
   return { frontmatter: m[1], body: content.slice(m[0].length) };
 }
 
+function _skillMarkdownHtml(markdown) {
+  return `<div class="preview-md">${renderMd(markdown || '')}</div>`;
+}
+
+function _enhanceSkillMarkdown(root) {
+  if (!root) return;
+  requestAnimationFrame(() => {
+    const mdRoot = root.querySelector('.preview-md') || root;
+    if (typeof highlightCode === 'function') highlightCode(mdRoot);
+    if (typeof renderKatexBlocks === 'function') renderKatexBlocks(mdRoot);
+  });
+}
+
 function _renderSkillDetail(name, content, linkedFiles) {
   const title = $('skillDetailTitle');
   const body = $('skillDetailBody');
@@ -3652,7 +3665,7 @@ function _renderSkillDetail(name, content, linkedFiles) {
   if (frontmatter) {
     html += `<details class="skill-frontmatter"><summary>${esc(t('skill_metadata'))}</summary><pre><code>${esc(frontmatter)}</code></pre></details>`;
   }
-  html += renderMd(markdownBody || '(no content)');
+  html += _skillMarkdownHtml(markdownBody || '(no content)');
   const lf = linkedFiles || {};
   const categories = Object.entries(lf).filter(([,files]) => files && files.length > 0);
   if (categories.length) {
@@ -3667,6 +3680,7 @@ function _renderSkillDetail(name, content, linkedFiles) {
     html += '</div>';
   }
   body.innerHTML = `<div class="main-view-content skill-detail-content">${html}</div>`;
+  _enhanceSkillMarkdown(body);
   body.querySelectorAll('.skill-linked-file').forEach(a => {
     a.addEventListener('click', e => { e.preventDefault(); openSkillFile(a.dataset.skillName, a.dataset.skillFile); });
   });
@@ -3738,7 +3752,7 @@ async function openSkillFile(skillName, filePath) {
     const header = `<div class="skill-file-breadcrumb"><a href="#" class="skill-file-back" data-skill-name="${esc(skillName)}">&larr; ${esc(backLabel)}</a><span class="skill-file-path">${esc(filePath)}</span></div>`;
     let content;
     if (isMd) {
-      content = `<div class="main-view-content">${renderMd(data.content || '')}</div>`;
+      content = `<div class="main-view-content">${_skillMarkdownHtml(data.content || '')}</div>`;
     } else {
       const escaped = esc(data.content || '');
       content = `<pre class="skill-file-code"><code>${escaped}</code></pre>`;
@@ -3757,7 +3771,8 @@ async function openSkillFile(skillName, filePath) {
         }
       });
     });
-    if (!isMd) requestAnimationFrame(() => { if (typeof highlightCode === 'function') highlightCode(); });
+    if (isMd) _enhanceSkillMarkdown(body);
+    else requestAnimationFrame(() => { if (typeof highlightCode === 'function') highlightCode(); });
   } catch(e) { setStatus(t('skill_file_load_failed') + e.message); }
 }
 
