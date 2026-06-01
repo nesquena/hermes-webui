@@ -74,6 +74,94 @@ if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window 
 let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';
 let _selectedTextReplyRaf=0;
+const _persistentStateToastSeen=new Set();
+
+function _persistentToastText(value){
+  if(value===null||value===undefined)return '';
+  if(typeof value==='string')return value;
+  try{return JSON.stringify(value);}catch(_){return String(value||'');}
+}
+
+function _persistentToastToolName(tool){
+  return String(tool&&tool.name||'').trim();
+}
+
+function _persistentToastArgs(tool){
+  const args=tool&&tool.args;
+  return args&&typeof args==='object'?args:{};
+}
+
+function _persistentToastPreview(tool){
+  return [
+    _persistentToastText(tool&&tool.preview),
+    _persistentToastText(tool&&tool.snippet),
+  ].filter(Boolean).join('\n');
+}
+
+function _persistentToastHasWriteIntent(name, text){
+  const nameWords=String(name||'').replace(/_/g,' ');
+  const haystack=`${nameWords}\n${text}`.toLowerCase();
+  if(/\b(read|list|view|search|lookup|get|fetch|load|usage|toggle|delete|remove)\b/.test(nameWords))return false;
+  if(/\b(no|not|nothing)\s+(?:was\s+)?(?:saved|updated|created|written|stored|changed)\b/.test(haystack))return false;
+  if(/\b(?:unchanged|skipped|dry[- ]run|failed|error)\b/.test(haystack))return false;
+  return /\b(save|saved|write|wrote|written|update|updated|create|created|store|stored|persist|persisted|remember|remembered)\b/.test(haystack);
+}
+
+function _persistentToastSkillName(tool){
+  const args=_persistentToastArgs(tool);
+  const raw=args.name||args.skill_name||args.skill||args.title||'';
+  const direct=String(raw||'').trim();
+  if(direct)return direct;
+  const text=_persistentToastPreview(tool);
+  const match=text.match(/\bskill(?:\s+updated|\s+created|\s+saved)?\s*[:=]\s*["'`]?([A-Za-z0-9_.-]{2,80})/i);
+  return match?match[1]:'';
+}
+
+function _maybeNotifyPersistentStateSaved(tool){
+  if(!tool||tool.is_error||typeof showToast!=='function')return;
+  const name=_persistentToastToolName(tool);
+  if(!name)return;
+  const nameKey=name.toLowerCase().replace(/[^a-z0-9]+/g,'_');
+  const preview=_persistentToastPreview(tool);
+  const argsText=_persistentToastText(_persistentToastArgs(tool));
+  const text=`${preview}\n${argsText}`;
+  if(!_persistentToastHasWriteIntent(nameKey, text))return;
+
+  const nameWords=nameKey.replace(/_/g,' ');
+  const isSkill=/\bskills?\b/.test(nameWords);
+  const isMemory=/\b(memory|memories|remember|profile)\b/.test(nameWords);
+  if(!isSkill&&!isMemory)return;
+  const skillName=isSkill?_persistentToastSkillName(tool):'';
+  if(isSkill&&!skillName)return;
+  _showPersistentStateToast(isSkill?'skill':'memory', skillName, {
+    created: isSkill&&/\b(create|created|new)\b/.test(`${nameKey}\n${preview}`.toLowerCase()),
+  });
+}
+
+function _showPersistentStateToast(kind, name, options){
+  if(typeof showToast!=='function')return;
+  const normalizedKind=String(kind||'').toLowerCase();
+  if(normalizedKind!=='skill'&&normalizedKind!=='memory')return;
+  const itemName=String(name||'').trim();
+  const dedupeKey=[
+    S&&S.session&&S.session.session_id||'',
+    normalizedKind,
+    itemName||'memory',
+  ].join(':');
+  if(_persistentStateToastSeen.has(dedupeKey))return;
+  _persistentStateToastSeen.add(dedupeKey);
+  if(_persistentStateToastSeen.size>200){
+    const first=_persistentStateToastSeen.values().next().value;
+    _persistentStateToastSeen.delete(first);
+  }
+
+  if(normalizedKind==='skill'){
+    const base=options&&options.created?t('skill_created'):t('skill_updated');
+    showToast(itemName?`${base}: ${itemName}`:base,4200,'success');
+    return;
+  }
+  showToast(t('memory_saved'),3600,'success');
+}
 
 function _selectedTextReplyT(key, fallback){
   try{
@@ -1714,6 +1802,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(typeof noteWorkspaceMutationsFromToolCall==='function') noteWorkspaceMutationsFromToolCall(tc);
       if(S.session&&S.session.session_id===activeSid&&typeof scheduleRenderSessionArtifacts==='function') scheduleRenderSessionArtifacts();
       if(!S.session||S.session.session_id!==activeSid) return;
+      _maybeNotifyPersistentStateSaved(tc);
       if(typeof refreshOpenPreviewIfMutated==='function') refreshOpenPreviewIfMutated();
       appendLiveToolCard(tc);
       snapshotLiveTurn();
@@ -1732,6 +1821,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       showClarifyForSession(activeSid, d);
       playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));
       sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed');
+    });
+
+    source.addEventListener('state_saved',e=>{
+      let d={};
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){}
+      if((d.session_id||activeSid)!==activeSid) return;
+      if(!S.session||S.session.session_id!==activeSid) return;
+      _showPersistentStateToast(d.kind, d.name||'', {created:String(d.action||'').toLowerCase()==='created'});
     });
 
     source.addEventListener('title',e=>{
@@ -2303,7 +2400,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _setActivePaneIdleIfOwner();
     });
 
-    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
+    for(const _runJournalEventName of ['token','interim_assistant','reasoning','tool','tool_complete','approval','clarify','state_saved','title','title_status','context_status','goal','goal_continue','done','stream_end','pending_steer_leftover','compressing','compressed','metering','apperror','warning','error','cancel']){
       source.addEventListener(_runJournalEventName,_rememberRunJournalCursor);
     }
   }

@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- Chat now shows a small success toast when an agent turn saves memory or creates/updates a skill, so persistent state changes are visible during normal WebUI turns (#3340).
+
 ## [v0.51.195] — 2026-06-01 — Release FO (stage-batch7 — hide attachment path markers in chat UI)
 
 ### Fixed
