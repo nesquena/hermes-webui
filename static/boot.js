@@ -11,19 +11,38 @@
   } catch(_) {}
 })();
 
+// cancelStream: stop the active chat stream.
+// See docs/rfcs/webui-run-state-consistency-contract.md (Invariants #2, #4)
+// for the owner-aware + SSE-close rationale.
 async function cancelStream(){
+  const sid = S.session && S.session.session_id;
   const streamId = S.activeStreamId;
   if(!streamId) return;
+  let respBody=null;
   try{
-    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
-  }catch(e){/* cancel request failed - cleanup below still runs */}
-  // Clear status unconditionally after the cancel request completes.
-  // The SSE cancel event may also fire, but if the connection is already
-  // closed it won't arrive — so we handle cleanup here as the guaranteed path.
-  S.activeStreamId=null;
-  setBusy(false);
-  if(typeof setComposerStatus==='function') setComposerStatus('');
-  else setStatus('');
+    const r=await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
+    try{respBody=await r.json();}catch(_){}
+  }catch(e){}
+  // Always close the SSE EventSource for the (sid, streamId) we just tried
+  // to cancel — mirrors cancelSessionStream() so the old source cannot leak
+  // events into a subsequent turn's UI.
+  if(sid && typeof closeLiveStream==='function'){ closeLiveStream(sid, streamId); }
+  // Owner guard: only clear the local active state if WE still own the
+  // stream we asked to cancel. A new turn may have started while the
+  // cancel request was in flight; clearing in that case would wipe the
+  // new turn's busy state and desync UI from the worker.
+  if(!S.activeStreamId || S.activeStreamId===streamId){
+    S.activeStreamId=null;
+    setBusy(false);
+    if(typeof setComposerStatus==='function') setComposerStatus('');
+    else setStatus('');
+  }
+  // Surface a lightweight signal when the backend rejected the cancel.
+  // /api/chat/cancel only exposes `cancelled:bool`, so we cannot
+  // distinguish reasons — keep the toast generic and short.
+  if(respBody && respBody.cancelled===false && typeof showToast==='function'){
+    showToast('Stream is no longer active',2000);
+  }
 }
 
 async function cancelSessionStream(session){

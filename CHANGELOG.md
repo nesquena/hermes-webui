@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- `cancelStream()` now (1) closes the SSE EventSource for the `(sid, streamId)` pair it just tried to cancel, (2) reads the `/api/chat/cancel` response and only clears local busy state when the active stream id still matches the one we asked to cancel, so a new turn that started while the cancel request was in flight is no longer wiped, and (3) surfaces a short `Stream is no longer active` toast when the backend returns `cancelled:false`. The change is owner-aware and mirrors the existing `cancelSessionStream()` cleanup path.
+
 ## [v0.51.248] — 2026-06-03 — Release HP (stage-q20 — self-heal deleted WebUI sessions instead of bricking the chat)
 
 ### Fixed
