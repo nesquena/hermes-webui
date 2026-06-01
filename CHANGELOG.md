@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Uploaded image attachment path context remains available to the agent, but the chat transcript and sidebar title no longer display the raw `[Attached files: ...]` path suffix.
+
 ## [v0.51.191] — 2026-05-31 — Release FK (stage-batch3 — skills-detail markdown styling + launchd duplicate-start guard)
 
 ### Fixed
