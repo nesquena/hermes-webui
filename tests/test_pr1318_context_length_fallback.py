@@ -47,17 +47,21 @@ def test_fallback_uses_model_metadata():
 
 
 def test_fallback_gates_on_falsy_context_length():
-    """Fallback runs only when the compressor didn't populate s.context_length.
+    """Fallback runs when the compressor didn't populate s.context_length.
 
-    The gate must check s.context_length (not _cc_for_save) — if the compressor
-    set context_length but it was 0, we still want the fallback to fire.
+    The gate must still check s.context_length being falsy — if the compressor
+    set context_length but it was 0, we want the fallback to fire. (#3256/#3263
+    widened the gate to ALSO fire on `_skip_cc_cl` — a non-default model whose
+    compressor carried the stale global cap — so the gate is now
+    `(not getattr(s, 'context_length', 0)) or _skip_cc_cl`. The falsy-check
+    remains; this test asserts that invariant is intact, not the exact spelling.)
     """
     block = _persistence_block()
-    # The conditional must reference s.context_length (or getattr(s, 'context_length', 0))
+    # The conditional must still reference s.context_length being falsy.
     assert (
-        "if not getattr(s, 'context_length'" in block
-        or "if not s.context_length" in block
-    ), "Fallback must gate on s.context_length being falsy"
+        "not getattr(s, 'context_length'" in block
+        or "not s.context_length" in block
+    ), "Fallback must still gate on s.context_length being falsy"
 
 
 def test_fallback_passes_model_and_base_url():
