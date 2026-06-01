@@ -2310,6 +2310,60 @@ def _github_issue_comments_refresh_summary(origin_uri: str, payload: list[Any]) 
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_pull_commits_path_number(origin_uri: str) -> int | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or lowered[4] != "pulls"
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+        or lowered[6] != "commits"
+    ):
+        return None
+    return int(path[5])
+
+
+def _json_payload_is_github_pull_commits_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_pull_commits_path_number(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_commit_list_row_is_safe(row) for row in payload)
+
+
+def _github_pull_commits_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    number = _github_pull_commits_path_number(origin_uri) or 0
+    safe_rows = [row for row in payload if _github_commit_list_row_is_safe(row)]
+    parts = [f"GitHub pull request #{number} commits", f"commit count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        sha = _safe_public_text(row.get("sha"), limit=80).lower()
+        title = _github_commit_message_title(row)
+        raw_commit = row.get("commit")
+        commit: dict[str, Any] = raw_commit if isinstance(raw_commit, dict) else {}
+        raw_author = commit.get("author")
+        author: dict[str, Any] = raw_author if isinstance(raw_author, dict) else {}
+        author_date = _safe_iso_timestamp(author.get("date"))
+        parents = row.get("parents") if isinstance(row.get("parents"), list) else []
+        row_parts = [f"commit: {sha[:12]}"]
+        if title:
+            row_parts.append(f"message: {title}")
+        if author_date:
+            row_parts.append(f"author date: {author_date}")
+        row_parts.append(f"parents: {len(parents)}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_pull_reviews_path_number(origin_uri: str) -> int | None:
     try:
         parts = urlsplit(origin_uri)
@@ -2550,6 +2604,15 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         kind, number = comments_path_info
         title = f"GitHub {kind} #{number} comments"
         summary = _github_issue_comments_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _json_payload_is_github_pull_commits_metadata(origin_uri, payload):
+        title = f"GitHub PR commits #{(_github_pull_commits_path_number(origin_uri) or 0)}"
+        summary = _github_pull_commits_refresh_summary(origin_uri, payload)
         return {
             "metadata_only": True,
             "title": title,
