@@ -2219,6 +2219,7 @@ def _github_workflows_refresh_summary(origin_uri: str, payload: dict[str, Any]) 
 
 
 _GITHUB_PULL_FILE_STATUSES = {"added", "removed", "modified", "renamed", "copied", "changed", "unchanged"}
+_GITHUB_PULL_REVIEW_STATES = {"approved", "changes_requested", "commented", "dismissed", "pending"}
 
 
 def _github_issue_comments_path_info(origin_uri: str) -> tuple[str, int] | None:
@@ -2305,6 +2306,92 @@ def _github_issue_comments_refresh_summary(origin_uri: str, payload: list[Any]) 
     parts = [f"GitHub {kind} #{number} comments", f"comment count: {len(payload)}"]
     if commenters:
         parts.append(f"commenters: {', '.join(commenters[:5])}")
+    parts.extend(row_summaries)
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_pull_reviews_path_number(origin_uri: str) -> int | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or lowered[4] != "pulls"
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+        or lowered[6] != "reviews"
+    ):
+        return None
+    return int(path[5])
+
+
+def _github_pull_review_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    review_id = _safe_optional_nonnegative_int(row.get("id"))
+    if review_id is None or review_id <= 0:
+        return False
+    state = _safe_public_text(row.get("state"), limit=60).lower()
+    if state not in _GITHUB_PULL_REVIEW_STATES:
+        return False
+    user = row.get("user")
+    if user is not None:
+        if not isinstance(user, dict):
+            return False
+        raw_login = user.get("login")
+        if _is_present_public_value(raw_login) and not _github_comment_login_is_safe(raw_login):
+            return False
+    raw_submitted = row.get("submitted_at")
+    if _is_present_public_value(raw_submitted) and not _safe_iso_timestamp(raw_submitted):
+        return False
+    return True
+
+
+def _json_payload_is_github_pull_reviews_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_pull_reviews_path_number(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_pull_review_row_is_safe(row) for row in payload)
+
+
+def _github_pull_reviews_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    number = _github_pull_reviews_path_number(origin_uri) or 0
+    safe_rows = [row for row in payload if _github_pull_review_row_is_safe(row)]
+    reviewers: list[str] = []
+    state_counts: dict[str, int] = {}
+    row_summaries: list[str] = []
+    for row in safe_rows:
+        state = _safe_public_text(row.get("state"), limit=60).lower()
+        state_counts[state] = state_counts.get(state, 0) + 1
+        user = row.get("user") if isinstance(row.get("user"), dict) else {}
+        login = _safe_public_text(user.get("login") if isinstance(user, dict) else "", limit=80)
+        review_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        submitted = _safe_public_text(row.get("submitted_at"), limit=80)
+        if login and login not in reviewers:
+            reviewers.append(login)
+        row_parts = [f"review {review_id}"]
+        if login:
+            row_parts[-1] = f"review {review_id} by {login}"
+        if state:
+            row_parts.append(f"state: {state}")
+        if submitted:
+            row_parts.append(f"submitted: {submitted}")
+        if len(row_summaries) < 5:
+            row_summaries.append("; ".join(row_parts))
+    parts = [f"GitHub pull request #{number} reviews", f"review count: {len(payload)}"]
+    if reviewers:
+        parts.append(f"reviewers: {', '.join(reviewers[:5])}")
+    for state in sorted(state_counts):
+        parts.append(f"state {state}: {state_counts[state]}")
     parts.extend(row_summaries)
     return _bounded_refresh_summary("; ".join(parts))
 
@@ -2463,6 +2550,15 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         kind, number = comments_path_info
         title = f"GitHub {kind} #{number} comments"
         summary = _github_issue_comments_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _json_payload_is_github_pull_reviews_metadata(origin_uri, payload):
+        title = f"GitHub PR reviews #{(_github_pull_reviews_path_number(origin_uri) or 0)}"
+        summary = _github_pull_reviews_refresh_summary(origin_uri, payload)
         return {
             "metadata_only": True,
             "title": title,
