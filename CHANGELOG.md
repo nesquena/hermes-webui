@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- Settings now includes a configurable **Non-WebUI session limit** (`cli_session_limit`) for sidebar rows imported from CLI/gateway sources. The cap is persisted via `/api/settings`, applied to the state.db import path (`api/models.py`) and the final sidebar visibility cap (`api/routes.py`), while preserving the legacy fallback of 20 when the setting is missing or invalid.
+
 ## [v0.51.195] — 2026-06-01 — Release FO (stage-batch7 — hide attachment path markers in chat UI)
 
 ### Fixed

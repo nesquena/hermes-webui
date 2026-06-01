@@ -5906,6 +5906,8 @@ function _preferencesPayloadFromUi(){
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
   const showCliCb=$('settingsShowCliSessions');
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
+  const cliLimitField=$('settingsCliSessionLimit');
+  if(cliLimitField) payload.cli_session_limit=parseInt(cliLimitField.value,10);
   const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
@@ -6201,6 +6203,12 @@ async function loadSettingsPanel(){
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb){showCliCb.checked=!!settings.show_cli_sessions;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const cliLimitField=$('settingsCliSessionLimit');
+    if(cliLimitField){
+      cliLimitField.value=parseInt(settings.cli_session_limit||20,10)||20;
+      cliLimitField.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      cliLimitField.addEventListener('input',_schedulePreferencesAutosave,{once:false});
+    }
     const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
@@ -7432,6 +7440,7 @@ async function saveSettings(andClose){
   const showTps=!!($('settingsShowTps')||{}).checked;
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
+  const cliSessionLimit=parseInt(($('settingsCliSessionLimit')||{}).value,10)||20;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
@@ -7457,6 +7466,7 @@ async function saveSettings(andClose){
   body.simplified_tool_calling=!!($('settingsSimplifiedToolCalling')||{}).checked;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
+  body.cli_session_limit=cliSessionLimit;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;

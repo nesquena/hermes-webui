@@ -3300,6 +3300,21 @@ def _cli_sessions_cache_ttl_seconds() -> float:
         return 5.0
 
 
+def _cli_visible_session_limit() -> int:
+    """Resolve non-WebUI sidebar session cap from settings.
+
+    Keeps legacy behavior (20) when the setting is missing/invalid.
+    """
+    try:
+        raw = _cfg.load_settings().get('cli_session_limit', CLI_VISIBLE_SESSION_LIMIT)
+        value = int(raw)
+    except Exception:
+        value = CLI_VISIBLE_SESSION_LIMIT
+    if value < 1:
+        return CLI_VISIBLE_SESSION_LIMIT
+    return value
+
+
 def _path_cache_key(path) -> str | None:
     if path is None:
         return None
@@ -3384,7 +3399,7 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
 
     for row in read_importable_agent_session_rows(
         db_path,
-        limit=CLI_VISIBLE_SESSION_LIMIT,
+        limit=_cli_visible_session_limit(),
         log=logger,
         exclude_sources=None,
     ):

@@ -4804,6 +4804,7 @@ _SETTINGS_DEFAULTS = {
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
     "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
+    "cli_session_limit": 20,  # max non-WebUI sessions to keep visible in sidebar when enabled
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
@@ -4949,6 +4950,7 @@ _SETTINGS_ENUM_VALUES = {
     "busy_input_mode": {"queue", "interrupt", "steer"},
 }
 _SETTINGS_INT_RANGES = {
+    "cli_session_limit": (1, 500),
     "pinned_sessions_limit": (1, 99),
     "inflight_state_max_sessions": (1, 25),
     "inflight_state_max_messages": (1, 100),

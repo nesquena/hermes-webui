@@ -2662,6 +2662,19 @@ def _dedupe_cli_sidebar_sessions_for_api(cli: list[dict], represented_webui_ids:
 CLI_VISIBLE_SESSION_CAP = 20
 
 
+def _resolve_cli_session_cap(settings: dict | None = None) -> int:
+    """Resolve non-WebUI sidebar cap from settings with safe fallback."""
+    try:
+        source = settings if isinstance(settings, dict) else load_settings()
+        raw = source.get("cli_session_limit", CLI_VISIBLE_SESSION_CAP)
+        value = int(raw)
+    except Exception:
+        value = CLI_VISIBLE_SESSION_CAP
+    if value < 1:
+        return CLI_VISIBLE_SESSION_CAP
+    return value
+
+
 def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SESSION_CAP) -> list[dict]:
     """Keep only the most recent CLI-visible sessions after filtering."""
     if cli_cap <= 0:
@@ -4887,7 +4900,10 @@ def handle_get(handler, parsed) -> bool:
             )
             if show_cli_sessions:
                 diag.stage("cli_cap")
-                scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+                scoped = _cap_recent_cli_sessions(
+                    scoped,
+                    cli_cap=_resolve_cli_session_cap(settings),
+                )
             diag.stage("redact_sessions")
             safe_merged = []
             for s in scoped:
