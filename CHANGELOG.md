@@ -6,6 +6,11 @@
 ### Fixed
 - Gateway-backed chat now backfills model-context turns into the visible transcript before saving the latest reply while keeping hidden context-compaction markers out of the visible transcript, so sidebar/header message counts no longer show a two-message conversation while the assistant is responding to hidden prior context.
 
+## [v0.51.195] — 2026-06-01 — Release FO (stage-batch7 — hide attachment path markers in chat UI)
+
+### Fixed
+- Uploaded image attachment path context (`[Attached files: …]`) remains available to the agent in the stored message, but the chat transcript, sidebar display title, and server-derived provisional titles no longer show the raw path suffix to the user (#3296, @AJV20).
+
 ## [v0.51.194] — 2026-06-01 — Release FN (stage-batch6 — profiles config-import-cycle fix)
 
 ### Fixed

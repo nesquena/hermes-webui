@@ -22,6 +22,40 @@ def test_image_uploads_use_server_path_in_attached_files_context():
     assert "uploadedPaths=uploaded.map(u=>u&&u.path?u.path" in src
 
 
+def test_attached_files_context_is_hidden_from_user_message_display():
+    """Persist full attachment paths for the agent without showing them in chat."""
+    ui_src = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+
+    assert "function _stripAttachedFilesMarkerForDisplay" in ui_src
+    assert "_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content))" in ui_src
+    assert "dataset.rawText=String(displayContent).trim()" in ui_src
+
+
+def test_attached_files_context_is_hidden_from_sidebar_titles():
+    """Sidebar rows should not expose absolute uploaded image paths in titles."""
+    sessions_src = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+
+    assert "function _stripAttachedFilesMarker" in sessions_src
+    assert "? _stripAttachedFilesMarker" in sessions_src
+    assert "replace(/\\n\\n\\[Attached files: [^\\]]+\\]$/" in sessions_src
+
+
+def test_server_provisional_titles_strip_attached_files_context():
+    """Server-generated provisional titles must not include the path suffix."""
+    from api.models import title_from
+
+    title = title_from([
+        {
+            "role": "user",
+            "content": "why is llm wiki not working?\n\n[Attached files: /tmp/private/Screenshot.png]",
+        }
+    ])
+
+    assert title == "why is llm wiki not working?"
+    assert "Attached files" not in title
+    assert "/tmp/private" not in title
+
+
 def test_duplicate_upload_response_reports_actual_stored_filename(tmp_path, monkeypatch):
     """Duplicate upload names should report the suffixed stored basename."""
     monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(tmp_path))
