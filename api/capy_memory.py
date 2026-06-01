@@ -1097,6 +1097,80 @@ def _github_release_refresh_summary(payload: dict[str, Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_releases_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or lowered[4] != "releases"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_release_list_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    release_id = _safe_optional_nonnegative_int(row.get("id"))
+    if release_id is None or release_id <= 0:
+        return False
+    name = _safe_public_text(row.get("name"), limit=200)
+    tag = _safe_public_text(row.get("tag_name"), limit=120)
+    if not (name or tag):
+        return False
+    for field in ("name", "tag_name", "published_at"):
+        raw_value = row.get(field)
+        if _is_present_public_value(raw_value) and _refresh_value_is_blocked(raw_value):
+            return False
+    raw_published = row.get("published_at")
+    if _is_present_public_value(raw_published) and not _safe_iso_timestamp(raw_published):
+        return False
+    for field in ("draft", "prerelease"):
+        raw_value = row.get(field)
+        if raw_value is not None and not isinstance(raw_value, bool):
+            return False
+    return True
+
+
+def _json_payload_is_github_releases_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_releases_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_release_list_row_is_safe(row) for row in payload)
+
+
+def _github_releases_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_releases_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_release_list_row_is_safe(row)]
+    parts = [f"GitHub releases for {repo}", f"release count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        name = _safe_public_text(row.get("name"), limit=200)
+        tag = _safe_public_text(row.get("tag_name"), limit=120)
+        published = _safe_public_text(row.get("published_at"), limit=80)
+        release_parts = [f"release: {name or tag}"]
+        if tag:
+            release_parts.append(f"tag: {tag}")
+        if isinstance(row.get("draft"), bool):
+            release_parts.append(f"draft: {str(row['draft']).lower()}")
+        if isinstance(row.get("prerelease"), bool):
+            release_parts.append(f"prerelease: {str(row['prerelease']).lower()}")
+        if published:
+            release_parts.append(f"published: {published}")
+        parts.append("; ".join(release_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 _GITHUB_WORKFLOW_STATES = {"active", "disabled_manually", "disabled_inactivity", "disabled_fork", "deleted"}
 
 
@@ -2168,6 +2242,15 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
     if _json_payload_is_github_pull_files_metadata(origin_uri, payload):
         title = f"GitHub PR files #{(_github_pull_files_path_number(origin_uri) or 0)}"
         summary = _github_pull_files_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _json_payload_is_github_releases_metadata(origin_uri, payload):
+        title = f"GitHub releases {(_github_releases_path_repo(origin_uri) or source_id)}"
+        summary = _github_releases_refresh_summary(origin_uri, payload)
         return {
             "metadata_only": True,
             "title": title,
