@@ -8062,8 +8062,6 @@ def _serve_branding(handler, parsed):
     instead of the static/ source tree.  No gzip (files are small),
     no ETag cache (files can change).
     """
-    import gzip as _gzip
-
     branding_root = BRANDING_DIR.resolve()
     # Strip '/branding/' prefix
     rel = parsed.path[len("/branding/"):]

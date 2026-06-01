@@ -4,7 +4,6 @@ Hermes Web UI — Branding: user-uploaded logo/favicon management.
 Uploaded logos are stored under STATE_DIR / 'branding' and served
 via the /branding/<filename> route (see api/routes.py).
 """
-import io
 import re as _re
 import struct
 from pathlib import Path
