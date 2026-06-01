@@ -155,7 +155,7 @@ def test_joplin_api_get_converts_bare_timeout_to_valueerror(monkeypatch):
     def fake_urlopen(request, timeout):
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(routes, "_joplin_connection_from_config", lambda: ("http://127.0.0.1:41184", "secret-token"))
+    monkeypatch.setattr(routes, "_joplin_connection_from_config", lambda: ("http://127.0.0.1:41184", "clipper-test-token"))
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     with pytest.raises(ValueError, match="not reachable"):
@@ -183,16 +183,16 @@ def test_joplin_api_get_sends_header_and_query_token_for_clip_search_compat(monk
         captured["timeout"] = timeout
         return FakeResponse()
 
-    monkeypatch.setattr(routes, "_joplin_connection_from_config", lambda: ("http://127.0.0.1:41184", "secret-token"))
+    monkeypatch.setattr(routes, "_joplin_connection_from_config", lambda: ("http://127.0.0.1:41184", "clipper-test-token"))
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     data = routes._joplin_api_get("/search", {"query": "hello world"})
 
     assert data == {"ok": True}
     assert captured["timeout"] == 8
-    assert "token=secret-token" in captured["url"]
+    assert "token=clipper-test-token" in captured["url"]
     assert "query=hello+world" in captured["url"]
-    assert captured["authorization"] == "token secret-token"
+    assert captured["authorization"] == "token clipper-test-token"
 
 
 def test_joplin_api_get_keeps_non_search_token_out_of_url(monkeypatch):
@@ -215,14 +215,54 @@ def test_joplin_api_get_keeps_non_search_token_out_of_url(monkeypatch):
         captured["authorization"] = request.get_header("Authorization")
         return FakeResponse()
 
-    monkeypatch.setattr(routes, "_joplin_connection_from_config", lambda: ("http://127.0.0.1:41184", "secret-token"))
+    monkeypatch.setattr(routes, "_joplin_connection_from_config", lambda: ("http://127.0.0.1:41184", "clipper-test-token"))
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
 
     routes._joplin_api_get("/notes", {"query": "hello world"})
 
     assert "token=" not in captured["url"]
     assert "query=hello+world" in captured["url"]
-    assert captured["authorization"] == "token secret-token"
+    assert captured["authorization"] == "token clipper-test-token"
+
+
+def test_joplin_api_get_retries_non_search_403_with_query_token(monkeypatch):
+    from email.message import Message
+    from urllib.error import HTTPError
+    from api import routes
+
+    captured = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit):
+            return b'{"ok": true}'
+
+    def fake_urlopen(request, timeout):
+        captured.append({
+            "url": request.full_url,
+            "authorization": request.get_header("Authorization"),
+            "timeout": timeout,
+        })
+        if len(captured) == 1:
+            raise HTTPError(request.full_url, 403, "Forbidden", hdrs=Message(), fp=None)
+        return FakeResponse()
+
+    monkeypatch.setattr(routes, "_joplin_connection_from_config", lambda: ("http://127.0.0.1:41184", "clipper-test-token"))
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    data = routes._joplin_api_get("/folders", {"limit": 100})
+
+    assert data == {"ok": True}
+    assert len(captured) == 2
+    assert "token=" not in captured[0]["url"]
+    assert "token=clipper-test-token" in captured[1]["url"]
+    assert captured[0]["authorization"] == "token clipper-test-token"
+    assert captured[1]["authorization"] == "token clipper-test-token"
 
 
 def test_joplin_recent_ai_notes_uses_configured_prefill_script(monkeypatch, tmp_path):

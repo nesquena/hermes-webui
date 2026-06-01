@@ -3234,6 +3234,7 @@ def _handle_logs(handler, parsed) -> bool:
 
 _LLM_WIKI_DOCS_URL = "https://hermes-agent.nousresearch.com/docs/user-guide/skills/bundled/research/research-llm-wiki"
 _LLM_WIKI_PAGE_DIRS = ("entities", "concepts", "comparisons", "queries")
+_LLM_WIKI_JOPLIN_DEFAULT_ROOT_TITLE = "Hermes 🤖"
 
 
 def _llm_wiki_active_hermes_home() -> Path:
@@ -3286,6 +3287,245 @@ def _llm_wiki_config_path() -> str | None:
         _llm_wiki_get_config_path_value(cfg, "skills.config.wiki.path")
         or _llm_wiki_get_config_path_value(cfg, "wiki.path")
     )
+
+
+def _llm_wiki_joplin_root_title() -> str:
+    try:
+        from api.config import get_config as _get_cfg
+        cfg = _get_cfg()
+    except Exception:
+        cfg = {}
+    return (
+        _llm_wiki_get_config_path_value(cfg, "skills.config.wiki.joplin_root_title")
+        or _llm_wiki_get_config_path_value(cfg, "wiki.joplin_root_title")
+        or os.getenv("HERMES_WEBUI_LLM_WIKI_JOPLIN_ROOT_TITLE")
+        or _LLM_WIKI_JOPLIN_DEFAULT_ROOT_TITLE
+    )
+
+
+def _llm_wiki_notes_fallback_enabled() -> bool:
+    raw = (
+        os.getenv("HERMES_WEBUI_LLM_WIKI_NOTES_FALLBACK", "")
+        or os.getenv("HERMES_WEBUI_LLM_WIKI_JOPLIN_FALLBACK", "")
+    )
+    if raw:
+        return _webui_truthy(raw)
+    try:
+        from api.config import get_config as _get_cfg
+        cfg = _get_cfg()
+    except Exception:
+        cfg = {}
+    configured = (
+        _llm_wiki_get_config_path_value(cfg, "skills.config.wiki.notes_fallback")
+        or _llm_wiki_get_config_path_value(cfg, "wiki.notes_fallback")
+        or _llm_wiki_get_config_path_value(cfg, "skills.config.wiki.joplin_fallback")
+        or _llm_wiki_get_config_path_value(cfg, "wiki.joplin_fallback")
+    )
+    if configured is not None:
+        return _webui_truthy(configured)
+    return True
+
+
+def _llm_wiki_joplin_ms_to_iso(value) -> str | None:
+    try:
+        millis = int(value)
+    except Exception:
+        return None
+    if millis <= 0:
+        return None
+    return _llm_wiki_safe_iso(millis / 1000.0)
+
+
+def _llm_wiki_joplin_status(base: dict) -> dict | None:
+    """Summarize a configured Joplin knowledge notebook as an LLM Wiki source.
+
+    This is metadata-only: it reads notebook/note titles and timestamps, never note bodies.
+    """
+    if not _llm_wiki_notes_fallback_enabled():
+        return None
+    try:
+        folders_data = _joplin_api_get("/folders", {
+            "fields": "id,title,parent_id,updated_time",
+            "limit": 100,
+        })
+    except Exception:
+        return None
+    folders = folders_data.get("items") if isinstance(folders_data, dict) else []
+    if not isinstance(folders, list):
+        return None
+
+    root_title = str(_llm_wiki_joplin_root_title() or "").strip()
+    root = None
+    for row in folders:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("title") or "").strip() == root_title:
+            root = row
+            break
+    if root is None and root_title == _LLM_WIKI_JOPLIN_DEFAULT_ROOT_TITLE:
+        for row in folders:
+            if isinstance(row, dict) and "hermes" in str(row.get("title") or "").lower():
+                root = row
+                break
+    if not isinstance(root, dict) or not root.get("id"):
+        return None
+
+    by_parent: dict[str, list[dict]] = {}
+    by_id: dict[str, dict] = {}
+    latest_ms = 0
+    for row in folders:
+        if not isinstance(row, dict):
+            continue
+        fid = str(row.get("id") or "").strip()
+        if not fid:
+            continue
+        by_id[fid] = row
+        by_parent.setdefault(str(row.get("parent_id") or ""), []).append(row)
+        try:
+            latest_ms = max(latest_ms, int(row.get("updated_time") or 0))
+        except Exception:
+            pass
+
+    root_id = str(root.get("id") or "")
+    folder_ids: list[str] = []
+    stack = [root_id]
+    while stack and len(folder_ids) < 1000:
+        fid = stack.pop()
+        if fid in folder_ids:
+            continue
+        folder_ids.append(fid)
+        stack.extend(str(child.get("id") or "") for child in by_parent.get(fid, []) if child.get("id"))
+
+    raw_folder_ids = {
+        fid for fid in folder_ids
+        if str(by_id.get(fid, {}).get("title") or "").strip().lower() in {"raw captures", "raw", "sources"}
+    }
+    note_count = 0
+    raw_count = 0
+    for fid in folder_ids:
+        if note_count > _LLM_WIKI_MAX_FILES:
+            break
+        try:
+            notes_data = _joplin_api_get(f"/folders/{fid}/notes", {
+                "fields": "id,title,updated_time,parent_id",
+                "limit": 100,
+            })
+        except Exception:
+            continue
+        rows = notes_data.get("items") if isinstance(notes_data, dict) else []
+        if not isinstance(rows, list):
+            continue
+        for note in rows:
+            if not isinstance(note, dict) or not note.get("id"):
+                continue
+            note_count += 1
+            if fid in raw_folder_ids:
+                raw_count += 1
+            try:
+                latest_ms = max(latest_ms, int(note.get("updated_time") or 0))
+            except Exception:
+                pass
+            if note_count > _LLM_WIKI_MAX_FILES:
+                break
+
+    out = dict(base)
+    out.update({
+        "available": True,
+        "enabled": True,
+        "status": "ready" if note_count else "empty",
+        "entry_count": note_count,
+        "page_count": note_count,
+        "raw_source_count": raw_count,
+        "last_updated": _llm_wiki_joplin_ms_to_iso(latest_ms),
+        "last_writer": "Joplin",
+        "path_configured": True,
+        "path_source": "notes",
+        "source_kind": "joplin",
+        "source_label": "Joplin",
+        "source_count_available": True,
+        "toggle_reason": "Using configured third-party notes as the knowledge-base source because no filesystem LLM Wiki is configured.",
+    })
+    return out
+
+
+def _llm_wiki_preferred_notes_source() -> str | None:
+    try:
+        cfg = get_config()
+    except Exception:
+        cfg = {}
+    value = (
+        _llm_wiki_get_config_path_value(cfg, "skills.config.wiki.notes_source")
+        or _llm_wiki_get_config_path_value(cfg, "wiki.notes_source")
+        or os.getenv("HERMES_WEBUI_LLM_WIKI_NOTES_SOURCE")
+    )
+    return str(value).strip().lower() if value else None
+
+
+def _llm_wiki_configured_notes_status(base: dict) -> dict | None:
+    """Return a generic configured notes/knowledge source when rich counts are unavailable."""
+    if not _llm_wiki_notes_fallback_enabled():
+        return None
+    try:
+        cfg = get_config()
+    except Exception:
+        cfg = {}
+    servers = cfg.get("mcp_servers", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(servers, dict):
+        return None
+
+    preferred = _llm_wiki_preferred_notes_source()
+    candidates: list[tuple[str, dict]] = []
+    for name, server_cfg in servers.items():
+        server_name = str(name or "").strip()
+        if not server_name or not isinstance(server_cfg, dict):
+            continue
+        try:
+            is_notes_source = _looks_like_notes_source(server_name, [])
+        except Exception:
+            lowered = server_name.lower()
+            is_notes_source = any(hint in lowered for hint in ("joplin", "obsidian", "notion", "wiki", "note", "knowledge", "logseq"))
+        if is_notes_source:
+            candidates.append((server_name, server_cfg))
+    if not candidates:
+        return None
+
+    selected_name, selected_cfg = candidates[0]
+    if preferred:
+        for name, server_cfg in candidates:
+            if name.lower() == preferred:
+                selected_name, selected_cfg = name, server_cfg
+                break
+    try:
+        source_label = _note_source_label(selected_name)
+    except Exception:
+        source_label = selected_name.replace("_", " ").replace("-", " ").title()
+
+    out = dict(base)
+    out.update({
+        "available": True,
+        "enabled": bool(selected_cfg.get("enabled", True)),
+        "status": "configured",
+        "entry_count": 0,
+        "page_count": 0,
+        "raw_source_count": 0,
+        "last_updated": None,
+        "last_writer": source_label,
+        "path_configured": True,
+        "path_source": "notes",
+        "source_kind": selected_name.lower(),
+        "source_label": source_label,
+        "source_count_available": False,
+        "toggle_reason": "Using a configured third-party notes/knowledge source because no filesystem LLM Wiki is configured; detailed counts depend on provider-specific support.",
+    })
+    return out
+
+
+def _llm_wiki_notes_status(base: dict) -> dict | None:
+    """Return provider-neutral third-party notes status, using rich provider metadata when available."""
+    rich_joplin = _llm_wiki_joplin_status(base)
+    if rich_joplin is not None:
+        return rich_joplin
+    return _llm_wiki_configured_notes_status(base)
 
 
 # Cap WIKI walks to prevent self-DoS if WIKI_PATH points at /, /etc, /home, etc.
@@ -3393,6 +3633,10 @@ def _build_llm_wiki_status() -> dict:
             "docs_url": _LLM_WIKI_DOCS_URL,
         }
         if not wiki_path.exists():
+            if not path_configured:
+                notes_status = _llm_wiki_notes_status(base)
+                if notes_status is not None:
+                    return notes_status
             return base
         if not wiki_path.is_dir():
             base["status"] = "not_directory"
@@ -13555,18 +13799,33 @@ def _joplin_api_get(path: str, params: dict | None = None) -> dict:
         raise ValueError("Joplin token is not configured")
     safe_path = "/" + str(path or "").lstrip("/")
     query = dict(params or {})
-    # Joplin Web Clipper builds can reject header-only auth on /search even when
-    # they accept it elsewhere. Keep the Authorization header for defense in
-    # depth and add the query token only for /search compatibility.
+    # Joplin Web Clipper builds can reject header-only auth. Keep the
+    # Authorization header for defense in depth, add query-token auth for
+    # /search up front for compatibility, and retry other 403s with a query
+    # token without logging the URL or credential.
     if safe_path == "/search":
         query["token"] = token
-    url = f"{base_url}{safe_path}?{urlencode(query)}"
-    request = Request(url, headers={"Authorization": f"token {token}"})
-    try:
+
+    def _read_with_query(query_params: dict) -> str:
+        url = f"{base_url}{safe_path}?{urlencode(query_params)}"
+        request = Request(url, headers={"Authorization": f"token {token}"})
         with urlopen(request, timeout=8) as response:
-            raw = response.read(2_000_000).decode("utf-8", errors="replace")
+            return response.read(2_000_000).decode("utf-8", errors="replace")
+
+    try:
+        raw = _read_with_query(query)
     except HTTPError as exc:
-        raise ValueError(f"Joplin API returned HTTP {exc.code}") from None
+        if exc.code == 403 and "token" not in query:
+            retry_query = dict(query)
+            retry_query["token"] = token
+            try:
+                raw = _read_with_query(retry_query)
+            except HTTPError as retry_exc:
+                raise ValueError(f"Joplin API returned HTTP {retry_exc.code}") from None
+            except (URLError, TimeoutError):
+                raise ValueError("Joplin API is not reachable") from None
+        else:
+            raise ValueError(f"Joplin API returned HTTP {exc.code}") from None
     except (URLError, TimeoutError) as exc:
         # A bare socket-connect TimeoutError from urlopen(timeout=8) is NOT
         # always URLError-wrapped, so catch it explicitly here. Otherwise it

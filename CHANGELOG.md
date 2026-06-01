@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Added
+- Insights LLM Wiki status can now fall back to a configured third-party notes or knowledge source when no filesystem `WIKI_PATH` is configured, reporting metadata-only status and provider-specific counts when available without exposing note bodies.
+
+### Fixed
+- Joplin Web Clipper requests now retry HTTP 403 header-auth failures with query-token auth while preserving the Authorization header and avoiding credential logging, so notebook metadata endpoints work with stricter clipper builds.
+
 ## [v0.51.191] — 2026-05-31 — Release FK (stage-batch3 — skills-detail markdown styling + launchd duplicate-start guard)
 
 ### Fixed
