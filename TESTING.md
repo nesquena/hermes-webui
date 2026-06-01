@@ -1,14 +1,14 @@
 # Hermes Web UI: Browser Testing Plan
 
 > This document is for manual browser testing by you or by a Claude browser agent.
-> It covers user-facing features of the UI through v0.50.21 and later releases.
+> It covers user-facing features of the UI across current releases.
 > Each section is written as a step-by-step test procedure with expected outcomes.
 > A browser agent (e.g. Claude with Chrome access) can execute this plan directly.
 >
 > Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
 > Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
 >
-> Automated coverage: 5303 tests collected via `pytest tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.11, 3.12, and 3.13. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 11 languages, and hundreds of issue/PR-pinned regression tests.
+> Automated coverage: ~7,150 tests collected via `pytest tests/ --collect-only -q`. Tests run on every PR via GitHub Actions on Python 3.11, 3.12, and 3.13 (3 parallel shards each), alongside a ruff lint gate, a headless browser smoke test, and a Docker smoke test. The suite covers the bootstrap/static wizard, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, CSS regression coverage for thinking/tool card animation, streaming session persistence, mobile layout breakpoints, locale parity across 11 languages, and hundreds of issue/PR-pinned regression tests.
 > Run: `pytest tests/ -v --timeout=60`
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
@@ -1925,8 +1925,8 @@ Bridged CLI sessions:
 
 ---
 
-*Last updated: v0.51.54, May 13, 2026*
-*Total automated tests collected: 5303*
+*Last updated: v0.51.192, May 31, 2026*
+*Total automated tests collected: ~7,150 (run `pytest tests/ --collect-only -q` for the exact current count)*
 *Regression gate: tests/test_regressions.py*
 *Run: pytest tests/ -v --timeout=60*
 *Source: <repo>/*
