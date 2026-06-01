@@ -6,6 +6,12 @@
 ### Added
 - Settings → System now includes a safe, read-only config.yaml viewer that redacts credential-looking values before rendering or copying the active profile config (#2929).
 
+## [v0.51.191] — 2026-05-31 — Release FK (stage-batch3 — skills-detail markdown styling + launchd duplicate-start guard)
+
+### Fixed
+- Skills detail view now renders `SKILL.md` markdown with the same `.preview-md` typography used by Memory and Notes, instead of unstyled `renderMd()` output. Linked markdown skill files opened from the detail view use the same wrapper plus scoped post-render `highlightCode` / KaTeX enhancement (#3284, @pamnard).
+- `ctl.sh start` now refuses to launch a second WebUI instance when a launchd-managed job already owns it (macOS), instead of racing the launchd instance into repeated `Address already in use` churn on port 8787. The guard is macOS/launchd-only, no-ops on every non-launchd path, and can be overridden with `HERMES_WEBUI_CTL_ALLOW_LAUNCHD_CONFLICT=1`; `docs/supervisor.md` documents launchd as the single source of truth. Closes #3289 (#3291, @andrewkangkr).
+
 ## [v0.51.190] — 2026-05-31 — Release FJ (stage-batch2 — Windows upgrade state-stranding hotfix + gateway banner + quiet tool previews)
 
 ### Fixed
