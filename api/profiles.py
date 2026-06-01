@@ -891,6 +891,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
             raise ValueError(f"Profile '{name}' does not exist.")
 
     with _profile_lock:
+        _SKILLS_STATS_CACHE.clear()
         if process_wide:
             global _active_profile
             _active_profile = name
@@ -989,6 +990,77 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     }
 
 
+_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, float]] = {}
+_SKILLS_STATS_CACHE_TTL = 8.0  # seconds
+
+
+def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
+    """Calculate (enabled_count, compatible_count) for a profile directory."""
+    import time
+    profile_dir = Path(profile_dir).resolve()
+    now = time.time()
+    if profile_dir in _SKILLS_STATS_CACHE:
+        enabled, compat, expiry = _SKILLS_STATS_CACHE[profile_dir]
+        if now < expiry:
+            return enabled, compat
+
+    skills_dir = profile_dir / "skills"
+    if not skills_dir.is_dir():
+        res = (0, 0)
+        _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
+        return res
+
+    disabled = set()
+    config_path = profile_dir / "config.yaml"
+    if config_path.exists():
+        try:
+            import yaml as _yaml
+            cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if isinstance(cfg, dict):
+                skills_cfg = cfg.get("skills")
+                if isinstance(skills_cfg, dict):
+                    # Align with get_disabled_skill_names(platform="webui") behavior:
+                    platform_disabled = (skills_cfg.get("platform_disabled") or {}).get("webui")
+                    if platform_disabled is not None:
+                        disabled_val = platform_disabled
+                    else:
+                        disabled_val = skills_cfg.get("disabled")
+                    
+                    if disabled_val is not None:
+                        if isinstance(disabled_val, str):
+                            disabled_val = [disabled_val]
+                        disabled = {str(v).strip() for v in disabled_val if str(v).strip()}
+        except Exception:
+            pass
+
+    from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
+    
+    seen_names = set()
+    enabled_count = 0
+    compatible_count = 0
+    
+    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+        try:
+            content = skill_md.read_text(encoding="utf-8")[:4000]
+            frontmatter, _ = parse_frontmatter(content)
+            if not skill_matches_platform(frontmatter):
+                continue
+            name = frontmatter.get("name", skill_md.parent.name)[:64]
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            
+            compatible_count += 1
+            if name not in disabled:
+                enabled_count += 1
+        except Exception:
+            pass
+            
+    res = (enabled_count, compatible_count)
+    _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
+    return res
+
+
 def list_profiles_api() -> list:
     """List all profiles with metadata, serialized for JSON response."""
     try:
@@ -1001,6 +1073,7 @@ def list_profiles_api() -> list:
     active = get_active_profile_name()
     result = []
     for p in infos:
+        enabled_count, total_count = _get_profile_skills_stats(p.path)
         result.append({
             'name': p.name,
             'path': str(p.path),
@@ -1010,13 +1083,16 @@ def list_profiles_api() -> list:
             'model': p.model,
             'provider': p.provider,
             'has_env': p.has_env,
-            'skill_count': p.skill_count,
+            'skill_count': enabled_count,
+            'enabled_skills': enabled_count,
+            'total_skills': total_count,
         })
     return result
 
 
 def _default_profile_dict() -> dict:
     """Fallback profile dict when hermes_cli is not importable."""
+    enabled_count, compatible_count = _get_profile_skills_stats(_DEFAULT_HERMES_HOME)
     return {
         'name': 'default',
         'path': str(_DEFAULT_HERMES_HOME),
@@ -1026,7 +1102,9 @@ def _default_profile_dict() -> dict:
         'model': None,
         'provider': None,
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
-        'skill_count': 0,
+        'skill_count': enabled_count,
+        'enabled_skills': enabled_count,
+        'total_skills': compatible_count,
     }
 
 
@@ -1437,6 +1515,7 @@ def create_profile_api(name: str, clone_from: str = None,
 
     # Invalidate cached root-profile-name lookup; create_profile may have added
     # a new profile that flips is_default semantics on the agent side (#1612).
+    _SKILLS_STATS_CACHE.clear()
     _invalidate_root_profile_cache()
 
     # Find and return the newly created profile info.
@@ -1456,6 +1535,8 @@ def create_profile_api(name: str, clone_from: str = None,
         'provider': None,
         'has_env': (profile_path / '.env').exists(),
         'skill_count': 0,
+        'enabled_skills': 0,
+        'total_skills': 0,
     }
 
 
@@ -1488,5 +1569,6 @@ def delete_profile_api(name: str) -> dict:
             raise ValueError(f"Profile '{name}' does not exist.")
 
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
+    _SKILLS_STATS_CACHE.clear()
     _invalidate_root_profile_cache()
     return {'ok': True, 'name': name}
