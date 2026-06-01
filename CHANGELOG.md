@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Changed
+- The #1925 runtime-adapter RFC now marks the configured runner-client boundary as shipped in v0.51.188 (#3073 / #3274) and defines the next Slice 4g gate for a supervised local runner process harness: real runner-owned `AIAgent` execution, restart/reattach proof, bounded runner health diagnostics, and no new WebUI runtime-surrogate globals.
+
 ## [v0.51.195] — 2026-06-01 — Release FO (stage-batch7 — hide attachment path markers in chat UI)
 
 ### Fixed
