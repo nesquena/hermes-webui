@@ -6840,14 +6840,20 @@ def handle_post(handler, parsed) -> bool:
         target_pid = body.get("project_id") or None
         if target_pid:
             from api.profiles import get_active_profile_name
-            active_profile = get_active_profile_name()
+            # Use the session's own profile for authorization, not the global
+            # active profile. A session belongs to a specific profile set at
+            # creation; projects from that profile should always be assignable,
+            # regardless of which profile is "active" at the process level.
+            # Matches the same principle as the profile chip fix — prefer
+            # session-scoped state over global active profile. (#3325 follow-up)
+            _session_profile = getattr(s, 'profile', None) or get_active_profile_name()
             target = next(
                 (p for p in load_projects() if p["project_id"] == target_pid),
                 None,
             )
             if not target:
                 return bad(handler, "Project not found", 404)
-            if not _profiles_match(target.get("profile"), active_profile):
+            if not _profiles_match(target.get("profile"), _session_profile):
                 return bad(handler, "Project not found", 404)
         with _get_session_agent_lock(body["session_id"]):
             s.project_id = target_pid
@@ -6871,11 +6877,20 @@ def handle_post(handler, parsed) -> bool:
         if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
             return bad(handler, "Invalid color format")
         projects = load_projects()
+        # #3331 follow-up (Codex+Opus gate): validate the optional client-supplied
+        # `profile` before stamping it, mirroring /api/profile/switch — otherwise a
+        # client could create a project tagged with an arbitrary/unknown profile,
+        # producing hidden cross-profile rows that can't be managed normally.
+        _requested_profile = str(body.get('profile') or "").strip()
+        if _requested_profile and _requested_profile != "default":
+            from api.profiles import _PROFILE_ID_RE
+            if not _PROFILE_ID_RE.fullmatch(_requested_profile):
+                return bad(handler, "invalid profile")
         proj = {
             "project_id": uuid.uuid4().hex[:12],
             "name": name,
             "color": color,
-            "profile": get_active_profile_name() or 'default',
+            "profile": _requested_profile or get_active_profile_name() or 'default',
             "created_at": time.time(),
         }
         projects.append(proj)

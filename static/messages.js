@@ -685,6 +685,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
+  if(!reconnecting&&typeof _resetStreamScrollFollow==='function') _resetStreamScrollFollow();
 
   // On reconnect, restore accumulated text from INFLIGHT so we don't lose
   // progress made before the session switch. Without this the closure starts
@@ -752,6 +753,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const text=String(typeof msgContent==='function'?msgContent(m):(m.content||''));
     return typeof _isPreservedCompressionTaskListMarkerOnlyText==='function'
       && _isPreservedCompressionTaskListMarkerOnlyText(text);
+  }
+  function _streamRecoveryControlMessageText(text){
+    const normalized=String(text||'').replace(/\s+/g,' ').trim();
+    if(!normalized) return false;
+    const systemRecovery=/^\[System:/i.test(normalized)
+      && /previous response was cut off by a network error/i.test(normalized)
+      && /continue exactly where you left off/i.test(normalized);
+    const backendRecovery=/^the live worker stopped before this run finished\.?$/i.test(normalized);
+    return !!(systemRecovery || backendRecovery);
+  }
+  function _streamRecoveryControlMessage(m){
+    if(!m||m.role==='tool') return false;
+    if(m.recovery_control===true) return true;
+    // Backward-compat ONLY for pre-marker persisted sessions: match the two
+    // fully-anchored synthetic recovery strings. Do NOT fall back to
+    // provider_details_label — a genuine "Response interrupted" card the user
+    // SHOULD see also carries the 'Interruption details' label, and filtering
+    // on it would drop a real interruption from the transcript (the inverse
+    // data-loss class flagged on the sibling #3300). Marker + strict text only.
+    const text=String(typeof msgContent==='function'?msgContent(m):(m.content||''));
+    return _streamRecoveryControlMessageText(text);
+  }
+  function _filterRecoveryControlMessages(messages){
+    if(!Array.isArray(messages)) return [];
+    return messages.filter((m)=>!_streamRecoveryControlMessage(m));
   }
   function _replaceMarkerOnlyAssistantWithStreamError(messages){
     if(!Array.isArray(messages)) return false;
@@ -1884,6 +1910,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(S.session&&S.session.session_id){
             try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
@@ -2170,6 +2197,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
+        let isRecoveryControlMessage=false;
         try{
           const d=JSON.parse(e.data);
           const isRateLimit=d.type==='rate_limit';
@@ -2179,17 +2207,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isModelNotFound=d.type==='model_not_found';
           const isCancelled=d.type==='cancelled';
           const isInterrupted=d.type==='interrupted';
+          isRecoveryControlMessage=isInterrupted && (d.recovery_control===true || _streamRecoveryControlMessageText(d.message));
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
           const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
           const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
-          S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
+          if(isRecoveryControlMessage){
+            if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
+          } else {
+            S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
+          }
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
         }
-        _markSessionViewed(activeSid, S.messages.length);
-        renderMessages({preserveScroll:true});
+        if(isRecoveryControlMessage){
+          (async()=>{
+            if(await _restoreSettledSession(source)) return;
+            if(S.session&&S.session.session_id===activeSid){
+              S.messages=_filterRecoveryControlMessages(S.messages||[]);
+              _markSessionViewed(activeSid, S.messages.length);
+              renderMessages({preserveScroll:true});
+            }
+          })();
+        } else {
+          _markSessionViewed(activeSid, S.messages.length);
+          renderMessages({preserveScroll:true});
+        }
       }else if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
         try{const d=JSON.parse(e.data);trackBackgroundError(activeSid,_errTitle,d.message||'Error');}
@@ -2382,6 +2426,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.session=session;
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+        S.messages=_filterRecoveryControlMessages(S.messages || []);
         if(S.session&&S.session.session_id){
           try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);

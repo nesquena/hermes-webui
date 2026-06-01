@@ -7,6 +7,21 @@
 - Chat turn footers now show a quiet provider-quota remainder after each completed response when the active provider exposes quota/account-limit data, reusing the existing server-side quota probe without revealing credentials.
 - The provider quota chip now defaults on as a circular meter next to the send button, including compact/mobile widths, so available quota/account-limit remainder is visible in a Codex-style location while unsupported providers stay quiet; the ring defaults to the 5-hour account-limit window, can be switched to Weekly from the popover, drains with the selected remaining quota, low quota states tint yellow below 60% and red below 20%, and clicking it opens a compact quota details popover showing both 5-hour and weekly usage with reset dates formatted as `MM/DD/YY` when available.
 
+## [v0.51.204] — 2026-06-01 — Release FX (stage-batch17 — project/session operations honor the session's own profile)
+
+### Fixed
+- Project and session operations (project create/rename/recolor/delete/unassign, session move, and the profile chip label) now key on the session's own profile (`S.session.profile`) instead of the global active profile, so switching between sessions from different profiles no longer causes silent 404s, misleading chip labels, or project-picker entries from the wrong profile. The project picker also filters to the session's profile and surfaces an error toast on failure instead of a silent no-op (#3331, @PINKIIILQWQ).
+
+## [v0.51.203] — 2026-06-01 — Release FW (stage-batch15 — sticky manual unpin for streaming chat scroll)
+
+### Changed
+- Streaming chat scroll now uses a sticky manual-unpin model: once you scroll up to read earlier content during a streaming response, the view stays put and no longer auto-follows the live tail until you scroll back to the bottom (near-bottom hysteresis on downward motion) or click the scroll-to-bottom control. Tool cards, token updates, and layout growth no longer re-pin the viewport after a reading pause. This replaces the #3250 upward-intent timeout and supersedes the v0.51.199 proximity-re-pin (#3330), matching the streaming-scroll behavior of ChatGPT/Claude/Codex. Fresh streams reset the follow state on attach (#3343, @pamnard).
+
+## [v0.51.202] — 2026-06-01 — Release FV (stage-batch14 — filter interrupted-recovery control text from visible transcript)
+
+### Fixed
+- Interrupted SSE-recovery control text (the synthetic `stale_interrupted_event` run-journal payload) is now kept out of the visible chat transcript instead of being replayed as a message: it's marked `recovery_control` on the backend and filtered across the `msgContent()` render path, the SSE settle/error handlers, and final transcript filtering, so platform-only control state no longer leaks into the conversation (#3321, @franksong2702).
+
 ## [v0.51.201] — 2026-06-01 — Release FU (stage-batch13 — colored diff lines in tool-card snippets)
 
 ### Added

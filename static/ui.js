@@ -2415,58 +2415,32 @@ window.addEventListener('resize',function(){
 });
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
-// When streaming, auto-scroll only if the user hasn't manually scrolled up.
-// Once the user scrolls back to within 250px of the bottom, re-pin.
-// Uses a guard flag to avoid the race where programmatic scrolls (from
-// scrollIfPinned / scrollToBottom) re-set _scrollPinned=true, overriding
-// the user's explicit scroll-up.  Fixes #1469 / #1360.
-// Direction-aware unpin (issue #1731): the hysteresis below is correct
-// for re-pinning (entering the near-bottom zone), but applying it to
-// unpinning stranded users who scrolled up by a small amount inside the
-// 250px zone — every upward sample still landed in the near-bottom
-// region, so the counter kept incrementing and _scrollPinned stayed
-// true. The next streaming token snapped them back. We now track
-// scrollTop direction: an explicit upward movement (scrollTop decreased
-// by more than 2px between samples) unpins immediately and resets the
-// counter, while downward / stationary movement falls through the
-// original hysteresis path so the macOS momentum re-pin protection from
-// #1360 is preserved.
-// rAF-debounced scroll listener (issue #1360): on macOS WKWebView, trackpad
-// momentum scrolling fires scroll events that interleave with the
-// _programmaticScroll setTimeout(0) guard. A mid-momentum scroll event can
-// either get swallowed (_programmaticScroll still true) or falsely report
-// the user is at the bottom (momentum hasn't settled). rAF defers the
-// distance check to the next paint frame when the browser's scroll
-// position has settled. A hysteresis counter requires two consecutive
-// near-bottom samples before re-pinning, preventing accidental re-pin
-// during initial deceleration.
+// When streaming, auto-scroll only while the user is following the live tail.
+// Any manual scroll up sets a sticky unpinned flag until the user scrolls back
+// to the bottom (near-bottom hysteresis on downward motion) or clicks ↓.
+// Programmatic scrolls are ignored via _programmaticScroll. Fixes #1469 / #1360 / #1731.
 let _scrollPinned=true;
 let _programmaticScroll=false;
 let _nearBottomCount=0;
 let _lastScrollTop=null;
+// Sticky-unpin model (#3343 supersedes #3330's proximity re-pin): once the user
+// scrolls up, streaming stops auto-following until they return to the bottom or
+// click ↓. The upward-intent TIMEOUT mechanism (_lastMessageUpwardIntentMs /
+// MESSAGE_UPWARD_INTENT_MS) is removed — sticky-unpin makes it unnecessary.
+// Keep the non-message intent timestamp at -Infinity so load-time isn't read as
+// intent (the #3330 follow-up fix); 0 would mark the first NON_MESSAGE_SCROLL_INTENT
+// window after load as suppressed.
 let _lastNonMessageScrollIntentMs=-Infinity;
-let _lastMessageUpwardIntentMs=-Infinity;
 let _messageUserUnpinned=false;
 let _bottomSettleToken=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
-const MESSAGE_UPWARD_INTENT_MS=2000;
 function _cancelBottomSettle(){ _bottomSettleToken++; }
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
   const target=e&&e.target;
   if(!el||!target) return;
-  // Streaming token renders should keep pinning the chat only while the user is
-  // actually interacting with the chat pane. A wheel/touch gesture over the
-  // session sidebar (or another independent pane) must not be immediately fought
-  // by scrollIfPinned() writing #messages.scrollTop on the next token (#1784).
   if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
   else if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY<0)){
-    // User is intentionally moving upward in the transcript. Record the real
-    // input event so later scrollTop decreases caused by layout/windowing do
-    // not masquerade as user intent and strand live streaming away from bottom.
-    _lastMessageUpwardIntentMs=performance.now();
-    // User is intentionally moving in the transcript. Cancel any delayed
-    // scrollToBottom settling that was scheduled by session-load/layout growth.
     _cancelBottomSettle();
     if(typeof e.deltaY==='number'&&e.deltaY<0){
       _messageUserUnpinned=true;
@@ -2474,9 +2448,6 @@ function _recordNonMessageScrollIntent(e){
       _scrollPinned=false;
     }
   }
-}
-function _recentMessageUpwardIntent(){
-  return performance.now()-_lastMessageUpwardIntentMs<MESSAGE_UPWARD_INTENT_MS;
 }
 function _recentNonMessageScrollIntent(){
   return performance.now()-_lastNonMessageScrollIntentMs<NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS;
@@ -2488,8 +2459,23 @@ if(typeof document!=='undefined'){
 // Reset hook for session-switch — called from sessions.js loadSession() to
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
-function _resetScrollDirectionTracker(){ _lastScrollTop=null; }
-if(typeof window!=='undefined') window._resetScrollDirectionTracker=_resetScrollDirectionTracker;
+function _resetScrollDirectionTracker(){
+  _lastScrollTop=null;
+  _messageUserUnpinned=false;
+  _scrollPinned=true;
+  _nearBottomCount=0;
+}
+function _resetStreamScrollFollow(){
+  _messageUserUnpinned=false;
+  _scrollPinned=true;
+  _nearBottomCount=0;
+  _lastScrollTop=null;
+  _cancelBottomSettle();
+}
+if(typeof window!=='undefined'){
+  window._resetScrollDirectionTracker=_resetScrollDirectionTracker;
+  window._resetStreamScrollFollow=_resetStreamScrollFollow;
+}
 /* ── Pull-to-refresh for PWA standalone (Android) ── */
 (function(){
   if(typeof document==='undefined') return;
@@ -2569,17 +2555,32 @@ if(typeof window!=='undefined') window._resetScrollDirectionTracker=_resetScroll
     _scrollRaf=requestAnimationFrame(()=>{
       const top=el.scrollTop;
       const nearBottom=el.scrollHeight-top-el.clientHeight<250;
-      // scrollToBottomBtn visibility is updated below after pin state settles.
-      const movedUp=_lastScrollTop!==null && top<_lastScrollTop-2 && _recentMessageUpwardIntent();
+      const movedUp=_lastScrollTop!==null&&top<_lastScrollTop-2;
+      const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
       _lastScrollTop=top;
-      if(movedUp){ _cancelBottomSettle(); _nearBottomCount=0; _scrollPinned=false; _messageUserUnpinned=true; } // #1731
-      else {
+      if(movedUp){
+        _cancelBottomSettle();
+        _nearBottomCount=0;
+        _scrollPinned=false;
+        _messageUserUnpinned=true;
+      }else if(movedDown&&nearBottom){
+        _nearBottomCount=_nearBottomCount+1;
+        if(_nearBottomCount>=2){
+          _scrollPinned=true;
+          _messageUserUnpinned=false;
+        }
+      }else if(!_messageUserUnpinned){
         if(nearBottom){
           _nearBottomCount=_nearBottomCount+1;
           if(_nearBottomCount>=2) _scrollPinned=true;
-        } else { _nearBottomCount=0; _scrollPinned=false; }
-        if(_scrollPinned) _messageUserUnpinned=false;
-      } // #1360
+        }else{
+          _nearBottomCount=0;
+          _scrollPinned=false;
+        }
+      }else if(!nearBottom){
+        _nearBottomCount=0;
+        _scrollPinned=false;
+      }
       const btn=$('scrollToBottomBtn');
       const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
       if(btn) btn.style.display=showBottomButton?'flex':'none';
@@ -2980,11 +2981,10 @@ function _setMessageScrollToBottom(){
     // Retry the bottom write on the next layout frame so a DOM rebuild that
     // grows the transcript after the first write doesn't strand a pinned
     // conversation mid-scroll (#3319). But by this frame the user may have
-    // scrolled up — re-check intent and DON'T snap them back or re-pin if so;
-    // only release the programmatic-scroll latch.
-    if(_messageUserUnpinned || !_scrollPinned
-       || (typeof _recentMessageUpwardIntent==='function' && _recentMessageUpwardIntent())
-       || _recentNonMessageScrollIntent()){
+    // scrolled up — under the sticky-unpin model (#3343) _messageUserUnpinned
+    // is the authoritative "user scrolled away" signal, so DON'T snap them back
+    // or re-pin if so; only release the programmatic-scroll latch.
+    if(_messageUserUnpinned || !_scrollPinned || _recentNonMessageScrollIntent()){
       requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
       return;
     }
@@ -3018,19 +3018,20 @@ function _settleMessageScrollToBottom(force){
   const passes=[0,16,80,180];
   passes.forEach(delay=>setTimeout(()=>{
     if(token!==_bottomSettleToken) return;
-    if(!force && (!_scrollPinned||_recentNonMessageScrollIntent())) return;
+    if(!force && (!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent())) return;
     _setMessageScrollToBottom();
   },delay));
   requestAnimationFrame(()=>{
     if(token!==_bottomSettleToken) return;
-    if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+    if(force || (_scrollPinned&&!_messageUserUnpinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
     requestAnimationFrame(()=>{
       if(token!==_bottomSettleToken) return;
-      if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+      if(force || (_scrollPinned&&!_messageUserUnpinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
     });
   });
 }
 function scrollIfPinned(){
+  if(_messageUserUnpinned) return;
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
   if(_messageBottomDistance()>500) _setMessageScrollToBottom();
@@ -5636,7 +5637,7 @@ function syncTopbar(){
   // modelSelect already set above
   // Update profile chip label
   const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(profileLabel) profileLabel.textContent=(S.session&&S.session.profile)||S.activeProfile||'default';
 }
 
 function msgContent(m){
@@ -5644,6 +5645,29 @@ function msgContent(m){
   let c=m.content||'';
   if(Array.isArray(c))c=c.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('').trim();
   return String(c).trim();
+}
+
+function _isRecoveryControlMessageText(text){
+  const normalized=String(text||'').replace(/\s+/g,' ').trim();
+  if(!normalized) return false;
+  const systemRecovery=/^\[System:/i.test(normalized)
+    && /previous response was cut off by a network error/i.test(normalized)
+    && /continue exactly where you left off/i.test(normalized);
+  const backendRecovery=/^the live worker stopped before this run finished\.?$/i.test(normalized);
+  return !!(systemRecovery || backendRecovery);
+}
+function _isRecoveryControlMessage(m){
+  if(!m||m.role==='tool') return false;
+  if(m.recovery_control===true) return true;
+  // Backward-compat ONLY: strict fully-anchored text match for pre-marker
+  // persisted sessions. NOT provider_details_label — a real "Response
+  // interrupted" card carries 'Interruption details' and must stay visible.
+  return _isRecoveryControlMessageText(msgContent(m)||String(m.content||''));
+}
+function _assistantMessageHasVisibleContent(m){
+  if(!m||m.role!=='assistant') return false;
+  if(_isRecoveryControlMessage(m)) return false;
+  return !!msgContent(m);
 }
 
 function _fmtDateSep(d){
@@ -6521,6 +6545,7 @@ function _restoreMessageScrollSnapshot(snapshot){
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
   _programmaticScroll=true;
   el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
   requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
 }
@@ -6598,10 +6623,12 @@ function renderMessages(options){
     if(!m||!m.role||m.role==='tool')return false;
     if(_isContextCompactionMessage(m)) return false;
     if(_isPreservedCompressionTaskListMessage(m)) return false;
+    if(_isRecoveryControlMessage(m)) return false;
     if(m.role==='assistant'){
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
       if(hasTc||hasTu||_messageHasReasoningPayload(m)) return true;
+      if(_assistantMessageHasVisibleContent(m)) return true;
     }
     return m._statusCard||msgContent(m)||m.attachments?.length;
   });
@@ -6628,9 +6655,10 @@ function renderMessages(options){
     for(const m of S.messages){
       if(!m||!m.role||m.role==='tool'){ri++;continue;}
       if(_isPreservedCompressionTaskListMessage(m)){ri++;continue;}
+      if(_isRecoveryControlMessage(m)){ri++;continue;}
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) rebuilt.push({m,rawIdx:ri});
+      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) rebuilt.push({m,rawIdx:ri});
       ri++;
     }
     _visWithIdxCache=rebuilt;
