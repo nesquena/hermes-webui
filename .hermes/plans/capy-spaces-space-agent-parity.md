@@ -38,6 +38,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub deployment metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub deployment-list API payloads (`/repos/{owner}/{repo}/deployments`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from the safe repository path, deployment count, bounded deployment ids/environments/refs/SHA prefixes/tasks/production-transient flags, and timestamps while omitting deployment descriptions, payloads, status URLs, creator URLs, API-auth/query/fragment markers, prompt-injection text, scripts, renderer fields, and secret-like fixture values from receipts/search/vault output.
+  - JSON Feed bypass payloads at the same endpoint fail closed without creating vault records.
+
 - `feat(capy-memory): ingest GitHub check-runs metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub check-runs API payloads (`/repos/{owner}/{repo}/commits/{sha}/check-runs`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from the safe repository path, commit SHA prefix, check-run count, bounded check-run ids/names/statuses/conclusions, and timestamps while omitting output summaries, details/html URLs, pull-request rows, API-auth/query/fragment markers, prompt-injection text, script markers, renderer/source fields, and secret-like fixture values from receipts/search/vault output.

@@ -2173,6 +2173,104 @@ def _github_tags_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_deployments_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "deployments"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+_GITHUB_DEPLOYMENT_TASKS = {"deploy", "deploy:migrations", "rollback", "rollback:migrations"}
+_GITHUB_DEPLOYMENT_TEXT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._/#:+-]{0,119}")
+
+
+def _github_deployment_text_is_safe(value: Any, *, limit: int = 120) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = _safe_public_text(value, limit=limit)
+    if not text or text != value.strip():
+        return False
+    if _refresh_value_is_blocked(value) or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(text):
+        return False
+    return bool(_GITHUB_DEPLOYMENT_TEXT_RE.fullmatch(text))
+
+
+def _github_deployment_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    deployment_id = _safe_optional_nonnegative_int(row.get("id"))
+    if deployment_id is None or deployment_id <= 0:
+        return False
+    if not _github_deployment_text_is_safe(row.get("ref")):
+        return False
+    raw_sha = row.get("sha")
+    if not isinstance(raw_sha, str) or not re.fullmatch(r"[A-Fa-f0-9]{40}", raw_sha):
+        return False
+    task = _safe_public_text(row.get("task"), limit=80).lower()
+    if not task or task not in _GITHUB_DEPLOYMENT_TASKS:
+        return False
+    if not _github_deployment_text_is_safe(row.get("environment"), limit=80):
+        return False
+    for field in ("production_environment", "transient_environment"):
+        raw_bool = row.get(field)
+        if raw_bool is not None and not isinstance(raw_bool, bool):
+            return False
+    for field in ("created_at", "updated_at"):
+        raw_timestamp = row.get(field)
+        if raw_timestamp is not None and not _safe_iso_timestamp(raw_timestamp):
+            return False
+    for raw_value in (row.get("id"), row.get("ref"), row.get("sha"), row.get("task"), row.get("environment"), row.get("created_at"), row.get("updated_at")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_deployments_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_deployments_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_deployment_row_is_safe(row) for row in payload)
+
+
+def _github_deployments_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_deployments_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_deployment_row_is_safe(row)]
+    parts = [f"GitHub deployments for {repo}", f"deployment count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        deployment_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        ref = _safe_public_text(row.get("ref"), limit=120)
+        sha = _safe_public_text(row.get("sha"), limit=40)[:12]
+        task = _safe_public_text(row.get("task"), limit=80).lower()
+        environment = _safe_public_text(row.get("environment"), limit=80)
+        created = _safe_iso_timestamp(row.get("created_at")) if row.get("created_at") is not None else ""
+        updated = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
+        row_parts = [f"deployment #{deployment_id}", f"environment: {environment}", f"ref: {ref}", f"sha: {sha}", f"task: {task}"]
+        if row.get("production_environment") is not None:
+            row_parts.append(f"production: {str(row.get('production_environment') is True).lower()}")
+        if row.get("transient_environment") is not None:
+            row_parts.append(f"transient: {str(row.get('transient_environment') is True).lower()}")
+        if created:
+            row_parts.append(f"created: {created}")
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 _GITHUB_MILESTONE_STATES = {"open", "closed"}
 
 
@@ -2992,6 +3090,19 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    if _json_payload_is_github_deployments_metadata(origin_uri, payload):
+        repo = _github_deployments_path_repo(origin_uri) or source_id
+        title = f"GitHub deployments {repo}"
+        summary = _github_deployments_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    deployments_repo = _github_deployments_path_repo(origin_uri)
+    if deployments_repo:
+        raise ValueError("refresh failed")
     if _json_payload_is_github_releases_metadata(origin_uri, payload):
         title = f"GitHub releases {(_github_releases_path_repo(origin_uri) or source_id)}"
         summary = _github_releases_refresh_summary(origin_uri, payload)
