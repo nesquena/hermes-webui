@@ -380,8 +380,19 @@ def _run_gateway_chat_streaming(
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
             s.context_messages = previous_context + [user_msg, assistant_msg]
+            try:
+                from api.streaming import _is_context_compression_marker
+
+                display_context = [
+                    msg
+                    for msg in previous_context
+                    if not _is_context_compression_marker(msg)
+                ]
+            except Exception:
+                logger.debug("Failed to filter gateway display context markers", exc_info=True)
+                display_context = previous_context
             display = merge_session_messages_append_only(
-                previous_context,
+                display_context,
                 list(getattr(s, "messages", None) or []),
             )
             try:

@@ -331,6 +331,11 @@ def test_gateway_chat_worker_backfills_context_only_turns_into_display(tmp_path,
 
     s = new_session()
     s.context_messages = [
+        {
+            "role": "assistant",
+            "content": "[context compaction] Hidden summary for model continuity.",
+            "timestamp": 9.5,
+        },
         {"role": "user", "content": "delete the matrix apps", "timestamp": 10.0},
         {"role": "assistant", "content": "I will verify the Matrix cleanup targets.", "timestamp": 10.1},
     ]
@@ -361,6 +366,7 @@ def test_gateway_chat_worker_backfills_context_only_turns_into_display(tmp_path,
         "done",
     ]
     assert len(saved.messages) == 4
+    assert not any("context compaction" in m["content"] for m in saved.messages)
 
 
 def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_path, monkeypatch):
