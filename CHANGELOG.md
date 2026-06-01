@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Gateway-backed chat now carries the same WebUI final-answer polish guidance as the in-process chat paths, so terse scratchpad fragments such as "Need script" are not encouraged as visible assistant replies.
+
 ## [v0.51.192] — 2026-05-31 — Release FL (stage-batch4 — per-model context_length default-only guard)
 
 ### Fixed

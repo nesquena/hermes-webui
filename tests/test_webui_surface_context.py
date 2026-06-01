@@ -26,6 +26,8 @@ def test_webui_ephemeral_prompt_includes_browser_surface_context():
     assert "explicit captures" in prompt
     assert "durable user preferences" in prompt
     assert "Do not include terse planning fragments" in prompt
+    assert "Final visible assistant replies" in prompt
+    assert "Need script" in prompt
     assert "Need inspect email" in prompt
     assert "clear user-facing progress" in prompt
 
