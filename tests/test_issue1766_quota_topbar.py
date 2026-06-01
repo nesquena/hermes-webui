@@ -58,7 +58,7 @@ def test_quota_indicator_formats_openrouter_and_account_limit_shapes_minimally()
     assert "return 'Weekly'" in UI_JS
     assert "_providerQuotaRemainingPercent" in UI_JS
     assert "function _formatQuotaResetDate" in UI_JS
-    assert "`${mm}/${dd}/${yy}`" in UI_JS
+    assert "`${mm}${dd}${yy}`" in UI_JS
     assert "_formatQuotaResetDate(w.reset_at)" in UI_JS
     assert "providerQuotaRingValue" in UI_JS
     assert "strokeDashoffset" in UI_JS

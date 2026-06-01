@@ -5,7 +5,7 @@
 
 ### Added
 - Chat turn footers now show a quiet provider-quota remainder after each completed response when the active provider exposes quota/account-limit data, reusing the existing server-side quota probe without revealing credentials.
-- The provider quota chip now defaults on as a circular meter next to the send button, including compact/mobile widths, so available quota/account-limit remainder is visible in a Codex-style location while unsupported providers stay quiet; the ring defaults to the 5-hour account-limit window, can be switched to Weekly from the popover, drains with the selected remaining quota, low quota states tint yellow below 60% and red below 20%, and clicking it opens a compact quota details popover showing both 5-hour and weekly usage with reset dates formatted as `MM/DD/YY` when available.
+- The provider quota chip now defaults on as a circular meter next to the send button, including compact/mobile widths, so available quota/account-limit remainder is visible in a Codex-style location while unsupported providers stay quiet; the ring defaults to the 5-hour account-limit window, can be switched to Weekly from the popover, drains with the selected remaining quota, low quota states tint yellow below 60% and red below 20%, and clicking it opens a compact quota details popover showing both 5-hour and weekly usage with reset dates formatted as `MMDDYY` when available.
 
 ## [v0.51.201] — 2026-06-01 — Release FU (stage-batch13 — colored diff lines in tool-card snippets)
 
