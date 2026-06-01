@@ -492,7 +492,7 @@ class TestScenarioFailureIsolation:
             except Exception as exc:  # pragma: no cover — defensive
                 raise AssertionError(
                     f"emit_todo_state raised on {bad!r}: {exc}"
-                )
+                ) from exc
         # No event should have leaked through; all silently dropped.
         assert rec.todo_events() == []
 

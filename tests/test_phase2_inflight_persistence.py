@@ -24,7 +24,6 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -410,7 +409,7 @@ def driver_results():
         raise RuntimeError(
             f"could not parse driver output as JSON: {exc}\n"
             f"raw stdout:\n{out.stdout}"
-        )
+        ) from exc
 
 
 _DECLARED = [
