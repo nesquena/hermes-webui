@@ -1809,6 +1809,124 @@ def _github_check_runs_refresh_summary(origin_uri: str, payload: dict[str, Any])
     return _bounded_refresh_summary("; ".join(parts))
 
 
+_GITHUB_COMMIT_STATUS_STATES = {"error", "failure", "pending", "success"}
+
+
+def _github_commit_statuses_path_info(origin_uri: str) -> tuple[str, str] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "commits"
+        or path[6] != "statuses"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or not re.fullmatch(r"[A-Fa-f0-9]{40}", path[5])
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", path[5].lower()
+
+
+def _github_commit_statuses_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    path = parts.path.split("/")
+    return (
+        len(path) == 7
+        and path[0] == ""
+        and path[1] == "repos"
+        and path[4] == "commits"
+        and path[6] == "statuses"
+    )
+
+
+def _github_commit_status_context_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    context = _safe_public_text(value, limit=200)
+    if not context or context != value.strip():
+        return False
+    if _refresh_value_is_blocked(context) or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(context):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._/#:+@(),-]{0,199}", context))
+
+
+def _github_commit_status_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    status_id = _safe_optional_nonnegative_int(row.get("id"))
+    if status_id is None or status_id <= 0:
+        return False
+    state = _safe_public_text(row.get("state"), limit=40).lower()
+    if state not in _GITHUB_COMMIT_STATUS_STATES:
+        return False
+    if not _github_commit_status_context_is_safe(row.get("context")):
+        return False
+    creator = row.get("creator")
+    if creator is not None:
+        if not isinstance(creator, dict):
+            return False
+        raw_login = creator.get("login")
+        if _is_present_public_value(raw_login) and not _github_comment_login_is_safe(raw_login):
+            return False
+    for field in ("created_at", "updated_at"):
+        raw_timestamp = row.get(field)
+        if _is_present_public_value(raw_timestamp) and not _safe_iso_timestamp(raw_timestamp):
+            return False
+    for raw_value in (row.get("id"), row.get("state"), row.get("context"), row.get("created_at"), row.get("updated_at")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_commit_statuses_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_commit_statuses_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_commit_status_row_is_safe(row) for row in payload)
+
+
+def _github_commit_statuses_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo, sha = _github_commit_statuses_path_info(origin_uri) or ("repository", "")
+    safe_rows = [row for row in payload if _github_commit_status_row_is_safe(row)]
+    state_counts: dict[str, int] = {}
+    for row in safe_rows:
+        state = _safe_public_text(row.get("state"), limit=40).lower()
+        state_counts[state] = state_counts.get(state, 0) + 1
+    parts = [f"GitHub commit statuses for {repo} at {sha[:12]}", f"status count: {len(payload)}"]
+    for state in sorted(state_counts):
+        parts.append(f"state {state}: {state_counts[state]}")
+    for row in safe_rows[:5]:
+        status_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        context = _safe_public_text(row.get("context"), limit=200)
+        state = _safe_public_text(row.get("state"), limit=40).lower()
+        creator = row.get("creator") if isinstance(row.get("creator"), dict) else {}
+        creator_login = _safe_public_text(creator.get("login") if isinstance(creator, dict) else "", limit=80)
+        created = _safe_iso_timestamp(row.get("created_at")) if row.get("created_at") is not None else ""
+        updated = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
+        row_parts = [f"status #{status_id}: {context}", f"state: {state}"]
+        if creator_login:
+            row_parts.append(f"creator: {creator_login}")
+        if created:
+            row_parts.append(f"created: {created}")
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_commit_path_sha(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -3317,6 +3435,19 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
     deployments_repo = _github_deployments_path_repo(origin_uri)
     if deployments_repo:
         raise ValueError("refresh failed")
+    commit_statuses_info = _github_commit_statuses_path_info(origin_uri)
+    if commit_statuses_info is not None:
+        if not _json_payload_is_github_commit_statuses_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        repo, sha = commit_statuses_info
+        title = f"GitHub commit statuses {repo} {sha[:12]}"
+        summary = _github_commit_statuses_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_releases_metadata(origin_uri, payload):
         title = f"GitHub releases {(_github_releases_path_repo(origin_uri) or source_id)}"
         summary = _github_releases_refresh_summary(origin_uri, payload)
@@ -3583,6 +3714,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_deployment_statuses_path_matches(safe_origin_uri) and (
             _github_deployment_statuses_path_info(safe_origin_uri) is None
+            or content_type not in {"application/json", "application/feed+json"}
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_commit_statuses_path_matches(safe_origin_uri) and (
+            _github_commit_statuses_path_info(safe_origin_uri) is None
             or content_type not in {"application/json", "application/feed+json"}
         ):
             raise RuntimeError("refresh fetcher disabled")
