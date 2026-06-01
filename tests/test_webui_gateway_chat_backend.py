@@ -286,10 +286,14 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
     assert [m["content"] for m in payload["messages"]] == [
+        streaming._WEBUI_PROGRESS_PROMPT,
         "prefill",
         "webui session context",
         "Say hello",
     ]
+    assert payload["messages"][0]["role"] == "system"
+    assert "Final visible assistant replies" in payload["messages"][0]["content"]
+    assert "Need script" in payload["messages"][0]["content"]
     events = []
     while not subscriber.empty():
         events.append(subscriber.get_nowait())
@@ -361,7 +365,9 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     )
 
     content = captured["body"]["messages"][-1]["content"]
-    assert captured["body"]["messages"][0] == {"role": "user", "content": "webui session context"}
+    assert captured["body"]["messages"][0]["role"] == "system"
+    assert "Final visible assistant replies" in captured["body"]["messages"][0]["content"]
+    assert captured["body"]["messages"][1] == {"role": "user", "content": "webui session context"}
     assert content[0] == {"type": "text", "text": "What is in this image?"}
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
