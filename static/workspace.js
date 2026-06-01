@@ -268,12 +268,41 @@ function collectSessionArtifacts(){
     if(!path || seen.has(path)) return;
     seen.add(path); items.push({path, source});
   };
+  // Source 1: session-level tool call summaries (may be empty when messages
+  // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
   for(const tc of (S.toolCalls || [])){
     for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
   }
+  // Source 2 & 3: message-level data — both text-mined diffs and structured
+  // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
   for(const msg of (S.messages || [])){
-    const text = msg && (msg.content || msg.text || msg.message || '');
-    for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
+    if(!msg) continue;
+    const text = msg.content || msg.text || msg.message || '';
+    // Text-mined diff/patch fences (existing path).
+    if(typeof text === 'string'){
+      for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
+    }
+    // Structured tool_calls array (OpenAI format: {function:{name,arguments}}).
+    if(Array.isArray(msg.tool_calls)){
+      for(const tc of msg.tool_calls){
+        const fn = tc.function || tc;
+        const name = fn.name || tc.name || '';
+        let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
+        if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
+        const fakeTc = {name, args, result: tc.result || tc.output || ''};
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || name || 'tool');
+      }
+    }
+    // Structured content array with tool_use blocks (Anthropic format).
+    if(Array.isArray(msg.content)){
+      for(const block of msg.content){
+        if(!block || block.type !== 'tool_use') continue;
+        let inp = block.input || {};
+        if(typeof inp === 'string'){ try{ inp = JSON.parse(inp); }catch(_){} }
+        const fakeTc = {name: block.name || '', args: inp, result: block.result || ''};
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || block.name || 'tool');
+      }
+    }
   }
   return items.slice(0, 50);
 }
@@ -292,7 +321,14 @@ function renderSessionArtifacts(){
     root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
     return;
   }
-  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+  // Strip workspace prefix for display so long absolute paths don't clutter the list.
+  const ws = S.session && S.session.workspace;
+  const normWs = ws ? ws.replace(/\/+$/,'') + '/' : '';
+  const displayPath = (p) => {
+    if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
+    return p;
+  };
+  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(displayPath(item.path))}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
 }
 
 async function _workspacePathExists(path){
@@ -308,7 +344,15 @@ async function _workspacePathExists(path){
 async function openArtifactPath(path){
   if(!path) return;
   switchWorkspacePanelTab('files');
-  const rel = path.replace(/^~\//,'').replace(/^\.\//,'');
+  let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
+  // Strip workspace prefix so /api/list receives a workspace-relative path.
+  const ws = S.session && S.session.workspace;
+  if(ws){
+    const normWs = ws.replace(/\/+$/,'') + '/';
+    if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
+    else if(rel === ws.replace(/\/+$/,'')) rel = '.';
+  }
+  if(!rel) rel = '.';
   try{
     if(!(await _workspacePathExists(rel))){
       setStatus(t('file_open_failed'));
