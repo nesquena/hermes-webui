@@ -10,6 +10,7 @@ import pathlib
 
 REPO = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
@@ -23,10 +24,25 @@ def test_live_activity_group_has_observable_baseline_events():
 
 def test_empty_thinking_placeholder_becomes_status_row_not_raw_thinking_card():
     assert "data-activity-event-id=\"thinking-placeholder\"" in UI_JS
+    assert "Starting agent" in UI_JS
+    assert "Creating the stream and sending your message…" in UI_JS
+    assert "Waiting for first model token" in UI_JS
+    assert "Stream connected; no model output has arrived yet." in UI_JS
     assert "Waiting on model" in UI_JS
-    assert "No tool activity has been reported yet." in UI_JS
+    assert "Tool finished; waiting for the model to continue." in UI_JS
     assert "Waiting on tool result" in UI_JS
+    assert "The tool is still running; the response will continue after it completes." in UI_JS
     assert "_thinkingActivityNode(thinkingText, false)" in UI_JS
+
+
+def test_stream_start_refreshes_waiting_status_after_stream_id_arrives():
+    active_idx = MESSAGES_JS.find("S.activeStreamId = streamId;")
+    assert active_idx != -1
+    refresh_idx = MESSAGES_JS.find("appendThinking('',{pending:true})", active_idx)
+    attach_idx = MESSAGES_JS.find("attachLiveStream(activeSid, streamId, uploadedNames);", active_idx)
+    assert refresh_idx != -1
+    assert attach_idx != -1
+    assert refresh_idx < attach_idx
 
 
 def test_tool_events_update_activity_timeline_and_summary():

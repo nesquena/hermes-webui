@@ -137,6 +137,31 @@ def test_done_handler_is_idempotent_for_replay_or_duplicate_done_events():
     )
 
 
+def test_attention_events_use_distinct_sound_from_completion():
+    approval_body = _event_body("approval")
+    clarify_body = _event_body("clarify")
+    done_body = _event_body("done")
+    attention_body = _function_body("playAttentionSound")
+
+    assert "playAttentionSound(_attentionSoundKey(activeSid,'approval',1));" in approval_body
+    assert "playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));" in clarify_body
+    for body in (approval_body, clarify_body):
+        assert "playNotificationSound();" not in body
+    assert "playNotificationSound();" in done_body
+    assert "playAttentionSound();" not in done_body
+    assert "osc.type='sine'" in attention_body
+    assert "window._lastAttentionSoundAt" in attention_body
+    assert "nowMs-window._lastAttentionSoundAt<900" in attention_body
+    assert "window._attentionSoundSeenKeys" in attention_body
+    assert "seen.has(dedupeKey)" in attention_body
+    assert "seen.set(dedupeKey,nowMs)" in attention_body
+    assert "osc.frequency.setValueAtTime(880,ctx.currentTime);" in attention_body
+    assert "osc.frequency.setValueAtTime(660,ctx.currentTime+0.075);" in attention_body
+    assert "gain.gain.setValueAtTime(0.24,ctx.currentTime);" in attention_body
+    assert "osc.stop(ctx.currentTime+0.24);" in attention_body
+    assert "Notification sound failed" not in attention_body
+
+
 def test_attach_live_stream_registers_one_source_per_session_stream():
     """Reconnect/compaction paths must not stack same-stream EventSources.
 

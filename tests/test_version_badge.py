@@ -11,6 +11,7 @@ Covers:
   7. server.py: server_version is not the old hardcoded string
 """
 import importlib
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -116,6 +117,66 @@ class TestDetectWebUIVersion:
         result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)
         assert result == 'v0.50.123-dirty'
         assert calls[1][0][:2] == ['diff-index', '--quiet']
+
+    def test_dirty_check_hashes_tracked_diff_when_available(self, tmp_path):
+        """Dirty dev-build asset URLs should change on each tracked diff edit."""
+        import hashlib
+
+        diff = "diff --git a/static/ui.js b/static/ui.js\n+console.log('dev edit')\n"
+        expected = hashlib.sha1(diff.encode('utf-8', errors='replace')).hexdigest()[:8]
+        calls = []
+
+        def fake_run_git(args, cwd, timeout=10):
+            calls.append((args, timeout))
+            if args[:3] == ['describe', '--tags', '--always']:
+                return ('v0.50.123', True)
+            if args[:2] == ['diff-index', '--quiet']:
+                return ('git exited with status 1', False)
+            if args[:3] == ['diff', '--binary', 'HEAD']:
+                return (diff, True)
+            return ('unexpected', False)
+
+        result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)
+        assert result == f'v0.50.123-dirty-{expected}'
+        assert calls[2][0][:3] == ['diff', '--binary', 'HEAD']
+
+    def test_dirty_check_falls_back_when_diff_hash_unavailable(self, tmp_path):
+        """If the diff read fails, keep the old best-effort -dirty suffix."""
+        def fake_run_git(args, cwd, timeout=10):
+            if args[:3] == ['describe', '--tags', '--always']:
+                return ('v0.50.123', True)
+            if args[:2] == ['diff-index', '--quiet']:
+                return ('git exited with status 1', False)
+            if args[:3] == ['diff', '--binary', 'HEAD']:
+                return ('git diff timed out after 1s', False)
+            return ('unexpected', False)
+
+        result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)
+        assert result == 'v0.50.123-dirty'
+
+    def test_dirty_suffix_changes_when_tracked_diff_changes(self, tmp_path):
+        """Real git diff hashing should produce a new suffix for each tracked edit."""
+        import api.updates as upd
+
+        def git(*args):
+            subprocess.run(['git', *args], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+        git('init')
+        git('config', 'user.name', 'Test User')
+        git('config', 'user.email', 'test@example.invalid')
+        tracked = tmp_path / 'tracked.txt'
+        tracked.write_text('base\n', encoding='utf-8')
+        git('add', 'tracked.txt')
+        git('commit', '-m', 'base')
+
+        tracked.write_text('edit one\n', encoding='utf-8')
+        first = upd._dirty_suffix(tmp_path)
+        tracked.write_text('edit two\n', encoding='utf-8')
+        second = upd._dirty_suffix(tmp_path)
+
+        assert first.startswith('-dirty-')
+        assert second.startswith('-dirty-')
+        assert first != second
 
     def test_dirty_check_timeout_does_not_hide_base_version(self, tmp_path):
         """If dirty detection times out, keep the base version instead of unknown."""

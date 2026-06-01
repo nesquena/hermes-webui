@@ -85,9 +85,17 @@ def test_lru_eviction_closes_evicted_agent_session_db():
         "is the original bug shape."
     )
 
-    # Positive pattern: must close on the evicted agent.
-    assert "_evicted_agent._session_db.close()" in block, (
-        "LRU eviction must close the evicted agent\'s _session_db. "
+    # Positive pattern: eviction must call the lifecycle helper, and the helper
+    # must close the evicted agent's SessionDB after provider teardown.
+    assert "_close_evicted_agent_at_session_boundary(_evicted_sid, _evicted_agent)" in block, (
+        "LRU eviction must route the evicted agent through the session-boundary "
+        "close helper."
+    )
+    helper_start = src.index("def _close_evicted_agent_at_session_boundary")
+    helper_end = src.index("\ndef _refresh_cached_agent_runtime", helper_start)
+    helper_block = src[helper_start:helper_end]
+    assert "session_db.close()" in helper_block, (
+        "LRU eviction helper must close the evicted agent's _session_db. "
         "(Opus pre-release follow-up to PR #1421.)"
     )
 

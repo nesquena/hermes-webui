@@ -345,6 +345,86 @@
   :root.dark[data-skin="nous"] .mcp-http{color:#7EB6E0;}
   :root.dark[data-skin="nous"] .mcp-status-active{color:#7EB6E0;}
 
+  /* ═══ NEON — cyberpunk theme (dark-first) ═══ */
+  :root[data-skin="neon"]{
+    --bg:#F8F7FC;--sidebar:#F0EEF8;--border:#D8D4EC;--border2:rgba(0,0,0,0.12);
+    --text:#1E1B2E;--muted:#6E6888;--accent:#9333EA;--blue:#7C3AED;--gold:#A855F7;--code-bg:#F0EDF8;
+    --surface:#FFFFFF;--topbar-bg:rgba(248,247,252,.98);--main-bg:rgba(248,247,252,0.5);
+    --focus-ring:rgba(147,51,234,.3);--focus-glow:rgba(147,51,234,.08);
+    --input-bg:rgba(147,51,234,.03);--hover-bg:rgba(147,51,234,.05);
+    --strong:#0D0B14;--em:#7C3AED;--code-text:#6D28D9;--code-inline-bg:rgba(147,51,234,.08);--pre-text:#1E1B2E;
+    --accent-hover:#7E22CE;--accent-bg:rgba(147,51,234,0.06);--accent-bg-strong:rgba(147,51,234,0.12);--accent-text:#6D28D9;
+    --error:#DC2626;--success:#059669;--warning:#D97706;--info:#7C3AED;
+    --radius-sm:2px;--radius-md:4px;--radius-card:4px;--radius-lg:6px;
+    --font-ui:system-ui,-apple-system,sans-serif;
+    --surface-subtle:rgba(147,51,234,.025);--surface-subtle-hover:rgba(147,51,234,.05);
+    --border-subtle:rgba(147,51,234,.08);--border-muted:rgba(147,51,234,.12);
+    --purple:#9333EA;
+  }
+  :root.dark[data-skin="neon"]{
+    --bg:#08060d;--sidebar:#06040a;--border:#1c1633;--border2:rgba(179,71,255,0.15);
+    --text:#d8d6f0;--muted:#6a6588;--accent:#b347ff;--blue:#a78bfa;--gold:#c084fc;--code-bg:#050308;
+    --surface:#0f0d1a;--topbar-bg:rgba(8,6,13,.98);--main-bg:rgba(8,6,13,0.5);
+    --focus-ring:rgba(179,71,255,.35);--focus-glow:rgba(179,71,255,.10);
+    --input-bg:rgba(179,71,255,.04);--hover-bg:rgba(179,71,255,.06);
+    --strong:#f0edff;--em:#00ddff;--code-text:#c8c0f0;--code-inline-bg:rgba(179,71,255,.10);--pre-text:#d8d6f0;
+    --accent-hover:#c76bff;--accent-bg:rgba(179,71,255,0.10);--accent-bg-strong:rgba(179,71,255,0.20);--accent-text:#c8a0ff;
+    --error:#ff4466;--success:#00dd88;--warning:#ffaa33;--info:#00ddff;
+    --surface-subtle:rgba(179,71,255,.03);--surface-subtle-hover:rgba(179,71,255,.06);
+    --border-subtle:rgba(179,71,255,.08);--border-muted:rgba(179,71,255,.12);
+    --purple:#b347ff;
+  }
+  /* ── Neon skin: component-level overrides ── */
+  /* Selection glow */
+  :root.dark[data-skin="neon"] ::selection{background:rgba(179,71,255,0.35);color:#fff;}
+  /* Topbar: purple bottom border with glow */
+  :root.dark[data-skin="neon"] .app-titlebar{border-bottom-color:rgba(179,71,255,0.2);}
+  /* Sidebar: subtle purple inset shadow */
+  :root.dark[data-skin="neon"] .sidebar{box-shadow:inset -1px 0 30px rgba(179,71,255,0.03);}
+  /* Inputs: purple glow on focus */
+  :root.dark[data-skin="neon"] textarea:focus,
+  :root.dark[data-skin="neon"] input[type="text"]:focus,
+  :root.dark[data-skin="neon"] input[type="password"]:focus,
+  :root.dark[data-skin="neon"] select:focus{box-shadow:0 0 16px rgba(179,71,255,0.2);}
+  /* Send button: neon glow */
+  :root.dark[data-skin="neon"] button.send-btn{box-shadow:0 0 14px rgba(179,71,255,0.25);}
+  :root.dark[data-skin="neon"] button.send-btn:hover{box-shadow:0 0 24px rgba(179,71,255,0.45);}
+  /* New chat button: purple gradient */
+  :root.dark[data-skin="neon"] .new-chat-btn{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;box-shadow:0 0 12px rgba(179,71,255,0.2);}
+  :root.dark[data-skin="neon"] .new-chat-btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#fff;box-shadow:0 0 20px rgba(179,71,255,0.35);}
+  /* Scrollbar: purple */
+  :root.dark[data-skin="neon"]::-webkit-scrollbar-thumb{background:rgba(179,71,255,.18);border-radius:3px;}
+  :root.dark[data-skin="neon"]::-webkit-scrollbar-thumb:hover{background:rgba(179,71,255,.30);}
+  :root.dark[data-skin="neon"]{scrollbar-width:thin;scrollbar-color:rgba(179,71,255,.18) transparent;}
+  /* Tool cards */
+  :root.dark[data-skin="neon"] .tool-card{background:rgba(179,71,255,0.03);border-color:rgba(179,71,255,0.08);}
+  :root.dark[data-skin="neon"] .tool-card:hover{border-color:rgba(179,71,255,0.2);}
+  :root.dark[data-skin="neon"] .tool-card-running{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+  :root.dark[data-skin="neon"] .tool-card-name{color:var(--muted);font-weight:500;}
+  :root.dark[data-skin="neon"] .tool-arg-key,
+  :root.dark[data-skin="neon"] .tool-card-more{color:var(--accent-text);}
+  :root.dark[data-skin="neon"] .tool-card-running-dot{background:var(--accent);}
+  /* Tree viewer: purple family */
+  :root.dark[data-skin="neon"] .tree-key{color:#b347ff;}
+  :root.dark[data-skin="neon"] .tree-str{color:#c8a0ff;}
+  :root.dark[data-skin="neon"] .tree-num{color:#00ddff;}
+  :root.dark[data-skin="neon"] .tree-bool{color:#b347ff;}
+  /* Session badges/tags */
+  :root.dark[data-skin="neon"] .session-child-count{background:rgba(179,71,255,.16);color:#c8a0ff;}
+  :root.dark[data-skin="neon"] .session-child-count:hover{background:rgba(179,71,255,.26);color:#d8c0ff;}
+  :root.dark[data-skin="neon"] .session-tree-badge{background:rgba(179,71,255,.2);color:#c8a0ff;}
+  :root.dark[data-skin="neon"] .session-tag{background:rgba(179,71,255,.2);color:#c8a0ff;}
+  /* Diff blocks */
+  :root.dark[data-skin="neon"] .diff-block .diff-plus{color:#b347ff;}
+  /* MCP status */
+  :root.dark[data-skin="neon"] .mcp-http{color:#c8a0ff;}
+  :root.dark[data-skin="neon"] .mcp-status-active{color:#00dd88;}
+  /* Image lightbox */
+  :root.dark[data-skin="neon"] .img-lightbox-close:hover{background:rgba(179,71,255,.35);}
+  /* Links: cyan with hover glow */
+  :root.dark[data-skin="neon"] a{color:var(--info);transition:text-shadow 0.2s;}
+  :root.dark[data-skin="neon"] a:hover{text-shadow:0 0 8px rgba(0,221,255,0.4);}
+
   /* ── Skin: Geist Contrast (Geist-inspired neutral precision) ──
      Dark mode uses a #FFF175 accent; solid accent controls use black
      foreground, while selected/navigation states stay neutral and restrained. */
@@ -549,7 +629,6 @@
   :root:not(.dark) *{scrollbar-color:rgba(0,0,0,.15) transparent;}
   /* ── Light mode: sidebar, roles, chips, active states ── */
   :root:not(.dark) .session-item{color:var(--muted);}
-  :root:not(.dark) .session-item:hover{background:var(--hover-bg);color:var(--text);}
   :root:not(.dark) .session-item.active{background:var(--accent-bg);color:var(--accent-text);}
   :root:not(.dark) .session-item.active .session-title{color:var(--accent-text);}
   :root:not(.dark) .session-pin-indicator{color:var(--accent-text);}
@@ -702,10 +781,18 @@
   .new-chat-btn:hover{background:var(--accent-bg-strong);border-color:var(--accent);}
   .session-list{flex:1;overflow-y:auto;padding:0 8px 8px;min-height:0;overscroll-behavior-y:contain;touch-action:pan-y;overflow-anchor:none;}
   .sidebar-search{position:relative;padding:8px 12px;flex-shrink:0;}
+  .session-search-field{position:relative;display:flex;align-items:center;width:100%;}
   .sidebar-search input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 10px 7px 32px;font-size:13px;outline:none;transition:border-color .15s,box-shadow .15s,background .15s;box-sizing:border-box;}
+  .session-search input{padding-right:34px;}
   .sidebar-search input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   .sidebar-search input::placeholder{color:var(--muted);opacity:.7;}
   .sidebar-search-icon{position:absolute;left:22px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--muted);opacity:.7;pointer-events:none;}
+  .session-search .sidebar-search-icon{left:10px;}
+  .session-search .session-search-clear{position:absolute;right:6px;top:50%;transform:translateY(-50%);z-index:1;width:24px;height:24px;border:0;border-radius:6px;background:transparent;color:var(--muted);display:flex;align-items:center;justify-content:center;padding:0;cursor:pointer;opacity:.78;}
+  .session-search-clear[hidden]{display:none;}
+  .session-search-clear svg{width:14px;height:14px;}
+  .session-search-clear:hover,.session-search-clear:focus-visible{background:var(--hover);color:var(--text);opacity:1;}
+  .session-search-clear:focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
   /* Inline session title edit */
   .session-title-input{flex:1;background:var(--surface);border:1px solid var(--accent);border-radius:6px;color:var(--text);padding:3px 8px;font-size:13px;outline:none;min-width:0;box-shadow:0 0 0 2px var(--accent-bg-strong);font-family:inherit;}
   /* padding-right was 86px to reserve space for the absolute-positioned
@@ -716,17 +803,130 @@
      and attention indicator (26x26 at right:6px) still need 40px reserved
      when they're visible — covered by the hover / streaming / unread /
      menu-open / focus-within rule below. */
-  .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s,transform .36s cubic-bezier(.2,.8,.2,1);display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:manipulation;-webkit-tap-highlight-color:transparent;transform:translateY(var(--session-reflow-offset,0));}
-  .session-item.streaming,.session-item.unread,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
-  .session-item:hover{background:var(--hover-bg);color:var(--text);}
+  .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s,transform .5s cubic-bezier(.22,.61,.36,1),box-shadow .15s ease;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:pan-y;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;transform:translate3d(var(--session-swipe-offset,0),var(--session-reflow-offset,0),0);}
+  .session-item.streaming,.session-item.unread,.session-item.needs-attention,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
+  .session-item.needs-attention{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
+  .session-item.attention-approval{box-shadow:inset 3px 0 0 var(--error);background:color-mix(in srgb,var(--error) 9%,transparent);}
+  .session-item.attention-clarify{box-shadow:inset 3px 0 0 var(--warning);background:color-mix(in srgb,var(--warning) 8%,transparent);}
+  @media (hover:hover){.session-item:hover{background:var(--hover-bg);color:var(--text);}}
+  .session-item.loading{background:var(--hover-bg);color:var(--text);}
+  .session-item.long-pressing{
+    background:var(--hover-bg);
+    color:var(--text);
+    box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 38%,transparent);
+    animation:session-long-press .4s cubic-bezier(.2,.8,.2,1) both;
+  }
+  .session-item.swiping-right{background:color-mix(in srgb,var(--warning) 16%,var(--surface));box-shadow:0 0 0 1px color-mix(in srgb,var(--warning) 48%,transparent);}
+  .session-item.swiping-left{background:color-mix(in srgb,var(--error) 14%,var(--surface));box-shadow:0 0 0 1px color-mix(in srgb,var(--error) 48%,transparent);}
+  .session-swipe-affordance{
+    position:absolute;
+    top:0;
+    bottom:0;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:0;
+    width:var(--session-swipe-reveal,0px);
+    padding:0;
+    box-sizing:border-box;
+    opacity:0;
+    overflow:hidden;
+    transform:translate3d(calc(-1 * var(--session-swipe-offset,0px)),0,0);
+    pointer-events:none;
+    z-index:0;
+  }
+  .session-swipe-affordance-right{
+    left:0;
+    color:#fff;
+    background:transparent;
+    border-radius:0;
+    align-items:flex-start;
+    transform-origin:left center;
+    --session-swipe-action-color:var(--warning);
+  }
+  .session-swipe-affordance-left{
+    right:0;
+    color:#fff;
+    background:transparent;
+    border-radius:0;
+    align-items:flex-end;
+    transform-origin:right center;
+    --session-swipe-action-color:var(--error);
+  }
+  .session-item.swiping-right .session-swipe-affordance-right,
+  .session-item.swiping-left .session-swipe-affordance-left{
+    opacity:var(--session-swipe-progress,0);
+  }
+  .session-text,.session-state-indicator,.session-actions{z-index:1;}
+  .session-swipe-action-stack{
+    width:calc(var(--session-swipe-badge-size,34px) + var(--session-swipe-badge-stretch,0px));
+    max-width:100%;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:3px;
+    flex:0 0 auto;
+  }
+  .session-swipe-badge{
+    width:calc(var(--session-swipe-badge-size,34px) + var(--session-swipe-badge-stretch,0px));
+    height:var(--session-swipe-badge-size,34px);
+    border-radius:999px;
+    background:var(--session-swipe-action-color);
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    color:#fff;
+    flex:0 0 auto;
+    overflow:hidden;
+  }
+  .session-swipe-badge svg{
+    display:block;
+    width:var(--session-swipe-icon-size,18px);
+    height:var(--session-swipe-icon-size,18px);
+    stroke-width:2.2;
+  }
+  .session-swipe-label{
+    min-width:58px;
+    width:100%;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+    text-align:center;
+    color:var(--muted);
+    font-size:10px;
+    font-weight:600;
+    line-height:1;
+    transform:scale(var(--session-swipe-label-scale,1));
+    transform-origin:top center;
+  }
+  .session-swipe-affordance-right .session-swipe-action-stack{transform:translateX(6px);}
+  .session-swipe-affordance-left .session-swipe-action-stack{transform:translateX(-6px);}
+  .session-item.dragging{transition:background .15s,color .15s,box-shadow .15s ease;will-change:transform;}
+  .session-item.session-reflowing{transition:background .15s,color .15s,transform .36s cubic-bezier(.2,.8,.2,1),box-shadow .15s ease;will-change:transform;}
+  .session-item.swipe-committed,
+  .session-item.swipe-removing{transition:background .15s,color .15s,transform .5s cubic-bezier(.22,.61,.36,1),box-shadow .15s ease;will-change:transform;}
+  .session-item.swipe-removing{
+    overflow:hidden;
+  }
+  .session-item.session-swipe-returning{animation:sessionSwipeReturn .5s cubic-bezier(.22,.61,.36,1) both;will-change:transform,opacity;}
+  .session-item.swipe-committed .session-swipe-affordance{transition:opacity .18s ease,transform .18s ease;}
   /* Suppress hover highlight during drag to avoid visual noise mid-scroll */
   .session-item.dragging:hover{background:transparent;color:var(--muted);}
+  .session-item.dragging.swiping-right{background:color-mix(in srgb,var(--warning) 16%,var(--surface));}
+  .session-item.dragging.swiping-left{background:color-mix(in srgb,var(--error) 14%,var(--surface));}
   /* Restore hover padding-right only for mouse (hover:hover) devices.
      Touch/iPad (hover:none) must NOT expand padding-right on :hover —
      the expansion causes a layout-reflow mid-tap that moves session-actions
      under the finger, triggering stopPropagation and swallowing navigation. */
-  @media (hover:hover){.session-item:hover{padding-right:40px;}}
+  @media (hover:hover){:root:not(.dark) .session-item:hover{background:var(--hover-bg);color:var(--text);}.session-item:hover{padding-right:40px;}}
   .session-item.active{background:var(--accent-bg);color:var(--accent);}
+  .session-item.active.swiping-right{background:color-mix(in srgb,var(--warning) 20%,var(--accent-bg));}
+  .session-item.active.swiping-left{background:color-mix(in srgb,var(--error) 18%,var(--accent-bg));}
+  .session-item.archived .session-swipe-affordance-right{--session-swipe-action-color:var(--success);}
+  .session-item.archived.swiping-right,
+  .session-item.archived.dragging.swiping-right{background:color-mix(in srgb,var(--success) 16%,var(--surface));box-shadow:0 0 0 1px color-mix(in srgb,var(--success) 48%,transparent);}
+  .session-item.active.archived.swiping-right{background:color-mix(in srgb,var(--success) 20%,var(--accent-bg));}
   .session-item.streaming .session-title{color:var(--accent);}
   .session-item.streaming .session-title-row{color:var(--text);}
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
@@ -740,10 +940,29 @@
   .session-item.active .session-search-preview{color:var(--accent-text);opacity:.72;}
   .session-item.active .session-search-hit{background:var(--accent-bg-strong);color:var(--accent-text);}
   .session-item.active .session-meta{color:var(--accent-text);opacity:.8;}
+  /* Attention dot variants — see the attention-dot block below the base
+     .session-state-indicator rule. */
   .session-state-indicator{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:10px;height:10px;color:var(--accent);visibility:hidden;}
   .session-attention-indicator{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:26px;height:26px;z-index:1;pointer-events:none;transition:opacity .15s ease,visibility .15s ease;}
   .session-item:hover .session-attention-indicator,.session-item:focus-within .session-attention-indicator,.session-item.menu-open .session-attention-indicator{opacity:0;visibility:hidden;}
   .session-state-indicator.is-streaming,.session-state-indicator.is-unread{visibility:visible;}
+  /* Attention state dot: NO text badge — the right-side status dot itself
+     carries the attention color (red=approval, amber/warning=clarify), and the
+     row keeps its colored left rail + tinted background. Visible even when the
+     session is not streaming/unread. Theme-driven via --error / --warning. */
+  .session-state-indicator.is-attention-approval,
+  .session-state-indicator.is-attention-clarify,
+  .session-state-indicator.is-attention-generic{visibility:visible;}
+  .session-state-indicator.is-attention-approval{color:var(--error);}
+  .session-state-indicator.is-attention-clarify,
+  .session-state-indicator.is-attention-generic{color:var(--warning);}
+  .session-state-indicator.is-attention-approval:not(.is-streaming):not(.is-unread)::before,
+  .session-state-indicator.is-attention-clarify:not(.is-streaming):not(.is-unread)::before,
+  .session-state-indicator.is-attention-generic:not(.is-streaming):not(.is-unread)::before{
+    content:"";display:block;width:8px;height:8px;border-radius:50%;background:currentColor;
+  }
+  /* Approval is the more urgent state — gently pulse its dot. */
+  .session-state-indicator.is-attention-approval:not(.is-streaming):not(.is-unread)::before{animation:sessionAttentionPulse 1.6s ease-in-out infinite;}
   .session-state-indicator::before{content:"";display:block;flex-shrink:0;}
   .session-state-indicator.is-streaming::before{
     width:100%;
@@ -790,8 +1009,8 @@
   .session-actions-trigger:hover{background:var(--hover-bg);color:var(--text);}
   .session-actions-trigger.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
   .session-actions-trigger svg{display:block;}
-  .session-action-menu{display:block;position:fixed;left:0;top:0;right:auto;bottom:auto;min-width:220px;max-width:min(280px,calc(100vw - 16px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:999;overflow:hidden;max-height:320px;overflow-y:auto;}
-  .session-action-menu.open{display:block;}
+  .session-action-menu{display:block;position:fixed;left:0;top:0;right:auto;bottom:auto;min-width:220px;max-width:min(280px,calc(100vw - 16px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:999;overflow:hidden;max-height:calc(100vh - 16px);overflow-y:auto;transform-origin:top right;will-change:opacity,transform;}
+  .session-action-menu.open-animated{animation:session-menu-in .45s cubic-bezier(.2,.8,.2,1);}
   .session-action-opt{width:100%;background:none;border:none;text-align:left;font:inherit;color:var(--text);flex-direction:row!important;gap:0!important;padding:0!important;}
   .session-action-opt .ws-opt-action{display:flex;flex-direction:row;align-items:center;gap:10px;width:100%;padding:10px 14px;}
   .session-action-opt .ws-opt-icon{color:var(--muted);transition:color .12s,opacity .12s;flex-shrink:0;display:flex;align-items:center;width:16px;}
@@ -803,19 +1022,24 @@
   .session-action-opt.is-disabled:hover{background:transparent;}
   .session-action-opt.danger:hover{background:rgba(239,83,80,.08);}
   .session-action-opt.danger .ws-opt-icon,.session-action-opt.danger .ws-opt-name{color:var(--error);}
+  @media (prefers-reduced-motion:reduce){
+    .session-action-menu{animation:none;will-change:auto;}
+    .session-item,.session-item.dragging,.session-item.session-reflowing,.session-item.swipe-committed,.session-item.swipe-removing{transition:none;}
+    .session-item.long-pressing,.session-item.session-swipe-returning{animation:none;}
+    .session-item.session-list-flip-enter{animation:none;}
+    .session-state-indicator.is-attention-approval:not(.is-streaming):not(.is-unread)::before{animation:none;}
+  }
   /* Hide overlay during inline rename */
   .session-item:has(.session-title-input) .session-actions{display:none;}
+  @keyframes session-menu-in{from{opacity:0;transform:translate3d(0,-4px,0) scale(.985);}to{opacity:1;transform:translate3d(0,0,0) scale(1);}}
+  @keyframes session-long-press{from{filter:brightness(1);}to{filter:brightness(1.08);}}
+  @keyframes sessionSwipeReturn{0%{opacity:.62;transform:translate3d(var(--session-swipe-return-offset,32px),var(--session-reflow-offset,0),0) scale(.985);}100%{opacity:1;transform:translate3d(0,var(--session-reflow-offset,0),0) scale(1);}}
   @keyframes newflash{0%{background:var(--accent-bg-strong);color:var(--accent);}100%{background:transparent;color:var(--muted);}}
   @keyframes sessionListFlipIn{0%{opacity:0;transform:perspective(700px) rotateX(-8deg) translateY(10px) scale(.985);}100%{opacity:1;transform:perspective(700px) rotateX(0) translateY(0) scale(1);}}
+  @keyframes sessionAttentionPulse{0%,100%{filter:saturate(1);box-shadow:0 0 0 1px color-mix(in srgb,var(--error) 42%,transparent),0 0 0 0 color-mix(in srgb,var(--error) 18%,transparent);}50%{filter:saturate(1.12);box-shadow:0 0 0 1px color-mix(in srgb,var(--error) 55%,transparent),0 0 0 4px color-mix(in srgb,var(--error) 10%,transparent);}}
   @keyframes spin{to{transform:rotate(360deg);}}
   .session-item.new-flash{animation:newflash 1.4s ease-out forwards;}
-  .session-item.session-reflowing{transition:background .15s,color .15s,transform .36s cubic-bezier(.2,.8,.2,1);will-change:transform;}
   .session-item.session-list-flip-enter{animation:sessionListFlipIn .28s cubic-bezier(.2,.8,.2,1) backwards;transform-origin:center top;}
-  @media (prefers-reduced-motion: reduce){
-    .session-item,
-    .session-item.session-reflowing{transition:background .15s,color .15s;}
-    .session-item.session-list-flip-enter{animation:none;}
-  }
   /* Collapsible date group headers */
   .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 10px 4px;cursor:pointer;user-select:none;opacity:.8;transition:opacity .15s;}
   .session-date-header:hover{opacity:1;}
@@ -1996,6 +2220,13 @@
     .suggestion{font-size:12px;padding:10px 12px;}
   }
 
+  @media (hover:none) and (pointer:coarse){
+    .session-actions{display:none;}
+    .session-item{padding-right:6px;}
+    .session-item.streaming,.session-item.unread{padding-right:40px;}
+    .session-item:focus-within,.session-item.menu-open{padding-right:6px;}
+  }
+
   @media (max-width: 340px){
     /* Extreme legacy-phone widths (e.g. 320px) cannot fit five 44px
        left-side touch targets plus the fixed send button with the normal
@@ -2422,6 +2653,7 @@ body.resizing .sidebar{transition:none!important;}
 .tool-card-running{border-color:var(--accent-bg-strong);background:var(--accent-bg);}
 .tool-card-header{display:flex;align-items:center;gap:var(--space-2);padding:var(--space-1) var(--space-3);cursor:pointer;user-select:none;}
 .tool-card-icon{font-size:13px;flex-shrink:0;opacity:.65;}
+
 .tool-card-name{font-size:var(--font-size-xs);font-weight:600;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;flex-shrink:0;}
 .tool-card-preview{font-size:var(--font-size-xs);color:var(--muted);opacity:.62;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .tool-card-toggle{font-size:10px;color:var(--muted);opacity:.45;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform;}

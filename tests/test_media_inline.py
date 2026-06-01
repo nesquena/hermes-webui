@@ -19,6 +19,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from tests._pytest_port import BASE, TEST_STATE_DIR
@@ -40,6 +41,15 @@ class TestMediaRenderMdStash(unittest.TestCase):
     def test_media_token_regex(self):
         self.assertIn("MEDIA:", UI_JS,
                       "MEDIA: token regex must be present in renderMd()")
+
+    def test_bare_file_urls_are_stashed_as_media_artifacts(self):
+        self.assertIn("file:// links for local artifacts", UI_JS)
+        self.assertIn("file:\\/\\/[^\\s<>", UI_JS)
+
+    def test_file_urls_are_rewritten_through_media_endpoint(self):
+        self.assertIn("new URL(ref)", UI_JS)
+        self.assertIn("u.pathname", UI_JS)
+        self.assertIn("api/media?path=", UI_JS)
 
     def test_media_restore_produces_img_tag(self):
         self.assertIn("msg-media-img", UI_JS,
@@ -255,6 +265,226 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn(".split(_os.pathsep)", block)
         self.assertNotIn('.split(":")', block)
 
+    def test_path_is_within_root_treats_commonpath_valueerror_as_not_within(self):
+        """Windows cross-drive commonpath() errors must not crash /api/media."""
+        from api import routes
+
+        with mock.patch.object(
+            routes.os.path,
+            "commonpath",
+            side_effect=ValueError("Paths don't have the same drive"),
+        ):
+            self.assertFalse(
+                routes._path_is_within_root(
+                    pathlib.Path("D:/outputs/card.png"),
+                    pathlib.Path("C:/Users/agent/.hermes"),
+                )
+            )
+
+    def test_path_is_within_root_accepts_child_path(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            root = pathlib.Path(tmpd).resolve()
+            child = root / "media" / "card.png"
+            child.parent.mkdir()
+            child.write_bytes(b"png")
+            self.assertTrue(routes._path_is_within_root(child.resolve(), root))
+
+    def test_active_workspace_carveout_gated_against_hermes_roots(self):
+        """#3234: the active-workspace carve-out must NOT re-open the disclosure
+        when the active workspace is pathologically set to a broad/internal root
+        ($HOME, ~/.hermes, a profile root, etc.). A state.db sitting under such a
+        workspace must still be denied (403), not served.
+        """
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self._buf = []
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            class _W:
+                def write(self_inner, b):
+                    pass
+            wfile = _W()
+
+        with tempfile.TemporaryDirectory() as home:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            secret = hermes_home / "state.db"
+            secret.write_bytes(b"secret-state")
+            target = secret.resolve()
+
+            handler = _Handler()
+            parsed = SimpleNamespace(
+                query=f"path={urllib.parse.quote(str(target))}", path="/api/media"
+            )
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(hermes_home)), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False):
+                routes._handle_media(handler, parsed)
+
+            self.assertEqual(
+                handler.status, 403,
+                "state.db must stay denied even when the active workspace IS the "
+                "Hermes home (carve-out must be gated against internal roots)",
+            )
+
+    def test_active_workspace_under_state_dir_serves_but_sessions_denied(self):
+        """#3234: a workspace at STATE_DIR/workspace is legitimate user media —
+        STATE_DIR/workspace/shot.png must serve (not 403), while a sibling
+        STATE_DIR/sessions/<sid>.json (internal state) must stay denied (403).
+
+        Regression for the over-block where STATE_DIR was denied wholesale.
+        """
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            class _W:
+                def write(self_inner, b):
+                    pass
+                def flush(self_inner):
+                    pass
+            wfile = _W()
+
+        png_bytes = (
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
+            b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00'
+            b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+        )
+        with tempfile.TemporaryDirectory() as home:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            state_dir = hermes_home / "webui-state"
+            ws = state_dir / "workspace"
+            sessions = state_dir / "sessions"
+            ws.mkdir(parents=True)
+            sessions.mkdir(parents=True)
+            shot = ws / "shot.png"
+            shot.write_bytes(png_bytes)
+            sess_file = sessions / "abc.json"
+            sess_file.write_text('{"messages":[]}', encoding="utf-8")
+
+            env = {
+                "HERMES_HOME": str(hermes_home),
+                "HERMES_WEBUI_STATE_DIR": str(state_dir),
+            }
+            with mock.patch.dict(os.environ, env), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                 mock.patch("api.config.STATE_DIR", state_dir):
+                # workspace media → not blocked by the #3234 deny
+                h1 = _Handler()
+                routes._handle_media(h1, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(shot.resolve()))}&inline=1",
+                    path="/api/media"))
+                self.assertNotEqual(
+                    h1.status, 403,
+                    "STATE_DIR/workspace/shot.png must NOT be blocked (legit media)")
+                # sessions state → still denied
+                h2 = _Handler()
+                routes._handle_media(h2, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(sess_file.resolve()))}",
+                    path="/api/media"))
+                self.assertEqual(
+                    h2.status, 403,
+                    "STATE_DIR/sessions/abc.json must stay denied (internal state)")
+
+    def test_named_profile_workspace_serves_but_profile_secrets_denied(self):
+        """#3234: a named-profile workspace (<base>/profiles/p1/workspace) is
+        legitimate media and must serve, while that profile's secrets
+        (<base>/profiles/p1/auth.json) and a SIBLING profile's secrets
+        (<base>/profiles/other/auth.json) must stay denied (403).
+
+        Regression for the over-block where the whole `profiles` tree was denied.
+        """
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, *a, **k):
+                pass
+            def end_headers(self):
+                pass
+            class _W:
+                def write(self_inner, b):
+                    pass
+                def flush(self_inner):
+                    pass
+            wfile = _W()
+
+        png_bytes = (
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
+            b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00'
+            b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+        )
+        with tempfile.TemporaryDirectory() as home:
+            base = pathlib.Path(home) / ".hermes"
+            p1_ws = base / "profiles" / "p1" / "workspace"
+            p1_ws.mkdir(parents=True)
+            (p1_ws / "shot.png").write_bytes(png_bytes)
+            p1_secret = base / "profiles" / "p1" / "auth.json"
+            p1_secret.write_text("{}", encoding="utf-8")
+            other_secret = base / "profiles" / "other" / "auth.json"
+            other_secret.parent.mkdir(parents=True)
+            other_secret.write_text("{}", encoding="utf-8")
+
+            active = base / "profiles" / "p1"  # active profile HERMES_HOME
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(active)}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(p1_ws)), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False), \
+                 mock.patch("api.profiles._DEFAULT_HERMES_HOME", base):
+                # named-profile workspace media → served
+                h1 = _Handler()
+                routes._handle_media(h1, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str((p1_ws / 'shot.png').resolve()))}&inline=1",
+                    path="/api/media"))
+                self.assertNotEqual(
+                    h1.status, 403,
+                    "named-profile workspace media must NOT be blocked")
+                # this profile's own secret → denied
+                h2 = _Handler()
+                routes._handle_media(h2, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(p1_secret.resolve()))}",
+                    path="/api/media"))
+                self.assertEqual(h2.status, 403, "profile auth.json must be denied")
+                # sibling profile's secret → denied
+                h3 = _Handler()
+                routes._handle_media(h3, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(other_secret.resolve()))}",
+                    path="/api/media"))
+                self.assertEqual(h3.status, 403, "sibling profile auth.json must be denied")
+                # per-profile webui_state/sessions → denied (not a direct child of root)
+                ws_sess = active / "webui_state" / "sessions"
+                ws_sess.mkdir(parents=True, exist_ok=True)
+                ws_sess_file = ws_sess / "s1.json"
+                ws_sess_file.write_text('{"messages":[]}', encoding="utf-8")
+                h4 = _Handler()
+                routes._handle_media(h4, SimpleNamespace(
+                    query=f"path={urllib.parse.quote(str(ws_sess_file.resolve()))}",
+                    path="/api/media"))
+                self.assertEqual(
+                    h4.status, 403,
+                    "profile webui_state/sessions/*.json must be denied")
+
     def test_media_endpoints_advertise_byte_range_support(self):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         self.assertIn("Accept-Ranges", routes_src)
@@ -429,6 +659,79 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             "/api/media?path=" + urllib.request.quote("/tmp/../../etc/passwd")
         )
         self.assertIn(status, {403, 404})
+
+    def test_webui_state_secret_files_denied(self):
+        """#3234: /api/media must hard-deny WebUI state/secret files even though
+        they live under an allowed root (the whole Hermes home is allowed).
+
+        An authenticated session rendering attacker-influenced agent output that
+        emits a file://  or MEDIA: link to settings.json / state.db / auth.json
+        must NOT be able to fetch it through /api/media.
+        """
+        state_dir = pathlib.Path(TEST_STATE_DIR)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        # settings.json by name (deny-by-filename)
+        settings = state_dir / "settings.json"
+        settings.write_text('{"secret":"value"}', encoding="utf-8")
+        try:
+            _, status, _ = self._get(
+                "/api/media?path=" + urllib.request.quote(str(settings.resolve()))
+            )
+            self.assertEqual(
+                status, 403,
+                f"settings.json under the state dir must be denied, got {status}",
+            )
+        finally:
+            settings.unlink(missing_ok=True)
+
+        # a file inside the sessions/ state subdir (deny-by-dir)
+        sess_dir = state_dir / "sessions"
+        sess_dir.mkdir(parents=True, exist_ok=True)
+        sess_file = sess_dir / "abc123.json"
+        sess_file.write_text('{"messages":[]}', encoding="utf-8")
+        try:
+            _, status, _ = self._get(
+                "/api/media?path=" + urllib.request.quote(str(sess_file.resolve()))
+            )
+            self.assertEqual(
+                status, 403,
+                f"files under the sessions/ state subdir must be denied, got {status}",
+            )
+        finally:
+            sess_file.unlink(missing_ok=True)
+
+    def test_deny_list_does_not_overblock_legitimate_media(self):
+        """#3234 follow-up: the state/secret deny-list must NOT block ordinary
+        media that merely shares a sensitive basename but lives OUTSIDE any
+        Hermes state root (e.g. a user artifact in /tmp named settings.json).
+
+        The deny is scoped to files under a Hermes root; a /tmp PNG named
+        settings.png — or even settings.json — is the user's own content and
+        must still be served (200), not 403.
+        """
+        png_bytes = (
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
+            b'\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00'
+            b'\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+        )
+        # A /tmp artifact whose stem collides with a denied basename — must serve
+        # because /tmp is not a Hermes state root.
+        with tempfile.NamedTemporaryFile(
+            suffix=".png", prefix="settings_artifact_", dir="/tmp", delete=False
+        ) as f:
+            f.write(png_bytes)
+            tmp_path = f.name
+        try:
+            body, status, headers = self._get(
+                f"/api/media?path={urllib.request.quote(tmp_path)}"
+            )
+            self.assertEqual(
+                status, 200,
+                f"a /tmp PNG outside any Hermes root must serve, got {status}",
+            )
+            self.assertIn("image/png", headers.get("Content-Type", ""))
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
 
     def test_health_check_still_works(self):
         """Sanity: server is up and /health works."""

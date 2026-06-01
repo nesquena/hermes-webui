@@ -31,16 +31,69 @@ HOME = Path.home()
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 
 
+def _hermes_home_has_webui_state(base: Path) -> bool:
+    """Return True when *base* holds real WebUI state under its ``webui/`` dir.
+
+    Used only on Windows to detect a pre-v0.51.134 install at the legacy
+    ``%USERPROFILE%\\.hermes`` location so we don't strand the user's existing
+    sessions/pins/settings when the default moved to ``%LOCALAPPDATA%\\hermes``
+    (#2905).
+
+    We intentionally check ONLY WebUI-owned artifacts (the ``webui/`` subtree),
+    NOT agent-owned files like ``config.yaml`` / ``auth.json``.  The agent has
+    defaulted to ``%LOCALAPPDATA%\\hermes`` on Windows since before #2897, so a
+    long-time agent user who never ran WebUI at the legacy location would have a
+    stray ``auth.json`` there — keying on that would wrongly divert a *fresh*
+    WebUI install to the legacy dir.  Only ``webui/`` state is what actually
+    gets stranded by the move, so it is the correct and narrow signal.
+    Cheap stat-only checks; never raises.
+    """
+    try:
+        if not base.is_dir():
+            return False
+        markers = (
+            base / "webui" / "sessions",        # WebUI session store
+            base / "webui" / "settings.json",   # WebUI UI settings + pins
+            base / "webui",                     # WebUI state dir at all
+        )
+        return any(m.exists() for m in markers)
+    except OSError:
+        return False
+
+
 def _platform_default_hermes_home() -> Path:
     """Return the platform-aware default Hermes home when HERMES_HOME is unset.
 
     Native Windows Hermes Agent installs default to %LOCALAPPDATA%\\hermes,
     while POSIX installs use ~/.hermes.
+
+    Windows migration safety (#2905): v0.51.134 moved the Windows default from
+    ``%USERPROFILE%\\.hermes`` to ``%LOCALAPPDATA%\\hermes`` to match the agent.
+    Upgrading users whose WebUI state still lives at the old location saw an
+    empty app (sessions/pins/settings "lost" — actually just at an address the
+    new build no longer reads).  To avoid stranding that data, prefer the
+    legacy ``%USERPROFILE%\\.hermes`` ONLY when it is populated AND the new
+    ``%LOCALAPPDATA%\\hermes`` location is not yet established.  This is a
+    non-destructive, self-healing fallback: no files are moved, and once the
+    new location has state (fresh installs, or users who set HERMES_HOME) the
+    legacy path is never preferred.  Explicit HERMES_HOME / HERMES_WEBUI_STATE_DIR
+    overrides take precedence upstream and are unaffected.
     """
     if os.name == "nt":
         local_app_data = os.getenv("LOCALAPPDATA", "").strip()
         if local_app_data:
-            return Path(local_app_data) / "hermes"
+            new_home = Path(local_app_data) / "hermes"
+            legacy_home = HOME / ".hermes"
+            # Only fall back to the legacy home if it actually holds state and
+            # the new location has not been established yet — the exact
+            # post-upgrade fingerprint from #2905.
+            if (
+                legacy_home != new_home
+                and not _hermes_home_has_webui_state(new_home)
+                and _hermes_home_has_webui_state(legacy_home)
+            ):
+                return legacy_home
+            return new_home
     return HOME / ".hermes"
 
 # ── Network config (env-overridable) ─────────────────────────────────────────
@@ -2131,6 +2184,32 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     )
     if any(model.startswith(prefix) for prefix in prefixes):
         return list(VALID_REASONING_EFFORTS)
+    # Custom API aggregators (e.g. New API, One API) use non-standard model naming:
+    # bare names like "deepseek-v4-flash" or dot-separated "moonshotai.kimi-k2.5"
+    # rather than the OpenRouter-style "vendor/model" that the prefix list targets.
+    # Strip a dot-vendor prefix (e.g. "moonshotai.kimi-k2.5" → "kimi-k2.5") and
+    # check both the original bare name and the stripped suffix.
+    bare_after_dot = bare.split(".", 1)[-1] if "." in bare else bare
+    thinking_bare_prefixes = (
+        "deepseek-v4",
+        "deepseek-r1",
+        "deepseek-r2",
+        "kimi-k2",
+        "kimi-thinking",
+        "qwen3",
+        "claude-3",
+        "claude-4",
+        "o1-",
+        "o3-",
+        "o4-",
+    )
+    if any(
+        bare.startswith(p) or bare_after_dot.startswith(p)
+        for p in thinking_bare_prefixes
+    ):
+        return list(VALID_REASONING_EFFORTS)
+    if "thinking" in bare or "reasoning" in bare:
+        return list(VALID_REASONING_EFFORTS)
     return []
 
 
@@ -2637,7 +2716,7 @@ def _minimal_static_models_catalog() -> dict:
 # session is expensive (~10s for zai due to endpoint probing).  The credential pool
 # only changes when the user adds/removes credentials, which is rare; a 24h TTL
 # is plenty safe and ensures get_available_models() cold paths are fast.
-_CREDENTIAL_POOL_CACHE: dict[str, tuple[float, "CredentialPool"]] = {}  # pid -> (ts, pool)
+_CREDENTIAL_POOL_CACHE: dict[str, tuple[float, "CredentialPool"]] = {}  # noqa: F821  forward-ref string annotation, resolved at runtime  # pid -> (ts, pool)
 _provider_models_invalidated_ts: dict[str, float] = {}  # provider_id -> timestamp of last invalidation
 
 # Disk-backed in-memory cache for get_available_models().
@@ -3582,6 +3661,7 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                 "XIAOMI_API_KEY",
                 "OPENCODE_ZEN_API_KEY",
                 "OPENCODE_GO_API_KEY",
+                "OPENCODE_API_KEY",
                 "MINIMAX_API_KEY",
                 "MINIMAX_CN_API_KEY",
                 "XAI_API_KEY",
@@ -3623,9 +3703,9 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                 detected_providers.add("x-ai")
             if all_env.get("MISTRAL_API_KEY"):
                 detected_providers.add("mistralai")
-            if all_env.get("OPENCODE_ZEN_API_KEY"):
+            if all_env.get("OPENCODE_ZEN_API_KEY") or all_env.get("OPENCODE_API_KEY"):
                 detected_providers.add("opencode-zen")
-            if all_env.get("OPENCODE_GO_API_KEY"):
+            if all_env.get("OPENCODE_GO_API_KEY") or all_env.get("OPENCODE_API_KEY"):
                 detected_providers.add("opencode-go")
             # AWS Bedrock uses IAM credentials rather than a single API key.
             # Detect when both access key and secret are available (#2720).

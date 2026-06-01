@@ -28,10 +28,10 @@ def test_loadsession_preserves_tool_rows():
 
 def test_loadsession_uses_session_toolcalls_only_as_fallback():
     """Session summaries are the fallback, not the primary reload source."""
-    assert ("if(!hasMessageToolMetadata&&data.session.tool_calls&&data.session.tool_calls.length)" in SESSIONS_JS or
-            "if (!hasMessageToolMetadata && data.session.tool_calls && data.session.tool_calls.length)" in SESSIONS_JS)
-    assert ("S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));" in SESSIONS_JS or
-            "S.toolCalls = data.session.tool_calls.map(tc => ({...tc, done: true}));" in SESSIONS_JS)
+    assert "function _syncToolCallsForLoadedMessages(messages, sessionToolCalls)" in SESSIONS_JS
+    assert "if(!hasMessageToolMetadata&&Array.isArray(sessionToolCalls)&&sessionToolCalls.length)" in SESSIONS_JS
+    assert "windowOffset" not in SESSIONS_JS
+    assert "copy.assistant_msg_idx=idx-offset;" not in SESSIONS_JS
     assert "S.toolCalls=[];" in SESSIONS_JS
 
 
@@ -114,3 +114,27 @@ def test_reload_uses_session_summary_when_messages_have_no_tool_metadata():
     assert result["has_metadata"] is False
     assert result["fallback_len"] == 1
     assert result["done_flag"] is True
+
+
+def test_rebased_legacy_toolcalls_stay_distinct_in_paged_window():
+    """Backend-rebased legacy tool calls must not be rebased a second time."""
+    result = _run_js("""
+        const messages = [
+            { role: 'assistant', content: 'first legacy page row' },
+            { role: 'assistant', content: 'second legacy page row' }
+        ];
+        const sessionToolCalls = [
+            { name: 'first_tool', assistant_msg_idx: 0, snippet: 'first' },
+            { name: 'second_tool', assistant_msg_idx: 1, snippet: 'second' }
+        ];
+        const loaded = loadSessionShape(messages, sessionToolCalls);
+        const renderedRawIdxs = messages.map((_, idx) => idx);
+        process.stdout.write(JSON.stringify({
+            indices: loaded.toolCalls.map(tc => tc.assistant_msg_idx),
+            distinct_indices: new Set(loaded.toolCalls.map(tc => tc.assistant_msg_idx)).size,
+            anchors_visible: loaded.toolCalls.every(tc => renderedRawIdxs.includes(tc.assistant_msg_idx))
+        }));
+    """)
+    assert result["indices"] == [0, 1]
+    assert result["distinct_indices"] == 2
+    assert result["anchors_visible"] is True
