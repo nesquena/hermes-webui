@@ -17,6 +17,13 @@ const ICONS={
 // responses from in-flight requests when the user switches sessions again
 // before the first request completes (#1060).
 let _loadingSessionId = null;
+// #3306: Snapshot of S.messages captured by loadSession() right before it
+// clears them on a force-reload of the active session. Consumed by
+// _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
+// ephemeral fields (_turnUsage, _turnDuration, _turnTps, _gatewayRouting,
+// _statusCard) survive the wholesale replace. null when there is nothing
+// to carry forward (initial load, switch-to-different-session, etc.).
+let _pendingCarryForwardSnapshot = null;
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
@@ -611,6 +618,18 @@ async function loadSession(sid){
     _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
   }
   if (currentSid !== sid || forceReload) {
+    // #3306: When force-reloading the currently-active session (e.g. external
+    // poll triggering a refresh), snapshot the existing messages BEFORE we
+    // clear them. _ensureMessagesLoaded() runs the ephemeral-field
+    // carry-forward (_turnUsage, _turnDuration, _turnTps, _gatewayRouting,
+    // _statusCard) against S.messages, but by the time the API fetch returns
+    // S.messages has already been reset to [] here and the carry-forward is a
+    // no-op. The visible symptom is the token-usage badge vanishing ~10s
+    // after each assistant turn completes. Stash the snapshot so the
+    // carry-forward call can consume it.
+    _pendingCarryForwardSnapshot = (currentSid === sid && forceReload)
+      ? (S.messages || []).slice()
+      : null;
     S.messages = [];
     S.toolCalls = [];
     _messagesTruncated = false;
@@ -1355,7 +1374,14 @@ async function _ensureMessagesLoaded(sid) {
   // #3018: preserve client-side ephemeral turn fields (_turnUsage, _turnDuration,
   // _turnTps, _gatewayRouting, _statusCard) across the loadSession replace.
   if(typeof window._carryForwardEphemeralTurnFields==='function'){
-    msgs=window._carryForwardEphemeralTurnFields(S.messages||[], msgs);
+    // #3306: Prefer the pre-clear snapshot stashed by loadSession() on a
+    // force-reload of the active session; S.messages was reset to [] there
+    // and would otherwise yield an empty carry-forward.
+    const _prev = (Array.isArray(_pendingCarryForwardSnapshot) && _pendingCarryForwardSnapshot.length)
+      ? _pendingCarryForwardSnapshot
+      : (S.messages || []);
+    msgs=window._carryForwardEphemeralTurnFields(_prev, msgs);
+    _pendingCarryForwardSnapshot = null;
   }
   S.messages = msgs;
   if(S.session&&S.session.session_id===sid){
@@ -1595,7 +1621,15 @@ async function _ensureAllMessagesLoaded() {
     // prefetch (whose snapshot was taken before this call's mutex
     // acquisition) sees the new value and aborts.
     _bumpMessagesGeneration();
-    S.messages = msgs;
+    // #3306: Same ephemeral-field carry-forward as _ensureMessagesLoaded.
+    // Loading older messages also does a wholesale replace of S.messages
+    // and would otherwise drop _turnUsage/_turnDuration/_turnTps/
+    // _gatewayRouting/_statusCard on the existing turns.
+    let _msgsToAssign = msgs;
+    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+      _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
+    }
+    S.messages = _msgsToAssign;
     _messagesTruncated = false;
     _oldestIdx = 0;
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
