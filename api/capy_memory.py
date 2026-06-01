@@ -1977,6 +1977,67 @@ def _github_pull_files_refresh_summary(origin_uri: str, payload: list[Any]) -> s
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_contributors_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "contributors"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_contributor_login_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    login = _safe_public_text(value, limit=80)
+    if not login or _refresh_value_is_blocked(login):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", login))
+
+
+def _github_contributor_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if not _github_contributor_login_is_safe(row.get("login")):
+        return False
+    if _safe_optional_nonnegative_int(row.get("contributions")) is None:
+        return False
+    contributor_id = row.get("id")
+    if _is_present_public_value(contributor_id) and _safe_optional_nonnegative_int(contributor_id) is None:
+        return False
+    return True
+
+
+def _json_payload_is_github_contributors_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_contributors_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_contributor_row_is_safe(row) for row in payload)
+
+
+def _github_contributors_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_contributors_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_contributor_row_is_safe(row)]
+    parts = [f"GitHub contributors for {repo}", f"contributor count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        login = _safe_public_text(row.get("login"), limit=80)
+        contributions = _safe_optional_nonnegative_int(row.get("contributions")) or 0
+        parts.append(f"contributor: {login}; contributions: {contributions}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -2011,6 +2072,15 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
     if _json_payload_is_github_pull_files_metadata(origin_uri, payload):
         title = f"GitHub PR files #{(_github_pull_files_path_number(origin_uri) or 0)}"
         summary = _github_pull_files_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _json_payload_is_github_contributors_metadata(origin_uri, payload):
+        title = f"GitHub contributors {(_github_contributors_path_repo(origin_uri) or source_id)}"
+        summary = _github_contributors_refresh_summary(origin_uri, payload)
         return {
             "metadata_only": True,
             "title": title,
