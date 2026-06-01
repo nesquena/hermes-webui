@@ -83,7 +83,7 @@ _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._:-]+")
 _REFRESH_BLOCKED_VALUE_RE = re.compile(
     r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
     r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
-    r"renderer|rendercode|generated[_ -]?code|raw\s+prompt|raw\s+fetched\s+body|"
+    r"renderer|rendercode|generated[_ -]?code|raw\s+prompt|system\s+prompt|raw\s+fetched\s+body|"
     r"javascript\s*:|"
     r"ignore\s+previous\s+instructions|credential|password|secret(?!ary)|token(?!ization)|"
     r"authorization|cookie|"
@@ -1695,6 +1695,120 @@ def _github_workflow_jobs_refresh_summary(origin_uri: str, payload: dict[str, An
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_check_runs_path_info(origin_uri: str) -> tuple[str, str] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or lowered[4] != "commits"
+        or not re.fullmatch(r"[A-Fa-f0-9]{40}", path[5])
+        or lowered[6] != "check-runs"
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", path[5].lower()
+
+
+def _github_check_run_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    name = _safe_public_text(value, limit=200)
+    if not name or name != value.strip():
+        return False
+    if _refresh_value_is_blocked(name) or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(name):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._/#:+@(),-]{0,199}", name))
+
+
+def _github_check_run_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    check_id = _safe_optional_nonnegative_int(row.get("id"))
+    if check_id is None or check_id <= 0:
+        return False
+    if not _github_check_run_name_is_safe(row.get("name")):
+        return False
+    status = _safe_public_text(row.get("status"), limit=60).lower()
+    if not status or status not in _GITHUB_WORKFLOW_RUN_STATUSES:
+        return False
+    conclusion = _safe_public_text(row.get("conclusion"), limit=80).lower()
+    if conclusion and conclusion not in _GITHUB_WORKFLOW_RUN_CONCLUSIONS:
+        return False
+    for field in ("started_at", "completed_at"):
+        raw_value = row.get(field)
+        if raw_value is not None and not _safe_iso_timestamp(raw_value):
+            return False
+    for raw_value in (row.get("id"), row.get("name"), row.get("status"), row.get("conclusion"), row.get("started_at"), row.get("completed_at")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_check_runs_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_check_runs_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    if total_count is None:
+        return False
+    check_runs = payload.get("check_runs")
+    if not isinstance(check_runs, list):
+        return False
+    if not check_runs:
+        return total_count == 0
+    return all(_github_check_run_row_is_safe(row) for row in check_runs)
+
+
+def _github_check_runs_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo, sha = _github_check_runs_path_info(origin_uri) or ("repository", "")
+    raw_runs = payload.get("check_runs")
+    check_runs = raw_runs if isinstance(raw_runs, list) else []
+    safe_runs = [row for row in check_runs if _github_check_run_row_is_safe(row)]
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    conclusion_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    parts = [
+        f"GitHub check runs for {repo} at {sha[:12]}",
+        f"check-run count: {total_count if total_count is not None else len(check_runs)}",
+    ]
+    for row in safe_runs:
+        status = _safe_public_text(row.get("status"), limit=60).lower()
+        conclusion = _safe_public_text(row.get("conclusion"), limit=80).lower()
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if conclusion:
+            conclusion_counts[conclusion] = conclusion_counts.get(conclusion, 0) + 1
+    for status in sorted(status_counts):
+        parts.append(f"status {status}: {status_counts[status]}")
+    for conclusion in sorted(conclusion_counts):
+        parts.append(f"conclusion {conclusion}: {conclusion_counts[conclusion]}")
+    for row in safe_runs[:5]:
+        check_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        name = _safe_public_text(row.get("name"), limit=200)
+        status = _safe_public_text(row.get("status"), limit=60).lower()
+        conclusion = _safe_public_text(row.get("conclusion"), limit=80).lower()
+        started = _safe_iso_timestamp(row.get("started_at")) if row.get("started_at") is not None else ""
+        completed = _safe_iso_timestamp(row.get("completed_at")) if row.get("completed_at") is not None else ""
+        run_parts = [f"check run {check_id}: {name}", f"status: {status}"]
+        if conclusion:
+            run_parts.append(f"conclusion: {conclusion}")
+        if started:
+            run_parts.append(f"started: {started}")
+        if completed:
+            run_parts.append(f"completed: {completed}")
+        parts.append("; ".join(run_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_commit_path_sha(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -1819,7 +1933,7 @@ def _refresh_value_is_blocked(value: Any) -> bool:
     if not isinstance(value, _PUBLIC_SCALAR_TYPES):
         return False
     text = str(value)
-    normalized = re.sub(r"[._/-]+", " ", text)
+    normalized = re.sub(r"[^A-Za-z0-9]+", " ", text)
     return bool(_REFRESH_BLOCKED_VALUE_RE.search(text) or _REFRESH_BLOCKED_VALUE_RE.search(normalized))
 
 
@@ -2978,6 +3092,11 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         elif _json_payload_is_github_workflow_jobs_metadata(origin_uri, payload):
             title = f"GitHub workflow run {_github_workflow_jobs_path_run_id(origin_uri) or 0} jobs"
             summary = _github_workflow_jobs_refresh_summary(origin_uri, payload)
+        elif _json_payload_is_github_check_runs_metadata(origin_uri, payload):
+            check_runs_info = _github_check_runs_path_info(origin_uri)
+            check_runs_repo, check_runs_sha = check_runs_info or (source_id, "")
+            title = f"GitHub check runs {check_runs_repo} {check_runs_sha[:12]}".strip()
+            summary = _github_check_runs_refresh_summary(origin_uri, payload)
         elif _json_payload_is_github_commit_metadata(origin_uri, payload):
             title = f"GitHub commit {(_github_commit_path_sha(origin_uri) or source_id)[:12]}"
             summary = _github_commit_refresh_summary(origin_uri, payload)
