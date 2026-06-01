@@ -5322,6 +5322,7 @@ async function switchToProfile(name) {
       if (S.session && !sessionInProgress) {
         S.session.model = modelToUse;
         S.session.model_provider = modelState.model_provider||providerId||null;
+        S.session.profile = data.active || name;
       }
     }
 
