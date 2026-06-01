@@ -766,6 +766,9 @@
   .system-health-bar-fill{height:100%;width:0%;border-radius:inherit;background:linear-gradient(90deg,var(--accent),var(--accent-hover));transition:width .25s ease;}
   .system-health-foot{font-size:11px;color:var(--muted);line-height:1.45;opacity:.82;}
   .app-titlebar-icon{display:inline-flex;align-items:center;color:var(--accent);}
+  .custom-logo-img[hidden]{display:none!important;}
+  .default-logo-mark[hidden],.default-logo-mark.is-hidden,html.has-custom-logo .default-logo-mark{display:none!important;}
+  .app-titlebar-custom-logo{width:16px;height:16px;object-fit:contain;display:block;}
   .app-titlebar-title{font-size:12px;font-weight:600;color:var(--text);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw;}
   .app-titlebar-sub{font-size:10px;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;white-space:nowrap;flex-shrink:0;}
   .app-titlebar-sub[hidden]{display:none;}
@@ -1624,6 +1627,8 @@
   .empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:40px;color:var(--muted);}
   .empty-state.no-suggestions .suggestion-grid{display:none}
   .empty-logo{width:64px;height:64px;border-radius:20px;background:linear-gradient(145deg,var(--accent-bg),var(--accent-bg));border:1px solid var(--accent-bg);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:700;color:var(--accent-text);margin-bottom:4px;box-shadow:0 4px 20px var(--accent-bg);}
+  html.has-custom-logo .empty-logo{background:transparent;border:none;border-radius:0;box-shadow:none;}
+  .empty-custom-logo{width:52px;height:52px;object-fit:contain;display:block;}
   .empty-state h2{font-size:20px;color:var(--text);font-weight:700;letter-spacing:-.02em;}
   .empty-state p{font-size:14px;text-align:center;max-width:320px;}
   .suggestion-grid{display:flex;flex-direction:column;gap:8px;margin-top:12px;width:100%;max-width:380px;}
@@ -3228,6 +3233,55 @@ main.main > #mainPlugin{display:none;}
 }
 #mainSettings .settings-autosave-status button:hover{
   background:var(--accent-hover);
+}
+
+/* ── Custom logo upload ───────────────────────────────────────────── */
+.logo-upload-field{margin-bottom:12px;}
+.logo-upload-grid{display:block;}
+#logoUploadAreas.is-split .logo-upload-grid{
+  display:flex;
+  align-items:flex-start;
+  gap:16px;
+}
+#logoUploadAreas.is-split .logo-upload-field{
+  flex:0 0 auto;
+  margin-bottom:0;
+}
+.logo-upload-label{font-size:12px;font-weight:600;color:var(--muted);margin-bottom:6px;}
+.logo-drop-zone{
+  width:100px;height:100px;
+  border:2px dashed var(--border2);
+  border-radius:12px;
+  display:flex;align-items:center;justify-content:center;
+  cursor:pointer;transition:border-color 0.2s,background 0.2s;
+  position:relative;overflow:hidden;
+}
+.logo-drop-zone:hover,.logo-drop-zone.drag-over{
+  border-color:var(--accent);
+  background:var(--accent-bg);
+}
+.logo-drop-hint{
+  font-size:10px;color:var(--muted);text-align:center;padding:8px;
+  pointer-events:none;
+}
+.logo-drop-zone .logo-preview{
+  width:100%;height:100%;object-fit:contain;border-radius:8px;
+  position:absolute;top:0;left:0;
+}
+.logo-remove-btn{
+  margin-top:4px;font-size:11px;color:var(--danger, #e74c3c);
+  background:none;border:none;cursor:pointer;padding:2px 4px;
+  border-radius:4px;transition:background 0.15s;
+}
+.logo-remove-btn:hover{background:var(--danger-bg, rgba(231,76,60,0.1));}
+.logo-upload-hint{font-size:11px;color:var(--muted);margin-top:2px;}
+.logo-upload-requirements{font-size:11px;line-height:1.45;color:var(--muted);margin-bottom:8px;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface);}
+.logo-upload-status{display:none;font-size:11px;line-height:1.45;margin-bottom:8px;padding:7px 9px;border-radius:8px;border:1px solid var(--border);}
+.logo-upload-status.is-error{display:block;color:var(--danger, #e74c3c);border-color:color-mix(in srgb,var(--danger, #e74c3c) 45%,var(--border));background:var(--danger-bg, rgba(231,76,60,0.1));}
+.logo-upload-status.is-ok{display:block;color:var(--success, #22a06b);border-color:color-mix(in srgb,var(--success, #22a06b) 45%,var(--border));background:color-mix(in srgb,var(--success, #22a06b) 12%,transparent);}
+@media (max-width:520px){
+  #logoUploadAreas.is-split .logo-upload-grid{flex-direction:column;gap:0;}
+  #logoUploadAreas.is-split .logo-upload-field{margin-bottom:12px;}
 }
 
 /* Secondary sm-btn fallback (Sign out / Disable auth) — neutral outline. */

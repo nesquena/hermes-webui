@@ -1477,6 +1477,52 @@ const _LEGACY_THEME_MAP={
 };
 let _systemThemeMq=null;
 let _onSystemThemeChange=null;
+let _systemThemePollTimer=null;
+let _lastResolvedThemeIsDark=null;
+
+function _customLogoCachePayload(settings){
+  return {
+    enabled:!!(settings&&settings.custom_logo_enabled),
+    darkMode:!!(settings&&settings.custom_logo_dark_mode),
+    lightPath:(settings&&settings.custom_logo_light_path)||'',
+    darkPath:(settings&&settings.custom_logo_dark_path)||'',
+    lightVersion:window._customLogoLightVersion||'',
+    darkVersion:window._customLogoDarkVersion||'',
+  };
+}
+
+function _cacheCustomLogoState(settings){
+  try{
+    localStorage.setItem('hermes-custom-logo-state',JSON.stringify(_customLogoCachePayload(settings)));
+  }catch(_){}
+}
+
+function _readCachedCustomLogoState(){
+  try{
+    const logo=JSON.parse(localStorage.getItem('hermes-custom-logo-state')||'null');
+    if(!logo||!logo.enabled||!logo.lightPath) return null;
+    return logo;
+  }catch(_){
+    return null;
+  }
+}
+
+function _applyCachedCustomLogo(){
+  const logo=_readCachedCustomLogoState();
+  if(!logo||typeof applyCustomLogo!=='function') return;
+  window._customLogoEnabled=!!logo.enabled;
+  window._customLogoDarkMode=!!logo.darkMode;
+  window._customLogoLightPath=logo.lightPath||'';
+  window._customLogoDarkPath=logo.darkPath||'';
+  window._customLogoLightVersion=logo.lightVersion||'';
+  window._customLogoDarkVersion=logo.darkVersion||'';
+  applyCustomLogo({
+    custom_logo_enabled:!!logo.enabled,
+    custom_logo_dark_mode:!!logo.darkMode,
+    custom_logo_light_path:logo.lightPath||'',
+    custom_logo_dark_path:logo.darkPath||'',
+  });
+}
 
 function _normalizeAppearance(theme,skin){
   const rawTheme=typeof theme==='string'?theme.trim().toLowerCase():'';
@@ -1515,7 +1561,19 @@ function _syncThemeColorMeta(){
 }
 
 function _setResolvedTheme(isDark){
-  document.documentElement.classList.toggle('dark',!!isDark);
+  const nextIsDark=!!isDark;
+  document.documentElement.classList.toggle('dark',nextIsDark);
+  _lastResolvedThemeIsDark=nextIsDark;
+  window._customLogoThemeVersion=(Number(window._customLogoThemeVersion)||0)+1;
+  if(typeof applyCustomLogo==='function'){
+    // Use stored logo paths so theme switch picks the right variant
+    applyCustomLogo({
+      custom_logo_enabled: !!window._customLogoEnabled || (window._customLogoLightPath?true:false),
+      custom_logo_dark_mode: !!window._customLogoDarkMode,
+      custom_logo_light_path: window._customLogoLightPath||'',
+      custom_logo_dark_path: window._customLogoDarkPath||'',
+    });
+  }
   const link=document.getElementById('prism-theme');
   if(!link){ _syncThemeColorMeta(); return; }
   const want=isDark
@@ -1527,19 +1585,62 @@ function _setResolvedTheme(isDark){
   _syncThemeColorMeta();
 }
 
+function _syncSystemThemeFromMedia(){
+  if(!_systemThemeMq) return;
+  let matches=!!_systemThemeMq.matches;
+  try{
+    matches=window.matchMedia('(prefers-color-scheme:dark)').matches;
+  }catch(_){}
+  if(_lastResolvedThemeIsDark!==matches||document.documentElement.classList.contains('dark')!==matches){
+    _setResolvedTheme(matches);
+  }else if(typeof applyCustomLogo==='function'){
+    applyCustomLogo({
+      custom_logo_enabled: !!window._customLogoEnabled || (window._customLogoLightPath?true:false),
+      custom_logo_dark_mode: !!window._customLogoDarkMode,
+      custom_logo_light_path: window._customLogoLightPath||'',
+      custom_logo_dark_path: window._customLogoDarkPath||'',
+    });
+  }
+}
+
+function _installSystemThemeFallbacks(){
+  if(_systemThemePollTimer) clearInterval(_systemThemePollTimer);
+  _systemThemePollTimer=setInterval(_syncSystemThemeFromMedia,250);
+  window.addEventListener('focus',_syncSystemThemeFromMedia);
+  document.addEventListener('visibilitychange',_syncSystemThemeFromMedia);
+  window.addEventListener('pageshow',_syncSystemThemeFromMedia);
+}
+
+function _removeSystemThemeFallbacks(){
+  if(_systemThemePollTimer){
+    clearInterval(_systemThemePollTimer);
+    _systemThemePollTimer=null;
+  }
+  window.removeEventListener('focus',_syncSystemThemeFromMedia);
+  document.removeEventListener('visibilitychange',_syncSystemThemeFromMedia);
+  window.removeEventListener('pageshow',_syncSystemThemeFromMedia);
+}
+
 function _applyTheme(name){
   const normalized=_normalizeAppearance(name,'default');
   delete document.documentElement.dataset.theme;
   if(_systemThemeMq&&_onSystemThemeChange){
-    _systemThemeMq.removeEventListener('change',_onSystemThemeChange);
+    try{_systemThemeMq.removeEventListener('change',_onSystemThemeChange);}catch(_){}
+    try{_systemThemeMq.removeListener(_onSystemThemeChange);}catch(_){}
     _systemThemeMq=null;
     _onSystemThemeChange=null;
   }
+  _removeSystemThemeFallbacks();
   if(normalized.theme==='system'){
     _systemThemeMq=window.matchMedia('(prefers-color-scheme:dark)');
-    _onSystemThemeChange=()=>_setResolvedTheme(_systemThemeMq.matches);
+    _onSystemThemeChange=(event)=>{
+      const matches=event&&typeof event.matches==='boolean'?event.matches:_systemThemeMq.matches;
+      _setResolvedTheme(matches);
+    };
     _setResolvedTheme(_systemThemeMq.matches);
-    _systemThemeMq.addEventListener('change',_onSystemThemeChange);
+    try{_systemThemeMq.addEventListener('change',_onSystemThemeChange);}catch(_){}
+    try{_systemThemeMq.addListener(_onSystemThemeChange);}catch(_){}
+    _installSystemThemeFallbacks();
     return;
   }
   _setResolvedTheme(normalized.theme==='dark');
@@ -1659,12 +1760,95 @@ function applyBotName(){
   if(msg) msg.placeholder='Message '+name+'\u2026';
 }
 
+function customLogoAssetUrl(path,mode){
+  if(!path) return '';
+  var version='';
+  if(mode==='dark') version=window._customLogoDarkVersion||'';
+  else if(mode==='light') version=window._customLogoLightVersion||'';
+  if(!version&&window._customLogoVersionByPath) version=window._customLogoVersionByPath[path]||'';
+  if(!version) version='theme-'+(window._customLogoThemeVersion||0);
+  var src='branding/'+path;
+  if(version) src+=(src.indexOf('?')===-1?'?':'&')+'v='+encodeURIComponent(version);
+  return src;
+}
+
+function applyCustomLogo(settings){
+  if(!settings) return;
+  _cacheCustomLogoState(settings);
+  var enabled=settings.custom_logo_enabled;
+  var darkMode=settings.custom_logo_dark_mode;
+  var lightPath=settings.custom_logo_light_path||'';
+  var darkPath=settings.custom_logo_dark_path||'';
+
+  if(!enabled||!lightPath){
+    _setCustomLogoSrc('');
+    _setFavicon('static/favicon.svg');
+    return;
+  }
+
+  var lightSrc=customLogoAssetUrl(lightPath,'light');
+  var darkSrc=(darkMode&&darkPath)?customLogoAssetUrl(darkPath,'dark'):lightSrc;
+  var src=(darkMode&&document.documentElement.classList.contains('dark'))?darkSrc:lightSrc;
+
+  document.documentElement.dataset.customLogoMode=(src===darkSrc&&darkSrc!==lightSrc)?'dark':'light';
+  document.documentElement.dataset.customLogoSrc=src;
+  _setCustomLogoSrc(src);
+  _setFavicon(src);
+
+  function _setCustomLogoSrc(src){
+    var hasCustom=!!src;
+    document.documentElement.classList.toggle('has-custom-logo',hasCustom);
+    document.querySelectorAll('.custom-logo-img').forEach(function(img){
+      if(hasCustom){
+        img.src=src;
+        img.removeAttribute('hidden');
+      }else{
+        img.removeAttribute('src');
+        img.setAttribute('hidden','');
+      }
+    });
+    document.querySelectorAll('.default-logo-mark').forEach(function(mark){
+      mark.classList.toggle('is-hidden',hasCustom);
+      if(hasCustom) mark.setAttribute('hidden','');
+      else mark.removeAttribute('hidden');
+    });
+  }
+
+  function _setFavicon(src){
+    document.querySelectorAll('link[rel~=\"icon\"], link[rel=\"shortcut icon\"], link[rel=\"apple-touch-icon\"], link[rel~=\"apple-touch-icon\"]').forEach(function(l){l.remove();});
+    var cleanSrc=src.split('?')[0];
+    var isSvg=/\.svg$/i.test(cleanSrc);
+    var href=src;
+    if(src.indexOf('?')===-1){
+      var iconToken=(cleanSrc.split('/').pop()||lightPath||darkPath||'default');
+      href=src+'?v='+encodeURIComponent(iconToken);
+    }
+    var links=[
+      {rel:'icon',type:isSvg?'image/svg+xml':'image/png'},
+      {rel:'shortcut icon',type:isSvg?'image/svg+xml':'image/png'},
+    ];
+    if(!isSvg) links.push({rel:'apple-touch-icon',type:'image/png'});
+    links.forEach(function(meta){
+      var link=document.createElement('link');
+      link.rel=meta.rel;
+      link.type=meta.type;
+      link.href=href;
+      document.head.appendChild(link);
+    });
+  }
+}
+
 (async()=>{
   // Load send key preference
   let _bootSettings={};
+  _applyCachedCustomLogo();
   try{
     const s=await api('/api/settings');
     _bootSettings=s;
+    window._customLogoEnabled=!!s.custom_logo_enabled;
+    window._customLogoDarkMode=!!s.custom_logo_dark_mode;
+    window._customLogoLightPath=s.custom_logo_light_path||'';
+    window._customLogoDarkPath=s.custom_logo_dark_path||'';
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
     window._showQuotaChip=s.show_quota_chip===true;
@@ -1805,6 +1989,7 @@ function applyBotName(){
   // Fetch active profile
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
   applyBotName();
+  applyCustomLogo(_bootSettings);
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';

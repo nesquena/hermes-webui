@@ -18,6 +18,7 @@
 <meta name="apple-mobile-web-app-title" content="Hermes">
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
 <script>(function(){try{var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.classList.add('dark');}})()</script>
+<script>(function(){try{var raw=localStorage.getItem('hermes-custom-logo-state');if(!raw)return;var logo=JSON.parse(raw);if(logo&&logo.enabled&&logo.lightPath)document.documentElement.classList.add('has-custom-logo');}catch(e){}})()</script>
 <script>(function(){try{var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;}catch(e){}})()</script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
 <meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
@@ -123,7 +124,8 @@
   </button>
   <div class="app-titlebar-inner">
     <span class="app-titlebar-icon" aria-hidden="true">
-      <svg viewBox="0 0 64 64" width="16" height="16" aria-hidden="true">
+      <img class="custom-logo-img app-titlebar-custom-logo" alt="" hidden>
+      <svg class="default-logo-mark" viewBox="0 0 64 64" width="16" height="16" aria-hidden="true">
         <defs>
           <linearGradient id="app-titlebar-gold" x1="0%" y1="0%" x2="0%" y2="100%">
             <stop offset="0%" style="stop-color:#F5C542"/>
@@ -377,7 +379,7 @@
       <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" style="display:none" onclick="scrollToBottom()" aria-label="Scroll to bottom" data-i18n-aria-label="session_jump_end_label" data-i18n-title="session_jump_end_label"><span aria-hidden="true">↓</span><span class="session-jump-btn__text" data-i18n="session_jump_end">End</span></button>
     <div class="messages" id="messages">
       <div class="empty-state" id="emptyState">
-        <div class="empty-logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="80" height="80" aria-label="Hermes caduceus">
+        <div class="empty-logo"><img class="custom-logo-img empty-custom-logo" alt="" hidden><svg class="default-logo-mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="80" height="80" aria-label="Hermes caduceus">
           <defs>
             <linearGradient id="hermes-gold" x1="0%" y1="0%" x2="0%" y2="100%">
               <stop offset="0%" style="stop-color:#F5C542;stop-opacity:1"/>
@@ -973,6 +975,45 @@
                 <span data-i18n="settings_label_workspace_panel_open">Keep workspace panel open by default</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_workspace_panel_open">When enabled, the workspace / file browser panel opens automatically with each new session. You can still close it manually at any time.</div>
+            </div>
+            <!-- Custom logo upload -->
+            <div class="settings-field">
+              <label>Logo</label>
+              <div class="logo-upload-hint">Customize the titlebar logo, empty-state icon, and favicon.</div>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:10px">
+                <input type="checkbox" id="settingsCustomLogoEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span>Use custom logo</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px">
+                <input type="checkbox" id="settingsCustomLogoDarkMode" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span>Separate light / dark logos</span>
+              </label>
+              <div id="logoUploadAreas" style="margin-top:10px;display:none">
+                <div class="logo-upload-requirements">PNG, SVG, or ICO. Max 256&times;256 px and 200 KB.</div>
+                <div class="logo-upload-status" id="logoUploadStatus" aria-live="polite"></div>
+                <!-- Light / universal upload -->
+                <div class="logo-upload-grid">
+                  <div class="logo-upload-field">
+                    <div class="logo-upload-label" id="logoUploadLightLabel">Light</div>
+                    <div class="logo-drop-zone" id="logoDropLight">
+                      <div class="logo-drop-hint">Drop image<br>or click</div>
+                      <img class="logo-preview" id="logoPreviewLight" style="display:none" alt="">
+                    </div>
+                    <button class="logo-remove-btn" id="logoRemoveLight" style="display:none" type="button">Remove</button>
+                    <input type="file" id="logoFileInputLight" accept="image/png,image/svg+xml,image/x-icon" style="display:none">
+                  </div>
+                  <!-- Dark upload (shown when dark mode toggle is on) -->
+                  <div class="logo-upload-field" id="logoUploadDarkField" style="display:none">
+                    <div class="logo-upload-label">Dark</div>
+                    <div class="logo-drop-zone" id="logoDropDark">
+                      <div class="logo-drop-hint">Drop image<br>or click</div>
+                      <img class="logo-preview" id="logoPreviewDark" style="display:none" alt="">
+                    </div>
+                    <button class="logo-remove-btn" id="logoRemoveDark" style="display:none" type="button">Remove</button>
+                    <input type="file" id="logoFileInputDark" accept="image/png,image/svg+xml,image/x-icon" style="display:none">
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
