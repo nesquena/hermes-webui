@@ -1179,6 +1179,11 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_external_sessions">Show conversations from CLI, Telegram, Discord, Slack, and other channels in the session list. Click to import and continue.</div>
             </div>
             <div class="settings-field">
+              <label for="settingsCliSessionLimit">Non-WebUI session limit</label>
+              <input type="number" id="settingsCliSessionLimit" min="1" max="500" step="1" inputmode="numeric" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              <div style="font-size:11px;color:var(--muted);margin-top:4px">Maximum number of non-WebUI sessions (CLI/Telegram/Discord/etc.) shown in the sidebar when enabled. Default is 20.</div>
+            </div>
+            <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsShowPreviousMessagingSessions" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_previous_messaging_sessions">Show previous messaging sessions</span>
