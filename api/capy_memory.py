@@ -1840,6 +1840,144 @@ def _github_tags_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_labels_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "labels"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+_GITHUB_LABEL_COMPACT_BLOCKED_TERMS = {
+    "apikey",
+    "developermessage",
+    "developerprompt",
+    "disregardinstructions",
+    "hiddeninstructions",
+    "ignorepreviousinstructions",
+    "overridesystem",
+    "prompt",
+    "rawprompt",
+    "revealinstructions",
+    "systemmessage",
+    "systemprompt",
+}
+
+
+def _github_label_value_is_blocked(value: Any) -> bool:
+    if isinstance(value, _PUBLIC_SCALAR_TYPES):
+        text = str(value)
+        punctuation_normalized = re.sub(r"[^A-Za-z0-9]+", " ", text)
+        compact_normalized = re.sub(r"[^A-Za-z0-9]+", "", text).lower()
+        return bool(
+            _refresh_value_is_blocked(text)
+            or _refresh_value_is_blocked(punctuation_normalized)
+            or any(term in compact_normalized for term in _GITHUB_LABEL_COMPACT_BLOCKED_TERMS)
+        )
+    if isinstance(value, dict):
+        return any(_github_label_value_is_blocked(key) or _github_label_value_is_blocked(item) for key, item in value.items())
+    if isinstance(value, (list, tuple, set)):
+        return any(_github_label_value_is_blocked(item) for item in value)
+    return False
+
+
+_GITHUB_LABEL_UNSAFE_IGNORED_KEYS = {
+    "api_auth",
+    "api_key",
+    "body",
+    "code",
+    "content",
+    "data",
+    "html",
+    "prompt",
+    "raw",
+    "raw_prompt",
+    "renderer",
+    "script",
+    "source",
+}
+
+
+def _github_label_row_has_unsafe_ignored_field(row: dict[str, Any]) -> bool:
+    for key, value in row.items():
+        if key in {"name", "color", "default", "description"}:
+            continue
+        normalized_key = str(key).strip().lower().replace("-", "_")
+        if normalized_key in _GITHUB_LABEL_UNSAFE_IGNORED_KEYS:
+            return True
+        if _github_label_value_is_blocked(key) or _github_label_value_is_blocked(value):
+            return True
+    return False
+
+
+def _github_label_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    name = _safe_public_text(value, limit=120)
+    if not name or name != value.strip() or _github_label_value_is_blocked(name):
+        return False
+    if _REFRESH_TITLE_BLOCKED_VALUE_RE.search(name):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._/#:+-]{0,119}", name))
+
+
+def _github_label_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if not _github_label_name_is_safe(row.get("name")):
+        return False
+    raw_color = row.get("color")
+    if not isinstance(raw_color, str) or not re.fullmatch(r"[A-Fa-f0-9]{6}", raw_color):
+        return False
+    raw_default = row.get("default")
+    if raw_default is not None and not isinstance(raw_default, bool):
+        return False
+    if _github_label_row_has_unsafe_ignored_field(row):
+        return False
+    raw_description = row.get("description")
+    if raw_description is not None:
+        if not isinstance(raw_description, str):
+            return False
+        if raw_description.strip():
+            description = _safe_public_text(raw_description, limit=280)
+            if not description or _github_label_value_is_blocked(raw_description):
+                return False
+    return True
+
+
+def _json_payload_is_github_labels_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_labels_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_label_row_is_safe(row) for row in payload)
+
+
+def _github_labels_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_labels_path_repo(origin_uri) or "repository"
+    parts = [f"GitHub repository labels for {repo}", f"label count: {len(payload)}"]
+    for row in payload[:3]:
+        if not _github_label_row_is_safe(row):
+            continue
+        name = _safe_public_text(row.get("name"), limit=120)
+        color = _safe_public_text(row.get("color"), limit=6).lower()
+        is_default = str(row.get("default") is True).lower()
+        parts.append(f"label: {name}; color: {color}; default: {is_default}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_languages_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -2284,6 +2422,16 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    if _json_payload_is_github_labels_metadata(origin_uri, payload):
+        repo = _github_labels_path_repo(origin_uri) or source_id
+        title = f"GitHub labels {repo}"
+        summary = _github_labels_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": f"github labels {repo}",
+        }
     if _json_payload_is_github_tags_metadata(origin_uri, payload):
         title = f"GitHub tags {(_github_tags_path_repo(origin_uri) or source_id)}"
         summary = _github_tags_refresh_summary(origin_uri, payload)
@@ -2512,8 +2660,10 @@ def _source_refresh_allowed(origin_uri: str) -> bool:
         return False
     if parts.scheme not in {"http", "https"}:
         return False
-    hostname = (parts.hostname or "").strip().rstrip(".").lower()
+    hostname = (parts.hostname or "").strip().lower()
     if not hostname:
+        return False
+    if hostname.endswith("."):
         return False
     if hostname == "localhost" or hostname.endswith(".localhost"):
         return False
@@ -2575,7 +2725,7 @@ def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dic
     dropped_field_count += dropped
     if not summary:
         raise ValueError("refresh result did not include a safe summary")
-    safe_origin_uri = _safe_origin_uri(origin_uri, source_id=source_id)
+    safe_origin_uri = _safe_origin_uri(fetched.get("origin_uri") or origin_uri, source_id=source_id)
     body = "\n".join([
         f"# {title}",
         "",
