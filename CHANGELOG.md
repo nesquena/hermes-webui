@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Gateway-backed chat now backfills model-context turns into the visible transcript before saving the latest reply, so sidebar/header message counts no longer show a two-message conversation while the assistant is responding to hidden prior context.
+
 ## [v0.51.191] — 2026-05-31 — Release FK (stage-batch3 — skills-detail markdown styling + launchd duplicate-start guard)
 
 ### Fixed

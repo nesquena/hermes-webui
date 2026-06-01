@@ -306,6 +306,63 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     }) in events
 
 
+def test_gateway_chat_worker_backfills_context_only_turns_into_display(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    s = new_session()
+    s.context_messages = [
+        {"role": "user", "content": "delete the matrix apps", "timestamp": 10.0},
+        {"role": "assistant", "content": "I will verify the Matrix cleanup targets.", "timestamp": 10.1},
+    ]
+    s.messages = [
+        {"role": "user", "content": "when done also delete tunesync", "timestamp": 11.0},
+    ]
+    stream_id = "stream-gateway-context-backfill-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "when done also delete tunesync"
+    s.pending_attachments = []
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "when done also delete tunesync",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(s.session_id)
+    assert [m["content"] for m in saved.messages] == [
+        "delete the matrix apps",
+        "I will verify the Matrix cleanup targets.",
+        "when done also delete tunesync",
+        "done",
+    ]
+    assert len(saved.messages) == 4
+
+
 def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
