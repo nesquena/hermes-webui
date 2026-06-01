@@ -592,7 +592,7 @@ const LOCALES = {
     settings_autosave_retry: 'Retry',
     settings_label_language: 'Language',
     settings_label_quota_chip: 'Show provider quota chip in composer',
-    settings_desc_quota_chip: 'Displays an ambient remaining-quota indicator (e.g. OpenRouter credit balance) in the composer footer. Default off. Only visible on wide displays (≥1400px) when enabled, to keep the composer uncluttered on laptop and standard desktop widths.',
+    settings_desc_quota_chip: 'Displays an ambient remaining-quota indicator (e.g. OpenRouter credit balance) in the composer footer. Default on, matching Codex-style composer usage visibility; unsupported providers stay hidden quietly.',
     settings_label_hide_suggestions: 'Hide new-chat suggestions',
     settings_desc_hide_suggestions: 'Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.',
     settings_label_token_usage: 'Show token usage',

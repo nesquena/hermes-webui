@@ -1353,7 +1353,7 @@ async function _ensureMessagesLoaded(sid) {
   _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
   clearLiveToolCards();
   // #3018: preserve client-side ephemeral turn fields (_turnUsage, _turnDuration,
-  // _turnTps, _gatewayRouting, _statusCard) across the loadSession replace.
+  // _turnTps, _gatewayRouting, _statusCard, _providerQuota) across the loadSession replace.
   if(typeof window._carryForwardEphemeralTurnFields==='function'){
     msgs=window._carryForwardEphemeralTurnFields(S.messages||[], msgs);
   }

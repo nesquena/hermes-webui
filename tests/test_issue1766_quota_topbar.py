@@ -10,17 +10,20 @@ BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
-def test_quota_indicator_is_near_model_picker_in_composer_chrome():
-    model_idx = INDEX.find('id="composerModelChip"')
+def test_quota_indicator_is_next_to_send_button_in_composer_chrome():
     quota_idx = INDEX.find('id="providerQuotaChip"')
+    send_idx = INDEX.find('id="btnSend"')
 
-    assert model_idx != -1, "composer model chip must exist"
     assert quota_idx != -1, "provider quota chip must exist"
-    assert model_idx < quota_idx < INDEX.find('id="composerReasoningWrap"'), (
-        "quota chip should sit next to the model picker, before reasoning/toolset chrome"
+    assert send_idx != -1, "send button must exist"
+    assert INDEX.find('class="composer-right"') < quota_idx < send_idx, (
+        "quota chip should sit in composer-right immediately before the send button"
     )
     assert 'class="provider-quota-chip"' in INDEX
-    assert 'hidden' in INDEX[quota_idx - 200 : quota_idx + 400]
+    assert 'id="providerQuotaRingValue"' in INDEX
+    assert 'id="providerQuotaPopover"' in INDEX
+    assert 'toggleProviderQuotaPopover(event)' in INDEX
+    assert 'hidden' in INDEX[quota_idx - 200 : quota_idx + 900]
 
 
 def test_quota_indicator_fetches_provider_quota_on_boot():
@@ -41,9 +44,47 @@ def test_quota_indicator_hides_unsupported_or_failed_statuses():
     assert "unsupported" not in render_block.lower(), "ambient chip should disappear instead of showing noisy unsupported text"
 
 
-def test_quota_indicator_formats_openrouter_and_account_limit_shapes():
+def test_quota_indicator_formats_openrouter_and_account_limit_shapes_minimally():
     assert "function _providerQuotaIndicatorText" in UI_JS
     assert "limit_remaining" in UI_JS
     assert "account_limits" in UI_JS
     assert "remaining_percent" in UI_JS
+    assert "label:remaining" in UI_JS, "quota helpers should still compute compact remaining text for titles/footer"
+    assert "label.textContent=''" in UI_JS, "composer quota circle should not show an in-ring percentage label"
+    assert "provider+' '+remaining" not in UI_JS, "composer chip should not include provider name in the visible label"
+    assert "_providerQuotaWindowModePreference='five_hour'" in UI_JS
+    assert "_providerQuotaAccountWindow(status,_providerQuotaWindowModePreference)" in UI_JS
+    assert "return '5 hour'" in UI_JS
+    assert "return 'Weekly'" in UI_JS
+    assert "_providerQuotaRemainingPercent" in UI_JS
+    assert "function _formatQuotaResetDate" in UI_JS
+    assert "`${mm}/${dd}/${yy}`" in UI_JS
+    assert "_formatQuotaResetDate(w.reset_at)" in UI_JS
+    assert "providerQuotaRingValue" in UI_JS
+    assert "strokeDashoffset" in UI_JS
+    assert "toggleProviderQuotaPopover" in UI_JS
+    assert "renderProviderQuotaPopover" in UI_JS
+    assert "provider-quota-popover-window-option" in UI_JS
+    assert "aria-pressed" in UI_JS
+    assert "quota-low" in UI_JS and "quota-mid" in UI_JS
+    assert "remainingPct<20" in UI_JS
+    assert "remainingPct>=20&&remainingPct<60" in UI_JS
     assert "provider-quota-chip" in CSS
+    assert ".provider-quota-chip-dot{display:none;}" in CSS
+    assert ".provider-quota-chip-label{display:none;}" in CSS
+    assert ".provider-quota-ring-value" in CSS
+    assert ".provider-quota-popover" in CSS
+    assert ".provider-quota-popover-window-option" in CSS
+    assert ".provider-quota-chip.quota-mid{color:var(--warning);}" in CSS
+    assert ".provider-quota-chip.quota-low{color:var(--error);}" in CSS
+
+
+def test_chat_turn_footer_shows_remaining_provider_quota_after_done():
+    assert "function _providerQuotaChatText" in UI_JS
+    assert "function attachProviderQuotaToLastAssistant" in UI_JS
+    assert "api('/api/provider/quota?refresh=1'" in UI_JS
+    assert "_providerQuota" in UI_JS
+    assert "msg-provider-quota-inline" in UI_JS
+    assert "msg-provider-quota-inline" in CSS
+    assert "attachProviderQuotaToLastAssistant(completedSid)" in (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+    assert "'_providerQuota'" in (REPO / "static" / "messages.js").read_text(encoding="utf-8")

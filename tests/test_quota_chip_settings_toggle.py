@@ -1,7 +1,8 @@
-"""Regression test for #show-quota-chip-toggle — Settings toggle to opt into the ambient quota chip.
+"""Regression test for the ambient provider quota chip in composer chrome.
 
-Quota chip default state is now OFF (per Nathan's directive 2026-05-16, immediately
-after the stage-371 release of #2082). Users opt in via Settings → Preferences.
+The quota chip defaults ON so provider/account-limit remainder is visible in the
+composer like Codex when the active provider exposes sanitized quota data. Users
+can still hide it via Settings → Preferences.
 """
 from pathlib import Path
 
@@ -21,16 +22,16 @@ def test_quota_chip_settings_field_present():
     assert 'data-i18n="settings_desc_quota_chip"' in html
 
 
-def test_quota_chip_default_off_in_config_defaults():
+def test_quota_chip_default_on_in_config_defaults():
     src = CONFIG.read_text(encoding="utf-8")
-    assert '"show_quota_chip": False' in src, "show_quota_chip must default to False (opt-in)"
+    assert '"show_quota_chip": True' in src, "show_quota_chip must default to True for composer visibility"
     # Must be in the writable settings allow-list (bool keys)
     assert '"show_quota_chip",' in src, "show_quota_chip must be in _SETTINGS_BOOL_KEYS"
 
 
-def test_quota_chip_render_short_circuits_when_disabled():
+def test_quota_chip_render_short_circuits_when_explicitly_disabled():
     """Both renderProviderQuotaIndicator and refreshProviderQuotaIndicator must
-    hide the chip when window._showQuotaChip !== true. Specifically renderer
+    hide the chip when window._showQuotaChip === false. Specifically renderer
     must hide BEFORE any other render logic, and refresher must skip the fetch
     entirely so we don't burn quota API calls for chip-disabled users."""
     js = UI_JS.read_text(encoding="utf-8")
@@ -39,11 +40,11 @@ def test_quota_chip_render_short_circuits_when_disabled():
     render_start = js.index("function renderProviderQuotaIndicator(status){")
     render_end = js.index("\nasync function refreshProviderQuotaIndicator", render_start)
     render_body = js[render_start:render_end]
-    assert "window._showQuotaChip!==true" in render_body, (
+    assert "window._showQuotaChip===false" in render_body, (
         "renderProviderQuotaIndicator must check window._showQuotaChip before rendering"
     )
     # Guard must come BEFORE the existing _providerQuotaIndicatorText(status) call
-    guard_idx = render_body.index("window._showQuotaChip!==true")
+    guard_idx = render_body.index("window._showQuotaChip===false")
     text_call_idx = render_body.index("_providerQuotaIndicatorText(status)")
     assert guard_idx < text_call_idx, (
         "Disabled-chip guard must run before the indicator-text computation"
@@ -54,20 +55,20 @@ def test_quota_chip_render_short_circuits_when_disabled():
     # Find the closing brace of the function — first 'try{' line marks the live body
     # Just check the entire snippet ahead of try{
     refresh_head = js[refresh_start:js.index("try{", refresh_start)]
-    assert "window._showQuotaChip!==true" in refresh_head, (
+    assert "window._showQuotaChip===false" in refresh_head, (
         "refreshProviderQuotaIndicator must skip the fetch when chip is disabled"
     )
 
 
-def test_quota_chip_boot_initializes_default_off():
+def test_quota_chip_boot_initializes_default_on():
     js = BOOT.read_text(encoding="utf-8")
     # Both success path (reads from settings) and failure path (defaults block)
     # must set window._showQuotaChip
-    assert "window._showQuotaChip=s.show_quota_chip===true" in js, (
-        "Boot must initialize _showQuotaChip from settings.show_quota_chip"
+    assert "window._showQuotaChip=s.show_quota_chip!==false" in js, (
+        "Boot must initialize _showQuotaChip from settings.show_quota_chip with default-on semantics"
     )
-    assert "window._showQuotaChip=false" in js, (
-        "Boot must default _showQuotaChip to false in the settings-fetch-failed branch"
+    assert "window._showQuotaChip=true" in js, (
+        "Boot must default _showQuotaChip to true in the settings-fetch-failed branch"
     )
 
 
@@ -79,9 +80,9 @@ def test_quota_chip_panels_round_trip():
     # Body assignment
     assert "body.show_quota_chip=showQuotaChip===true;" in js
     # Settings panel load — checkbox is initialized from saved settings
-    assert "showQuotaChipCb.checked=settings.show_quota_chip===true;" in js
+    assert "showQuotaChipCb.checked=settings.show_quota_chip!==false;" in js
     # Window-state propagation
-    assert "window._showQuotaChip=showQuotaChip===true;" in js
+    assert "window._showQuotaChip=showQuotaChip!==false;" in js
     # Live refresh on toggle (immediate visual feedback)
     assert "if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();" in js
 

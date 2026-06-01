@@ -1713,28 +1713,37 @@
   .composer-model-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .composer-model-icon,.composer-model-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
   .composer-model-select{position:absolute!important;left:-9999px!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important;}
-  .provider-quota-chip{display:inline-flex;align-items:center;gap:6px;height:34px;max-width:150px;padding:7px 10px;border:1px solid var(--border2);border-radius:999px;background:rgba(34,197,94,.10);color:var(--text);font-size:11px;font-weight:650;line-height:1;white-space:nowrap;cursor:pointer;transition:background .12s,border-color .12s,color .12s;}
+  .provider-quota-chip{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;border:1px solid transparent;border-radius:999px;background:transparent;color:var(--muted);font-size:9px;font-weight:700;line-height:1;white-space:nowrap;cursor:pointer;transition:background .12s,border-color .12s,color .12s;position:relative;}
   .provider-quota-chip[hidden]{display:none!important;}
-  .provider-quota-chip:hover{background:rgba(34,197,94,.16);border-color:rgba(34,197,94,.35);}
-  .provider-quota-chip-dot{width:6px;height:6px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.12);flex:0 0 auto;}
-  .provider-quota-chip-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  /* Hide the ambient quota chip below 1400px — the composer footer already
-     has profile + workspace + model picker + reasoning + media + send and
-     was getting cramped (model picker truncating from "Claude Sonnet 4 7"
-     to "Claude Sonnet 4", workspace dropping more text) once the chip
-     squeezed in. Mobile users get provider info via the dedicated
-     mobile-config drawer; laptop desktop users can find quota in
-     Settings → Providers (the chip's onclick target). Show only on wide
-     desktop where there's genuine room. Aron's standing position on
-     composer real estate (PR #1721, May 13 2026) reinforces this.
-
-     Using 1399.98px rather than 1400px to avoid the one-pixel boundary
-     overlap with the existing @media (min-width:1400px) `.messages-inner`
-     rule at line 893 — at exactly 1400px both would fire, so the chip
-     was hidden AT the wide-desktop boundary where it should first appear. */
-  @media (max-width:1399.98px){
-    .provider-quota-chip{display:none!important;}
-  }
+  .provider-quota-chip:hover,.provider-quota-chip[aria-expanded="true"]{background:var(--hover-bg);border-color:var(--border2);color:var(--text);}
+  .provider-quota-chip.quota-mid{color:var(--warning);}
+  .provider-quota-chip.quota-low{color:var(--error);}
+  .provider-quota-chip.quota-mid:hover,.provider-quota-chip.quota-mid[aria-expanded="true"]{border-color:var(--warning);background:rgba(245,158,11,.10);color:var(--warning);}
+  .provider-quota-chip.quota-low:hover,.provider-quota-chip.quota-low[aria-expanded="true"]{border-color:var(--error);background:rgba(239,83,80,.10);color:var(--error);}
+  .provider-quota-ring{position:relative;display:flex;width:30px;height:30px;align-items:center;justify-content:center;}
+  .provider-quota-ring-svg{position:absolute;inset:0;width:30px;height:30px;transform:rotate(-90deg);}
+  .provider-quota-ring-track,.provider-quota-ring-value{fill:none;stroke-width:2.2;}
+  .provider-quota-ring-track{stroke:rgba(255,255,255,.12);}
+  .provider-quota-ring-value{stroke:currentColor;stroke-linecap:round;stroke-dasharray:59.69;stroke-dashoffset:59.69;transition:stroke-dashoffset .35s ease,stroke .18s ease;}
+  .provider-quota-chip-dot{display:none;}
+  .provider-quota-chip-label{display:none;}
+  .provider-quota-popover{position:absolute;right:48px;bottom:calc(100% + 10px);z-index:190;min-width:190px;max-width:240px;padding:10px 12px;border:1px solid var(--border2);border-radius:12px;background:var(--surface);box-shadow:0 12px 30px rgba(0,0,0,.32);color:var(--text);font-size:12px;line-height:1.35;}
+  .provider-quota-popover[hidden]{display:none!important;}
+  .provider-quota-popover::after{content:'';position:absolute;right:14px;top:100%;border-width:6px 6px 0 6px;border-style:solid;border-color:var(--surface) transparent transparent transparent;}
+  .provider-quota-popover-title{font-weight:700;margin-bottom:7px;}
+  .provider-quota-popover-window-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-bottom:9px;}
+  .provider-quota-popover-window-option{padding:5px 7px;border:1px solid var(--border2);border-radius:999px;background:transparent;color:var(--muted);font:inherit;font-size:11px;cursor:pointer;}
+  .provider-quota-popover-window-option[aria-pressed="true"]{border-color:currentColor;background:rgba(255,255,255,.08);color:var(--text);}
+  .provider-quota-popover-window-option:hover{background:var(--hover-bg);color:var(--text);}
+  .provider-quota-popover-row{display:flex;align-items:center;justify-content:space-between;gap:14px;color:var(--muted);}
+  .provider-quota-popover-row+.provider-quota-popover-row{margin-top:4px;}
+  .provider-quota-popover-row strong{color:var(--text);font-variant-numeric:tabular-nums;}
+  .provider-quota-popover-message{margin-top:8px;padding-top:8px;border-top:1px solid var(--border2);color:var(--muted);font-size:11px;}
+  .provider-quota-popover-settings{margin-top:9px;width:100%;padding:6px 8px;border:1px solid var(--border2);border-radius:8px;background:transparent;color:var(--text);font:inherit;font-size:11px;cursor:pointer;}
+  .provider-quota-popover-settings:hover{background:var(--hover-bg);}
+  /* Keep provider quota in the composer on desktop and mobile when available.
+     The footer's horizontal scroll handles cramped layouts, matching the Codex-style
+     always-present usage affordance without forcing noisy unsupported/error states. */
   /* Increased specificity (.icon-btn.composer-mobile-config-btn) to win the cascade
      against the later-in-source `.icon-btn { display:flex }` rule that this element
      also matches. Without this, the button shows at desktop width — see #1381 review. */
@@ -3873,6 +3882,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .msg-duration-inline,
 .msg-gateway-inline,
 .gateway-failover-inline,
+.msg-provider-quota-inline,
 .msg-model-warning-inline {
   font-size: 11px;
   color: var(--muted);
@@ -3883,6 +3893,10 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .gateway-failover-inline {
   color: var(--accent);
   opacity: .9;
+}
+.msg-provider-quota-inline {
+  color: var(--accent);
+  opacity: .85;
 }
 .msg-model-warning-inline {
   color: var(--error);
