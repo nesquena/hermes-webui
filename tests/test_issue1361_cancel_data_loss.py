@@ -244,6 +244,89 @@ class TestCancelPreservesToolCalls:
 
 # ── §C: Empty _stripped skips entire append ─────────────────────────────────
 
+class TestCheckpointPersistsToolProgress:
+    """Completed tools should survive restart before final writeback.
+
+    The checkpoint thread currently runs after completed tool calls, but before
+    the final `done` merge. If the process restarts in that window, the run
+    journal can contain the last tool call while the session sidecar does not.
+    The checkpoint path should persist a single `_partial` assistant marker for
+    the current turn and update it in place as more tools complete.
+    """
+
+    def test_streaming_checkpoint_persists_partial_tool_progress(self):
+        sid = "test_1361_ckpt_1"
+        stream_id = "stream_ckpt_1"
+        s = _make_session(
+            session_id=sid,
+            messages=[{"role": "user", "content": "check the file"}],
+        )
+        s.active_stream_id = stream_id
+        config.STREAM_PARTIAL_TEXT[stream_id] = "Partial answer so far"
+        if hasattr(config, 'STREAM_REASONING_TEXT'):
+            config.STREAM_REASONING_TEXT[stream_id] = "Thinking through the file"
+        if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
+            config.STREAM_LIVE_TOOL_CALLS[stream_id] = [
+                {
+                    "name": "read_file",
+                    "args": {"path": "/tmp/test.py"},
+                    "done": True,
+                    "snippet": "print('hello')",
+                    "tid": "tool-1",
+                }
+            ]
+
+        streaming._save_streaming_checkpoint(s, stream_id=stream_id)
+
+        saved = Session.load(sid)
+        partial_msgs = [m for m in (saved.messages or []) if isinstance(m, dict) and m.get('_partial')]
+        assert len(partial_msgs) == 1, partial_msgs
+        assert partial_msgs[0].get('content') == "Partial answer so far"
+        assert partial_msgs[0].get('reasoning') == "Thinking through the file"
+        assert partial_msgs[0].get('_partial_tool_calls'), partial_msgs[0]
+        assert partial_msgs[0]['_partial_tool_calls'][0]['name'] == 'read_file'
+        assert partial_msgs[0]['_partial_tool_calls'][0]['snippet'] == "print('hello')"
+
+    def test_streaming_checkpoint_updates_existing_partial_marker_instead_of_appending(self):
+        sid = "test_1361_ckpt_2"
+        stream_id = "stream_ckpt_2"
+        s = _make_session(
+            session_id=sid,
+            messages=[{"role": "user", "content": "run the checks"}],
+        )
+        s.active_stream_id = stream_id
+        config.STREAM_PARTIAL_TEXT[stream_id] = "Working on it"
+        if hasattr(config, 'STREAM_LIVE_TOOL_CALLS'):
+            config.STREAM_LIVE_TOOL_CALLS[stream_id] = [
+                {
+                    "name": "read_file",
+                    "args": {"path": "/tmp/a.py"},
+                    "done": True,
+                    "snippet": "alpha",
+                    "tid": "tool-a",
+                }
+            ]
+
+        streaming._save_streaming_checkpoint(s, stream_id=stream_id)
+
+        config.STREAM_LIVE_TOOL_CALLS[stream_id].append(
+            {
+                "name": "terminal",
+                "args": {"command": "pytest -q"},
+                "done": True,
+                "snippet": "2 passed",
+                "tid": "tool-b",
+            }
+        )
+        streaming._save_streaming_checkpoint(s, stream_id=stream_id)
+
+        saved = Session.load(sid)
+        partial_msgs = [m for m in (saved.messages or []) if isinstance(m, dict) and m.get('_partial')]
+        assert len(partial_msgs) == 1, partial_msgs
+        assert len(partial_msgs[0].get('_partial_tool_calls') or []) == 2
+        assert [tc.get('name') for tc in partial_msgs[0]['_partial_tool_calls']] == ['read_file', 'terminal']
+
+
 class TestCancelWithReasoningOnlyNoText:
     """§C: When streaming was 100% reasoning (no visible tokens), _stripped is
     empty after regex cleanup, so no partial assistant message is appended.

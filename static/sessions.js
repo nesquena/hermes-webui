@@ -10,6 +10,8 @@ const ICONS={
   trash:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5v8.5h7v-8.5"/><line x1="7" y1="7" x2="7" y2="11"/><line x1="9" y1="7" x2="9" y2="11"/></svg>',
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
   edit:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L5 13H3v-2z"/><path d="M10 4l2 2"/></svg>',
+  check:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 4.8"/></svg>',
+  regen:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v4h4"/><path d="M13 13V9H9"/><path d="M4.2 10.5a5 5 0 0 0 8.1 1.5"/><path d="M11.8 5.5A5 5 0 0 0 3.7 4"/></svg>',
 };
 
 // Tracks which session_id is currently being loaded. Used to discard stale
@@ -101,6 +103,7 @@ const SESSION_RECENT_WINDOW_MS = 3 * 60 * 60 * 1000;
 let _sessionViewedCounts = null;
 let _sessionCompletionUnread = null;
 let _sessionObservedStreaming = null;
+let _serverReadStateLoaded = false;
 const _sessionStreamingById = new Map();
 const _sessionListSnapshotById = new Map();
 let _sessionListPointerActive = false;
@@ -145,7 +148,7 @@ function _saveSessionViewedCounts() {
   }
 }
 
-function _setSessionViewedCount(sid, messageCount = 0) {
+function _setSessionViewedCount(sid, messageCount = 0, options = {syncServer:false}) {
   if (!sid) return;
   const counts = _getSessionViewedCounts();
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
@@ -154,6 +157,60 @@ function _setSessionViewedCount(sid, messageCount = 0) {
   // If the viewed count is now current, any prior completion-unread marker is
   // stale — clear it so _hasUnreadForSession doesn't short-circuit (#3020).
   _clearSessionCompletionUnread(sid);
+  const maySyncServer = Boolean(
+    options
+    && options.syncServer === true
+    && (
+      options.forceServerSync === true
+      || (typeof _isSessionActivelyViewedForList === 'function' && _isSessionActivelyViewedForList(sid))
+    )
+  );
+  if(maySyncServer && typeof _markSessionReadServer==='function'){
+    void _markSessionReadServer(sid, next).catch(()=>{});
+  }
+}
+
+function _applyServerReadStateToSession(session, readState) {
+  if (!session || !readState) return;
+  const count = Number(readState.read_message_count);
+  session.read_state_loaded = true;
+  session.read_state_source = readState.source || 'stored';
+  session.read_message_count = Number.isFinite(count) ? count : 0;
+  session.read_at = readState.read_at || null;
+  session.manual_unread = Boolean(readState.manual_unread);
+}
+
+function _applyServerReadStateToCachedSession(sid, readState) {
+  if (!sid || !readState) return;
+  const cached = Array.isArray(_allSessions) ? _allSessions.find(s => s && s.session_id === sid) : null;
+  if (cached) _applyServerReadStateToSession(cached, readState);
+  if (S.session && S.session.session_id === sid) _applyServerReadStateToSession(S.session, readState);
+}
+
+function _getServerReadState(s) {
+  if (!s || !s.session_id || !s.read_state_loaded) return null;
+  const count = Number(s.read_message_count);
+  return {
+    read_message_count: Number.isFinite(count) ? count : 0,
+    read_at: s.read_at || null,
+    source: s.read_state_source || 'default',
+    manual_unread: Boolean(s.manual_unread),
+  };
+}
+
+async function _markSessionReadServer(sid, messageCount = 0) {
+  if (!sid) return null;
+  const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  const res = await api('/api/session/read', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sid, message_count: next }),
+    timeoutToast: false,
+  });
+  if (res && res.read_state) {
+    _serverReadStateLoaded = true;
+    _applyServerReadStateToCachedSession(sid, res.read_state);
+  }
+  return res;
 }
 
 function _getSessionCompletionUnread() {
@@ -179,8 +236,15 @@ function _markSessionCompletionUnread(sid, messageCount = 0) {
   if (!sid) return;
   const unread = _getSessionCompletionUnread();
   const count = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  const counts = _getSessionViewedCounts();
+  const viewedCount = Object.prototype.hasOwnProperty.call(counts, sid)
+    ? Number(counts[sid] || 0)
+    : Math.max(0, count - 1);
+  const readCount = Number.isFinite(viewedCount) ? Math.max(0, Math.min(viewedCount, count)) : Math.max(0, count - 1);
   unread[sid] = {message_count: count, completed_at: Date.now()};
   _saveSessionCompletionUnread();
+  _applyServerReadStateToCachedSession(sid, {read_message_count: readCount, read_at: Date.now()/1000});
+  if(typeof _markSessionReadServer==='function') void _markSessionReadServer(sid, readCount).catch(()=>{});
 }
 
 function _clearSessionCompletionUnread(sid) {
@@ -244,6 +308,13 @@ function _forgetObservedStreamingSession(sid) {
 
 function _hasUnreadForSession(s) {
   if (!s || !s.session_id) return false;
+  const serverRead = _getServerReadState(s);
+  if (serverRead && serverRead.manual_unread) return true;
+  if (serverRead && Number.isFinite(s.message_count)) {
+    const hasServerUnread = Number(s.message_count || 0) > Number(serverRead.read_message_count || 0);
+    if (!hasServerUnread) _clearSessionCompletionUnread(s.session_id);
+    return hasServerUnread;
+  }
   if (_hasSessionCompletionUnread(s.session_id)) return true;
   const counts = _getSessionViewedCounts();
   if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
@@ -424,7 +495,7 @@ function _markPollingCompletionUnreadTransitions(sessions) {
         _markSessionCompletionUnread(sid, s.message_count);
       } else {
         // Sync viewed count so we don't flag stale unread on tab switch (#3020)
-        _setSessionViewedCount(sid, messageCount);
+        _setSessionViewedCount(sid, messageCount, {syncServer:true});
       }
     }
     _sessionStreamingById.set(sid, isStreaming);
@@ -509,7 +580,7 @@ async function newSession(flash, options={}){
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
-    _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
+    _setSessionViewedCount(S.session.session_id, S.session.message_count || 0, {syncServer:true});
     // Sync chat-header dropdown to the session's model/provider so the UI reflects
     // the default route the server actually used (#872). Compare provider state too:
     // duplicate model ids can exist under several providers, and a stale persisted
@@ -670,7 +741,7 @@ async function loadSession(sid){
   // Sync workspace display immediately so the chip label reflects the new session's workspace
   // before any async message-loading begins (mirrors how model is handled).
   if(typeof syncTopbar==='function') syncTopbar();
-  _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
+  _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0), {syncServer:true});
   _clearSessionCompletionUnread(S.session.session_id);
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
@@ -1311,6 +1382,24 @@ let _messagesTruncated = false;
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
 
+function _resolveSessionToolCalls(messages, sessionToolCalls) {
+  const filtered = (messages || []).filter(m => m && m.role);
+  const hasMessageToolMetadata = filtered.some(m => {
+    if (!m || m.role !== 'assistant') return false;
+    const hasTc = Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
+    const hasPartialTc = Array.isArray(m._partial_tool_calls) && m._partial_tool_calls.length > 0;
+    const hasTu = Array.isArray(m.content) && m.content.some(p => p && p.type === 'tool_use');
+    return hasTc || hasPartialTc || hasTu;
+  });
+  const normalized = (sessionToolCalls || []).map(tc => ({ ...tc, done: true }));
+  const recoveredSessionToolCalls = normalized.filter(tc => tc && tc._recovered_from_run_journal);
+  const toolCalls = (!hasMessageToolMetadata && normalized.length) ? normalized : recoveredSessionToolCalls;
+  return { hasMessageToolMetadata, recoveredSessionToolCalls, toolCalls };
+}
+if (typeof window !== 'undefined') {
+  window._resolveSessionToolCalls = _resolveSessionToolCalls;
+}
+
 async function _ensureMessagesLoaded(sid) {
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
@@ -1328,17 +1417,8 @@ async function _ensureMessagesLoaded(sid) {
   // toast on every mobile message (SSE/visibility events trigger this reload path
   // more aggressively on mobile).
   let msgs = (data.session.messages || []).filter(m => m && m.role);
-  // Check for tool-call metadata on messages (for tool-call card rendering)
-  const hasMessageToolMetadata = msgs.some(m => {
-    const hasTc = Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
-    const hasTu = Array.isArray(m.content) && m.content.some(p => p && p.type === 'tool_use');
-    return hasTc || hasTu;
-  });
-  if (!hasMessageToolMetadata && data.session.tool_calls && data.session.tool_calls.length) {
-    S.toolCalls = data.session.tool_calls.map(tc => ({...tc, done: true}));
-  } else {
-    S.toolCalls = [];
-  }
+  const resolvedToolCalls = _resolveSessionToolCalls(msgs, data.session.tool_calls || []);
+  S.toolCalls = resolvedToolCalls.toolCalls;
   clearLiveToolCards();
   // #3018: preserve client-side ephemeral turn fields (_turnUsage, _turnDuration,
   // _turnTps, _gatewayRouting, _statusCard) across the loadSession replace.
@@ -1349,7 +1429,7 @@ async function _ensureMessagesLoaded(sid) {
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
-    _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
+    _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length), {syncServer:true});
   }
 }
 
@@ -2029,6 +2109,94 @@ function _appendSessionDuplicateAction(menu, session){
   ));
 }
 
+function _applySessionTitleUpdate(session, nextTitle){
+  const titleText=(nextTitle||'').trim();
+  if(!titleText) return;
+  session.title=titleText;
+  const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
+  if(cached) cached.title=titleText;
+  if(S.session&&S.session.session_id===session.session_id){
+    S.session.title=titleText;
+    if(typeof syncTopbar==='function') syncTopbar();
+  }
+}
+
+function _appendSessionRegenerateTitleAction(menu, session){
+  menu.appendChild(_buildSessionAction(
+    t('session_regenerate_title'),
+    t('session_regenerate_title_desc'),
+    ICONS.regen,
+    async()=>{
+      closeSessionActionMenu();
+      try{
+        if(typeof showToast==='function') showToast(t('session_regenerating_title'));
+        const res=await api('/api/session/regenerate_title',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
+        const nextTitle=(res&&res.session&&res.session.title)||res.title;
+        _applySessionTitleUpdate(session,nextTitle);
+        renderSessionListFromCache();
+        void renderSessionList();
+        if(typeof showToast==='function') showToast(t('session_title_regenerated'));
+      }catch(err){
+        if(typeof showToast==='function') showToast(t('session_title_regenerate_failed')+(err&&err.message?err.message:err),3000,'error');
+      }
+    }
+  ));
+}
+
+function _appendSessionMarkReadAction(menu, session){
+  if(!_hasUnreadForSession(session)) return;
+  menu.appendChild(_buildSessionAction(
+    t('session_mark_read'),
+    t('session_mark_read_desc'),
+    ICONS.check,
+    async()=>{
+      closeSessionActionMenu();
+      const sid=session&&session.session_id;
+      if(!sid) return;
+      const count=Number(session.message_count||0);
+      _setSessionViewedCount(sid,count,{syncServer:false});
+      _applyServerReadStateToCachedSession(sid,{read_message_count:count,read_at:Date.now()/1000,manual_unread:false,source:'stored'});
+      renderSessionListFromCache();
+      try{
+        await _markSessionReadServer(sid,count);
+        if(typeof showToast==='function') showToast(t('session_marked_read'));
+        void renderSessionList({deferWhileInteracting:false});
+      }catch(err){
+        if(typeof showToast==='function') showToast(t('session_mark_read_failed')+(err&&err.message?err.message:err),3000,'error');
+      }
+    }
+  ));
+}
+
+function _appendSessionMarkUnreadAction(menu, session){
+  if(_hasUnreadForSession(session)) return;
+  menu.appendChild(_buildSessionAction(
+    t('session_mark_unread'),
+    t('session_mark_unread_desc'),
+    ICONS.check,
+    async()=>{
+      closeSessionActionMenu();
+      const sid=session&&session.session_id;
+      if(!sid) return;
+      const count=Number(session.message_count||0);
+      _applyServerReadStateToCachedSession(sid,{read_message_count:count,read_at:Date.now()/1000,manual_unread:true,source:'stored'});
+      renderSessionListFromCache();
+      try{
+        await api('/api/session/unread',{method:'POST',body:JSON.stringify({session_id:sid,message_count:count})});
+        if(typeof showToast==='function') showToast(t('session_marked_unread'));
+        void renderSessionList({deferWhileInteracting:false});
+      }catch(err){
+        if(typeof showToast==='function') showToast(t('session_mark_unread_failed')+(err&&err.message?err.message:err),3000,'error');
+      }
+    }
+  ));
+}
+
+function _appendSessionReadStateAction(menu, session){
+  if(_hasUnreadForSession(session)) _appendSessionMarkReadAction(menu, session);
+  else _appendSessionMarkUnreadAction(menu, session);
+}
+
 function _playSessionActionMenuEntrance(menu){
   if(!menu) return;
   const reduce=_sessionPrefersReducedMotion();
@@ -2107,6 +2275,8 @@ function _openSessionActionMenu(session, anchorEl){
         }
       }
     ));
+    _appendSessionRegenerateTitleAction(menu, session);
+    _appendSessionReadStateAction(menu, session);
   }
   menu.appendChild(_buildSessionAction(
     session.pinned?t('session_unpin'):t('session_pin'),
@@ -2372,6 +2542,7 @@ function _applySessionListPayload(sessData, projData){
   const serverSessions=_optimisticallyRemovedSessionIds.size
     ? (sessData.sessions||[]).filter(s=>s&&!_optimisticallyRemovedSessionIds.has(s.session_id))
     : (sessData.sessions||[]);
+  _serverReadStateLoaded = serverSessions.some(s=>s&&s.read_state_loaded);
   _reconcileActiveSessionIdleStateFromList(serverSessions);
   _allSessions = _mergeOptimisticFirstTurnSessions(serverSessions);
   _clearLineageReportCache();
@@ -3629,9 +3800,10 @@ function renderSessionListFromCache(){
   const orderedSessions=[...sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
   // Separate pinned from unpinned
   const pinned=orderedSessions.filter(s=>s.pinned);
+  const unreadUnpinned=orderedSessions.filter(s=>!s.pinned&&!_isSessionEffectivelyStreaming(s)&&_hasUnreadForSession(s));
   const activeUnpinned=orderedSessions.filter(s=>!s.pinned&&_isSessionEffectivelyStreaming(s));
-  const unpinned=orderedSessions.filter(s=>!s.pinned&&!_isSessionEffectivelyStreaming(s));
-  // Date grouping: Pinned / Active / Recent / Today / Yesterday / This week / Last week / Older
+  const unpinned=orderedSessions.filter(s=>!s.pinned&&!_isSessionEffectivelyStreaming(s)&&!_hasUnreadForSession(s));
+  // Date grouping: Pinned / Active / Unread / Recent / Today / Yesterday / This week / Last week / Older
   const now=_serverNowMs();
   // Collapse state persisted in localStorage
   let _groupCollapsed={};
@@ -3642,6 +3814,7 @@ function renderSessionListFromCache(){
   let curLabel=null,curItems=[];
   if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
   if(activeUnpinned.length) groups.push({label:t('session_time_bucket_active'),items:activeUnpinned,isActive:true});
+  if(unreadUnpinned.length) groups.push({label:t('session_time_bucket_unread'),items:unreadUnpinned,isUnread:true});
   for(const s of unpinned){
     const ts=_sessionTimestampMs(s);
     const label=_sessionTimeBucketLabel(ts, now);
@@ -3704,7 +3877,7 @@ function renderSessionListFromCache(){
     const wrapper=document.createElement('div');
     wrapper.className='session-date-group';
     const hdr=document.createElement('div');
-    hdr.className='session-date-header'+(g.isPinned?' pinned':'')+(g.isActive?' active':'');
+    hdr.className='session-date-header'+(g.isPinned?' pinned':'')+(g.isUnread?' unread':'')+(g.isActive?' active':'');
     const caret=document.createElement('span');
     caret.className='session-date-caret';
     caret.textContent='\u25BE'; // down when expanded; rotated right when collapsed
@@ -4104,8 +4277,16 @@ function renderSessionListFromCache(){
     // sits outside the truncating title span and stays visible.)
     el.appendChild(sessionText);
     const state=document.createElement('span');
-    state.className='session-attention-indicator session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''));
-    state.setAttribute('aria-hidden','true');
+    if(isStreaming){
+      state.className='session-attention-indicator session-state-indicator is-streaming';
+      state.setAttribute('aria-label','Streaming');
+    }else if(hasUnread){
+      state.className='session-attention-indicator session-state-indicator is-unread';
+      state.setAttribute('aria-label','Unread');
+    }else{
+      state.className='session-attention-indicator session-state-indicator';
+      state.setAttribute('aria-hidden','true');
+    }
     el.appendChild(state);
     // Single trigger button that opens a shared dropdown menu
     let actions=null;

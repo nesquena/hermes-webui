@@ -4750,6 +4750,10 @@ async function refreshSession() {
     S.messages = data.session.messages || [];
     const pendingMsg=getPendingSessionMessage(data.session,S.messages);
     if(pendingMsg) S.messages.push(pendingMsg);
+    const resolvedToolCalls=(typeof window._resolveSessionToolCalls==='function')
+      ? window._resolveSessionToolCalls(S.messages, data.session.tool_calls || [])
+      : {toolCalls:(data.session.tool_calls||[]).map(tc=>({...tc,done:true}))};
+    S.toolCalls=resolvedToolCalls.toolCalls||[];
     S.activeStreamId=data.session.active_stream_id||null;
 
     syncTopbar(); renderMessages();
@@ -6710,7 +6714,8 @@ function renderMessages(options){
       if(m.role==='assistant'){
         const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
         const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
-        if(hasTopLevelToolCalls||hasContentToolUse) fallbackToolSources.push({m,rawIdx});
+        const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+        if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});
       }
     });
     const derived=[];
@@ -6761,6 +6766,25 @@ function renderMessages(options){
           });
         });
       }
+      (m._partial_tool_calls||[]).forEach(tc=>{
+        if(!tc||typeof tc!=='object') return;
+        const name=tc.name||'tool';
+        const args=(tc.args&&typeof tc.args==='object')?tc.args:{};
+        const tid=tc.tid||tc.id||'';
+        const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+        const resultSnippet=String(tc.snippet||tc.preview||'');
+        const argsSnap={};
+        Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
+        derived.push({
+          name,
+          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+          tid,
+          assistant_msg_idx:rawIdx,
+          args:argsSnap,
+          done:tc.done!==false,
+        });
+      });
     });
     if(derived.length) S.toolCalls=derived;
   }

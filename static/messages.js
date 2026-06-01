@@ -1,7 +1,8 @@
 function _markSessionViewed(sid, messageCount) {
   if(typeof _setSessionViewedCount!=='function' || !sid) return;
+  if(typeof _isSessionActivelyViewed==='function' && !_isSessionActivelyViewed(sid)) return;
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
-  _setSessionViewedCount(sid, next);
+  _setSessionViewedCount(sid, next, {syncServer:true});
 }
 
 function _isDocumentVisibleAndFocused() {
@@ -1917,18 +1918,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               }
             }
           }
-          const hasMessageToolMetadata=S.messages.some(m=>{
-            if(!m||m.role!=='assistant') return false;
-            const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-            const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-            const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-            return hasTc||hasPartialTc||hasTu;
-          });
-          if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
-            S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
-          } else {
-            S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
-          }
+          const resolvedToolCalls=(typeof window._resolveSessionToolCalls==='function')
+            ? window._resolveSessionToolCalls(S.messages, d.session.tool_calls || [])
+            : (()=>{
+                const hasMessageToolMetadata=S.messages.some(m=>{
+                  if(!m||m.role!=='assistant') return false;
+                  const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+                  const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+                  const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+                  return hasTc||hasPartialTc||hasTu;
+                });
+                const normalized=(d.session.tool_calls||[]).map(tc=>({...tc,done:true}));
+                return {toolCalls:(!hasMessageToolMetadata&&normalized.length)?normalized:normalized.filter(tc=>tc&&tc._recovered_from_run_journal)};
+              })();
+          S.toolCalls=resolvedToolCalls.toolCalls||[];
           if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
           if(typeof _copyActivityDisclosureState==='function'&&lastAsst){
             const assistantIdx=S.messages.indexOf(lastAsst);
@@ -2364,22 +2367,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
         if(_markerOnlyAssistantError&&typeof showToast==='function') showToast('No response received after context compression. Please retry.',5000,'error');
-        const hasMessageToolMetadata=S.messages.some(m=>{
-          if(!m||m.role!=='assistant') return false;
-          // Recognize both the standard `tool_calls` (used by completed assistant
-          // turns where the LLM emitted tool_call entries) and the WebUI-internal
-          // `_partial_tool_calls` (used on Stop/Cancel partial messages — see
-          // api/streaming.py cancel_stream).
-          const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-          const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-          const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-          return hasTc||hasPartialTc||hasTu;
-        });
-        if(!hasMessageToolMetadata&&session.tool_calls&&session.tool_calls.length){
-          S.toolCalls=(session.tool_calls||[]).map(tc=>({...tc,done:true}));
-        }else{
-          S.toolCalls=[];
-        }
+        const resolvedToolCalls=(typeof window._resolveSessionToolCalls==='function')
+          ? window._resolveSessionToolCalls(S.messages, session.tool_calls || [])
+          : (()=>{
+              const hasMessageToolMetadata=S.messages.some(m=>{
+                if(!m||m.role!=='assistant') return false;
+                const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+                const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+                const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+                return hasTc||hasPartialTc||hasTu;
+              });
+              const normalized=(session.tool_calls||[]).map(tc=>({...tc,done:true}));
+              return {toolCalls:(!hasMessageToolMetadata&&normalized.length)?normalized:normalized.filter(tc=>tc&&tc._recovered_from_run_journal)};
+            })();
+        S.toolCalls=resolvedToolCalls.toolCalls||[];
         if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages({preserveScroll:true});
       }

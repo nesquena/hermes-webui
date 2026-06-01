@@ -725,6 +725,66 @@ def test_corrupt_index_fallback():
     assert "sess_a" in ids, "Session A should appear after fallback rebuild"
 
 
+def test_full_rebuild_normalizes_legacy_string_updated_at():
+    """Full index rebuild must survive sidecars with string timestamps."""
+    index_file = models.SESSION_INDEX_FILE
+
+    legacy = _make_session("legacy_a", "Legacy A", updated_at=100.0)
+    legacy.path.write_text(json.dumps({
+        **legacy.__dict__,
+        "created_at": "2026-05-02T17:31:45.925125",
+        "updated_at": "2026-05-02T18:36:25.175590",
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    fresh = _make_session("fresh_b", "Fresh B", updated_at=200.0)
+    fresh.path.write_text(json.dumps(fresh.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _write_session_index(updates=None)
+
+    index = _read_index(index_file)
+    by_id = {e["session_id"]: e for e in index}
+    assert isinstance(by_id["legacy_a"]["updated_at"], (int, float))
+    assert isinstance(by_id["legacy_a"]["created_at"], (int, float))
+    assert by_id["fresh_b"]["updated_at"] == 200.0
+
+
+def test_incremental_index_sort_survives_existing_legacy_string_updated_at():
+    """Incremental index patching must not crash on legacy string timestamps."""
+    index_file = models.SESSION_INDEX_FILE
+
+    legacy = _make_session("legacy_a", "Legacy A", updated_at=100.0)
+    legacy.path.write_text(json.dumps({
+        **legacy.__dict__,
+        "created_at": "2026-05-02T17:31:45.925125",
+        "updated_at": "2026-05-02T18:36:25.175590",
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _write_index_file(index_file, [
+        {
+            "session_id": "legacy_a",
+            "title": "Legacy A",
+            "workspace": legacy.workspace,
+            "model": legacy.model,
+            "message_count": 1,
+            "created_at": "2026-05-02T17:31:45.925125",
+            "updated_at": "2026-05-02T18:36:25.175590",
+            "last_message_at": "2026-05-02T18:36:25.175590",
+            "pinned": False,
+            "archived": False,
+        }
+    ])
+
+    fresh = _make_session("fresh_b", "Fresh B", updated_at=200.0)
+    fresh.path.write_text(json.dumps(fresh.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _write_session_index(updates=[fresh])
+
+    index = _read_index(index_file)
+    by_id = {e["session_id"]: e for e in index}
+    assert by_id["fresh_b"]["updated_at"] == 200.0
+    assert by_id["legacy_a"]["updated_at"] == "2026-05-02T18:36:25.175590"
+
+
 # ── 10. test_concurrent_saves_dont_lose_data ────────────────────────────
 
 def test_concurrent_saves_dont_lose_data():

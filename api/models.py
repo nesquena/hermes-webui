@@ -221,7 +221,7 @@ def _write_session_index(updates=None):
                 for s in SESSIONS.values():
                     if s.session_id not in existing_ids:
                         entries.append(s.compact())
-                entries.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
+                entries.sort(key=lambda s: _coerce_session_timestamp(s.get('updated_at')) or 0.0, reverse=True)
                 _payload = json.dumps(entries, ensure_ascii=False, indent=2)
 
             try:
@@ -267,7 +267,7 @@ def _write_session_index(updates=None):
                     sid = e.get('session_id')
                     if sid in updated_map:
                         existing[i] = updated_map[sid]
-                existing.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
+                existing.sort(key=lambda s: _coerce_session_timestamp(s.get('updated_at')) or 0.0, reverse=True)
                 _payload = json.dumps(existing, ensure_ascii=False, indent=2)
 
             try:
@@ -383,8 +383,54 @@ def _is_streaming_session(active_stream_id, active_stream_ids):
 
 def _session_sort_timestamp(session):
     if isinstance(session, dict):
-        return session.get('last_message_at') or session.get('updated_at') or 0
-    return _last_message_timestamp(getattr(session, 'messages', None)) or getattr(session, 'updated_at', 0) or 0
+        return (
+            _coerce_session_timestamp(session.get('last_message_at'))
+            or _coerce_session_timestamp(session.get('updated_at'))
+            or 0.0
+        )
+    return (
+        _last_message_timestamp(getattr(session, 'messages', None))
+        or _coerce_session_timestamp(getattr(session, 'updated_at', 0))
+        or 0.0
+    )
+
+
+def _coerce_session_timestamp(value):
+    """Normalize persisted session timestamps to float Unix seconds.
+
+    Legacy sidecars and backup restores can carry ISO-8601 strings for fields
+    such as ``created_at`` / ``updated_at`` while modern sessions use floats.
+    Mixed ``str`` + ``float`` values in sidebar sorting paths cause Python 3 to
+    raise ``TypeError: '<' not supported between instances of 'str' and
+    'float'``. Normalize on load and in sort helpers so legacy data cannot
+    poison `/api/sessions` or session-index rebuilds.
+    """
+    if value in (None, ''):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if isinstance(value, datetime.datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(datetime.timezone.utc).timestamp()
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    if text.endswith('Z'):
+        text = text[:-1] + '+00:00'
+    try:
+        dt = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc).timestamp()
 
 
 def _message_timestamp(message):
@@ -573,8 +619,11 @@ class Session:
         self.model_provider = str(model_provider).strip().lower() if model_provider else None
         self.messages = messages or []
         self.tool_calls = tool_calls or []
-        self.created_at = created_at or time.time()
-        self.updated_at = updated_at or time.time()
+        normalized_created_at = _coerce_session_timestamp(created_at)
+        normalized_updated_at = _coerce_session_timestamp(updated_at)
+        normalized_pending_started_at = _coerce_session_timestamp(pending_started_at)
+        self.created_at = normalized_created_at if normalized_created_at is not None else time.time()
+        self.updated_at = normalized_updated_at if normalized_updated_at is not None else time.time()
         self.pinned = bool(pinned)
         self.archived = bool(archived)
         self.project_id = project_id or None
@@ -588,7 +637,7 @@ class Session:
         self.active_stream_id = active_stream_id
         self.pending_user_message = pending_user_message
         self.pending_attachments = pending_attachments or []
-        self.pending_started_at = pending_started_at
+        self.pending_started_at = normalized_pending_started_at
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
@@ -844,16 +893,19 @@ class Session:
     def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         has_pending_user_message = bool(self.pending_user_message)
-        message_count = (
-            self._metadata_message_count
-            if self._metadata_message_count is not None
-            else len(self.messages)
-        )
+        # Metadata-only sidebar stubs have messages=[] but carry a real
+        # sidecar/index count. Fully-loaded sessions must use len(messages),
+        # otherwise stale _metadata_message_count can keep _index.json behind
+        # the canonical session sidecar and break unread detection.
+        if getattr(self, '_loaded_metadata_only', False) and self._metadata_message_count is not None:
+            message_count = self._metadata_message_count
+        else:
+            message_count = len(self.messages or [])
         if has_pending_user_message:
             message_count = max(message_count, 1)
-        last_message_at = _last_message_timestamp(self.messages) or self.updated_at
+        last_message_at = _last_message_timestamp(self.messages) or _coerce_session_timestamp(self.updated_at) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
-            last_message_at = self.pending_started_at
+            last_message_at = _coerce_session_timestamp(self.pending_started_at) or self.pending_started_at
         return {
             'session_id': self.session_id,
             'title': self.title,
@@ -861,9 +913,9 @@ class Session:
             'model': self.model,
             'model_provider': self.model_provider,
             'message_count': message_count,
-            'created_at': self.created_at,
-            'updated_at': self.updated_at,
-            'last_message_at': last_message_at,
+            'created_at': _coerce_session_timestamp(self.created_at) or self.created_at,
+            'updated_at': _coerce_session_timestamp(self.updated_at) or self.updated_at,
+            'last_message_at': _coerce_session_timestamp(last_message_at) or last_message_at,
             'pinned': self.pinned,
             'archived': self.archived,
             'project_id': self.project_id,
@@ -3242,7 +3294,14 @@ def get_claude_code_sessions(projects_dir: Path | str | None = None, *, max_file
             'is_cli_session': True,
             'read_only': True,
         })
-    sessions.sort(key=lambda s: s.get('last_message_at') or s.get('updated_at') or 0, reverse=True)
+    sessions.sort(
+        key=lambda s: (
+            _coerce_session_timestamp(s.get('last_message_at'))
+            or _coerce_session_timestamp(s.get('updated_at'))
+            or 0.0
+        ),
+        reverse=True,
+    )
     return sessions
 
 

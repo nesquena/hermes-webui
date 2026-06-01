@@ -37,6 +37,12 @@ from api.session_events import (
     subscribe_session_events,
     unsubscribe_session_events,
 )
+from api.session_read_state import (
+    merge_session_read_state,
+    mark_session_read,
+    mark_session_unread,
+    prune_deleted_sessions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +103,34 @@ def _session_field(session, field, default=None):
     if isinstance(session, dict):
         return session.get(field, default)
     return getattr(session, field, default)
+
+
+def _regenerated_session_title_too_weak(title: str, user_text: str) -> bool:
+    """Reject fragmentary manual title-regeneration outputs.
+
+    Kimi can occasionally compress a question into the first few syntactic words
+    (for example "how can add drop") instead of a usable noun-phrase label. For
+    manual regeneration, prefer the local fallback over persisting that kind of
+    sidebar noise.
+    """
+    candidate = re.sub(r'\s+', ' ', str(title or '')).strip().lower()
+    if not candidate:
+        return True
+    words = re.findall(r'[a-z0-9]+', candidate)
+    if len(words) < 3:
+        return True
+    prompt = re.sub(r'\s+', ' ', str(user_text or '')).strip().lower()
+    if (
+        'session' in prompt
+        and 'title' in prompt
+        and any(k in prompt for k in ('regenerate', 'regeneration', 'refresh', 'rename'))
+        and ('session' not in words and 'title' not in words)
+    ):
+        return True
+    weak_openers = {'hey', 'hi', 'hello', 'ok', 'okay', 'sure', 'how', 'can', 'could', 'would', 'should', 'please', 'help'}
+    if len(words) <= 4 and words[0] in weak_openers:
+        return True
+    return False
 
 
 # ── Profile-scoped session/project filtering (#1611, #1614) ────────────────
@@ -2787,6 +2821,11 @@ from api.streaming import (
     _run_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
+    _opening_context_snippets,
+    generate_title_raw_via_aux,
+    _sanitize_generated_title,
+    _fallback_title_from_exchange,
+    _is_generic_fallback_title,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
@@ -4665,6 +4704,7 @@ def handle_get(handler, parsed) -> bool:
         try:
             diag.stage("all_sessions")
             webui_sessions = all_sessions(diag=diag)
+            from api.models import _coerce_session_timestamp
             diag.stage("reconcile_stale_stream_state")
             if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
                 diag.stage("all_sessions_after_stale_stream_reconcile")
@@ -4705,7 +4745,11 @@ def handle_get(handler, parsed) -> bool:
             diag.stage("sort_sessions")
             merged = webui_sessions + deduped_cli
             merged.sort(
-                key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
+                key=lambda s: (
+                    _coerce_session_timestamp(s.get("last_message_at"))
+                    or _coerce_session_timestamp(s.get("updated_at", 0))
+                    or 0.0
+                ),
                 reverse=True,
             )
             # ── Profile scoping (#1611) ────────────────────────────────────────
@@ -4744,6 +4788,8 @@ def handle_get(handler, parsed) -> bool:
             if show_cli_sessions:
                 diag.stage("cli_cap")
                 scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+            diag.stage("read_state")
+            merge_session_read_state(scoped, active_profile)
             diag.stage("redact_sessions")
             safe_merged = []
             for s in scoped:
@@ -5588,6 +5634,105 @@ def handle_post(handler, parsed) -> bool:
         publish_session_list_changed("session_rename")
         return j(handler, {"session": s.compact()})
 
+    if parsed.path == "/api/session/regenerate_title":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = body["session_id"]
+        try:
+            s = get_session(sid)
+            s = _ensure_full_session_before_mutation(sid, s)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        if getattr(s, "read_only", False):
+            return bad(handler, "Read-only imported sessions cannot be modified from WebUI", 400)
+
+        user_text, assistant_text = _opening_context_snippets(s.messages, limit=5)
+        if not user_text:
+            return bad(handler, "Need at least one user message to regenerate title", 400)
+
+        raw_title, status = generate_title_raw_via_aux(
+            user_text,
+            assistant_text or " ",
+            provider="litellm-chat",
+            model="fireworks/kimi-k2.6-turbo",
+            base_url="https://llm.dreamit.au/v1",
+        )
+        next_title = _sanitize_generated_title(raw_title or "")
+        if _regenerated_session_title_too_weak(next_title, user_text):
+            status = f"weak:{status or 'empty'}"
+            next_title = None
+
+        if not next_title:
+            fallback_title = _fallback_title_from_exchange(user_text, assistant_text or "")
+            if (
+                fallback_title
+                and not _is_generic_fallback_title(fallback_title)
+                and not _regenerated_session_title_too_weak(fallback_title, user_text)
+            ):
+                next_title = fallback_title
+                status = f"fallback:{status or 'kimi_empty'}"
+            elif fallback_title:
+                status = f"weak_fallback:{status or 'kimi_empty'}"
+
+        if not next_title:
+            return bad(handler, f"Could not generate a useful title ({status or 'empty'})", 500)
+
+        with _get_session_agent_lock(sid):
+            s.title = str(next_title).strip()[:80] or "Untitled"
+            s.llm_title_generated = True
+            s.save(touch_updated_at=False)
+        publish_session_list_changed("session_title_regenerated")
+        return j(handler, {
+            "ok": True,
+            "title": s.title,
+            "provider": "litellm-chat",
+            "model": "fireworks/kimi-k2.6-turbo",
+            "status": status,
+            "session": s.compact(),
+        })
+
+    if parsed.path == "/api/session/read":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = str(body.get("session_id") or "").strip()
+        if not is_safe_session_id(sid):
+            return bad(handler, "Invalid session_id", 400)
+        from api.profiles import get_active_profile_name
+        try:
+            row = mark_session_read(
+                get_active_profile_name(),
+                sid,
+                body.get("message_count", 0),
+            )
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        publish_session_list_changed("session_read_state")
+        return j(handler, {"ok": True, "session_id": sid, "read_state": row})
+
+    if parsed.path == "/api/session/unread":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = str(body.get("session_id") or "").strip()
+        if not is_safe_session_id(sid):
+            return bad(handler, "Invalid session_id", 400)
+        from api.profiles import get_active_profile_name
+        try:
+            row = mark_session_unread(
+                get_active_profile_name(),
+                sid,
+                body.get("message_count", None),
+            )
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        publish_session_list_changed("session_read_state")
+        return j(handler, {"ok": True, "session_id": sid, "read_state": row})
+
     if parsed.path == "/api/personality/set":
         try:
             require(body, "session_id")
@@ -5830,6 +5975,12 @@ def handle_post(handler, parsed) -> bool:
             prune_session_from_index(sid)
         except Exception:
             logger.debug("Failed to prune deleted session from index: %s", sid, exc_info=True)
+        try:
+            from api.profiles import get_active_profile_name
+            valid_sids = [row.get("session_id") for row in all_sessions() if row.get("session_id")]
+            prune_deleted_sessions(get_active_profile_name(), valid_sids)
+        except Exception:
+            logger.debug("Failed to prune deleted session read state: %s", sid, exc_info=True)
         try:
             from api.upload import _session_attachment_dir
 

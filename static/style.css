@@ -968,6 +968,8 @@
   .session-item.active.archived.swiping-right{background:color-mix(in srgb,var(--success) 20%,var(--accent-bg));}
   .session-item.streaming .session-title{color:var(--accent);}
   .session-item.streaming .session-title-row{color:var(--text);}
+  .session-item.unread{box-shadow:inset 2px 0 0 color-mix(in srgb,var(--accent) 70%,transparent);}
+  .session-item.unread::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:2px;border-radius:999px;background:var(--accent);opacity:.75;pointer-events:none;}
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;}
@@ -1063,6 +1065,7 @@
   .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:7px 8px 6px;margin:-1px -1px 4px;border-radius:10px 10px 8px 8px;background:color-mix(in srgb,var(--surface-subtle) 80%,transparent);border-bottom:1px solid color-mix(in srgb,var(--border) 70%,transparent);cursor:pointer;user-select:none;opacity:.86;transition:opacity .15s,background .15s;}
   .session-date-header:hover{opacity:1;background:color-mix(in srgb,var(--hover-bg) 72%,transparent);}
   .session-date-header.pinned{color:var(--accent);}
+  .session-date-header.unread{color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,var(--surface-subtle));border-bottom-color:color-mix(in srgb,var(--accent) 22%,transparent);}
   .session-date-header.active{color:var(--accent);}
   .session-date-count{margin-left:auto;min-width:18px;padding:1px 6px;border-radius:999px;background:var(--hover-bg);color:var(--muted);font-size:10px;font-weight:700;line-height:1.45;text-align:center;letter-spacing:0;text-transform:none;}
   .session-date-body{display:flex;flex-direction:column;gap:2px;}
@@ -3737,7 +3740,7 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
 .msg-body code,
 .msg-body pre,
-.msg-body table { font-family: 'SF Mono', ui-monospace, monospace; }
+.msg-body table { font-family: inherit; }
 .msg-body:empty { display: none; }
 .assistant-turn { width: 100%; }
 .assistant-turn-blocks { display: flex; flex-direction: column; }

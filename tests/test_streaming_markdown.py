@@ -549,20 +549,20 @@ class TestDoneEventSmd:
             "the possibly-stale _scrollPinned flag."
         )
 
-    def test_done_handler_prefers_message_tool_metadata_for_settled_render(self):
+    def test_done_handler_prefers_message_tool_metadata_but_keeps_recovered_journal_cards(self):
         """If final messages already contain tool metadata, renderMessages()
-        should derive anchored settled cards from those messages.
+        should still keep journal-recovered session.tool_calls for interrupted tails.
 
-        Falling back to session-level tool_calls unconditionally can hide cards
-        after pagination/windowing because those anchors may not line up with
-        the active message array.
+        Pure session-level summaries remain a fallback, but `_recovered_from_run_journal`
+        cards must survive mixed histories because the recovered assistant anchor has
+        visible text without inline tool_calls.
         """
         fn = self.get_fn()
         assert fn, "'done' handler not found"
         done_before_render = fn[:fn.index("renderMessages({preserveScroll:true})")]
-        assert "const hasMessageToolMetadata=S.messages.some" in done_before_render
-        assert "!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length" in done_before_render
-        assert "S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map" in done_before_render
+        assert "window._resolveSessionToolCalls" in done_before_render
+        assert "_recovered_from_run_journal" in done_before_render
+        assert "S.toolCalls=resolvedToolCalls.toolCalls||[];" in done_before_render or "S.toolCalls = resolvedToolCalls.toolCalls || [];" in done_before_render
 
 
 # ── 7. apperror event: smd parser ends cleanly ───────────────────────────────

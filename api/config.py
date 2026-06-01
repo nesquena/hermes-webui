@@ -2142,6 +2142,12 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         if bare.startswith(("o1", "o3", "o4")):
             return ["low", "medium", "high"]
         return list(VALID_REASONING_EFFORTS)
+    if provider == "litellm-responses" and model.startswith("codex/") and bare.startswith("gpt-5"):
+        return ["high", "xhigh"]
+    if provider in {"xai", "xai-oauth"} and bare.startswith("grok"):
+        return ["high", "xhigh"]
+    if provider == "litellm-chat" and model.startswith("xai/") and bare.startswith("grok"):
+        return ["high", "xhigh"]
     if provider in {"copilot", "github-copilot"}:
         if bare.startswith(("gpt-5", "o1", "o3", "o4")):
             if bare.startswith(("o1", "o3", "o4")):

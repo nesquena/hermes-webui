@@ -28,6 +28,41 @@ def test_openai_codex_prefixed_gpt5_supports_reasoning_effort_levels():
     assert "high" in efforts
 
 
+def test_litellm_responses_codex_gpt5_exposes_high_and_xhigh_only():
+    assert cfg.resolve_model_reasoning_efforts(
+        "codex/gpt-5.5-fast",
+        provider_id="litellm-responses",
+    ) == ["high", "xhigh"]
+
+
+def test_litellm_responses_prefixed_codex_gpt5_exposes_high_and_xhigh_only():
+    assert cfg.resolve_model_reasoning_efforts(
+        "@litellm-responses:codex/gpt-5.5",
+        provider_id="litellm-responses",
+    ) == ["high", "xhigh"]
+
+
+def test_xai_grok_models_expose_high_and_xhigh_only():
+    assert cfg.resolve_model_reasoning_efforts(
+        "grok-4.20-reasoning",
+        provider_id="xai",
+    ) == ["high", "xhigh"]
+
+
+def test_litellm_chat_xai_grok_models_expose_high_and_xhigh_only():
+    assert cfg.resolve_model_reasoning_efforts(
+        "@litellm-chat:xai/grok-4.20-reasoning",
+        provider_id="litellm-chat",
+    ) == ["high", "xhigh"]
+
+
+def test_xai_oauth_grok_models_expose_high_and_xhigh_only():
+    assert cfg.resolve_model_reasoning_efforts(
+        "grok-4.20-reasoning",
+        provider_id="xai-oauth",
+    ) == ["high", "xhigh"]
+
+
 def test_github_copilot_gpt5_supports_reasoning_effort_levels():
     efforts = cfg.resolve_model_reasoning_efforts(
         "gpt-5.5",

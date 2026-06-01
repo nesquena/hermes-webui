@@ -1304,7 +1304,13 @@ def _strip_thinking_markup(text: str) -> str:
     # Treat provider thinking wrappers as metadata only when they lead the
     # response. Literal discussion of these tags later in normal prose should
     # stay visible (#2152).
-    s = re.sub(r'^\s*<think>.*?</think>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'^\s*<(?:think|thinking|thought|scratchpad|analysis)>.*?</(?:think|thinking|thought|scratchpad|analysis)>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    # If a model starts a thinking block and then hits max_tokens before the
+    # close tag, treat the whole response as non-title content rather than
+    # saving a reasoning fragment into the sidebar.
+    s = re.sub(r'^\s*<(?:think|thinking|thought|scratchpad|analysis)>.*$', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'^\s*```(?:think|thinking|thought|scratchpad|analysis)\b.*?```\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'^\s*```(?:think|thinking|thought|scratchpad|analysis)\b.*$', ' ', s, flags=re.IGNORECASE | re.DOTALL)
     s = re.sub(r'^\s*<\|channel\|?>thought\n?.*?<channel\|>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)
     s = re.sub(r'^\s*<\|turn\|>thinking\n.*?<turn\|>\s*', ' ', s, flags=re.IGNORECASE | re.DOTALL)  # Gemma 4
     s = re.sub(r'^\s*(the|ther)\s+user\s+is\s+asking[^\n]*(?:\n|$)', ' ', s, flags=re.IGNORECASE)
@@ -1361,9 +1367,10 @@ def _strip_xml_tool_calls(text: str) -> str:
     return s.strip()
 
 
-def _sanitize_generated_title(text: str) -> str:
-    """Sanitize LLM-generated title text before persisting to session."""
-    s = _strip_thinking_markup(text or '')
+def _normalize_generated_title_candidate(text: str) -> str:
+    """Normalize one possible title candidate without list/dump recovery."""
+    s = str(text or '')
+    s = re.sub(r'^\s*(?:[-*•]+|\d+[.)])\s*', '', s)
     s = re.sub(
         r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*:\s*(?:[*_`~]+\s*)?',
         '',
@@ -1371,8 +1378,55 @@ def _sanitize_generated_title(text: str) -> str:
         flags=re.IGNORECASE,
     )
     s = re.sub(r'^\s*title\s*:\s*', '', s, flags=re.IGNORECASE)
-    s = s.strip(" \t\r\n\"'`*_~")
+    s = s.strip(" \t\r\n\"'`*_~:;,.!?—–-")
     s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def _candidate_title_word_count(text: str) -> int:
+    return len(re.findall(r'[A-Za-z0-9À-ÖØ-öø-ÿ]+', str(text or '')))
+
+
+def _extract_title_from_candidate_list(text: str) -> str:
+    """Recover a clean title from visible LLM meta dumps with candidate lists.
+
+    Kimi-style chat routes sometimes ignore the "title only" prompt and emit
+    prose plus a "Possible titles:" list.  The list entries are often exactly
+    the usable answer, so salvage the first valid noun-phrase candidate instead
+    of discarding the whole response and falling through to the weaker local
+    first-words heuristic.
+    """
+    s = str(text or '')
+    if not re.search(r'\b(?:possible|candidate|suggested|better)\s+titles?\s*:', s, flags=re.IGNORECASE):
+        return ''
+    after = re.split(r'\b(?:possible|candidate|suggested|better)\s+titles?\s*:', s, maxsplit=1, flags=re.IGNORECASE)[-1]
+    for line in after.splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        if not re.match(r'^(?:[-*•]+|\d+[.)])\s+', raw):
+            # Candidate lists usually end when explanatory prose resumes.
+            if re.match(r'^(?:wait|so|because|the|i\b|we\b|need\b)', raw, flags=re.IGNORECASE):
+                break
+            continue
+        candidate = _normalize_generated_title_candidate(raw)
+        words = _candidate_title_word_count(candidate)
+        if 3 <= words <= 8 and not _looks_invalid_generated_title(candidate):
+            return candidate[:80]
+    return ''
+
+
+def _sanitize_generated_title(text: str) -> str:
+    """Sanitize LLM-generated title text before persisting to session."""
+    raw = str(text or '')
+    recovered = _extract_title_from_candidate_list(raw)
+    if recovered:
+        return recovered
+    s = _strip_thinking_markup(raw)
+    recovered = _extract_title_from_candidate_list(s)
+    if recovered:
+        return recovered
+    s = _normalize_generated_title_candidate(s)
     # Guard against chain-of-thought leakage and meta-reasoning patterns.
     if _looks_invalid_generated_title(s):
         return ''
@@ -1386,11 +1440,16 @@ def _looks_invalid_generated_title(text: str) -> bool:
     return bool(
         re.search(r'<think>|<\|channel\|>thought|<\|turn\|>thinking', s, flags=re.IGNORECASE)
         or re.search(r'^\s*(the|ther)\s+user\s+', s, flags=re.IGNORECASE)
+        or re.search(r'^\s*the\s+user\s+(?:wants|asked|asks)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*user\s+\w+\s+', s, flags=re.IGNORECASE)
         or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
+        or re.search(r'\bconversation\s+context\s*:', s, flags=re.IGNORECASE)
+        or re.search(r'\bpossible\s+titles\s*:', s, flags=re.IGNORECASE)
+        or re.search(r'\blet\s+me\s+count\b', s, flags=re.IGNORECASE)
+        or re.search(r'\bneed\s+\d+\s*-\s*\d+\s+words\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*(ok|okay|done|all set|complete|completed|finished)\b[\s.!?]*$', s, flags=re.IGNORECASE)
     )
 
@@ -1486,6 +1545,45 @@ def _first_exchange_snippets(messages):
         if user_text and asst_text:
             break
     return user_text[:500], asst_text[:500]
+
+
+def _opening_context_snippets(messages, limit: int = 5) -> tuple[str, str]:
+    """Return user/assistant snippets from the first visible opening messages.
+
+    Manual title regeneration should use a little more context than the first
+    exchange because the opening assistant row is often an empty/tool scaffold
+    and the first useful description can arrive a few visible turns later.  We
+    intentionally count only user/assistant text, not tool output, so tool JSON
+    and attachment analysis do not become the title source.
+    """
+    try:
+        limit = max(1, int(limit))
+    except Exception:
+        limit = 5
+    user_parts: list[str] = []
+    assistant_parts: list[str] = []
+    visible_count = 0
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get('role')
+        if role not in ('user', 'assistant'):
+            continue
+        candidate = _message_text(m.get('content'))
+        if not candidate:
+            continue
+        if role == 'assistant' and m.get('tool_calls') and _looks_invalid_generated_title(candidate):
+            continue
+        visible_count += 1
+        if role == 'user':
+            user_parts.append(candidate[:500])
+        else:
+            assistant_parts.append(candidate[:500])
+        if visible_count >= limit:
+            break
+    user_text = '\n'.join(f"User {idx + 1}: {part}" for idx, part in enumerate(user_parts))
+    assistant_text = '\n'.join(f"Assistant {idx + 1}: {part}" for idx, part in enumerate(assistant_parts))
+    return user_text[:1200], assistant_text[:1200]
 
 
 def _latest_exchange_snippets(messages):
@@ -1592,12 +1690,16 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
 
 
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
-    qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
+    qa = (
+        f"Opening conversation messages:\n"
+        f"User-side context:\n{user_text[:1200]}\n\n"
+        f"Assistant-side context:\n{assistant_text[:1200]}"
+    )
     language_rule = _title_prompt_language_rule(user_text)
     prompts = [
         (
-            "Generate a short session title from this conversation start.\n"
-            "Use BOTH the user's question and the assistant's visible answer.\n"
+            "Generate a short session title from these opening conversation messages.\n"
+            "Use BOTH the user's request and the assistant's visible response/context.\n"
             f"{language_rule}"
             "Return only the title text, 3-8 words, as a topic label.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
@@ -2062,6 +2164,15 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
             return f'{topic_name} AI productivity'
         return f'{topic_name} discussion'
 
+    if (
+        'session' in combined
+        and 'title' in combined
+        and any(k in combined for k in ('regenerate', 'regeneration', 'refresh', 'rename'))
+        and any(k in combined for k in ('drop down', 'dropdown', 'menu', 'action'))
+    ):
+        if 'drop down' in combined or 'dropdown' in combined:
+            return 'Session title regeneration dropdown'
+        return 'Session title regeneration menu'
     if any(k in combined for k in ('title', 'session title')) and any(k in combined for k in ('summary', 'summar', 'short title')):
         if any(k in combined for k in ('test', 'ok', 'reply ok')):
             return 'Session title auto-summary test'
@@ -2868,7 +2979,101 @@ def _drop_checkpointed_current_user_from_context(messages, msg_text):
     return history
 
 
-def _save_streaming_checkpoint(session):
+def _build_streaming_checkpoint_partial_message(stream_id: str | None) -> dict | None:
+    """Return a durable partial-assistant marker for the current stream state.
+
+    Periodic checkpoints fire after completed tool calls, but before the final
+    `done` writeback merges the full assistant/tool transcript into
+    ``session.messages``. Persisting only pending_user_message/runtime fields in
+    that window means a WebUI restart can lose the last visible tool call from
+    the session sidecar even though the run journal already has it.
+
+    Reuse the same `_partial` / `reasoning` / `_partial_tool_calls` shape that
+    cancel/interruption recovery already persists so the frontend can render the
+    checkpointed progress after restart without special cases.
+    """
+    sid = str(stream_id or '').strip()
+    if not sid:
+        return None
+    partial_text = _strip_thinking_markup(str(STREAM_PARTIAL_TEXT.get(sid, '') or '')).strip()
+    reasoning_text = str(STREAM_REASONING_TEXT.get(sid, '') or '').strip()
+    raw_tool_calls = STREAM_LIVE_TOOL_CALLS.get(sid) or []
+    tool_calls: list[dict] = []
+    for tool_call in raw_tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        clean = {
+            'name': str(tool_call.get('name') or ''),
+            'args': copy.deepcopy(tool_call.get('args') or {}) if isinstance(tool_call.get('args'), dict) else {},
+            'done': bool(tool_call.get('done', False)),
+        }
+        if tool_call.get('duration') is not None:
+            clean['duration'] = tool_call.get('duration')
+        if tool_call.get('is_error') is not None:
+            clean['is_error'] = bool(tool_call.get('is_error', False))
+        if tool_call.get('snippet'):
+            clean['snippet'] = str(tool_call.get('snippet'))
+        if tool_call.get('preview'):
+            clean['preview'] = str(tool_call.get('preview'))
+        if tool_call.get('tid'):
+            clean['tid'] = str(tool_call.get('tid'))
+        if clean['name']:
+            tool_calls.append(clean)
+    if not partial_text and not reasoning_text and not tool_calls:
+        return None
+    partial_msg: dict = {
+        'role': 'assistant',
+        'content': partial_text,
+        '_partial': True,
+        'timestamp': int(time.time()),
+    }
+    if reasoning_text:
+        partial_msg['reasoning'] = reasoning_text
+    if tool_calls:
+        partial_msg['_partial_tool_calls'] = tool_calls
+    return partial_msg
+
+
+def _upsert_streaming_checkpoint_partial_message(session, partial_msg: dict | None) -> bool:
+    """Upsert the current-turn partial assistant checkpoint in-place.
+
+    Keep at most one `_partial` assistant marker for the current user turn so
+    repeated checkpoints extend the same durable progress record rather than
+    appending one partial message per completed tool call.
+    """
+    if not isinstance(partial_msg, dict):
+        return False
+    messages = getattr(session, 'messages', None)
+    if not isinstance(messages, list):
+        session.messages = []
+        messages = session.messages
+    start = 0
+    for idx in range(len(messages) - 1, -1, -1):
+        msg = messages[idx]
+        if isinstance(msg, dict) and msg.get('role') == 'user':
+            start = idx + 1
+            break
+    existing_idx = None
+    for idx in range(len(messages) - 1, start - 1, -1):
+        msg = messages[idx]
+        if not isinstance(msg, dict):
+            continue
+        if msg.get('role') == 'assistant' and msg.get('_partial') and not msg.get('_error'):
+            existing_idx = idx
+            break
+    if existing_idx is not None:
+        if _partial_message_signature(messages[existing_idx]) == _partial_message_signature(partial_msg):
+            messages[existing_idx].update(partial_msg)
+            return False
+        messages[existing_idx] = partial_msg
+        return True
+    if _partial_marker_already_present(messages, partial_msg):
+        return False
+    messages.append(partial_msg)
+    return True
+
+
+def _save_streaming_checkpoint(session, *, stream_id: str | None = None):
     """Persist a streaming checkpoint under the session's profile context."""
     from api import profiles as profiles_api
 
@@ -2877,6 +3082,10 @@ def _save_streaming_checkpoint(session):
         "streaming checkpoint",
         logger_override=logger,
     ):
+        if stream_id:
+            _partial_msg = _build_streaming_checkpoint_partial_message(stream_id)
+            if _partial_msg is not None:
+                _upsert_streaming_checkpoint_partial_message(session, _partial_msg)
         session.save(skip_index=True)
 
 
@@ -5015,7 +5224,7 @@ def _run_agent_streaming(
                         cur = _checkpoint_activity[0]
                         if cur > last_saved_activity:
                             with _agent_lock:
-                                _save_streaming_checkpoint(s)
+                                _save_streaming_checkpoint(s, stream_id=stream_id)
                             last_saved_activity = cur
                     except Exception as e:
                         logger.debug("Periodic checkpoint save failed: %s", e)

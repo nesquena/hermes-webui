@@ -3,10 +3,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- Session unread state is now saved server-side per profile and synced through `/api/sessions`, with a dedicated Unread sidebar group below Active and above Recent, a clearer unread indicator, and explicit `Mark as read` / `Mark as unread` menu actions that do not reorder Recents.
+- Session action menus now include a start-of-conversation "Regenerate title" action that uses Kimi K2.6 to replace stale sidebar titles without moving the session in recent ordering.
+
 ### Changed
+
+- Manual session title regeneration now uses the first five visible user/assistant messages, skips tool output, salvages clean candidates from Kimi-style visible reasoning dumps such as `Possible titles:`, and rejects weak fallback fragments before saving a title.
 
 - Thinking/tool Activity groups now default open so live and settled tool-call thinking is visible without first expanding the disclosure, while individual tool output details remain collapsed until clicked.
 - Running sessions now appear in an Active sidebar bucket above Recent, keeping in-flight work visible even when its last message is older.
+
+### Fixed
+
+- `/api/sessions` and session-index rebuilds now normalize legacy ISO-string session timestamps (`created_at`, `updated_at`, `last_message_at`) before sorting, preventing mixed `str`/`float` metadata from crashing the sidebar with HTTP 500 after recovery scans or legacy sidecar loads.
+- Fully-loaded sessions now publish their actual `len(messages)` to sidebar metadata instead of reusing stale metadata-only counts, preventing `_index.json` drift from hiding unread sessions after long turns or recovery merges.
+- Reloaded or recovered sessions now keep tool-call history visible for interrupted/cancelled turns: settled rendering derives cards from `_partial_tool_calls`, and mixed-history reloads preserve journal-recovered session-level tool cards instead of dropping them whenever older assistant messages already contain tool metadata.
+- LiteLLM Responses Codex GPT-5 models and Grok routes now expose the `high` and `xhigh` reasoning effort options in the WebUI composer instead of hiding the reasoning chip as unsupported.
 
 ## [v0.51.171] — 2026-05-30 — Release EQ (stage-batch53 — tool-output card badge + Neon opt-in skin)
 

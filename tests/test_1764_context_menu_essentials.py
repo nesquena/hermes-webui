@@ -169,6 +169,34 @@ class TestSessionRenameMenuItem:
         assert "session_rename_desc: 'Edit the title of this conversation'" in src
 
 
+class TestSessionRegenerateTitleMenuItem:
+    def test_regenerate_title_action_in_menu(self):
+        """The session three-dot menu includes a start-mode title regeneration action."""
+        src = SESSIONS.read_text(encoding="utf-8")
+        assert "function _appendSessionRegenerateTitleAction(menu, session)" in src
+        assert "t('session_regenerate_title')" in src
+        assert "t('session_regenerate_title_desc')" in src
+        assert "'/api/session/regenerate_title'" in src
+
+    def test_regenerate_title_appears_after_rename_before_pin(self):
+        """Keep the menu order intentional: manual edit first, generated edit next."""
+        src = SESSIONS.read_text(encoding="utf-8")
+        menu_start = src.index("function _openSessionActionMenu(session, anchorEl){")
+        menu_end = src.index("  document.body.appendChild(menu);", menu_start)
+        menu_body = src[menu_start:menu_end]
+        rename_idx = menu_body.find("t('session_rename')")
+        regen_idx = menu_body.find("_appendSessionRegenerateTitleAction(menu, session)")
+        pin_idx = menu_body.find("t('session_pin')")
+        assert rename_idx > 0 and regen_idx > 0 and pin_idx > 0
+        assert rename_idx < regen_idx < pin_idx
+
+    def test_regenerate_title_translation_keys_present(self):
+        src = I18N.read_text(encoding="utf-8")
+        assert "session_regenerate_title: 'Regenerate title'" in src
+        assert "session_regenerate_title_desc: 'Generate a fresh title from the beginning with Kimi K2.6'" in src
+        assert "session_regenerating_title: 'Regenerating title with Kimi K2.6…'" in src
+
+
 # ════════════════════════════════════════════════════════════════════
 #  Item C — reveal-failed toast includes the resolved path
 # ════════════════════════════════════════════════════════════════════

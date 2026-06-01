@@ -4,6 +4,7 @@ from pathlib import Path
 from api.streaming import (
     _fallback_title_from_exchange,
     _first_exchange_snippets,
+    _opening_context_snippets,
     _sanitize_generated_title,
 )
 
@@ -25,6 +26,59 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
         self.assertEqual(
             _sanitize_generated_title("**Clarifying Topic for Discussion**"),
             "Clarifying Topic for Discussion",
+        )
+
+    def test_strips_thinking_tag_prefix(self):
+        self.assertEqual(
+            _sanitize_generated_title("<think>Count words and compare candidates.</think>Hermes WebUI Title Regeneration"),
+            "Hermes WebUI Title Regeneration",
+        )
+
+    def test_rejects_unclosed_thinking_tag_prefix(self):
+        self.assertEqual(
+            _sanitize_generated_title("<think>Count words until the response is truncated"),
+            "",
+        )
+
+    def test_recovers_candidate_from_visible_kimi_reasoning_dump(self):
+        self.assertEqual(
+            _sanitize_generated_title(
+                "The user wants a concise session title (3-8 words).\n\nPossible titles:\n- Hermes WebUI Title Regeneration"
+            ),
+            "Hermes WebUI Title Regeneration",
+        )
+
+    def test_recovers_first_valid_candidate_from_long_kimi_dump(self):
+        self.assertEqual(
+            _sanitize_generated_title(
+                "The user wants a short session title.\n"
+                "Key themes from the conversation:\n"
+                "- User asks about unread tags and marking sessions read.\n"
+                "Possible titles:\n"
+                "- Session Read State Sync Implementation\n"
+                "- Unread Tag and Read State Sync\n"
+                "So the topic is about session read/unread state."
+            ),
+            "Session Read State Sync Implementation",
+        )
+
+    def test_opening_context_uses_first_five_visible_messages(self):
+        messages = [
+            {"role": "user", "content": "First user ask"},
+            {"role": "assistant", "content": ""},
+            {"role": "tool", "content": "tool output should be ignored"},
+            {"role": "assistant", "content": "First answer"},
+            {"role": "user", "content": "Second user detail"},
+            {"role": "assistant", "content": "Second answer"},
+            {"role": "user", "content": "Third user detail"},
+            {"role": "assistant", "content": "Sixth visible message excluded"},
+        ]
+        self.assertEqual(
+            _opening_context_snippets(messages, limit=5),
+            (
+                "User 1: First user ask\nUser 2: Second user detail\nUser 3: Third user detail",
+                "Assistant 1: First answer\nAssistant 2: Second answer",
+            ),
         )
 
     def test_first_exchange_skips_empty_assistant_tool_call_placeholder(self):
@@ -49,6 +103,15 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
         self.assertEqual(
             _fallback_title_from_exchange("Generate a short title summary test", ""),
             "Session title auto-summary test",
+        )
+
+    def test_fallback_title_handles_session_title_dropdown_regeneration(self):
+        self.assertEqual(
+            _fallback_title_from_exchange(
+                "how can i add a drop down to sessions to regenerate the title for a session?",
+                "",
+            ),
+            "Session title regeneration dropdown",
         )
 
     def test_fallback_title_non_latin_input_uses_english_placeholder(self):
