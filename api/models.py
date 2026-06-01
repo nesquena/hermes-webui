@@ -2655,6 +2655,68 @@ def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict
     return out
 
 
+def state_db_has_session(sid: str) -> bool:
+    """Return True when ``sid`` exists in the active state.db sessions table.
+
+    Used by file-manager handlers to fall back to a state.db lookup when
+    ``get_session`` raises ``KeyError`` because the session was created by
+    Telegram/CLI (external) rather than the WebUI (issue #3280). The state.db
+    schema stores only metadata (id/title/model/source/...), not a workspace
+    path — the workspace is shared across session storage backends and is
+    resolved separately via ``get_last_workspace()``.
+    """
+    if not sid:
+        return False
+    try:
+        import sqlite3
+    except ImportError:
+        return False
+    db_path = _active_state_db_path()
+    if not db_path.exists():
+        return False
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (str(sid),))
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+class _ExternalSessionView:
+    """Minimal session-shaped view for external (Telegram/CLI) sessions.
+
+    Only exposes the fields file-manager handlers need (``session_id`` and
+    ``workspace``). The workspace falls back to the WebUI's last-used
+    workspace because state.db does not persist a per-session workspace path
+    and the file browser is intentionally workspace-scoped, not
+    session-storage-scoped (issue #3280).
+    """
+
+    __slots__ = ("session_id", "workspace")
+
+    def __init__(self, session_id: str, workspace: str):
+        self.session_id = session_id
+        self.workspace = workspace
+
+
+def get_session_for_file_ops(sid: str):
+    """Return a session-like object for file-manager handlers.
+
+    Tries ``get_session`` first (preserves all existing behavior for WebUI
+    sessions). If that raises ``KeyError``, checks state.db; when the session
+    exists there, returns an ``_ExternalSessionView`` whose ``workspace`` is
+    the active WebUI workspace. If neither has the session, re-raises
+    ``KeyError`` so callers continue to return their existing 404.
+    """
+    try:
+        return get_session(sid, metadata_only=True)
+    except KeyError:
+        if state_db_has_session(sid):
+            return _ExternalSessionView(str(sid), str(get_last_workspace()))
+        raise
+
+
 def _active_state_db_path() -> Path:
     """Return state.db for the active Hermes profile, degrading to HERMES_HOME."""
     try:
