@@ -7173,6 +7173,361 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_milestones_malfo
     assert "raw-prompt" not in serialized
 
 
+def test_run_source_refresh_jobs_default_fetcher_ingests_github_topics_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-topics-source-refresh",
+        "title": "GitHub Topics Source Refresh",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/topics?access_token=***#raw-prompt",
+    })
+    github_topics_body = json.dumps({
+        "names": ["memory-tree", "source-refresh", "capy-spaces", "prompt-engineering", "token-auth"],
+    }).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_topics_body
+
+    def fake_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-topics-source-refresh.md").read_text(encoding="utf-8").lower()
+    search = search_memory("capy-spaces", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [{"url": "https://api.github.com/repos/capy/spaces/topics", "timeout": 8}]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    assert result["jobs"][0]["prompt_preflight"]["boundary"] == "auto_fetched_source"
+    assert result["jobs"][0]["prompt_preflight"]["raw_prompt_stored"] is False
+    assert search["results"][0]["source_id"] == "github-topics-source-refresh"
+    assert "github repository topics for capy/spaces" in persisted
+    assert "topic count: 5" in persisted
+    assert "topics: memory-tree, source-refresh, capy-spaces, prompt-engineering, token-auth" in persisted
+    for unsafe in (
+        "secret_value_do_not_leak",
+        "api_key",
+        "access_token",
+        "raw-prompt",
+        "raw topics body",
+        "feed-looking raw body",
+        "body:",
+        "items",
+    ):
+        assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_topics_extra_fields(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-topics-extra-fields",
+        "title": "GitHub Topics Extra Fields",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/topics?access_token=***#raw-prompt",
+    })
+    github_topics_body = json.dumps({
+        "names": ["memory-tree"],
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        "body": "SECRET_VALUE_DO_NOT_LEAK raw topics body",
+        "items": [{"summary": "SECRET_VALUE_DO_NOT_LEAK feed-looking raw body"}],
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_topics_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-topics-extra-fields.md").exists()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "feed-looking raw body" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_accepts_empty_github_topics_names(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-empty-topics-source-refresh",
+        "title": "GitHub Empty Topics Source Refresh",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/topics?token=***#raw-prompt",
+    })
+    github_topics_body = json.dumps({"names": []}).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_topics_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-empty-topics-source-refresh.md").read_text(encoding="utf-8").lower()
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "completed"
+    assert "github repository topics for capy/spaces" in persisted
+    assert "topic count: 0" in persisted
+    assert "access_token" not in serialized
+    assert "token=***" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_topics_feed_bypass(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-topics-feed-bypass",
+        "title": "GitHub Topics Feed Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/topics?access_token=***#raw-prompt",
+    })
+    github_topics_body = json.dumps({
+        "version": "https://jsonfeed.org/version/1.1",
+        "items": [{
+            "title": "Topics feed bypass",
+            "summary": "Safe-looking topics feed summary must not bypass exact topics metadata validation.",
+            "content_text": "SECRET_VALUE_DO_NOT_LEAK raw topics body",
+        }],
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_topics_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"result": result, "jobs": list_source_refresh_jobs(limit=5)}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-topics-feed-bypass.md").exists()
+    assert "safe-looking topics feed summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_topics_feed_json_content_type(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-topics-feed-json-content-type",
+        "title": "GitHub Topics Feed JSON Content-Type",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/topics?access_token=***#raw-prompt",
+    })
+    github_topics_body = json.dumps({"names": ["memory-tree"]}).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/feed+json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_topics_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-topics-feed-json-content-type.md").exists()
+    assert "memory-tree" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_topics_non_json_fallback(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-topics-html-fallback",
+        "title": "GitHub Topics HTML Fallback",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/topics?access_token=***#raw-prompt",
+    })
+    html_body = (
+        '<html><head><title>Safe topics page</title>'
+        '<meta name="description" content="Safe-looking HTML summary must not bypass topics metadata validation.">'
+        '</head><body>SECRET_VALUE_DO_NOT_LEAK</body></html>'
+    ).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return html_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-topics-html-fallback.md").exists()
+    assert "safe-looking html summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_topics_malformed_names(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-topics-malformed-names",
+        "title": "GitHub Topics Malformed Names",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/topics?access_token=***#raw-prompt",
+    })
+    github_topics_body = json.dumps({
+        "names": ["memory-tree", "topic-", "double--dash"],
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_topics_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-topics-malformed-names.md").exists()
+    assert "topic-" not in serialized
+    assert "double--dash" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_topics_secret_like_names(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-topics-secret-like-names",
+        "title": "GitHub Topics Secret-Like Names",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/topics?access_token=***#raw-prompt",
+    })
+    github_topics_body = json.dumps({
+        "names": ["memory-tree", "api-auth", "script", "secret", "password", "pk-test-deadbeef"],
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_topics_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-topics-secret-like-names.md").exists()
+    for unsafe in ("api-auth", "script", "secret", "password", "pk-test-deadbeef"):
+        assert unsafe not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_run_source_refresh_jobs_default_fetcher_ingests_github_repository_without_description_and_omits_invalid_counts(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))

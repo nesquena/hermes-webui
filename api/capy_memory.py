@@ -2611,6 +2611,97 @@ def _github_labels_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_topics_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "topics"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+_GITHUB_TOPIC_COMPACT_BLOCKED_TERMS = {
+    "apikey",
+    "apiauth",
+    "authorization",
+    "authorizationheader",
+    "bearerplaceholder",
+    "bearertoken",
+    "body",
+    "credential",
+    "developerprompt",
+    "disregardinstructions",
+    "hiddeninstructions",
+    "ignorepreviousinstructions",
+    "javascript",
+    "overridesystem",
+    "password",
+    "rawbody",
+    "rawprompt",
+    "revealinstructions",
+    "script",
+    "secret",
+    "secretvaluedonotleak",
+    "systemprompt",
+}
+
+_GITHUB_TOPIC_COMPACT_BLOCKED_PREFIXES = (
+    "githubpat",
+    "ghp",
+    "pktest",
+)
+
+
+def _github_topic_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    topic = value.strip()
+    if not topic or topic != value:
+        return False
+    compact_normalized = re.sub(r"[^A-Za-z0-9]+", "", topic).lower()
+    if any(term in compact_normalized for term in _GITHUB_TOPIC_COMPACT_BLOCKED_TERMS):
+        return False
+    if compact_normalized.startswith(_GITHUB_TOPIC_COMPACT_BLOCKED_PREFIXES):
+        return False
+    return bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,49}", topic))
+
+
+def _json_payload_is_github_topics_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_topics_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict) or set(payload) != {"names"}:
+        return False
+    topics = payload.get("names")
+    if not isinstance(topics, list):
+        return False
+    return all(_github_topic_name_is_safe(topic) for topic in topics)
+
+
+def _github_topics_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_topics_path_repo(origin_uri) or "repository"
+    raw_topics = payload.get("names")
+    topics = [topic for topic in raw_topics if _github_topic_name_is_safe(topic)] if isinstance(raw_topics, list) else []
+    parts = [f"GitHub repository topics for {repo}", f"topic count: {len(topics)}"]
+    if topics:
+        parts.append(f"topics: {', '.join(topics[:8])}")
+    # Topic rows are already constrained to lowercase GitHub topic slugs and
+    # compact blocked phrases above. Avoid the generic refresh redactor here so
+    # legitimate metadata slugs such as "token-auth" are not mistaken for raw
+    # credential material.
+    return "; ".join(parts)[:1_200]
+
+
 def _github_languages_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -3272,6 +3363,17 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    topics_repo = _github_topics_path_repo(origin_uri)
+    if topics_repo:
+        if not _json_payload_is_github_topics_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "source_refresh_kind": "github_topics",
+            "title": f"GitHub topics {topics_repo}",
+            "summary": _github_topics_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_labels_metadata(origin_uri, payload):
         repo = _github_labels_path_repo(origin_uri) or source_id
         title = f"GitHub labels {repo}"
@@ -3484,6 +3586,8 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or content_type not in {"application/json", "application/feed+json"}
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_topics_path_repo(safe_origin_uri) and content_type != "application/json":
+            raise RuntimeError("refresh fetcher disabled")
         raw = response.read(_MAX_REFRESH_FETCH_BYTES + 1)
         if len(raw) > _MAX_REFRESH_FETCH_BYTES:
             raw = raw[:_MAX_REFRESH_FETCH_BYTES]
@@ -3570,6 +3674,24 @@ def _safe_refresh_summary_with_drop(value: Any, *, limit: int = 1_200) -> tuple[
     return text, 0
 
 
+def _safe_github_topics_summary_with_drop(value: Any, *, limit: int = 1_200) -> tuple[str, int]:
+    if not isinstance(value, str):
+        return "", 1 if _is_present_public_value(value) else 0
+    text = value.strip()
+    match = re.fullmatch(
+        r"GitHub repository topics for ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+); topic count: ([0-9]+)(?:; topics: ([a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,49}(?:, [a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,49}){0,7}))?",
+        text,
+    )
+    if not match:
+        return "", 1 if _is_present_public_value(value) else 0
+    topics_text = match.group(3) or ""
+    if topics_text:
+        for topic in topics_text.split(", "):
+            if not _github_topic_name_is_safe(topic):
+                return "", 1
+    return text[:limit], 0
+
+
 def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dict[str, Any]:
     if not isinstance(fetched, dict):
         raise ValueError("refresh result must be a mapping")
@@ -3583,10 +3705,16 @@ def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dic
     )
     title_preflight_text = title if dropped == 0 else ""
     dropped_field_count += dropped
-    summary, dropped = _safe_refresh_summary_with_drop(
-        fetched.get("summary") or fetched.get("description") or fetched.get("abstract"),
-        limit=1_200,
-    )
+    if fetched.get("source_refresh_kind") == "github_topics" and _github_topics_path_repo(origin_uri):
+        summary, dropped = _safe_github_topics_summary_with_drop(
+            fetched.get("summary") or fetched.get("description") or fetched.get("abstract"),
+            limit=1_200,
+        )
+    else:
+        summary, dropped = _safe_refresh_summary_with_drop(
+            fetched.get("summary") or fetched.get("description") or fetched.get("abstract"),
+            limit=1_200,
+        )
     dropped_field_count += dropped
     if not summary:
         raise ValueError("refresh result did not include a safe summary")
@@ -3604,6 +3732,10 @@ def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dic
     ]).strip() + "\n"
     content_sha256 = _sha256(body)
     redaction_status = "dropped_fields" if dropped_field_count else "none"
+    if fetched.get("source_refresh_kind") == "github_topics" and _github_topics_path_repo(origin_uri):
+        prompt_preflight_text = f"GitHub repository topics metadata for {_github_topics_path_repo(origin_uri)}; topic count only"
+    else:
+        prompt_preflight_text = "\n".join(part for part in (title_preflight_text, summary) if part)
     frontmatter = _frontmatter({
         "source_id": source_id,
         "source_type": "source_refresh_summary",
@@ -3624,7 +3756,7 @@ def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dic
         "redaction_status": redaction_status,
         "dropped_field_count": dropped_field_count,
         "metadata_only": True,
-        "prompt_preflight_text": "\n".join(part for part in (title_preflight_text, summary) if part),
+        "prompt_preflight_text": prompt_preflight_text,
         "markdown": frontmatter + "\n\n" + body,
     }
 
