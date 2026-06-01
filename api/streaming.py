@@ -3093,7 +3093,7 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             _backfilled = []
             _emitted = set()
             _cursor = 0
-            for _dmsg in previous_display:
+            for _display_idx, _dmsg in enumerate(previous_display):
                 _dkey = _message_identity(_dmsg)
                 if _dkey is not None:
                     _j = _cursor
@@ -3107,7 +3107,10 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _emitted.add(_ckey)
                         _cursor = _j + 1
-                    else:
+                    elif not any(
+                        _message_identity(_future_dmsg) in context_keys[_cursor:]
+                        for _future_dmsg in previous_display[_display_idx + 1:]
+                    ):
                         for _k in range(_cursor, len(context_keys)):
                             _ckey = context_keys[_k]
                             _cmsg = previous_context[_k]
