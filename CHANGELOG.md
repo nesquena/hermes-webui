@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Decoded, fixed, and completed zh-Hant locale strings to align with the current English source text.
+
 ## [v0.51.214] — 2026-06-02 — Release GH (stage-p2c — preserve loaded transcript width on same-session external refresh)
 
 ### Fixed
