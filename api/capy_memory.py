@@ -1072,6 +1072,123 @@ def _github_issues_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_pulls_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    return (
+        len(path) == 5
+        and path[0] == ""
+        and lowered[1] == "repos"
+        and lowered[4] == "pulls"
+        and _github_repo_path_segment_is_safe(path[2])
+        and _github_repo_path_segment_is_safe(path[3])
+    )
+
+
+def _github_pulls_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "pulls"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_pull_list_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    number = _safe_optional_nonnegative_int(row.get("number"))
+    if number is None or number <= 0 or number > 9_999_999:
+        return False
+    raw_title = row.get("title")
+    if not isinstance(raw_title, str):
+        return False
+    title = _safe_public_text(raw_title, limit=200)
+    raw_title_text = raw_title.strip()
+    if (
+        not title
+        or _refresh_value_is_blocked(raw_title)
+        or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(raw_title_text)
+        or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(title)
+        or _github_issue_list_value_has_query_fragment_marker(raw_title_text)
+        or _github_issue_list_value_has_query_fragment_marker(title)
+    ):
+        return False
+    raw_state = row.get("state")
+    if _is_present_public_value(raw_state):
+        state = _safe_public_text(raw_state, limit=40).lower()
+        if not state or state not in {"open", "closed"}:
+            return False
+    user = row.get("user")
+    if user is not None:
+        if not isinstance(user, dict):
+            return False
+        raw_login = user.get("login")
+        if _is_present_public_value(raw_login) and (
+            not isinstance(raw_login, str) or not _github_comment_login_is_safe(raw_login)
+        ):
+            return False
+    for field in ("created_at", "updated_at"):
+        raw_value = row.get(field)
+        if _is_present_public_value(raw_value) and not _safe_iso_timestamp(raw_value):
+            return False
+    if "draft" in row and not isinstance(row.get("draft"), bool):
+        return False
+    return True
+
+
+def _json_payload_is_github_pulls_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_pulls_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_pull_list_row_is_safe(row) for row in payload)
+
+
+def _github_pulls_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_pulls_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_pull_list_row_is_safe(row)]
+    parts = [f"GitHub pull requests for {repo}", f"pull request count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        number = _safe_optional_nonnegative_int(row.get("number")) or 0
+        title = _safe_public_text(row.get("title"), limit=200)
+        row_parts = [f"pull request #{number}: {title}"]
+        state = _safe_public_text(row.get("state"), limit=40).lower()
+        if state:
+            row_parts.append(f"state: {state}")
+        if "draft" in row:
+            row_parts.append(f"draft: {str(bool(row.get('draft'))).lower()}")
+        user = row.get("user") if isinstance(row.get("user"), dict) else {}
+        login = _safe_public_text(user.get("login") if isinstance(user, dict) else "", limit=80)
+        if login:
+            row_parts.append(f"author: {login}")
+        created = _safe_iso_timestamp(row.get("created_at"))
+        if created:
+            row_parts.append(f"created: {created}")
+        updated = _safe_iso_timestamp(row.get("updated_at"))
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_payload_is_github_repository_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -2712,6 +2829,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    pulls_repo = _github_pulls_path_repo(origin_uri)
+    if pulls_repo:
+        if not _json_payload_is_github_pulls_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub pull requests {pulls_repo}"
+        summary = _github_pulls_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_issues_metadata(origin_uri, payload):
         repo = _github_issues_path_repo(origin_uri) or source_id
         title = f"GitHub issues {repo}"
@@ -2991,6 +3120,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         content_type = _refresh_content_type(response.headers)
         if content_type not in _REFRESH_ALLOWED_CONTENT_TYPES:
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_pulls_path_matches(safe_origin_uri) and (
+            not _github_pulls_path_repo(safe_origin_uri)
+            or content_type not in {"application/json", "application/feed+json"}
+        ):
             raise RuntimeError("refresh fetcher disabled")
         raw = response.read(_MAX_REFRESH_FETCH_BYTES + 1)
         if len(raw) > _MAX_REFRESH_FETCH_BYTES:
