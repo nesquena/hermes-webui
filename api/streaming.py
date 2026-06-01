@@ -3598,7 +3598,6 @@ def _sse(handler, event, data):
 # is released. SessionChannel already supports reconnect + offline buffer,
 # so no events are lost for a tab that comes back.
 # SSE_WRITE_DEADLINE_SECONDS = 20.0
-import os
 SSE_WRITE_DEADLINE_SECONDS = float(os.environ.get("HERMES_WEBUI_SSE_WRITE_DEADLINE", "20.0"))
 
 
