@@ -378,6 +378,80 @@ def test_gateway_chat_worker_backfills_context_only_turns_into_display(tmp_path,
     assert not any("context compaction" in m["content"] for m in saved.messages)
 
 
+def test_gateway_chat_worker_preserves_old_visible_turns_when_context_is_compacted(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"new answer"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    s = new_session()
+    old_visible_turns = [
+        {"role": "user", "content": "turn one", "timestamp": 1.0},
+        {"role": "assistant", "content": "answer one", "timestamp": 1.1},
+        {"role": "user", "content": "turn two", "timestamp": 2.0},
+        {"role": "assistant", "content": "answer two", "timestamp": 2.1},
+        {"role": "user", "content": "recent turn", "timestamp": 3.0},
+        {"role": "assistant", "content": "recent answer", "timestamp": 3.1},
+    ]
+    s.messages = old_visible_turns + [
+        {"role": "user", "content": "new question", "timestamp": 4.0},
+    ]
+    s.context_messages = [
+        {
+            "role": "assistant",
+            "content": "[context compaction] Hidden summary for model continuity.",
+            "timestamp": 2.9,
+        },
+        old_visible_turns[-2],
+        old_visible_turns[-1],
+    ]
+    stream_id = "stream-gateway-compacted-visible-preserve-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "new question"
+    s.pending_attachments = []
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "new question",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(s.session_id)
+    assert [m["content"] for m in saved.messages] == [
+        "turn one",
+        "answer one",
+        "turn two",
+        "answer two",
+        "recent turn",
+        "recent answer",
+        "new question",
+        "new answer",
+    ]
+    assert not any("context compaction" in m["content"] for m in saved.messages)
+
+
 def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()

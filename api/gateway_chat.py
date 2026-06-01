@@ -396,8 +396,8 @@ def _run_gateway_chat_streaming(
                 logger.debug("Failed to filter gateway display context markers", exc_info=True)
                 display_context = previous_context
             display = merge_session_messages_append_only(
-                display_context,
                 list(getattr(s, "messages", None) or []),
+                display_context,
             )
             try:
                 from api.streaming import _merge_display_messages_after_agent_result

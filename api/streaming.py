@@ -3082,7 +3082,11 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
     # match are context-only gaps that get spliced in before the display msg.
     if previous_display and previous_context:
         _display_id_set = {_message_identity(m) for m in previous_display}
-        _context_id_set = {_message_identity(m) for m in previous_context}
+        _context_id_set = {
+            _message_identity(m)
+            for m in previous_context
+            if not _is_context_compression_marker(m)
+        }
         _has_context_only_turns = bool(_context_id_set - _display_id_set)
         if _has_context_only_turns:
             context_keys = [_message_identity(m) for m in previous_context]
@@ -3103,6 +3107,14 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _emitted.add(_ckey)
                         _cursor = _j + 1
+                    else:
+                        for _k in range(_cursor, len(context_keys)):
+                            _ckey = context_keys[_k]
+                            _cmsg = previous_context[_k]
+                            if _ckey is not None and _ckey not in _emitted and not _is_context_compression_marker(_cmsg):
+                                _backfilled.append(copy.deepcopy(_cmsg))
+                                _emitted.add(_ckey)
+                        _cursor = len(context_keys)
                 if _dkey not in _emitted:
                     _backfilled.append(_dmsg)
                     if _dkey is not None:
