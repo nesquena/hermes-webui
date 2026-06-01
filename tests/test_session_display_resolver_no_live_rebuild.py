@@ -21,7 +21,6 @@ carries a model_provider.
 
 import ast
 import inspect
-import types
 
 import pytest
 

@@ -15,7 +15,6 @@ import re
 import platform
 import shlex
 import shutil
-import socket
 import sqlite3
 import subprocess
 import sys
@@ -9841,10 +9840,8 @@ def _start_chat_stream_for_session(
     # discard it atomically here. Mirrors the goal_continue pattern (#1932).
     # The marker is server-internal telemetry; the actual wakeup is delivered
     # either server-side (Option Z) or via the PR #2279 next-turn drain.
-    process_completion_related = False
     if s.session_id in PENDING_BG_TASK_COMPLETIONS:
         PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
-        process_completion_related = True
 
     stream_id = uuid.uuid4().hex
     session_lock = _get_session_agent_lock(s.session_id)
