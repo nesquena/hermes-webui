@@ -1173,8 +1173,7 @@ def _json_payload_is_github_workflow_metadata(origin_uri: str, payload: dict[str
     if not state or state not in _GITHUB_WORKFLOW_STATES:
         return False
     for field in ("name", "state", "created_at", "updated_at"):
-        raw_value = payload.get(field)
-        if isinstance(raw_value, _PUBLIC_SCALAR_TYPES) and _REFRESH_BLOCKED_VALUE_RE.search(str(raw_value)):
+        if _refresh_value_is_blocked(payload.get(field)):
             return False
     for field in ("created_at", "updated_at"):
         if not _safe_iso_timestamp(payload.get(field)):
@@ -1735,6 +1734,90 @@ def _github_languages_refresh_summary(origin_uri: str, payload: dict[str, Any]) 
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_workflows_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or lowered[4] != "actions"
+        or lowered[5] != "workflows"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_workflow_list_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    workflow_id = _safe_optional_nonnegative_int(row.get("id"))
+    if workflow_id is None or workflow_id <= 0:
+        return False
+    name = _safe_public_text(row.get("name"), limit=200)
+    if not name:
+        return False
+    state = _safe_public_text(row.get("state"), limit=60).lower()
+    if not state or state not in _GITHUB_WORKFLOW_STATES:
+        return False
+    for field in ("name", "state", "created_at", "updated_at"):
+        if _refresh_value_is_blocked(row.get(field)):
+            return False
+    for field in ("created_at", "updated_at"):
+        if not _safe_iso_timestamp(row.get(field)):
+            return False
+    return True
+
+
+def _json_payload_is_github_workflows_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_workflows_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    if total_count is None:
+        return False
+    workflows = payload.get("workflows")
+    if not isinstance(workflows, list):
+        return False
+    if not workflows:
+        return total_count == 0
+    checked_workflows = workflows[:5]
+    if not checked_workflows:
+        return False
+    return all(_github_workflow_list_row_is_safe(row) for row in checked_workflows)
+
+
+def _github_workflows_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_workflows_path_repo(origin_uri) or "repository"
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    parts = [f"GitHub workflows for {repo}", f"workflow count: {total_count if total_count is not None else 0}"]
+    raw_workflows = payload.get("workflows")
+    workflows = raw_workflows if isinstance(raw_workflows, list) else []
+    for workflow in workflows[:2]:
+        if not _github_workflow_list_row_is_safe(workflow):
+            continue
+        name = _safe_public_text(workflow.get("name"), limit=200)
+        state = _safe_public_text(workflow.get("state"), limit=60).lower()
+        created = _safe_public_text(workflow.get("created_at"), limit=80)
+        updated = _safe_public_text(workflow.get("updated_at"), limit=80)
+        workflow_parts = [f"workflow: {name}", f"state: {state}"]
+        if created:
+            workflow_parts.append(f"created: {created}")
+        if updated:
+            workflow_parts.append(f"updated: {updated}")
+        parts.append("; ".join(workflow_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -1765,6 +1848,15 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
     if _json_payload_is_github_tags_metadata(origin_uri, payload):
         title = f"GitHub tags {(_github_tags_path_repo(origin_uri) or source_id)}"
         summary = _github_tags_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _json_payload_is_github_workflows_metadata(origin_uri, payload):
+        title = f"GitHub workflows {(_github_workflows_path_repo(origin_uri) or source_id)}"
+        summary = _github_workflows_refresh_summary(origin_uri, payload)
         return {
             "metadata_only": True,
             "title": title,
