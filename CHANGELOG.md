@@ -7,6 +7,12 @@
 - Chat turn footers now show a quiet provider-quota remainder after each completed response when the active provider exposes quota/account-limit data, reusing the existing server-side quota probe without revealing credentials.
 - The provider quota chip now defaults on as a circular meter next to the send button, including compact/mobile widths, so available quota/account-limit remainder is visible in a Codex-style location while unsupported providers stay quiet; the ring defaults to the 5-hour account-limit window, can be switched to Weekly from the popover, drains with the selected remaining quota, low quota states tint yellow below 60% and red below 20%, and clicking it opens a compact quota details popover showing both 5-hour and weekly usage with reset dates formatted as `MM/DD/YY` when available.
 
+## [v0.51.200] — 2026-06-01 — Release FT (stage-batch12 — remote-gateway health probe + ephemeral-turn-field preservation)
+
+### Fixed
+- The Tasks/Cron panel no longer shows a spurious "Gateway not configured" banner in multi-container Docker deployments where the WebUI image doesn't ship the `gateway` Python package: agent-health now probes the remote gateway via `HERMES_API_URL` before falling back to the local `gateway.status` import. Closes #3281 (#3312, @Sanjays2402).
+- Force-reloading the active session (`loadSession(sid, {forceReload:true})`) no longer drops ephemeral turn fields (`_turnUsage`, `_turnDuration`, `_turnTps`, `_gatewayRouting`, `_statusCard`): the ephemeral-field carry-forward now reads the prior `S.messages` before it's reset, so the token-usage badge and status cards survive an external refresh. Closes #3306 (#3313, @Sanjays2402).
+
 ## [v0.51.199] — 2026-06-01 — Release FS (stage-batch11 — pinned-scroll recovery + inline-math currency false-positive)
 
 ### Fixed
