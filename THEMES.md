@@ -58,7 +58,7 @@ absent for light. System mode tracks the OS preference at runtime.
 | **Catppuccin** | Catppuccin Latte/Mocha palette with Mauve accent. |
 | **Nous** | Steel-blue accent with dashed technical surfaces. |
 | **Geist Contrast** (`geist-contrast`) | Geist-inspired monochrome surfaces with a restrained dark-mode `#FFF175` accent. |
-| **Zeus** | OLED-near-black surfaces with the default gold accent. Deep and warm. Dark-only. |
+| **Zeus** | OLED-near-black surfaces with the default gold accent. Deep and warm. Defines dark overrides only; light mode falls back to the default skin. |
 
 Most skins define paired light + dark variants so they read cleanly on either
 theme. Dark-only skins (e.g. **Zeus**) intentionally omit a light variant; in
