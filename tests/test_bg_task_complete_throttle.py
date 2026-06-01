@@ -38,7 +38,7 @@ def _install_fake_registry(monkeypatch, fake):
     mod = types.ModuleType("tools.process_registry")
     mod.process_registry = fake
     tools_mod = types.ModuleType("tools")
-    setattr(tools_mod, "process_registry", mod)
+    tools_mod.process_registry = mod
     monkeypatch.setitem(sys.modules, "tools", tools_mod)
     monkeypatch.setitem(sys.modules, "tools.process_registry", mod)
 

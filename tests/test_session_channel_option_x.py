@@ -11,7 +11,6 @@ plus pure-function tests for the SessionChannel class and reaper logic.
 
 from __future__ import annotations
 
-import threading
 import time
 from pathlib import Path
 

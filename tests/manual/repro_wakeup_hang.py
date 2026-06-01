@@ -114,8 +114,6 @@ def main():
     # Reimport config so the budget constant picks up env=0.
     for m in ("api.config", "api.routes"):
         sys.modules.pop(m, None)
-    import api.config as cfg
-    import api.routes as routes
     routes, captured, _ = _install_fakes()
 
     # Force the legacy code path: bypass the prefer_cache short-circuit by
@@ -138,7 +136,6 @@ def main():
     for m in ("api.config", "api.routes"):
         sys.modules.pop(m, None)
     import api.config as cfg2  # noqa: F401
-    import api.routes as routes2
     routes2, captured2, fake_stream = _install_fakes()
     resp, elapsed_after, stuck_after = _time_call(
         "wakeup chat/start",
