@@ -2758,12 +2758,23 @@ function _setMessageScrollToBottom(){
   _lastScrollTop=el.scrollTop;
   _nearBottomCount=2;
   _scrollPinned=true;
-  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  requestAnimationFrame(()=>{
+    el.scrollTop=el.scrollHeight;
+    _lastScrollTop=el.scrollTop;
+    _nearBottomCount=2;
+    _scrollPinned=true;
+    requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  });
 }
 function _isMessagePaneNearBottom(threshold=250){
   const el=$('messages');
   if(!el) return false;
   return el.scrollHeight-el.scrollTop-el.clientHeight<=threshold;
+}
+function _messageBottomDistance(){
+  const el=$('messages');
+  if(!el) return 0;
+  return el.scrollHeight-el.scrollTop-el.clientHeight;
 }
 function _shouldFollowMessagesOnDomReplace(){
   return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(1200));
@@ -2793,6 +2804,7 @@ function _settleMessageScrollToBottom(force){
 function scrollIfPinned(){
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
+  if(_messageBottomDistance()>500) _setMessageScrollToBottom();
   _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
