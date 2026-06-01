@@ -79,8 +79,16 @@ def test_undo_persists_truncation_watermark_at_new_tail(monkeypatch, tmp_path):
 def test_truncate_endpoint_also_truncates_context_messages(monkeypatch, tmp_path):
     """POST /api/session/truncate must truncate context_messages in sync with
     messages so the agent's model-facing context doesn't retain rows the user
-    removed via Edit / Regenerate (#2914)."""
+    removed via Edit / Regenerate (#2914).
+
+    Integration test: calls the real handle_post route, not a simulation.
+    """
+    import json
+    from io import BytesIO
+    from types import SimpleNamespace
+
     import api.models as models
+    import api.routes as routes
     from api.models import Session
 
     session_dir = tmp_path / "sessions"
@@ -106,19 +114,23 @@ def test_truncate_endpoint_also_truncates_context_messages(monkeypatch, tmp_path
     )
     session.save()
 
-    # Simulate what the truncate endpoint does (keep_count=2 = keep first 2 messages)
-    from api.config import _get_session_agent_lock
-    with _get_session_agent_lock("issue2914truncate"):
-        keep = 2
-        session.messages = session.messages[:keep]
-        if isinstance(getattr(session, 'context_messages', None), list):
-            session.context_messages = session.context_messages[:keep]
-        try:
-            from api.session_ops import _truncation_watermark_for
-            session.truncation_watermark = _truncation_watermark_for(session.messages)
-        except Exception:
-            session.truncation_watermark = 0.0
-        session.save()
+    # Call the real truncate endpoint via handle_post
+    body = {"session_id": "issue2914truncate", "keep_count": 2}
+    body_bytes = json.dumps(body).encode()
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+
+    captured_response = {}
+    def fake_j(handler, payload, status=200, extra_headers=None):
+        captured_response["payload"] = payload
+    monkeypatch.setattr(routes, "j", fake_j)
+
+    handler = SimpleNamespace(
+        headers={"Content-Length": str(len(body_bytes))},
+        rfile=BytesIO(body_bytes),
+    )
+    routes.handle_post(handler, SimpleNamespace(path="/api/session/truncate"))
+
+    assert captured_response["payload"].get("ok") is True
 
     loaded = Session.load("issue2914truncate")
     assert loaded is not None
