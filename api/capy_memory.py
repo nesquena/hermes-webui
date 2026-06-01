@@ -1821,6 +1821,94 @@ def _github_workflows_refresh_summary(origin_uri: str, payload: dict[str, Any]) 
 _GITHUB_PULL_FILE_STATUSES = {"added", "removed", "modified", "renamed", "copied", "changed", "unchanged"}
 
 
+def _github_issue_comments_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or lowered[4] not in {"issues", "pulls"}
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+        or lowered[6] != "comments"
+    ):
+        return None
+    kind = "pull request" if lowered[4] == "pulls" else "issue"
+    return kind, int(path[5])
+
+
+def _github_comment_login_is_safe(value: Any) -> bool:
+    login = _safe_public_text(value, limit=80)
+    if not login or _refresh_value_is_blocked(login):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", login))
+
+
+def _github_comment_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    comment_id = _safe_optional_nonnegative_int(row.get("id"))
+    if comment_id is None or comment_id <= 0:
+        return False
+    user = row.get("user")
+    if user is not None:
+        if not isinstance(user, dict):
+            return False
+        raw_login = user.get("login")
+        if _is_present_public_value(raw_login) and not _github_comment_login_is_safe(raw_login):
+            return False
+    for field in ("created_at", "updated_at"):
+        raw_value = row.get(field)
+        if _is_present_public_value(raw_value) and not _safe_iso_timestamp(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_issue_comments_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_issue_comments_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_comment_row_is_safe(row) for row in payload)
+
+
+def _github_issue_comments_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    kind, number = _github_issue_comments_path_info(origin_uri) or ("issue", 0)
+    safe_rows = [row for row in payload if _github_comment_row_is_safe(row)]
+    commenters: list[str] = []
+    row_summaries: list[str] = []
+    for row in safe_rows:
+        user = row.get("user") if isinstance(row.get("user"), dict) else {}
+        login = _safe_public_text(user.get("login") if isinstance(user, dict) else "", limit=80)
+        comment_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        created = _safe_public_text(row.get("created_at"), limit=80)
+        updated = _safe_public_text(row.get("updated_at"), limit=80)
+        if login and login not in commenters:
+            commenters.append(login)
+        row_parts = [f"comment {comment_id}"]
+        if login:
+            row_parts[-1] = f"comment {comment_id} by {login}"
+        if created:
+            row_parts.append(f"created: {created}")
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        if len(row_summaries) < 5:
+            row_summaries.append("; ".join(row_parts))
+    parts = [f"GitHub {kind} #{number} comments", f"comment count: {len(payload)}"]
+    if commenters:
+        parts.append(f"commenters: {', '.join(commenters[:5])}")
+    parts.extend(row_summaries)
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_pull_files_path_number(origin_uri: str) -> int | None:
     try:
         parts = urlsplit(origin_uri)
@@ -1907,6 +1995,19 @@ def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
 
 
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
+    comments_path_info = _github_issue_comments_path_info(origin_uri)
+    if comments_path_info is not None:
+        if not _json_payload_is_github_issue_comments_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        kind, number = comments_path_info
+        title = f"GitHub {kind} #{number} comments"
+        summary = _github_issue_comments_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_pull_files_metadata(origin_uri, payload):
         title = f"GitHub PR files #{(_github_pull_files_path_number(origin_uri) or 0)}"
         summary = _github_pull_files_refresh_summary(origin_uri, payload)

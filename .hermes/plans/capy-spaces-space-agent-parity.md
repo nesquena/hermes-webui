@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub issue comments metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub issue and pull-request comments API payloads (`/repos/{owner}/{repo}/{issues|pulls}/{number}/comments`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from the issue/PR number, comment count, safe commenter logins, comment ids, and timestamps while omitting comment bodies, HTML, reactions, URLs, author association, API-auth/query/fragment, prompt-injection, script, and secret-like fixture fields from receipts/search/vault output.
+
 - `feat(capy-memory): ingest GitHub PR file-list metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub pull-request file-list API payloads (`/repos/{owner}/{repo}/pulls/{number}/files`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from the PR number, file count, aggregate additions/deletions/changes, and bounded status counts while omitting filenames, previous filenames, patches, raw/content URLs, API-auth/query/fragment, prompt-injection, script, and secret-like fixture fields from receipts/search/vault output.
