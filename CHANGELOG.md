@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- During streaming, scrolling up to read earlier content now stays unpinned until you scroll back to the bottom or click the scroll-to-bottom control. Tool cards, tokens, and layout growth no longer re-pin the viewport after a reading pause (replaces the #3250 upward-intent timeout workaround).
+
 ## [v0.51.195] — 2026-06-01 — Release FO (stage-batch7 — hide attachment path markers in chat UI)
 
 ### Fixed

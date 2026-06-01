@@ -685,6 +685,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
+  if(!reconnecting&&typeof _resetStreamScrollFollow==='function') _resetStreamScrollFollow();
 
   // On reconnect, restore accumulated text from INFLIGHT so we don't lose
   // progress made before the session switch. Without this the closure starts
