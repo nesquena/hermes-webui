@@ -7,10 +7,12 @@
 >
 > Keep this document updated as architecture changes are made.
 
-> Current shipped build: `v0.51.54` (May 13, 2026).
-> Automated coverage: 5303 tests via `pytest tests/ --collect-only -q`. CI runs on Python 3.11, 3.12, and 3.13 against every PR.
+> Current shipped build: `v0.51.192` (May 31, 2026).
+> Automated coverage: ~7,150 tests via `pytest tests/ --collect-only -q`. CI runs on
+> Python 3.11, 3.12, and 3.13 (3 parallel shards each) against every PR, plus a ruff
+> lint gate, a headless browser smoke test, and a Docker smoke test.
 >
-> Notable architecture state as of v0.51.54: the bootstrap and first-run onboarding flow own setup discovery; the default WebUI state directory is `~/.hermes/webui`; `ctl.sh` provides a daemon wrapper for homelab installs; chat streaming is still WebUI-owned SSE with stream-ownership guards, cancellation, async manual compression, and turn-journal audit plumbing; provider/model discovery is profile-aware with live-model cache invalidation and custom-provider scoping.
+> Notable architecture state: the bootstrap and first-run onboarding flow own setup discovery; the default WebUI state directory is `~/.hermes/webui`; `ctl.sh` provides a daemon wrapper for homelab installs; chat streaming is still WebUI-owned SSE with stream-ownership guards, cancellation, async manual compression, and turn-journal audit plumbing; provider/model discovery is profile-aware with live-model cache invalidation and custom-provider scoping. (Version/test-count numbers above are a periodic snapshot — the authoritative source is the latest git tag and `pytest --collect-only`.)
 
 ---
 
@@ -43,50 +45,62 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 ## 2. File Inventory
 
     <repo>/
-    server.py              Thin routing shell + HTTP Handler + auth middleware. ~446 lines.
+    server.py              Thin routing shell + HTTP Handler + auth middleware.
                            Delegates all route handling to api/routes.py.
     bootstrap.py           One-shot launcher: optional agent install, deps, health wait, browser open.
     start.sh               Thin wrapper around bootstrap.py for shell-based startup.
-    Dockerfile             python:3.12-slim container image (~89 lines)
-    docker-compose.yml     Compose config with named volume and optional auth (~57 lines)
+    ctl.sh                 Daemon lifecycle wrapper (start/stop/restart/status/logs) for homelab installs.
+    pyproject.toml         Tooling config (ruff lint gate). NOT a packaged distribution.
+    Dockerfile             python:3.12-slim container image
+    docker-compose.yml     Compose config with named volume and optional auth
     .dockerignore          Excludes .git, tests/, .env* from Docker builds
     api/
       __init__.py          Package marker
-      auth.py              Optional password authentication, signed cookies (~366 lines)
-      config.py            Discovery, globals, model detection, reloadable config (~4139 lines)
-      helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers (~302 lines)
-      models.py            Session model + CRUD, per-session profile tracking (~1927 lines)
-      profiles.py          Profile state management, hermes_cli wrapper (~1056 lines)
-      onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, and readiness detection (~1002 lines)
-      routes.py            All GET + POST route handlers (~9772 lines)
-      startup.py           Startup helpers: auto_install_agent_deps() (~128 lines)
-      streaming.py         SSE engine, run_agent, cancel, HERMES_HOME save/restore (~4420 lines)
-      upload.py            Multipart parser, file upload handler (~284 lines)
-      workspace.py         File ops: list_dir, read_file_content, workspace helpers (~810 lines)
+      auth.py              Optional password authentication, signed cookies, passkeys/WebAuthn
+      config.py            Discovery, globals, model detection, reloadable config
+      helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers
+      models.py            Session model + CRUD, per-session profile tracking, CLI/state.db bridge
+      profiles.py          Profile state management, hermes_cli wrapper
+      onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
+      routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
+      startup.py           Startup helpers: auto_install_agent_deps()
+      state_sync.py        /insights sync — message_count to the agent's state.db
+      streaming.py         SSE engine, run_agent, cancel, compression, HERMES_HOME save/restore
+      updates.py           Self-update check and release notes
+      upload.py            Multipart parser, file upload handler
+      workspace.py         File ops: list_dir, read_file_content, git detection, workspace helpers
     static/
-      index.html           HTML template (~1323 lines)
-      style.css            All CSS incl. mobile responsive (~3767 lines)
-      ui.js                DOM helpers, renderMd, tool cards, model dropdown, file tree (~7216 lines)
-      workspace.js         File preview, file ops, loadDir, clearPreview (~369 lines)
-      sessions.js          Session CRUD, list rendering, search, SVG icons, dropdown actions (~3517 lines)
-      messages.js          send(), SSE event handlers, approval, transcript (~2301 lines)
-      panels.js            Cron, skills, memory, workspace, profiles, todo, settings (~6480 lines)
-      commands.js          Slash command registry, parser, autocomplete dropdown (~1302 lines)
-      onboarding.js        First-run wizard overlay, provider setup flow, and settings/workspace orchestration.
-      boot.js              Event wiring, mobile sidebar/workspace nav, voice input, boot IIFE (~1607 lines)
+      index.html           HTML template
+      style.css            All CSS incl. mobile responsive, themes + skins, KaTeX
+      ui.js                DOM helpers, renderMd, tool cards, context indicator, file tree
+      workspace.js         File preview, file ops, git badge, central api() fetch wrapper
+      sessions.js          Session CRUD, list rendering, collapsible groups, search, SSE sync
+      messages.js          send(), SSE event handlers, approval/clarify, transcript, recovery
+      panels.js            Cron, skills, memory, profiles, todo, settings (Control Center)
+      commands.js          Slash command registry, parser, autocomplete dropdown
+      boot.js              Event wiring, mobile nav, voice input, theme/skin boot, bfcache handler
+      onboarding.js        First-run wizard overlay, provider setup flow
+      i18n.js              Localization catalog (en, es, de, zh, zh-Hant, ru, …)
+      login.js             Login page + open-redirect guard
+      icons.js             Lucide icon path registry
+      sw.js                Service worker: offline shell cache, version-pinned assets
     tests/
-      conftest.py          Isolated test server/state fixtures (~644 lines)
-      488 test files       5303 tests collected via pytest
-      test_regressions.py  Permanent regression gate (~976 lines)
+      conftest.py          Isolated test server/state fixtures
+      ~700 test files      ~7,150 tests collected via pytest (run `pytest --collect-only -q` for exact)
+      test_regressions.py  Permanent regression gate
     CONTRIBUTING.md        Contributor workflow and PR expectations.
     ROADMAP.md             Feature and product roadmap document.
     SPRINTS.md             Forward sprint plan with CLI + Claude parity targets.
     ARCHITECTURE.md        THIS FILE.
     TESTING.md             Manual browser test plan and automated coverage reference.
-    CHANGELOG.md           Release notes per sprint.
-    BUGS.md                Bug backlog and fixed items tracker.
+    CHANGELOG.md           Release notes per version.
+    CONTRIBUTORS.md        Community credit roll (regenerated via the maintainer workspace script).
     requirements.txt       Python dependencies.
     .env.example           Sample environment variable overrides.
+
+> Per-file line counts intentionally omitted — they drift every release. Use
+> `git ls-files | xargs wc -l` (or your editor) for current sizes; the role of
+> each file above is the durable part.
 
 State directory (runtime data, separate from source):
 
