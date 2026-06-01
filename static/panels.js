@@ -5690,16 +5690,16 @@ function _toggleTabVisibilityChip(panel){
 }
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='messaging'||name==='plugins'||name==='system')?name:'conversation';
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',messaging:'Messaging',plugins:'Plugins',system:'System'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','system'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','messaging','plugins','system'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -5708,6 +5708,7 @@ function switchSettingsSection(name){
   if(dd && dd.value!==section) dd.value=section;
   // Lazy-load integration panels when their tabs are opened
   if(section==='providers') loadProvidersPanel();
+  if(section==='messaging') loadMessagingPanel();
   if(section==='plugins') loadPluginsPanel();
 }
 
@@ -6464,6 +6465,325 @@ async function loadProvidersPanel(){
   }catch(e){
     list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load providers: '+esc(e.message||String(e))+'</div>';
   }
+}
+
+// ── Messaging platforms (Feishu / Lark) ──────────────────────────────────────
+// Matches the backend sentinel in api/platforms/feishu.py (MASKED_SENTINEL).
+const FEISHU_MASKED_SECRET='__FEISHU_SECRET_SET__';
+
+async function loadMessagingPanel(){
+  const list=$('messagingPlatformsList');
+  if(!list) return;
+  list.innerHTML='';
+  const loading=document.createElement('div');
+  loading.style.cssText='color:var(--muted);padding:12px;font-size:13px';
+  loading.textContent=t('messaging_loading');
+  list.appendChild(loading);
+  try{
+    const cfg=await api('/api/platforms/feishu');
+    list.innerHTML='';
+    list.appendChild(_buildFeishuCard(cfg||{}));
+  }catch(e){
+    list.innerHTML='';
+    const err=document.createElement('div');
+    err.style.cssText='color:var(--error);padding:12px;font-size:13px';
+    err.textContent=t('messaging_load_failed',e&&e.message?e.message:String(e));
+    list.appendChild(err);
+  }
+}
+
+// Small helper: a labelled text/password input field (provider-card styling).
+function _feishuField(labelKey,value,opts){
+  const o=opts||{};
+  const field=document.createElement('div');
+  field.className='provider-card-field';
+  field.style.marginTop='10px';
+  const label=document.createElement('label');
+  label.className='provider-card-label';
+  label.textContent=t(labelKey);
+  field.appendChild(label);
+  const input=document.createElement('input');
+  input.type=o.type||'text';
+  input.className='provider-card-input';
+  input.autocomplete='off';
+  if(o.placeholder) input.placeholder=o.placeholder;
+  if(value!=null) input.value=String(value);
+  field.appendChild(input);
+  return {field,input};
+}
+
+// Labelled <select> field.
+function _feishuSelect(labelKey,value,options){
+  const field=document.createElement('div');
+  field.className='provider-card-field';
+  field.style.marginTop='10px';
+  const label=document.createElement('label');
+  label.className='provider-card-label';
+  label.textContent=t(labelKey);
+  field.appendChild(label);
+  const select=document.createElement('select');
+  select.className='provider-card-input';
+  for(const opt of options){
+    const o=document.createElement('option');
+    o.value=opt.value;
+    o.textContent=t(opt.labelKey);
+    if(opt.value===value) o.selected=true;
+    select.appendChild(o);
+  }
+  field.appendChild(select);
+  return {field,select};
+}
+
+// Labelled checkbox (toggle) row.
+function _feishuCheckbox(labelKey,checked){
+  const row=document.createElement('label');
+  row.className='messaging-platform-toggle';
+  row.style.cssText='display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer;font-size:12px;color:var(--text)';
+  const input=document.createElement('input');
+  input.type='checkbox';
+  input.checked=!!checked;
+  const span=document.createElement('span');
+  span.textContent=t(labelKey);
+  row.appendChild(input);
+  row.appendChild(span);
+  return {row,input};
+}
+
+function _buildFeishuCard(cfg){
+  const card=document.createElement('div');
+  card.className='provider-card';
+  card.dataset.platform='feishu';
+
+  const configured=cfg.configured===true;
+
+  // ── Header with status chip ──
+  const header=document.createElement('button');
+  header.type='button';
+  header.className='provider-card-header';
+  const info=document.createElement('div');
+  info.className='provider-card-info';
+  const name=document.createElement('div');
+  name.className='provider-card-name';
+  name.textContent=t('feishu_card_name');
+  const meta=document.createElement('div');
+  meta.className='provider-card-meta';
+  meta.textContent=t('feishu_card_meta');
+  info.appendChild(name);
+  info.appendChild(meta);
+  header.appendChild(info);
+  const badge=document.createElement('span');
+  badge.className='provider-card-badge'+(configured?'':' messaging-platform-badge-off');
+  badge.textContent=configured?t('messaging_status_configured'):t('messaging_status_not_configured');
+  header.appendChild(badge);
+  const chevron=document.createElement('span');
+  chevron.innerHTML='<svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>';
+  header.appendChild(chevron.firstChild);
+  card.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='provider-card-body';
+
+  // ── Core credentials ──
+  const appId=_feishuField('feishu_app_id',cfg.app_id||'',{placeholder:'cli_xxxxxxxx'});
+  body.appendChild(appId.field);
+
+  const secretSet=cfg.app_secret_set===true;
+  const appSecret=_feishuField('feishu_app_secret','',{
+    type:'password',
+    placeholder:secretSet?t('feishu_secret_configured'):'',
+  });
+  body.appendChild(appSecret.field);
+
+  const domain=_feishuSelect('feishu_domain',cfg.domain||'feishu',[
+    {value:'feishu',labelKey:'feishu_domain_feishu'},
+    {value:'lark',labelKey:'feishu_domain_lark'},
+  ]);
+  body.appendChild(domain.field);
+
+  // ── Connection mode + webhook reveal ──
+  const mode=_feishuSelect('feishu_connection_mode',cfg.connection_mode||'websocket',[
+    {value:'websocket',labelKey:'feishu_mode_websocket'},
+    {value:'webhook',labelKey:'feishu_mode_webhook'},
+  ]);
+  body.appendChild(mode.field);
+
+  const webhookGroup=document.createElement('div');
+  webhookGroup.className='messaging-platform-reveal';
+  const webhookHost=_feishuField('feishu_webhook_host',cfg.webhook_host||'',{placeholder:'127.0.0.1'});
+  const webhookPort=_feishuField('feishu_webhook_port',cfg.webhook_port||'',{placeholder:'8765'});
+  const webhookPath=_feishuField('feishu_webhook_path',cfg.webhook_path||'',{placeholder:'/feishu/webhook'});
+  const verifTokenSet=cfg.verification_token_set===true;
+  const verifToken=_feishuField('feishu_verification_token','',{
+    type:'password',
+    placeholder:verifTokenSet?t('feishu_secret_configured'):'',
+  });
+  const encryptKeySet=cfg.encrypt_key_set===true;
+  const encryptKey=_feishuField('feishu_encrypt_key','',{
+    type:'password',
+    placeholder:encryptKeySet?t('feishu_secret_configured'):'',
+  });
+  webhookGroup.appendChild(webhookHost.field);
+  webhookGroup.appendChild(webhookPort.field);
+  webhookGroup.appendChild(webhookPath.field);
+  webhookGroup.appendChild(verifToken.field);
+  webhookGroup.appendChild(encryptKey.field);
+  body.appendChild(webhookGroup);
+
+  const syncReveal=()=>{webhookGroup.style.display=mode.select.value==='webhook'?'block':'none';};
+  syncReveal();
+  mode.select.addEventListener('change',syncReveal);
+
+  // ── DM access ──
+  const allowAll=_feishuCheckbox('feishu_allow_all_users',cfg.allow_all_users===true);
+  body.appendChild(allowAll.row);
+  const allowedUsers=_feishuField('feishu_allowed_users',cfg.allowed_users||'',{placeholder:t('feishu_allowed_users_placeholder')});
+  body.appendChild(allowedUsers.field);
+
+  // ── Group policy + require mention ──
+  const groupPolicy=_feishuSelect('feishu_group_policy',cfg.group_policy||'open',[
+    {value:'open',labelKey:'feishu_group_policy_open'},
+    {value:'disabled',labelKey:'feishu_group_policy_disabled'},
+  ]);
+  body.appendChild(groupPolicy.field);
+  const requireMention=_feishuCheckbox('feishu_require_mention',cfg.require_mention!==false);
+  body.appendChild(requireMention.row);
+
+  // ── Home channel ──
+  const homeChannel=_feishuField('feishu_home_channel',cfg.home_channel||'',{placeholder:t('feishu_home_channel_placeholder')});
+  body.appendChild(homeChannel.field);
+
+  // ── Restart-after-save toggle ──
+  const restartToggle=_feishuCheckbox('feishu_restart_after_save',true);
+  body.appendChild(restartToggle.row);
+
+  // ── Status / result line ──
+  const statusLine=document.createElement('div');
+  statusLine.className='messaging-platform-status';
+  statusLine.style.cssText='font-size:12px;margin-top:10px;min-height:16px;color:var(--muted)';
+  body.appendChild(statusLine);
+
+  // Resolve the value to send for a secret field honoring the masked rule.
+  const secretValue=(input,isSet)=>{
+    const v=input.value;
+    if(v) return v;
+    return isSet?FEISHU_MASKED_SECRET:'';
+  };
+
+  // ── Buttons ──
+  const btnRow=document.createElement('div');
+  btnRow.className='provider-card-row';
+  btnRow.style.marginTop='12px';
+
+  const validateBtn=document.createElement('button');
+  validateBtn.type='button';
+  validateBtn.className='provider-card-btn provider-card-btn-ghost';
+  validateBtn.textContent=t('feishu_btn_validate');
+  validateBtn.onclick=async()=>{
+    const appIdVal=appId.input.value.trim();
+    if(!appIdVal){
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('feishu_validate_need_app_id');
+      return;
+    }
+    validateBtn.disabled=true;
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('feishu_validating');
+    try{
+      const res=await api('/api/platforms/feishu/validate',{method:'POST',body:JSON.stringify({
+        app_id:appIdVal,
+        app_secret:secretValue(appSecret.input,secretSet),
+        domain:domain.select.value,
+      })});
+      if(res&&res.ok){
+        const botName=res.bot_name||t('feishu_validate_ok_generic');
+        statusLine.style.color='var(--success,#16a34a)';
+        statusLine.textContent=t('feishu_validate_ok',botName);
+        showToast(t('feishu_validate_ok',botName));
+      }else{
+        const msg=(res&&res.error)||t('feishu_validate_failed_generic');
+        statusLine.style.color='var(--error)';
+        statusLine.textContent=t('feishu_validate_failed',msg);
+        showToast(t('feishu_validate_failed',msg));
+      }
+    }catch(e){
+      const msg=e&&e.message?e.message:String(e);
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('feishu_validate_failed',msg);
+      showToast(t('feishu_validate_failed',msg));
+    }finally{
+      validateBtn.disabled=false;
+    }
+  };
+
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='provider-card-btn provider-card-btn-primary';
+  saveBtn.textContent=t('feishu_btn_save');
+  saveBtn.onclick=async()=>{
+    saveBtn.disabled=true;
+    validateBtn.disabled=true;
+    const wantRestart=restartToggle.input.checked;
+    statusLine.style.color='var(--muted)';
+    statusLine.textContent=t('feishu_saving');
+    const payload={
+      app_id:appId.input.value.trim(),
+      app_secret:secretValue(appSecret.input,secretSet),
+      domain:domain.select.value,
+      connection_mode:mode.select.value,
+      webhook_host:webhookHost.input.value.trim(),
+      webhook_port:webhookPort.input.value.trim(),
+      webhook_path:webhookPath.input.value.trim(),
+      verification_token:secretValue(verifToken.input,verifTokenSet),
+      encrypt_key:secretValue(encryptKey.input,encryptKeySet),
+      allow_all_users:allowAll.input.checked,
+      allowed_users:allowedUsers.input.value.trim(),
+      group_policy:groupPolicy.select.value,
+      require_mention:requireMention.input.checked,
+      home_channel:homeChannel.input.value.trim(),
+      restart:wantRestart,
+    };
+    try{
+      const res=await api('/api/platforms/feishu',{method:'POST',body:JSON.stringify(payload)});
+      if(res&&res.saved){
+        statusLine.style.color='var(--success,#16a34a)';
+        statusLine.textContent=t('feishu_saved');
+        showToast(t('feishu_saved'));
+        if(res.restart){
+          const ok=res.restart.ok===true;
+          const detail=res.restart.detail||'';
+          showToast(ok?t('feishu_restart_ok',detail):t('feishu_restart_failed',detail));
+        }
+        // Reload so masked placeholders and the status chip reflect saved state.
+        await loadMessagingPanel();
+      }else{
+        const msg=(res&&res.error)||t('feishu_save_failed_generic');
+        statusLine.style.color='var(--error)';
+        statusLine.textContent=t('feishu_save_failed',msg);
+        showToast(t('feishu_save_failed',msg));
+        saveBtn.disabled=false;
+        validateBtn.disabled=false;
+      }
+    }catch(e){
+      const msg=e&&e.message?e.message:String(e);
+      statusLine.style.color='var(--error)';
+      statusLine.textContent=t('feishu_save_failed',msg);
+      showToast(t('feishu_save_failed',msg));
+      saveBtn.disabled=false;
+      validateBtn.disabled=false;
+    }
+  };
+
+  btnRow.appendChild(validateBtn);
+  btnRow.appendChild(saveBtn);
+  body.appendChild(btnRow);
+
+  card.appendChild(body);
+  if(configured) card.classList.add('open');
+  header.addEventListener('click',e=>{
+    if(e.target.closest('.provider-card-body')) return;
+    card.classList.toggle('open');
+  });
+  return card;
 }
 
 async function _refreshProviderQuota(card,button){
