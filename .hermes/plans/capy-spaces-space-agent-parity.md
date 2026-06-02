@@ -38,6 +38,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub stargazer-list metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub stargazer-list API payloads (`/repos/{owner}/{repo}/stargazers`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from the safe repository path, stargazer count, bounded safe logins, and `starred_at` timestamps when present while omitting avatar/profile/API URLs, API-auth/query/fragment markers, prompt-injection text, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
+  - Empty lists are valid; JSON Feed/generic JSON bypass payloads, malformed stargazer-shaped text paths (case mismatch, unsafe owner/repo, trailing slash, or extra segment), malformed timestamps, unsafe logins, and malformed tail rows fail closed without creating vault records.
+
 - `feat(capy-memory): ingest GitHub commit-status metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub commit status-list API payloads (`/repos/{owner}/{repo}/commits/{sha}/statuses`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from the safe repository path, commit SHA prefix, status count, state counts, bounded status ids/contexts/creator logins, and timestamps while omitting status descriptions, target URLs, row URLs, avatar URLs, API-auth/query/fragment markers, prompt-injection text, scripts, renderer fields, and secret-like fixture values from receipts/search/vault output.

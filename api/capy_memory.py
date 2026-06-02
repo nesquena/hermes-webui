@@ -3288,6 +3288,97 @@ def _github_contributors_path_repo(origin_uri: str) -> str:
     return f"{path[2]}/{path[3]}"
 
 
+def _github_stargazers_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    return len(path) >= 5 and path[0] == "" and lowered[1] == "repos" and lowered[4] == "stargazers"
+
+
+def _github_stargazers_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "stargazers"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_stargazer_login_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    login = _safe_public_text(value, limit=80)
+    if not login or _refresh_value_is_blocked(login):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", login))
+
+
+def _github_stargazer_row_login(row: dict[str, Any]) -> str:
+    if _github_stargazer_login_is_safe(row.get("login")):
+        return _safe_public_text(row.get("login"), limit=80)
+    user = row.get("user")
+    if isinstance(user, dict) and _github_stargazer_login_is_safe(user.get("login")):
+        return _safe_public_text(user.get("login"), limit=80)
+    return ""
+
+
+def _github_stargazer_row_starred_at(row: dict[str, Any]) -> str:
+    if "starred_at" not in row:
+        return ""
+    return _safe_iso_timestamp(row.get("starred_at"))
+
+
+def _github_stargazer_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if _github_stargazer_login_is_safe(row.get("login")):
+        return "starred_at" not in row or bool(_safe_iso_timestamp(row.get("starred_at")))
+    user = row.get("user")
+    if not isinstance(user, dict) or not _github_stargazer_login_is_safe(user.get("login")):
+        return False
+    return bool(_safe_iso_timestamp(row.get("starred_at")))
+
+
+def _json_payload_is_github_stargazers_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_stargazers_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_stargazer_row_is_safe(row) for row in payload)
+
+
+def _github_stargazers_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_stargazers_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_stargazer_row_is_safe(row)]
+    parts = [f"GitHub stargazers for {repo}", f"stargazer count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        login = _github_stargazer_row_login(row)
+        if not login:
+            continue
+        row_parts = [f"stargazer: {login}"]
+        starred_at = _github_stargazer_row_starred_at(row)
+        if starred_at:
+            row_parts.append(f"starred: {starred_at}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_contributor_login_is_safe(value: Any) -> bool:
     if not isinstance(value, str):
         return False
@@ -3451,6 +3542,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
     if _json_payload_is_github_releases_metadata(origin_uri, payload):
         title = f"GitHub releases {(_github_releases_path_repo(origin_uri) or source_id)}"
         summary = _github_releases_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    stargazers_repo = _github_stargazers_path_repo(origin_uri)
+    if stargazers_repo:
+        if not _json_payload_is_github_stargazers_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub stargazers {stargazers_repo}"
+        summary = _github_stargazers_refresh_summary(origin_uri, payload)
         return {
             "metadata_only": True,
             "title": title,
@@ -3723,6 +3826,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_topics_path_repo(safe_origin_uri) and content_type != "application/json":
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_stargazers_path_matches(safe_origin_uri) and (
+            not _github_stargazers_path_repo(safe_origin_uri)
+            or content_type not in {"application/json", "application/feed+json"}
+        ):
             raise RuntimeError("refresh fetcher disabled")
         raw = response.read(_MAX_REFRESH_FETCH_BYTES + 1)
         if len(raw) > _MAX_REFRESH_FETCH_BYTES:
