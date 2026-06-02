@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Localized the five `session_title_regenerate*` session-menu strings (the "Regenerate title" action, its description, and the regenerating/regenerated/failed states) that shipped as English text in every non-English locale. Translated across it, ja, ru, es, de, zh, zh-Hant, pt, ko, fr, and tr, matching each locale's existing terminology; `zh`/`zh-Hant` keep the `\u`-escaped style of those blocks. Closes #3364 (@vanshaj-pahwa).
+
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 
 ### Fixed
