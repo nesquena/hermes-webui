@@ -27,7 +27,7 @@ from api.config import (
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
-    STREAM_LAST_EVENT_ID,
+    STREAM_LAST_EVENT_ID, attach_sse_event_id,
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     register_active_run, update_active_run, unregister_active_run,
@@ -3496,9 +3496,19 @@ def _partial_marker_already_present(messages, candidate: dict, *, before_idx: in
     return False
 
 
-def _sse(handler, event, data):
-    """Write one SSE event to the response stream."""
-    payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+def _sse(handler, event, data, event_id=None):
+    """Write one SSE event to the response stream.
+
+    ``event_id`` maps to the native SSE ``id:`` field.  Keeping this at the
+    low-level writer makes chat-stream, replay, and any wrapper path share the
+    same browser-native Last-Event-ID behavior.
+    """
+    id_line = ""
+    if event_id not in (None, ""):
+        safe_event_id = str(event_id).replace("\r", "").replace("\n", "")
+        if safe_event_id:
+            id_line = f"id: {safe_event_id}\n"
+    payload = f"{id_line}event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
     handler.wfile.write(payload.encode('utf-8'))
     handler.wfile.flush()
 
@@ -4149,24 +4159,24 @@ def _run_agent_streaming(
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and event not in ('cancel', 'error'):
             return
+        event_id = None
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
-                # Stage-364: propagate journal event_id via a side-channel dict
-                # (STREAM_LAST_EVENT_ID) instead of changing the queue tuple
-                # shape — keeping the 2-tuple shape preserves backward
-                # compatibility for tests and any non-SSE queue consumer. The
-                # SSE handler reads this dict at emit time to populate `id:`
-                # on every live frame, which lets the frontend's cursor
-                # advance during live streaming and prevents replay from
-                # double-rendering tokens after a mid-stream error→reconnect.
+                # Stage-364 follow-up: keep the public queue shape as the
+                # 2-tuple (event, data), but bind the journal id to the payload
+                # object itself. A single latest-id side channel can go stale
+                # when the producer outruns the SSE consumer; attaching the id
+                # to each queued payload preserves deterministic ordering for
+                # browser-native Last-Event-ID resume. STREAM_LAST_EVENT_ID is
+                # retained only as a compatibility fallback for non-dict data.
                 event_id = (journaled or {}).get('event_id') if isinstance(journaled, dict) else None
                 if event_id:
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
                 logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
         try:
-            q.put_nowait((event, data))
+            q.put_nowait((event, attach_sse_event_id(data, event_id)))
         except Exception:
             logger.debug("Failed to put event to queue")
 
