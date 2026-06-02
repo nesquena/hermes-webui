@@ -49,15 +49,25 @@ from api.models import (
     reconciled_state_db_messages_for_session,
 )
 
-# Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
-# concurrent runs of the SAME session, but two DIFFERENT sessions can still
-# interleave their os.environ writes. This global lock serializes the env
-# save/restore — held only briefly across the env-mutation critical section,
-# NOT for the entire agent run. The agent runs outside the lock; the finally
-# block re-acquires to atomically restore env vars. See narrow-lock pattern
-# in _run_agent_streaming (line ~2719) and profile_env_for_background_worker
-# (api/profiles.py:715).
+# Global lock for short os.environ writes/restores. Per-session locks
+# (_agent_lock) prevent concurrent runs of the SAME session, but two DIFFERENT
+# sessions can still share process-global os.environ while the agent executes.
+# _RUN_EXEC_SEMAPHORE serializes the full run by default; _ENV_LOCK remains the
+# narrow critical-section lock for save/restore and for profile env operations.
 _ENV_LOCK = threading.Lock()
+_RUN_EXEC_SEMAPHORE = threading.Semaphore(1)
+
+
+def _serialize_runs_enabled() -> bool:
+    """Return True when WebUI should serialize full agent runs.
+
+    Hermes Agent tools still read process-global os.environ in some paths.
+    Serializing run execution avoids cross-session env races in the default
+    single-process deployment. Operators that isolate each session in separate
+    processes can opt out with HERMES_WEBUI_SERIALIZE_RUNS=0.
+    """
+    raw = os.environ.get("HERMES_WEBUI_SERIALIZE_RUNS", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 _KEYLESS_CUSTOM_API_KEY = "dummy-key"
 
@@ -3923,6 +3933,7 @@ def _run_agent_streaming(
     old_session_platform = None
     old_hermes_home = None
     old_profile_env = {}
+    _run_exec_acquired = False
 
     # MCP discovery moved to AFTER the per-profile HERMES_HOME mutation below
     # (was here at v0.51.30) — the previous placement always read the default
@@ -4276,10 +4287,14 @@ def _run_agent_streaming(
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
-        # Still set process-level env as fallback for tools that bypass thread-local
-        # Acquire lock only for the env mutation, then release before the agent runs.
-        # The finally block re-acquires to restore — keeping critical sections short
-        # and preventing a deadlock where the restore would re-enter the same lock.
+        # Still set process-level env as fallback for tools that bypass thread-local.
+        # By default, hold a run semaphore for the full agent execution because
+        # several upstream tool paths still read process-global os.environ after
+        # this mutation. HERMES_WEBUI_SERIALIZE_RUNS=0 keeps the old concurrent
+        # behavior but logs/emits a warning if the invariant is violated.
+        if _serialize_runs_enabled():
+            _RUN_EXEC_SEMAPHORE.acquire()
+            _run_exec_acquired = True
         with _ENV_LOCK:
             old_profile_env = {key: os.environ.get(key) for key in _profile_runtime_env}
             old_cwd = os.environ.get('TERMINAL_CWD')
@@ -4305,7 +4320,8 @@ def _run_agent_streaming(
                 # the lock (#2024).
                 if patch_skill_home_modules is not None:
                     patch_skill_home_modules(Path(_profile_home))
-        # Lock released — agent runs without holding it
+        # _ENV_LOCK released — agent runs while optionally holding the run
+        # semaphore so process-global env stays stable for this session.
         # ── MCP Server Discovery (lazy import, idempotent) ──
         # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
         # reads `~/.hermes/config.yaml` via `get_hermes_home()`, which uses
@@ -6413,6 +6429,20 @@ def _run_agent_streaming(
                     _unreg_clarify_notify(session_id)
                 except Exception:
                     logger.debug("Failed to unregister clarify callback")
+            current_session_env = os.environ.get('HERMES_SESSION_ID')
+            if current_session_env not in (None, session_id):
+                logger.warning(
+                    "env race detected: HERMES_SESSION_ID=%s expected=%s (concurrent run overlap)",
+                    current_session_env,
+                    session_id,
+                )
+                try:
+                    put('warning', {
+                        'type': 'env_race',
+                        'message': 'Concurrent run environment overlap detected; consider HERMES_WEBUI_SERIALIZE_RUNS=1.',
+                    })
+                except Exception:
+                    logger.debug("Failed to emit env-race warning for session %s", session_id, exc_info=True)
             with _ENV_LOCK:
                 for _key, _old_value in old_profile_env.items():
                     if _old_value is None: os.environ.pop(_key, None)
@@ -6429,6 +6459,9 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
                 if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
                 else: os.environ['HERMES_HOME'] = old_hermes_home
+            if _run_exec_acquired:
+                _RUN_EXEC_SEMAPHORE.release()
+                _run_exec_acquired = False
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
