@@ -153,11 +153,10 @@ class TestIssue1420LMStudioProviderEnvVar:
                 "lmstudio entry was missing from _PROVIDER_ENV_VAR so the env-var "
                 "check was skipped entirely. See #1420."
             )
-            assert by_id["lmstudio"]["configurable"] is True, (
-                "Settings → Providers must render LM Studio as configurable=True "
-                "(so the 'Add API key' UI surface is shown). Pre-fix, "
-                "configurable was False because lmstudio wasn't in "
-                "_PROVIDER_ENV_VAR."
+            assert by_id["lmstudio"]["is_self_hosted"] is True
+            assert by_id["lmstudio"]["configurable"] is False, (
+                "LM Studio is configured via the self-hosted Settings card "
+                "(base URL + optional key), not the API-key-only surface (#3260)."
             )
             assert by_id["lmstudio"]["key_source"] in {"env_file", "env_var"}, (
                 f"key_source should reflect that the key came from env, "
@@ -217,11 +216,12 @@ class TestIssue1420LMStudioProviderEnvVar:
             result = get_providers()
             by_id = {p["id"]: p for p in result["providers"]}
             assert by_id["lmstudio"]["has_key"] is False
-            assert by_id["lmstudio"]["configurable"] is True, (
-                "Even with no key configured, the LM Studio card must be "
-                "configurable=True so the user can add a key from the UI. "
-                "Pre-fix this was False — the user had no UI surface to "
-                "configure LM Studio after onboarding (#1420)."
+            assert by_id["lmstudio"]["is_self_hosted"] is True
+            assert by_id["lmstudio"]["configurable"] is False, (
+                "LM Studio must appear in Settings → Providers via the "
+                "self-hosted section (base URL + optional key), even when "
+                "no API key is set (#3260; supersedes the API-key-only "
+                "configurable=True expectation from #1420)."
             )
         finally:
             restore()

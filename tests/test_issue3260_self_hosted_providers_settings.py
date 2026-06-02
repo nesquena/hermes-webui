@@ -8,18 +8,11 @@ OLLAMA_API_KEY used for Ollama Cloud (#1410).
 
 from __future__ import annotations
 
-import json
 import sys
 import types
-import urllib.error
-import urllib.request
-from pathlib import Path
-
-import pytest
 
 import api.config as config
 import api.profiles as profiles
-from tests._pytest_port import BASE
 
 
 def _install_fake_hermes_cli(monkeypatch):
@@ -38,24 +31,6 @@ def _install_fake_hermes_cli(monkeypatch):
         invalidate_models_cache()
     except Exception:
         pass
-
-
-def _post(path, body=None):
-    data = json.dumps(body or {}).encode()
-    req = urllib.request.Request(
-        BASE + path,
-        data=data,
-        headers={"Content-Type": "application/json"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read()), r.status
-    except urllib.error.HTTPError as e:
-        body_text = e.read().decode("utf-8", errors="replace")
-        try:
-            return json.loads(body_text), e.code
-        except Exception:
-            return {"error": body_text}, e.code
 
 
 def _isolate_writes(monkeypatch, tmp_path):
