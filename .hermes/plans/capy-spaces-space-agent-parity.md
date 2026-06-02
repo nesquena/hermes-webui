@@ -38,6 +38,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub README metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub README API payloads (`/repos/{owner}/{repo}/readme`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from safe repository path, README name/path, file size, and SHA prefix while omitting raw README content, encoding, download/html/git URLs, link maps, API-auth/query/fragment markers, prompt-injection text, scripts, renderer/source fields, and secret-like fixture values from receipts/search/vault output.
+  - JSON Feed/content-type bypass payloads, uppercase hosts, README-like suffix paths, and malformed payload rows fail closed without creating vault records or performing unsafe fetches.
+
 - `feat(capy-memory): ingest GitHub issue labels metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub issue-label API payloads (`/repos/{owner}/{repo}/issues/{number}/labels`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, issue number, label count, bounded label names, colors, and default flags while omitting label descriptions, URLs, ids/node_ids, API-auth fields, query/fragment markers, prompt-injection text, scripts, renderer/source fields, and secret-like fixture values from receipts/search/vault output.

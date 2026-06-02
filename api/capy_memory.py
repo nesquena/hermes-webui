@@ -494,6 +494,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         terminal_refresh_failure = True
         if not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
             origin_uri = f"capy-memory://{source_id}"
+    if _github_readme_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_readme_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     display_name = _safe_public_text(
         record.get("title") or record.get("display_name") or record.get("name"),
         limit=200,
@@ -4226,6 +4231,104 @@ def _github_license_refresh_summary(origin_uri: str, payload: dict[str, Any]) ->
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_readme_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _segment_looks_like_readme(raw_segment: str) -> bool:
+        segment = raw_segment.lower()
+        return segment == "readme" or bool(re.fullmatch(r"readme(?:[^a-z0-9_-].*)?", segment))
+
+    def _matches_readme_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 5 and path[0] == "" and lowered[1] == "repos" and any(
+            _segment_looks_like_readme(segment) for segment in path[4:]
+        )
+
+    return _matches_readme_shape(parts.path) or _matches_readme_shape(unquote(parts.path))
+
+
+def _github_readme_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "readme"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_readme_text_is_safe(value: Any, *, limit: int = 160) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = _safe_public_text(value, limit=limit)
+    if not text or text != value.strip() or _refresh_value_is_blocked(text):
+        return False
+    if ":" in text or "@" in text:
+        return False
+    if ".." in text or "//" in text or text.startswith(("/", ".")) or text.endswith(("/", ".")):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._()+,/@-]{0," + str(limit - 1) + r"}", text))
+
+
+def _github_readme_payload_is_safe(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if not _github_readme_text_is_safe(payload.get("name"), limit=120):
+        return False
+    if not _github_readme_text_is_safe(payload.get("path"), limit=160):
+        return False
+    raw_sha = payload.get("sha")
+    if not isinstance(raw_sha, str) or not re.fullmatch(r"[A-Fa-f0-9]{40}", raw_sha):
+        return False
+    raw_size = payload.get("size")
+    if _is_present_public_value(raw_size) and _safe_optional_nonnegative_int(raw_size) is None:
+        return False
+    raw_type = payload.get("type")
+    if raw_type is not None and raw_type != "file":
+        return False
+    return True
+
+
+def _json_payload_is_github_readme_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_readme_path_repo(origin_uri):
+        return False
+    return _github_readme_payload_is_safe(payload)
+
+
+def _github_readme_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_readme_path_repo(origin_uri) or "repository"
+    name = _safe_public_text(payload.get("name"), limit=120)
+    path = _safe_public_text(payload.get("path"), limit=160)
+    sha = _safe_public_text(payload.get("sha"), limit=40)[:12]
+    size = _safe_optional_nonnegative_int(payload.get("size"))
+    parts = [f"GitHub README for {repo}"]
+    if name:
+        parts.append(f"name: {name}")
+    if path:
+        parts.append(f"path: {path}")
+    if size is not None:
+        parts.append(f"size: {size}")
+    if sha:
+        parts.append(f"sha: {sha}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_raw_hostname_is_exact(origin_uri: str, expected_host: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -4703,6 +4806,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    readme_repo = _github_readme_path_repo(origin_uri)
+    if readme_repo:
+        if not _json_payload_is_github_readme_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub README {readme_repo}"
+        summary = _github_readme_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     workflow_runs_repo = _github_workflow_runs_path_repo(origin_uri)
     if workflow_runs_repo:
         if not _json_payload_is_github_workflow_runs_metadata(origin_uri, payload):
@@ -4997,6 +5112,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_license_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_license_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_readme_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_readme_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_latest_release_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_latest_release_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -5021,6 +5139,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_license_path_matches(safe_origin_uri):
         if not _github_license_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_readme_path_matches(safe_origin_uri):
+        if not _github_readme_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_latest_release_path_matches(safe_origin_uri):
@@ -5084,6 +5206,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_license_path_matches(safe_origin_uri) and (
             not _github_license_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_readme_path_matches(safe_origin_uri) and (
+            not _github_readme_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
