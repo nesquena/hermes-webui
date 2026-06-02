@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- The session action menu can export the current conversation to PDF. A dependency-free flow renders an export-only transcript into an off-screen container with a dedicated `@media print` stylesheet and calls the browser's print-to-PDF, reusing the existing markdown and KaTeX rendering so code blocks and math keep fidelity (rather than rasterizing via an external library). Includes a light/dark theme toggle and an optional-timestamps toggle; message selection is deferred to a follow-up. Closes #3381 (@vanshaj-pahwa).
+
 ## [v0.51.230] — 2026-06-03 — Release GX (stage-p14 — extract <think> blocks to m.reasoning + LLM Wiki last-writer)
 
 ### Fixed
