@@ -365,8 +365,8 @@ def read_importable_agent_session_rows(
         return []
 
     log = log or logger
-    with closing(sqlite3.connect(str(db_path))) as conn:
-        conn.row_factory = sqlite3.Row
+    from api._sqlite import connect_state_db_ro
+    with closing(connect_state_db_ro(db_path)) as conn:
         cur = conn.cursor()
 
         # Older Hermes Agent versions may not have source tracking. Without a
@@ -533,8 +533,8 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
         return _empty_lineage_report(sid)
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
-            conn.row_factory = sqlite3.Row
+        from api._sqlite import connect_state_db_ro
+        with closing(connect_state_db_ro(db_path)) as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
             session_cols = {row[1] for row in cur.fetchall()}
@@ -663,8 +663,8 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
         return {}
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
-            conn.row_factory = sqlite3.Row
+        from api._sqlite import connect_state_db_ro
+        with closing(connect_state_db_ro(db_path)) as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
             session_cols = {row[1] for row in cur.fetchall()}

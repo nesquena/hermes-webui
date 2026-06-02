@@ -2662,7 +2662,8 @@ def state_db_has_session(sid: str) -> bool:
     if not db_path.exists():
         return False
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        from api._sqlite import connect_state_db_ro
+        with closing(connect_state_db_ro(db_path)) as conn:
             cur = conn.cursor()
             cur.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (str(sid),))
             return cur.fetchone() is not None
@@ -3680,8 +3681,8 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False, pr
         return []
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
-            conn.row_factory = sqlite3.Row
+        from api._sqlite import connect_state_db_ro
+        with closing(connect_state_db_ro(db_path)) as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(messages)")
             available = {str(row['name']) for row in cur.fetchall()}
@@ -3792,8 +3793,8 @@ def get_state_db_session_summary(sid, *, profile=None) -> dict:
         return {"message_count": 0, "last_message_at": 0.0}
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
-            conn.row_factory = sqlite3.Row
+        from api._sqlite import connect_state_db_ro
+        with closing(connect_state_db_ro(db_path)) as conn:
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(messages)")
             available = {str(row['name']) for row in cur.fetchall()}
@@ -4206,8 +4207,8 @@ def count_conversation_rounds(sid: str, since: float | None = None) -> int:
         return 0
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
-            conn.row_factory = sqlite3.Row
+        from api._sqlite import connect_state_db_ro
+        with closing(connect_state_db_ro(db_path)) as conn:
             cur = conn.cursor()
             cur.execute(
                 "SELECT role, timestamp FROM messages WHERE session_id = ? ORDER BY timestamp ASC",
@@ -4283,7 +4284,8 @@ def delete_cli_session(sid) -> bool:
         return False
 
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        from api._sqlite import connect_state_db_rw
+        with closing(connect_state_db_rw(db_path)) as conn:
             cur = conn.cursor()
             cur.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
             cur.execute("DELETE FROM sessions WHERE id = ?", (sid,))
