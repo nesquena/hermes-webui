@@ -874,7 +874,7 @@ async function attachProviderQuotaToLastAssistant(sessionId){
   const sid=String(sessionId||'');
   if(!sid||!S.session||S.session.session_id!==sid) return;
   try{
-    const status=await api('/api/provider/quota?refresh=1',{timeoutToast:false});
+    const status=await api('/api/provider/quota',{timeoutToast:false});
     const quota=_providerQuotaChatText(status);
     if(!quota||!S.session||S.session.session_id!==sid) return;
     const lastAsst=[...(S.messages||[])].reverse().find(m=>m&&m.role==='assistant'&&!m._ephemeral&&!m._error);

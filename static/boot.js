@@ -1615,7 +1615,7 @@ function applyBotName(){
     _bootSettings=s;
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
-    window._showQuotaChip=s.show_quota_chip!==false;
+    window._showQuotaChip=s.show_quota_chip===true;
     window._hideEmptyStateSuggestions=s.hide_empty_state_suggestions===true;
     applyEmptyStateSuggestionPref();
     window._showTps=!!s.show_tps;
@@ -1715,7 +1715,7 @@ function applyBotName(){
   }catch(e){
     window._sendKey='enter';
     window._showTokenUsage=false;
-    window._showQuotaChip=true;
+    window._showQuotaChip=false;
     window._hideEmptyStateSuggestions=false;
     applyEmptyStateSuggestionPref();
     window._showTps=false;

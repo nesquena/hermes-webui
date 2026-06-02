@@ -1757,9 +1757,15 @@
   .provider-quota-popover-message{margin-top:8px;padding-top:8px;border-top:1px solid var(--border2);color:var(--muted);font-size:11px;}
   .provider-quota-popover-settings{margin-top:9px;width:100%;padding:6px 8px;border:1px solid var(--border2);border-radius:8px;background:transparent;color:var(--text);font:inherit;font-size:11px;cursor:pointer;}
   .provider-quota-popover-settings:hover{background:var(--hover-bg);}
-  /* Keep provider quota in the composer on desktop and mobile when available.
-     The footer's horizontal scroll handles cramped layouts, matching the Codex-style
-     always-present usage affordance without forcing noisy unsupported/error states. */
+  /* Hide the ambient quota chip below 1400px — the composer footer already
+     has profile + workspace + model picker + reasoning + media + send and
+     was getting cramped once the chip squeezed in. Mobile users get provider
+     info via the dedicated mobile-config drawer; laptop desktop users can find
+     quota in Settings → Providers. Show only on wide desktop where there's
+     genuine room. */
+  @media (max-width:1399.98px){
+    .provider-quota-chip{display:none!important;}
+  }
   /* Increased specificity (.icon-btn.composer-mobile-config-btn) to win the cascade
      against the later-in-source `.icon-btn { display:flex }` rule that this element
      also matches. Without this, the button shows at desktop width — see #1381 review. */

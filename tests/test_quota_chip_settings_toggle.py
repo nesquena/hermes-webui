@@ -1,8 +1,7 @@
 """Regression test for the ambient provider quota chip in composer chrome.
 
-The quota chip defaults ON so provider/account-limit remainder is visible in the
-composer like Codex when the active provider exposes sanitized quota data. Users
-can still hide it via Settings → Preferences.
+Quota chip default state is now OFF (per Nathan's directive 2026-05-16, immediately
+after the stage-371 release of #2082). Users opt in via Settings → Preferences.
 """
 from pathlib import Path
 
@@ -22,9 +21,9 @@ def test_quota_chip_settings_field_present():
     assert 'data-i18n="settings_desc_quota_chip"' in html
 
 
-def test_quota_chip_default_on_in_config_defaults():
+def test_quota_chip_default_off_in_config_defaults():
     src = CONFIG.read_text(encoding="utf-8")
-    assert '"show_quota_chip": True' in src, "show_quota_chip must default to True for composer visibility"
+    assert '"show_quota_chip": False' in src, "show_quota_chip must default to False unless users opt in"
     # Must be in the writable settings allow-list (bool keys)
     assert '"show_quota_chip",' in src, "show_quota_chip must be in _SETTINGS_BOOL_KEYS"
 
@@ -60,15 +59,15 @@ def test_quota_chip_render_short_circuits_when_explicitly_disabled():
     )
 
 
-def test_quota_chip_boot_initializes_default_on():
+def test_quota_chip_boot_initializes_default_off():
     js = BOOT.read_text(encoding="utf-8")
     # Both success path (reads from settings) and failure path (defaults block)
     # must set window._showQuotaChip
-    assert "window._showQuotaChip=s.show_quota_chip!==false" in js, (
-        "Boot must initialize _showQuotaChip from settings.show_quota_chip with default-on semantics"
+    assert "window._showQuotaChip=s.show_quota_chip===true" in js, (
+        "Boot must initialize _showQuotaChip from settings.show_quota_chip with default-off semantics"
     )
-    assert "window._showQuotaChip=true" in js, (
-        "Boot must default _showQuotaChip to true in the settings-fetch-failed branch"
+    assert "window._showQuotaChip=false" in js, (
+        "Boot must default _showQuotaChip to false in the settings-fetch-failed branch"
     )
 
 
@@ -80,9 +79,9 @@ def test_quota_chip_panels_round_trip():
     # Body assignment
     assert "body.show_quota_chip=showQuotaChip===true;" in js
     # Settings panel load — checkbox is initialized from saved settings
-    assert "showQuotaChipCb.checked=settings.show_quota_chip!==false;" in js
+    assert "showQuotaChipCb.checked=settings.show_quota_chip===true;" in js
     # Window-state propagation
-    assert "window._showQuotaChip=showQuotaChip!==false;" in js
+    assert "window._showQuotaChip=showQuotaChip===true;" in js
     # Live refresh on toggle (immediate visual feedback)
     assert "if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();" in js
 

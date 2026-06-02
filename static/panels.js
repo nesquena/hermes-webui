@@ -6171,10 +6171,10 @@ async function loadSettingsPanel(){
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
-    // Ambient provider quota chip toggle — default on; hidden only when the user explicitly disables it.
+    // Ambient provider quota chip toggle — default off; users opt in via Preferences.
     const showQuotaChipCb=$('settingsShowQuotaChip');
     if(showQuotaChipCb){
-      showQuotaChipCb.checked=settings.show_quota_chip!==false;
+      showQuotaChipCb.checked=settings.show_quota_chip===true;
       window._showQuotaChip=showQuotaChipCb.checked;
       showQuotaChipCb.addEventListener('change',()=>{
         window._showQuotaChip=showQuotaChipCb.checked;
@@ -7114,7 +7114,7 @@ function _applySavedSettingsUi(saved, body, opts){
   const {sendKey,showTokenUsage,showQuotaChip,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
-  window._showQuotaChip=showQuotaChip!==false;
+  window._showQuotaChip=showQuotaChip===true;
   window._showTps=showTps;
   window._fadeTextEffect=!!fadeTextEffect;
   window._showCliSessions=showCliSessions;

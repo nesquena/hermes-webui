@@ -77,12 +77,15 @@ def test_quota_indicator_formats_openrouter_and_account_limit_shapes_minimally()
     assert ".provider-quota-popover-window-option" in CSS
     assert ".provider-quota-chip.quota-mid{color:var(--warning);}" in CSS
     assert ".provider-quota-chip.quota-low{color:var(--error);}" in CSS
+    assert "@media (max-width:1399.98px)" in CSS
+    assert ".provider-quota-chip{display:none!important;}" in CSS
 
 
 def test_chat_turn_footer_shows_remaining_provider_quota_after_done():
     assert "function _providerQuotaChatText" in UI_JS
     assert "function attachProviderQuotaToLastAssistant" in UI_JS
-    assert "api('/api/provider/quota?refresh=1'" in UI_JS
+    assert "api('/api/provider/quota'" in UI_JS
+    assert "api('/api/provider/quota?refresh=1'" not in UI_JS
     assert "_providerQuota" in UI_JS
     assert "msg-provider-quota-inline" in UI_JS
     assert "msg-provider-quota-inline" in CSS
