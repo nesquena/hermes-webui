@@ -2,11 +2,15 @@
 Hermes Web UI -- HTTP helper functions.
 """
 import json as _json
+import logging
 import os
+import secrets
 import re as _re
 import ssl
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
+
+logger = logging.getLogger(__name__)
 
 
 # Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
@@ -49,15 +53,49 @@ def safe_resolve(root: Path, requested: str) -> Path:
     return resolved
 
 
-def _security_headers(handler):
-    """Add security headers to every response."""
+def _trust_proxy() -> bool:
+    """Return True only when forwarded proxy headers are trusted.
+
+    Reverse-proxy deployments can opt in with HERMES_WEBUI_TRUST_PROXY=1.
+    By default, direct clients must not be able to forge X-Forwarded-* or
+    X-Real-* headers into auth, CSRF, passkey, or onboarding decisions.
+    """
+    raw = os.getenv("HERMES_WEBUI_TRUST_PROXY", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def csp_nonce() -> str:
+    """Return a fresh CSP nonce suitable for one HTML response."""
+    return secrets.token_urlsafe(16)
+
+
+def apply_script_nonce(html: str, nonce: str) -> str:
+    """Attach *nonce* to every <script> tag missing an explicit nonce."""
+    if not nonce:
+        return html
+    return _re.sub(r"<script(?![^>]*\bnonce=)", f'<script nonce="{nonce}"', html)
+
+
+def _security_headers(handler, *, script_nonce: str | None = None):
+    """Add security headers to every response.
+
+    HTML responses that pass ``script_nonce`` get a nonce-based script CSP and
+    no ``'unsafe-inline'`` in ``script-src``. Other responses keep the legacy
+    fallback because they do not render the index template and may not have a
+    nonce injected into any inline scripts.
+    """
     handler.send_header('X-Content-Type-Options', 'nosniff')
     handler.send_header('X-Frame-Options', 'DENY')
     handler.send_header('Referrer-Policy', 'same-origin')
+    script_src = "script-src 'self' https://cdn.jsdelivr.net https://static.cloudflareinsights.com"
+    if script_nonce:
+        script_src += f" 'nonce-{script_nonce}'"
+    else:
+        script_src += " 'unsafe-inline'"
     handler.send_header(
         'Content-Security-Policy',
         "default-src 'self' https://*.cloudflareaccess.com; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "
+        f"{script_src}; "
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
         "img-src 'self' data: https: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://cdn.jsdelivr.net; "
         "manifest-src 'self' https://*.cloudflareaccess.com; "
@@ -97,7 +135,7 @@ def _safe_write(handler, body: bytes) -> None:
         )
 
 
-def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
+def j(handler, payload, status: int=200, extra_headers: dict=None, *, csp_nonce: str | None = None) -> None:
     """Send a JSON response.
 
     *extra_headers*: optional dict of additional headers to include
@@ -117,21 +155,21 @@ def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
 
     handler.send_header('Content-Length', str(len(body)))
     handler.send_header('Cache-Control', 'no-store')
-    _security_headers(handler)
+    _security_headers(handler, script_nonce=csp_nonce)
     if extra_headers:
         for k, v in extra_headers.items():
             handler.send_header(k, v)
     _safe_write(handler, body)
 
 
-def t(handler, payload, status: int=200, content_type: str='text/plain; charset=utf-8') -> None:
+def t(handler, payload, status: int=200, content_type: str='text/plain; charset=utf-8', *, csp_nonce: str | None = None) -> None:
     """Send a plain text or HTML response."""
     body = payload if isinstance(payload, bytes) else str(payload).encode('utf-8')
     handler.send_response(status)
     handler.send_header('Content-Type', content_type)
     handler.send_header('Content-Length', str(len(body)))
     handler.send_header('Cache-Control', 'no-store')
-    _security_headers(handler)
+    _security_headers(handler, script_nonce=csp_nonce)
     _safe_write(handler, body)
 
 
@@ -193,6 +231,11 @@ def _build_redact_fn():
     _PRIVKEY_RE = _re.compile(
         r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
     )
+    _URL_USERINFO_RE = _re.compile(r"(://[^/\s:@]+:)([^@/\s]+)(@)")
+    _URL_SECRET_QUERY_RE = _re.compile(
+        r"([?&](?:token|api_key|apikey|access_token|refresh_token|id_token|client_secret|secret|password|authorization|sig|signature)=)([^&#\s]+)",
+        _re.IGNORECASE,
+    )
 
     def _mask(token: str) -> str:
         return f"{token[:6]}...{token[-4:]}" if len(token) >= 18 else "***"
@@ -202,6 +245,8 @@ def _build_redact_fn():
             return text
         text = _CRED_RE.sub(lambda m: _mask(m.group(1)), text)
         text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
+        text = _URL_USERINFO_RE.sub(lambda m: m.group(1) + _mask(m.group(2)) + m.group(3), text)
+        text = _URL_SECRET_QUERY_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
         text = _ENV_RE.sub(
             lambda m: f"{m.group(1)}={m.group(2)}{_mask(m.group(3))}{m.group(2)}", text
         )
@@ -286,7 +331,6 @@ _SENSITIVE_LOWER_MARKERS = (
     "mongodb://",
     "redis://",
     "amqp://",
-    "://",  # stage-348 Opus SHOULD-FIX: catch http(s)/ws(s)/ftp URL userinfo + sensitive query params (#2171 follow-up)
     "access_token",
     "refresh_token",
     "id_token",
@@ -311,6 +355,21 @@ _SENSITIVE_LOWER_MARKERS = (
 _SENSITIVE_TELEGRAM_MARKER_RE = _re.compile(r"(?:bot)?\d{8,}:[-A-Za-z0-9_]{30,}")
 _SENSITIVE_DISCORD_MARKER_RE = _re.compile(r"<@!?\d{17,20}>")
 _SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-Za-z0-9])")
+_SENSITIVE_URL_USERINFO_RE = _re.compile(r"://[^/\s:@]+:[^/\s:@]+@")
+_SENSITIVE_URL_QUERY_KEYS = (
+    "token=",
+    "api_key=",
+    "apikey=",
+    "access_token=",
+    "refresh_token=",
+    "id_token=",
+    "client_secret=",
+    "secret=",
+    "password=",
+    "authorization=",
+    "sig=",
+    "signature=",
+)
 
 
 def _might_contain_sensitive_text(text: str) -> bool:
@@ -321,6 +380,10 @@ def _might_contain_sensitive_text(text: str) -> bool:
         return True
     lower = text.lower()
     if any(marker in lower for marker in _SENSITIVE_LOWER_MARKERS):
+        return True
+    if "://" in text and _SENSITIVE_URL_USERINFO_RE.search(text):
+        return True
+    if any(key in lower for key in _SENSITIVE_URL_QUERY_KEYS):
         return True
     if ":" in text and _SENSITIVE_TELEGRAM_MARKER_RE.search(text):
         return True
@@ -399,19 +462,19 @@ def read_body(handler) -> dict:
         try:
             handler.close_connection = True
         except Exception:
-            pass
+            logger.debug("Failed to mark connection closed after invalid Content-Length", exc_info=True)
         raise ValueError(f'Invalid Content-Length: {raw_length!r}')
     if length < 0:
         try:
             handler.close_connection = True
         except Exception:
-            pass
+            logger.debug("Failed to mark connection closed after negative Content-Length", exc_info=True)
         raise ValueError(f'Invalid Content-Length: {length}')
     if length > MAX_BODY_BYTES:
         try:
             handler.close_connection = True
         except Exception:
-            pass
+            logger.debug("Failed to mark connection closed after oversized request body", exc_info=True)
         raise ValueError(f'Request body too large ({length} bytes, max {MAX_BODY_BYTES})')
     raw = handler.rfile.read(length) if length else b'{}'
     try:
