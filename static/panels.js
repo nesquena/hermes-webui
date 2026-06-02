@@ -6253,12 +6253,45 @@ async function loadSettingsPanel(){
         if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
       };
     }
-    // Populate voice selector from speechSynthesis
+    // TTS engine selector
+    const ttsEngineSel=$('settingsTtsEngine');
+    if(ttsEngineSel){
+      const saved=localStorage.getItem('hermes-tts-engine')||'browser';
+      ttsEngineSel.value=saved;
+      ttsEngineSel.onchange=function(){
+        localStorage.setItem('hermes-tts-engine',this.value);
+        window._populateTtsVoices();
+      };
+    }
+    // Populate voice selector based on engine
     const ttsVoiceSel=$('settingsTtsVoice');
-    if(ttsVoiceSel&&'speechSynthesis' in window){
-      const populateVoices=()=>{
+    window._populateTtsVoices=function(){
+      if(!ttsVoiceSel) return;
+      const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+      const current=localStorage.getItem('hermes-tts-voice')||'';
+      if(engine==='edge'){
+        const edgeVoices=[
+          {value:'zh-CN-XiaoxiaoNeural',label:'Xiaoxiao (Chinese, Female)'},
+          {value:'zh-CN-XiaoyiNeural',label:'Xiaoyi (Chinese, Female)'},
+          {value:'zh-CN-YunxiNeural',label:'Yunxi (Chinese, Male)'},
+          {value:'zh-CN-YunjianNeural',label:'Yunjian (Chinese, Male)'},
+          {value:'zh-CN-YunyangNeural',label:'Yunyang (Chinese, Male)'},
+          {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
+          {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
+        ];
+        ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
+        edgeVoices.forEach(v=>{
+          const opt=document.createElement('option');
+          opt.value=v.value;opt.textContent=v.label;
+          if(v.value===current) opt.selected=true;
+          ttsVoiceSel.appendChild(opt);
+        });
+      } else {
+        if(!('speechSynthesis' in window)){
+          ttsVoiceSel.innerHTML='<option value="">Speech synthesis not available</option>';
+          return;
+        }
         const voices=speechSynthesis.getVoices();
-        const current=localStorage.getItem('hermes-tts-voice')||'';
         ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
         voices.forEach(v=>{
           const opt=document.createElement('option');
@@ -6266,9 +6299,14 @@ async function loadSettingsPanel(){
           if(v.name===current) opt.selected=true;
           ttsVoiceSel.appendChild(opt);
         });
-      };
-      populateVoices();
-      speechSynthesis.addEventListener('voiceschanged',populateVoices,{once:true});
+      }
+    };
+    if(ttsVoiceSel&&'speechSynthesis' in window){
+      window._populateTtsVoices();
+      speechSynthesis.addEventListener('voiceschanged',function(){
+        const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+        if(engine==='browser') window._populateTtsVoices();
+      },{once:false});
       ttsVoiceSel.onchange=function(){localStorage.setItem('hermes-tts-voice',this.value);};
     }
     // TTS rate/pitch sliders

@@ -851,6 +851,8 @@ const LOCALES = {
     settings_desc_tts_voice: "Preferred voice. Populated from your browser's available voices.",
     settings_label_tts_rate: 'Speech rate',
     settings_label_tts_pitch: 'Speech pitch',
+    settings_label_tts_engine: 'TTS Engine',
+    settings_desc_tts_engine: 'Choose speech engine. Edge TTS uses Microsoft neural voices via the server.',
     settings_label_notifications: 'Browser notifications',
     settings_desc_notifications: 'Show a system notification when a response completes while the app is in the background.',
     settings_desc_token_usage: 'Displays input/output token count below each assistant reply. Also toggled with /usage.',
@@ -2171,6 +2173,8 @@ const LOCALES = {
     settings_desc_tts_voice: 'Voce preferita. Popolata dalle voci disponibili nel browser.',
     settings_label_tts_rate: 'Velocità voce',
     settings_label_tts_pitch: 'Tono voce',
+    settings_label_tts_engine: 'Motore TTS',
+    settings_desc_tts_engine: 'Scegli il motore vocale. Edge TTS utilizza le voci neurali Microsoft tramite il server.',
     settings_label_notifications: 'Notifiche browser',
     settings_desc_notifications: 'Mostra una notifica di sistema quando una risposta termina mentre l\'app è in background.',
     settings_desc_token_usage: 'Mostra il conteggio token input/output sotto ogni risposta dell\'assistente. Attivabile anche con /usage.',
@@ -3496,6 +3500,8 @@ const LOCALES = {
     settings_desc_tts_voice: '優先する声。ブラウザで利用可能な声から選択されます。',
     settings_label_tts_rate: '読み上げ速度',
     settings_label_tts_pitch: '読み上げピッチ',
+    settings_label_tts_engine: 'TTSエンジン',
+    settings_desc_tts_engine: '音声エンジンを選択してください。Edge TTSはサーバー経由でMicrosoftのニューラル音声を使用します。',
     settings_label_notifications: 'ブラウザ通知',
     settings_desc_notifications: 'アプリがバックグラウンドの間に応答が完了したらシステム通知を表示します。',
     settings_desc_token_usage: 'アシスタント応答の下に入力/出力トークン数を表示します。/usage でも切替可能。',
@@ -5184,6 +5190,8 @@ const LOCALES = {
     settings_desc_tts_voice: 'Выберите голос для синтеза речи',
     settings_label_tts_rate: 'Скорость речи',
     settings_label_tts_pitch: 'Тон речи',
+    settings_label_tts_engine: 'Движок TTS',
+    settings_desc_tts_engine: 'Выберите движок синтеза речи. Edge TTS использует нейронные голоса Microsoft через сервер.',
 
     checkpoint_date: 'Date',  // TODO: translate
     checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
@@ -6429,6 +6437,8 @@ const LOCALES = {
     settings_desc_tts_voice: 'Seleccionar voz para síntesis de voz',
     settings_label_tts_rate: 'Velocidad de voz',
     settings_label_tts_pitch: 'Tono de voz',
+    settings_label_tts_engine: 'Motor TTS',
+    settings_desc_tts_engine: 'Elija el motor de voz. Edge TTS utiliza voces neuronales de Microsoft a través del servidor.',
     checkpoint_date: 'Date',  // TODO: translate
     checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
     checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
@@ -7688,6 +7698,8 @@ const LOCALES = {
     settings_desc_tts_voice: 'Stimme für Sprachsynthese auswählen',
     settings_label_tts_rate: 'Sprechgeschwindigkeit',
     settings_label_tts_pitch: 'Tonhöhe',
+    settings_label_tts_engine: 'TTS-Engine',
+    settings_desc_tts_engine: 'Sprach-Engine auswählen. Edge TTS verwendet Microsoft Neural Voices über den Server.',
 
     checkpoint_date: 'Date',  // TODO: translate
     checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
@@ -8942,6 +8954,8 @@ const LOCALES = {
     settings_desc_tts_voice: '选择语音合成声音',
     settings_label_tts_rate: '语速',
     settings_label_tts_pitch: '音调',
+    settings_label_tts_engine: 'TTS 引擎',
+    settings_desc_tts_engine: '选择语音引擎。Edge TTS 通过服务器使用微软神经语音。',
     checkpoint_date: '日期',
     checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
     checkpoint_diff_no_changes: '此检查点与当前工作区之间无差异。',
@@ -10271,6 +10285,8 @@ const LOCALES = {
     settings_desc_tts_voice: '選擇語音合成聲音',
     settings_label_tts_rate: '語速',
     settings_label_tts_pitch: '音調',
+    settings_label_tts_engine: 'TTS 引擎',
+    settings_desc_tts_engine: '选择语音引擎。Edge TTS 通过服务器使用微软神经语音。',
 
     checkpoint_date: 'Date',  // TODO: translate
     checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
@@ -11414,6 +11430,8 @@ const LOCALES = {
     settings_desc_tts_voice: 'Selecionar voz para síntese de voz',
     settings_label_tts_rate: 'Velocidade da fala',
     settings_label_tts_pitch: 'Tom da fala',
+    settings_label_tts_engine: 'Motor TTS',
+    settings_desc_tts_engine: 'Escolha o mecanismo de fala. Edge TTS usa vozes neurais da Microsoft através do servidor.',
     checkpoint_date: 'Date',  // TODO: translate
     checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
     checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
@@ -12720,6 +12738,8 @@ const LOCALES = {
     settings_desc_tts_voice: '음성 합성 음성 선택',
     settings_label_tts_rate: '말 속도',
     settings_label_tts_pitch: '말 톤',
+    settings_label_tts_engine: 'TTS 엔진',
+    settings_desc_tts_engine: '음성 엔진을 선택하세요. Edge TTS는 서버를 통해 Microsoft 신경 음성을 사용합니다.',
     checkpoint_date: 'Date',  // TODO: translate
     checkpoint_diff_files_changed: (n) => `${n} file${n === 1 ? '' : 's'} changed`,  // TODO: translate
     checkpoint_diff_no_changes: 'No differences found between this checkpoint and the current workspace.',  // TODO: translate
@@ -13485,6 +13505,8 @@ const LOCALES = {
     settings_desc_tts_voice: 'Voix préférée. Rempli à partir des voix disponibles dans votre navigateur.',
     settings_label_tts_rate: 'Taux de parole',
     settings_label_tts_pitch: 'Emplacement du discours',
+    settings_label_tts_engine: 'Moteur TTS',
+    settings_desc_tts_engine: 'Choisissez le moteur de synthèse vocale. Edge TTS utilise les voix neuronales Microsoft via le serveur.',
     settings_label_notifications: 'Notifications du navigateur',
     settings_desc_notifications: 'Afficher une notification système lorsqu\'une réponse est terminée alors que l\'application est en arrière-plan.',
     settings_desc_token_usage: 'Affiche le nombre de jetons d’entrée/sortie sous chaque réponse de l’assistant. Également basculé avec /usage.',
@@ -15294,6 +15316,8 @@ const LOCALES = {
     settings_desc_tts_voice: 'Ses sentezi sesini seçin',
     settings_label_tts_rate: 'Konuşma hızı',
     settings_label_tts_pitch: 'Konuşma perdesi',
+    settings_label_tts_engine: 'TTS Motoru',
+    settings_desc_tts_engine: 'Ses motorunu seçin. Edge TTS, sunucu üzerinden Microsoft sinirsel seslerini kullanır.',
     checkpoint_date: 'Tarih',
     checkpoint_diff_files_changed: (n) => `${n} dosya değişti`,
     checkpoint_diff_no_changes: 'Bu kontrol noktası ile mevcut çalışma alanı arasında fark bulunamadı.',

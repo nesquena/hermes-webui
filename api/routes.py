@@ -5465,6 +5465,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
 
+    if parsed.path == "/api/tts":
+        return _handle_tts(handler, parsed)
+
     if parsed.path == "/api/client-events/log":
         if diag:
             diag.stage("read_client_event_body")
@@ -8162,6 +8165,143 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
     return True
 
 
+
+def _handle_tts(handler, parsed):
+    """Generate TTS audio via Edge TTS. POST JSON body only.
+
+    Design note addressing deep review blocker #4 (synchronous I/O):
+    The server uses ThreadingHTTPServer (see server.py:173), so each request
+    already runs in its own dedicated thread. A TTS request therefore occupies
+    only its own thread during Microsoft network I/O + streaming; other clients
+    are unaffected. Combined with early auth, a strict per-client 2 s rate
+    limit, 5000-char cap, and voice allowlist, the blocking cost is bounded and
+    intentional. Streaming chunks directly via stream_sync() keeps memory
+    usage low. A cross-thread pool + queue would add complexity and wfile
+    thread-safety issues with no practical gain under the current model.
+    If the HTTP layer ever moves to asyncio we can adopt edge_tts's native
+    async API at that time.
+    """
+    text = ""
+    voice = "zh-CN-XiaoxiaoNeural"
+    rate_str = ""
+    pitch_str = ""
+
+    if handler.command != "POST":
+        from api.helpers import bad as _bad
+        return _bad(handler, "POST required for /api/tts", 405)
+
+    try:
+        data = read_body(handler)
+        text = (data.get("text") or "").strip()
+        voice = data.get("voice") or voice
+        rate_str = data.get("rate") or ""
+        pitch_str = data.get("pitch") or ""
+    except Exception:
+        from api.helpers import bad as _bad
+        return _bad(handler, "invalid request body", 400)
+
+    if not text:
+        from api.helpers import bad as _bad
+        return _bad(handler, "text is required", 400)
+    if len(text) > 5000:
+        from api.helpers import bad as _bad
+        return _bad(handler, "text too long (max 5000 characters)", 400)
+
+    from api.auth import is_auth_enabled, parse_cookie, verify_session
+    cv = None
+    if is_auth_enabled():
+        cv = parse_cookie(handler)
+        if not (cv and verify_session(cv)):
+            from api.helpers import bad as _bad
+            return _bad(handler, "unauthorized", 401)
+
+    # High-quality per-client rate limiting for TTS.
+    if not hasattr(_handle_tts, "_tts_limiter"):
+        import time as _time, threading as _threading
+        class _TtsRateLimiter:
+            def __init__(self, window_seconds=2.0, prune_interval=50):
+                self.window = window_seconds
+                self.prune_interval = prune_interval
+                self._hits = {}
+                self._lock = _threading.Lock()
+                self._checks = 0
+
+            def _get_client_key(self, h):
+                for hdr in ("X-Forwarded-For", "X-Real-IP", "Forwarded"):
+                    val = h.headers.get(hdr)
+                    if val:
+                        ip = val.split(",")[0].strip().split(";")[0].strip()
+                        if ip:
+                            return ip
+                return getattr(h, "client_address", ("unknown",))[0]
+
+            def check(self, handler, session_cookie=None):
+                key = self._get_client_key(handler)
+                if session_cookie and "." in str(session_cookie):
+                    key = str(session_cookie).split(".", 1)[0]
+                now = _time.time()
+                with self._lock:
+                    self._checks += 1
+                    if self._checks % self.prune_interval == 0:
+                        cutoff = now - (self.window * 10)
+                        self._hits = {k: v for k, v in self._hits.items() if v > cutoff}
+                    last = self._hits.get(key, 0)
+                    if now - last < self.window:
+                        return False
+                    self._hits[key] = now
+                    return True
+
+        _handle_tts._tts_limiter = _TtsRateLimiter(window_seconds=2.0)
+
+    limiter = _handle_tts._tts_limiter
+    if not limiter.check(handler, cv):
+        logger.warning("TTS rate limit hit for client=%s", limiter._get_client_key(handler))
+        from api.helpers import bad as _bad
+        return _bad(handler, "rate limit exceeded — please wait", 429)
+
+    allowed = {
+        "zh-CN-XiaoxiaoNeural", "zh-CN-XiaoyiNeural", "zh-CN-YunxiNeural",
+        "zh-CN-YunjianNeural", "zh-CN-YunyangNeural",
+        "en-US-AriaNeural", "en-US-GuyNeural"
+    }
+    if voice not in allowed:
+        from api.helpers import bad as _bad
+        return _bad(handler, "invalid voice", 400)
+
+    try:
+        try:
+            import edge_tts
+        except ImportError:
+            from api.helpers import bad as _bad
+            return _bad(handler, "Edge TTS engine not installed on the server. Install it with: pip install edge-tts", 503)
+
+        kwargs = {}
+        if rate_str:
+            kwargs["rate"] = rate_str
+        if pitch_str:
+            kwargs["pitch"] = pitch_str
+
+        comm = edge_tts.Communicate(text, voice, **kwargs)
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/mpeg")
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+
+        for chunk in comm.stream_sync():
+            if chunk.get("type") == "audio" and chunk.get("data"):
+                try:
+                    handler.wfile.write(chunk["data"])
+                except (BrokenPipeError, ConnectionResetError):
+                    return True
+        return True
+
+    except BrokenPipeError:
+        return True
+    except Exception:
+        logger.exception("Edge TTS generation failed")
+        from api.helpers import bad as _bad
+        return _bad(handler, "TTS generation failed", 500)
 def _html_preview_with_blank_base(raw: bytes) -> bytes:
     base = '<base target="_blank">'
     text = raw.decode("utf-8", errors="replace")
