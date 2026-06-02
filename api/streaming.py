@@ -509,27 +509,36 @@ def _webui_delivery_context_prompt(config_data: Optional[dict] = None) -> str:
     are injected into the system prompt (safe for role alternation) rather
     than as a prefill ``user`` message, which strict chat templates (Mistral,
     Gemma) reject.
+
+    NOTE: This function only covers platform/delivery info.  The session
+    framing (\"Source: WebUI\", \"Session ID\", \"Profile\", \"Workspace\") is
+    emitted by ``_webui_surface_context_prompt()``, which is called from
+    ``_webui_ephemeral_system_prompt()`` before this helper.  If you
+    refactor this area, keep that surface call in place — the two helpers
+    together produce the full session context block.
     """
     cfg = config_data if isinstance(config_data, dict) else get_config()
     lines: list[str] = []
 
+    display_hermes_home = None
     try:
-        from hermes_constants import get_hermes_home, display_hermes_home
+        from hermes_constants import get_hermes_home, display_hermes_home as _dh
+        display_hermes_home = _dh
     except Exception:
-        display_hermes_home = None
+        get_hermes_home = None  # type: ignore[assignment]
 
     connected = ["local (files on this machine)"]
     try:
-        from hermes_constants import get_hermes_home
-        state_path = get_hermes_home() / "gateway_state.json"
-        if state_path.exists():
-            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
-            platforms = raw_state.get("platforms") if isinstance(raw_state, dict) else {}
-            if isinstance(platforms, dict):
-                for name in sorted(platforms):
-                    pdata = platforms.get(name) or {}
-                    if isinstance(pdata, dict) and pdata.get("state") == "connected" and name != "local":
-                        connected.append(f"{name}: Connected ✓")
+        if get_hermes_home is not None:
+            state_path = get_hermes_home() / "gateway_state.json"
+            if state_path.exists():
+                raw_state = json.loads(state_path.read_text(encoding="utf-8"))
+                platforms = raw_state.get("platforms") if isinstance(raw_state, dict) else {}
+                if isinstance(platforms, dict):
+                    for name in sorted(platforms):
+                        pdata = platforms.get(name) or {}
+                        if isinstance(pdata, dict) and pdata.get("state") == "connected" and name != "local":
+                            connected.append(f"{name}: Connected ✓")
     except Exception:
         pass
     lines.append(f"**Connected Platforms:** {', '.join(connected)}")
@@ -569,87 +578,6 @@ def _webui_delivery_context_prompt(config_data: Optional[dict] = None) -> str:
     lines.append("*For explicit targeting, use `\"platform:chat_id\"` format if the user provides a specific chat ID. Do not invent private IDs.*")
 
     return "\n".join(lines)
-
-
-def _webui_session_context_message(config_data: Optional[dict] = None) -> dict:
-    """Return a compact browser-session context message for WebUI agents.
-
-    Messaging gateway sessions get a small "Current Session Context" block that
-    tells the agent where the turn came from, which platforms are connected, and
-    how scheduled-task delivery should be interpreted. Browser-originated WebUI
-    turns do not have a Gateway ``SessionSource``, but they still benefit from a
-    safe equivalent so the model understands that this is a WebUI session, not a
-    literal Telegram thread, while retaining access to configured messaging
-    delivery targets.
-    """
-    cfg = config_data if isinstance(config_data, dict) else get_config()
-    lines = [
-        "## Current Session Context",
-        "",
-        "**Source:** WebUI (browser session)",
-        "**Session type:** Browser-originated Hermes WebUI chat. This is a separate WebUI transcript, not the same live Telegram/Discord/other messaging thread.",
-    ]
-
-    try:
-        from api.profiles import get_active_profile_name
-
-        profile_name = get_active_profile_name() or "default"
-    except Exception:
-        profile_name = "default"
-    lines.append(f"**Active Hermes profile:** {profile_name}")
-
-    connected = ["local (files on this machine)"]
-    try:
-        from hermes_constants import get_hermes_home, display_hermes_home
-
-        state_path = get_hermes_home() / "gateway_state.json"
-        if state_path.exists():
-            raw_state = json.loads(state_path.read_text(encoding="utf-8"))
-            platforms = raw_state.get("platforms") if isinstance(raw_state, dict) else {}
-            if isinstance(platforms, dict):
-                for name in sorted(platforms):
-                    pdata = platforms.get(name) or {}
-                    if isinstance(pdata, dict) and pdata.get("state") == "connected" and name != "local":
-                        connected.append(f"{name}: Connected ✓")
-    except Exception:
-        display_hermes_home = None  # type: ignore[assignment]
-    lines.append(f"**Connected Platforms:** {', '.join(connected)}")
-
-    home_channels = {}
-    try:
-        platforms_cfg = cfg.get("platforms", {}) if isinstance(cfg, dict) else {}
-        if isinstance(platforms_cfg, dict):
-            for name, pdata in platforms_cfg.items():
-                if not isinstance(pdata, dict):
-                    continue
-                if pdata.get("enabled") is False:
-                    continue
-                home = pdata.get("home_channel")
-                if isinstance(home, dict):
-                    home_channels[str(name)] = str(home.get("name") or name)
-    except Exception:
-        home_channels = {}
-
-    if home_channels:
-        lines.append("")
-        lines.append("**Home Channels (default destinations):**")
-        for platform, label in sorted(home_channels.items()):
-            lines.append(f"  - {platform}: {label}")
-
-    lines.append("")
-    lines.append("**Delivery options for scheduled tasks:**")
-    lines.append("- `\"origin\"` → Back to this WebUI/browser session when the WebUI runtime supports origin delivery; otherwise prefer an explicit platform target.")
-    try:
-        home_display = display_hermes_home() if display_hermes_home else "~/.hermes"  # type: ignore[name-defined]
-    except Exception:
-        home_display = "~/.hermes"
-    lines.append(f"- `\"local\"` → Save to local files only ({home_display}/cron/output/)")
-    for platform, label in sorted(home_channels.items()):
-        lines.append(f"- `\"{platform}\"` → Home channel ({label})")
-    lines.append("")
-    lines.append("*For explicit targeting, use `\"platform:chat_id\"` format if the user provides a specific chat ID. Do not invent private IDs.*")
-
-    return {"role": "user", "content": "\n".join(lines)}
 
 
 def _prefill_messages_with_webui_context(prefill_context: dict, config_data: Optional[dict] = None) -> list[dict]:

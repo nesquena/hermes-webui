@@ -84,3 +84,25 @@ def test_prefill_preserves_empty_and_none_messages():
     assert _prefill_messages_with_webui_context({"messages": []}) == []
     assert _prefill_messages_with_webui_context({}) == []
     assert _prefill_messages_with_webui_context({"messages": None}) == []
+
+
+def test_delivery_context_includes_home_channels_when_configured():
+    """When config_data has platforms with a home_channel, the prompt includes it."""
+    config = {
+        "platforms": {
+            "telegram": {
+                "enabled": True,
+                "home_channel": {"name": "General"},
+            },
+        },
+    }
+    prompt = _webui_ephemeral_system_prompt(
+        None,
+        surface_context={"source": "webui"},
+        config_data=config,
+    )
+
+    assert "Connected Platforms:" in prompt
+    assert "Home Channels (default destinations):" in prompt
+    assert "telegram: General" in prompt
+    assert "telegram" in prompt and "Home channel" in prompt
