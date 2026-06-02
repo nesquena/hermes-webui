@@ -4,8 +4,13 @@
 ## [Unreleased]
 
 ### Added
-- Chat turn footers now show a quiet provider-quota remainder after each completed response when the active provider exposes quota/account-limit data, reusing the existing server-side quota probe without revealing credentials.
-- The provider quota chip now defaults on as a circular meter next to the send button, including compact/mobile widths, so available quota/account-limit remainder is visible in a Codex-style location while unsupported providers stay quiet; the ring defaults to the 5-hour account-limit window, can be switched to Weekly from the popover, drains with the selected remaining quota, low quota states tint yellow below 60% and red below 20%, and clicking it opens a compact quota details popover showing both 5-hour and weekly usage with reset dates formatted as `MM/DD/YY` when available.
+- Chat turn footers now show a quiet provider-quota remainder after each completed response when the active provider exposes quota/account-limit data, reusing the cached server-side quota status without forcing a fresh quota probe per turn.
+- The opt-in provider quota chip now renders as a circular meter next to the send button on wide desktop layouts when enabled, while unsupported providers stay quiet; the ring defaults to the 5-hour account-limit window, can be switched to Weekly from the popover, drains with the selected remaining quota, low quota states tint yellow below 60% and red below 20%, and clicking it opens a compact quota details popover showing both 5-hour and weekly usage with reset dates formatted as `MM/DD/YY` when available.
+
+## [v0.51.207] — 2026-06-02 — Release GA (Edge TTS as an alternative speech engine)
+
+### Added
+- Added an optional server-side **Edge TTS** speech engine (Microsoft neural voices) selectable in Settings → Preferences → TTS Engine, alongside the existing browser speech synthesis. The voice list switches to the Edge neural voices when selected. A new `POST /api/tts` endpoint streams the audio, gated by the same-origin CSRF check + session auth, a per-client rate limit, a 5000-character cap, and a voice allowlist. `edge-tts` is an optional dependency — the endpoint returns a clear install hint (503) when it isn't present, so existing installs are unaffected (#2931, @liuqiangweb-svg).
 
 ## [v0.51.206] — 2026-06-02 — Release FZ (workspace file upload + drag-and-drop with archive extraction)
 
