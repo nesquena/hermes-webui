@@ -471,10 +471,17 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
     source_id = _safe_public_id(record.get("source_id") or record.get("id"), fallback=fallback_id)
     origin_uri = _safe_origin_uri(raw_origin, source_id=source_id)
     raw_origin_text = str(raw_origin or "").strip()
+    source_refresh_kind = ""
+    terminal_refresh_failure = False
     if _github_issue_events_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
     if _github_forks_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_license_path_matches(raw_origin_text):
+        source_refresh_kind = "github_license"
+        terminal_refresh_failure = True
+        if not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
+            origin_uri = f"capy-memory://{source_id}"
     display_name = _safe_public_text(
         record.get("title") or record.get("display_name") or record.get("name"),
         limit=200,
@@ -487,6 +494,10 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         "origin_uri": origin_uri,
         "refresh_interval_seconds": refresh_interval,
     }
+    if source_refresh_kind:
+        payload["source_refresh_kind"] = source_refresh_kind
+    if terminal_refresh_failure:
+        payload["terminal_refresh_failure"] = True
     with _connect() as conn:
         conn.executescript(_SCHEMA_SQL)
         conn.execute(
@@ -3584,6 +3595,107 @@ def _github_contributors_path_repo(origin_uri: str) -> str:
     return f"{path[2]}/{path[3]}"
 
 
+def _github_license_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _segment_looks_like_license(raw_segment: str) -> bool:
+        segment = raw_segment.lower()
+        return segment == "license" or bool(re.fullmatch(r"license(?:[^a-z0-9_-].*)?", segment))
+
+    def _matches_license_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 5 and path[0] == "" and lowered[1] == "repos" and any(
+            _segment_looks_like_license(segment) for segment in path[4:]
+        )
+
+    return _matches_license_shape(parts.path) or _matches_license_shape(unquote(parts.path))
+
+
+def _github_license_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "license"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_license_text_is_safe(value: Any, *, limit: int = 120) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = _safe_public_text(value, limit=limit)
+    if not text or text != value.strip() or _refresh_value_is_blocked(text):
+        return False
+    if _REFRESH_TITLE_BLOCKED_VALUE_RE.search(text):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._()+,/@-]{0," + str(limit - 1) + r"}", text))
+
+
+def _github_license_payload_is_safe(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if not _github_license_text_is_safe(payload.get("name"), limit=120):
+        return False
+    if not _github_license_text_is_safe(payload.get("path"), limit=160):
+        return False
+    raw_sha = payload.get("sha")
+    if not isinstance(raw_sha, str) or not re.fullmatch(r"[A-Fa-f0-9]{40}", raw_sha):
+        return False
+    raw_size = payload.get("size")
+    if _is_present_public_value(raw_size) and _safe_optional_nonnegative_int(raw_size) is None:
+        return False
+    license_info = payload.get("license")
+    if not isinstance(license_info, dict):
+        return False
+    for field in ("key", "name", "spdx_id"):
+        if not _github_license_text_is_safe(license_info.get(field), limit=120):
+            return False
+    return True
+
+
+def _json_payload_is_github_license_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_license_path_repo(origin_uri):
+        return False
+    return _github_license_payload_is_safe(payload)
+
+
+def _github_license_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_license_path_repo(origin_uri) or "repository"
+    raw_license_info = payload.get("license")
+    license_info = raw_license_info if isinstance(raw_license_info, dict) else {}
+    key = _safe_public_text(license_info.get("key"), limit=120).lower()
+    name = _safe_public_text(license_info.get("name"), limit=120)
+    spdx = _safe_public_text(license_info.get("spdx_id"), limit=120)
+    path = _safe_public_text(payload.get("path"), limit=160)
+    sha = _safe_public_text(payload.get("sha"), limit=40)[:12]
+    size = _safe_optional_nonnegative_int(payload.get("size"))
+    parts = [f"GitHub license for {repo}", f"license key: {key}", f"license: {name}", f"spdx: {spdx}"]
+    if path:
+        parts.append(f"path: {path}")
+    if size is not None:
+        parts.append(f"size: {size}")
+    if sha:
+        parts.append(f"sha: {sha}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_raw_hostname_is_exact(origin_uri: str, expected_host: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -4019,6 +4131,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    license_repo = _github_license_path_repo(origin_uri)
+    if license_repo:
+        if not _json_payload_is_github_license_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub license {license_repo}"
+        summary = _github_license_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_workflow_artifacts_metadata(origin_uri, payload):
         title = f"GitHub workflow run {_github_workflow_artifacts_path_run_id(origin_uri) or 0} artifacts"
         summary = _github_workflow_artifacts_refresh_summary(origin_uri, payload)
@@ -4268,6 +4392,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         raise RuntimeError("refresh fetcher disabled")
     if _github_forks_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
         raise RuntimeError("refresh fetcher disabled")
+    if _github_license_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_license_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     if not _source_refresh_allowed(safe_origin_uri):
@@ -4275,6 +4402,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     request_accept = "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8"
     if _github_issue_events_path_matches(safe_origin_uri):
         if _github_issue_events_path_info(safe_origin_uri) is None or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_license_path_matches(safe_origin_uri):
+        if not _github_license_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     request = Request(
@@ -4316,6 +4447,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if _github_forks_path_matches(safe_origin_uri) and (
             not _github_forks_path_repo(safe_origin_uri)
             or content_type not in {"application/json", "application/feed+json"}
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_license_path_matches(safe_origin_uri) and (
+            not _github_license_path_repo(safe_origin_uri)
+            or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_stargazers_path_matches(safe_origin_uri) and (
@@ -4763,6 +4899,9 @@ def queue_due_source_refresh_jobs(*, limit: int = 25, now: str | None = None) ->
                 "origin_uri": origin_uri,
                 "refresh_interval_seconds": interval,
             }
+            if payload.get("source_refresh_kind") == "github_license":
+                updated_payload["source_refresh_kind"] = "github_license"
+                updated_payload["terminal_refresh_failure"] = True
             cursor = conn.execute(
                 """
                 UPDATE jobs
@@ -4932,7 +5071,14 @@ def run_source_refresh_jobs(
             payload = {}
         source_id = _safe_public_id(payload.get("source_id"), fallback="source")
         raw_origin_uri = str(payload.get("origin_uri") or "").strip()
-        if _github_issue_events_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
+        if (
+            (
+                _github_issue_events_path_matches(raw_origin_uri)
+                or _github_forks_path_matches(raw_origin_uri)
+                or _github_license_path_matches(raw_origin_uri)
+            )
+            and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
+        ):
             origin_uri = f"capy-memory://{source_id}"
         else:
             origin_uri = _safe_origin_uri(raw_origin_uri, source_id=source_id)
@@ -5014,7 +5160,11 @@ def run_source_refresh_jobs(
             failed_at = _now_iso()
             attempts = max(1, int(row.get("lease_attempts") or 1))
             preflight_blocked = isinstance(preflight_receipt, dict) and preflight_receipt.get("status") == "block"
-            next_status = "pending" if preflight_blocked else ("failed" if attempts >= 3 else "pending")
+            terminal_refresh_failure = (
+                payload.get("source_refresh_kind") == "github_license"
+                and payload.get("terminal_refresh_failure") is True
+            )
+            next_status = "pending" if preflight_blocked else ("failed" if terminal_refresh_failure or attempts >= 3 else "pending")
             with _connect() as conn:
                 cursor = conn.execute(
                     """
