@@ -322,6 +322,24 @@ function cmdClear(){
   showToast(t('conversation_cleared'));
 }
 
+// Find the best matching model <option> for a slash-command query.
+// Returns an exact id/label match if present, otherwise the shortest option
+// whose value or label contains the query. Preferring the shortest match keeps
+// a specific query like "mimo-v2.5" from being shadowed by a longer variant
+// such as "mimo-v2.5-pro". See issue #3368.
+function _bestModelMatch(options,query){
+  let best=null;
+  for(const opt of options){
+    const value=opt.value.toLowerCase();
+    const text=opt.textContent.toLowerCase();
+    if(value===query||text===query) return opt.value;
+    if(value.includes(query)||text.includes(query)){
+      if(best===null||opt.value.length<best.length) best=opt.value;
+    }
+  }
+  return best;
+}
+
 async function cmdModel(args){
   if(!args){showToast(t('model_usage'));return;}
   const sel=$('modelSelect');
@@ -348,21 +366,13 @@ async function cmdModel(args){
   let match=(typeof _findModelInDropdown==='function')?_findModelInDropdown(q,sel,preferred):null;
   // Fallback: fuzzy match across all options
   if(!match){
-    for(const opt of sel.options){
-      if(opt.value.toLowerCase().includes(q)||opt.textContent.toLowerCase().includes(q)){
-        match=opt.value;break;
-      }
-    }
+    match=_bestModelMatch(sel.options,q);
   }
   // Fallback: if q has provider/ prefix (e.g. "deepseek/deepseek-v4-flash"),
   // try the bare model name (which is how options appear for the active provider)
   if(!match && q.includes('/')){
     const bare=q.slice(q.lastIndexOf('/')+1);
-    for(const opt of sel.options){
-      if(opt.value.toLowerCase().includes(bare)||opt.textContent.toLowerCase().includes(bare)){
-        match=opt.value;break;
-      }
-    }
+    match=_bestModelMatch(sel.options,bare);
     // Cross-provider fallback: if still no match, the model is from a
     // different provider not in the dropdown. Call /api/session/update directly.
     if(!match && S&&S.session&&S.session.session_id){
