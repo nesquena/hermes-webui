@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- The `/model` slash command no longer selects a longer model variant when a shorter name is a prefix of it (e.g. `/model mimo-v2.5` selecting `mimo-v2.5-pro`). The fuzzy fallback now prefers an exact id/label match and otherwise the shortest matching option, applied to both the main and bare-name (`provider/...`) fallbacks. Closes #3368 (#3394, @vanshaj-pahwa).
+
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 
 ### Fixed
