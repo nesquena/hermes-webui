@@ -1965,6 +1965,7 @@
   .file-item.active{background:var(--accent-bg);color:var(--accent-text);}
   .file-item.dragging{opacity:.35;border:1px dashed var(--accent-bg-strong);}
   .file-item.drag-over,.breadcrumb-seg.drag-over{background:var(--accent-bg);color:var(--accent-text);outline:1px solid var(--accent-bg-strong);outline-offset:-1px;}
+  .file-item.drag-over-upload,.breadcrumb-seg.drag-over-upload{background:var(--blue,#3b82f6);color:#fff;outline:1px dashed rgba(255,255,255,.5);outline-offset:-1px;}
   .file-tree-toggle{font-size:10px;color:var(--muted);flex-shrink:0;width:var(--file-tree-toggle-width);text-align:center;line-height:1;}
   .file-tree-toggle-placeholder{display:inline-block;flex:0 0 var(--file-tree-toggle-width);width:var(--file-tree-toggle-width);line-height:1;}
   .file-item.file-empty{color:var(--muted);opacity:.5;font-style:italic;cursor:default;font-size:11px;}
