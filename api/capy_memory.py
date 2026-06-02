@@ -482,6 +482,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         origin_uri = f"capy-memory://{source_id}"
     if _github_forks_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_participation_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_participation_path_repo(origin_uri)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_license_path_matches(raw_origin_text):
         source_refresh_kind = "github_license"
         terminal_refresh_failure = True
@@ -2852,6 +2857,106 @@ def _github_deployment_statuses_refresh_summary(origin_uri: str, payload: list[A
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_participation_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 6
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "stats"
+            and lowered[5] == "participation"
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return any(
+        segment.lower().startswith(("stats%", "participation%"))
+        for segment in raw_path
+    )
+
+
+def _github_participation_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "stats"
+        or path[5] != "participation"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_participation_counts_are_safe(value: Any) -> bool:
+    if not isinstance(value, list) or not value or len(value) > 52:
+        return False
+    return all(_safe_optional_nonnegative_int(item) is not None for item in value)
+
+
+def _json_payload_is_github_participation_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_participation_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if any(key in payload for key in ("version", "items")):
+        return False
+    all_counts = payload.get("all")
+    owner_counts = payload.get("owner")
+    if not isinstance(all_counts, list) or not isinstance(owner_counts, list):
+        return False
+    if not _github_participation_counts_are_safe(all_counts):
+        return False
+    if not _github_participation_counts_are_safe(owner_counts):
+        return False
+    return len(all_counts) == len(owner_counts)
+
+
+def _github_participation_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_participation_path_repo(origin_uri) or "repository"
+    raw_all_counts = payload.get("all")
+    raw_owner_counts = payload.get("owner")
+    all_counts = raw_all_counts if isinstance(raw_all_counts, list) else []
+    owner_counts = raw_owner_counts if isinstance(raw_owner_counts, list) else []
+    weeks = len(all_counts)
+    all_total = sum(int(count) for count in all_counts if _safe_optional_nonnegative_int(count) is not None)
+    owner_total = sum(int(count) for count in owner_counts if _safe_optional_nonnegative_int(count) is not None)
+    active_weeks = sum(
+        1
+        for all_count, owner_count in zip(all_counts, owner_counts)
+        if (_safe_optional_nonnegative_int(all_count) or 0) > 0 or (_safe_optional_nonnegative_int(owner_count) or 0) > 0
+    )
+    return _bounded_refresh_summary(
+        "; ".join([
+            f"GitHub participation for {repo}",
+            f"weeks: {weeks}",
+            f"all commits: {all_total}",
+            f"owner commits: {owner_total}",
+            f"active weeks: {active_weeks}",
+        ])
+    )
+
+
 _GITHUB_MILESTONE_STATES = {"open", "closed"}
 
 
@@ -4202,6 +4307,18 @@ def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
 
 
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
+    participation_repo = _github_participation_path_repo(origin_uri)
+    if participation_repo:
+        if not _json_payload_is_github_participation_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub participation {participation_repo}",
+            "summary": _github_participation_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_participation_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     issue_events_info = _github_issue_events_path_info(origin_uri)
     if issue_events_info is not None:
         if not _json_payload_is_github_issue_events_metadata(origin_uri, payload):
@@ -4641,6 +4758,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_latest_release_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_latest_release_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_participation_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_participation_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     if not _source_refresh_allowed(safe_origin_uri):
@@ -4656,6 +4776,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_latest_release_path_matches(safe_origin_uri):
         if not _github_latest_release_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_participation_path_matches(safe_origin_uri):
+        if not _github_participation_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     request = Request(
@@ -4706,6 +4830,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_latest_release_path_matches(safe_origin_uri) and (
             not _github_latest_release_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_participation_path_matches(safe_origin_uri) and (
+            not _github_participation_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
