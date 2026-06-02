@@ -1701,6 +1701,139 @@ def _github_workflow_run_refresh_summary(payload: dict[str, Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_workflow_runs_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "actions"
+        or path[5] != "runs"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_workflow_runs_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    return (
+        (parts.hostname or "").strip().lower() == "api.github.com"
+        and len(path) == 6
+        and path[0] == ""
+        and lowered[1] == "repos"
+        and lowered[4] == "actions"
+        and lowered[5].startswith("runs")
+    )
+
+
+def _github_workflow_run_list_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    run_id = _safe_optional_nonnegative_int(row.get("id"))
+    if run_id is None or run_id <= 0:
+        return False
+    name = _safe_public_text(row.get("name"), limit=200)
+    if not name or _refresh_value_is_blocked(row.get("name")):
+        return False
+    status = _safe_public_text(row.get("status"), limit=60).lower()
+    if not status or status not in _GITHUB_WORKFLOW_RUN_STATUSES:
+        return False
+    conclusion = _safe_public_text(row.get("conclusion"), limit=80).lower()
+    if conclusion and conclusion not in _GITHUB_WORKFLOW_RUN_CONCLUSIONS:
+        return False
+    head_sha = _safe_public_text(row.get("head_sha"), limit=80)
+    if not re.fullmatch(r"[A-Fa-f0-9]{40}", head_sha):
+        return False
+    branch = _safe_public_text(row.get("head_branch"), limit=120)
+    if branch and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,119}", branch):
+        return False
+    event = _safe_public_text(row.get("event"), limit=80)
+    if event and not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", event):
+        return False
+    for field in ("name", "status", "conclusion", "event", "head_branch", "head_sha", "created_at", "updated_at"):
+        raw_value = row.get(field)
+        if isinstance(raw_value, _PUBLIC_SCALAR_TYPES) and _REFRESH_BLOCKED_VALUE_RE.search(str(raw_value)):
+            return False
+    for field in ("created_at", "updated_at"):
+        if not _safe_iso_timestamp(row.get(field)):
+            return False
+    for field in ("run_number", "run_attempt"):
+        raw_value = row.get(field)
+        if raw_value is not None and _safe_optional_nonnegative_int(raw_value) is None:
+            return False
+    return True
+
+
+def _json_payload_is_github_workflow_runs_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_workflow_runs_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    if total_count is None:
+        return False
+    workflow_runs = payload.get("workflow_runs")
+    if not isinstance(workflow_runs, list):
+        return False
+    if not workflow_runs:
+        return total_count == 0
+    return all(_github_workflow_run_list_row_is_safe(row) for row in workflow_runs)
+
+
+def _github_workflow_runs_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_workflow_runs_path_repo(origin_uri) or "repository"
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    parts = [f"GitHub workflow runs for {repo}", f"run count: {total_count if total_count is not None else 0}"]
+    raw_runs = payload.get("workflow_runs")
+    workflow_runs = raw_runs if isinstance(raw_runs, list) else []
+    for row in workflow_runs[:5]:
+        if not _github_workflow_run_list_row_is_safe(row):
+            continue
+        run_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        name = _safe_public_text(row.get("name"), limit=200)
+        status = _safe_public_text(row.get("status"), limit=60).lower()
+        conclusion = _safe_public_text(row.get("conclusion"), limit=80).lower()
+        event = _safe_public_text(row.get("event"), limit=80)
+        run_number = _safe_optional_nonnegative_int(row.get("run_number"))
+        run_attempt = _safe_optional_nonnegative_int(row.get("run_attempt"))
+        branch = _safe_public_text(row.get("head_branch"), limit=120)
+        head_sha = _safe_public_text(row.get("head_sha"), limit=80)
+        created = _safe_public_text(row.get("created_at"), limit=80)
+        updated = _safe_public_text(row.get("updated_at"), limit=80)
+        run_parts = [f"run #{run_id}: {name}", f"status: {status}"]
+        if conclusion:
+            run_parts.append(f"conclusion: {conclusion}")
+        if event:
+            run_parts.append(f"event: {event}")
+        if run_number is not None:
+            run_parts.append(f"run number: {run_number}")
+        if run_attempt is not None:
+            run_parts.append(f"attempt: {run_attempt}")
+        if branch:
+            run_parts.append(f"branch: {branch}")
+        if head_sha:
+            run_parts.append(f"head sha: {head_sha[:12]}")
+        if created:
+            run_parts.append(f"created: {created}")
+        if updated:
+            run_parts.append(f"updated: {updated}")
+        parts.append("; ".join(run_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_workflow_jobs_path_run_id(origin_uri: str) -> int | None:
     try:
         parts = urlsplit(origin_uri)
@@ -4238,6 +4371,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    workflow_runs_repo = _github_workflow_runs_path_repo(origin_uri)
+    if workflow_runs_repo:
+        if not _json_payload_is_github_workflow_runs_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub workflow runs {workflow_runs_repo}"
+        summary = _github_workflow_runs_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_workflow_artifacts_metadata(origin_uri, payload):
         title = f"GitHub workflow run {_github_workflow_artifacts_path_run_id(origin_uri) or 0} artifacts"
         summary = _github_workflow_artifacts_refresh_summary(origin_uri, payload)
@@ -4346,6 +4491,9 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         elif _json_payload_is_github_workflow_run_metadata(origin_uri, payload):
             title = _safe_public_text(payload.get("name"), limit=200) or source_id
             summary = _github_workflow_run_refresh_summary(payload)
+        elif _json_payload_is_github_workflow_runs_metadata(origin_uri, payload):
+            title = f"GitHub workflow runs {(_github_workflow_runs_path_repo(origin_uri) or source_id)}"
+            summary = _github_workflow_runs_refresh_summary(origin_uri, payload)
         elif _json_payload_is_github_workflow_jobs_metadata(origin_uri, payload):
             title = f"GitHub workflow run {_github_workflow_jobs_path_run_id(origin_uri) or 0} jobs"
             summary = _github_workflow_jobs_refresh_summary(origin_uri, payload)
@@ -4563,6 +4711,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_stargazers_path_matches(safe_origin_uri) and (
             not _github_stargazers_path_repo(safe_origin_uri)
+            or content_type not in {"application/json", "application/feed+json"}
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_workflow_runs_path_matches(safe_origin_uri) and (
+            not _github_workflow_runs_path_repo(safe_origin_uri)
             or content_type not in {"application/json", "application/feed+json"}
         ):
             raise RuntimeError("refresh fetcher disabled")

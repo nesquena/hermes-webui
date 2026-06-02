@@ -38,6 +38,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub workflow-runs metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub Actions workflow-run list API payloads (`/repos/{owner}/{repo}/actions/runs`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from safe repository path, run count, bounded run ids/names/status/conclusion/event/run numbers/attempts/branches/SHA prefixes, and timestamps while omitting logs/jobs/html URLs, commit payloads, API-auth/query/fragment/userinfo markers, prompt-injection text, scripts, renderer fields, and secret-like fixture values from receipts/search/vault output.
+  - JSON Feed bypass payloads and malformed run rows fail closed without creating vault records.
+
 - `feat(capy-memory): ingest GitHub latest-release metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub latest-release API payloads (`/repos/{owner}/{repo}/releases/latest`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from the safe repository path, release id, release name/tag, draft/prerelease flags, and publish timestamp while omitting release bodies, assets, URLs, API-auth/query/fragment markers, prompt-injection text, scripts, renderer fields, and secret-like fixture values from receipts/search/vault output.
