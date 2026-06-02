@@ -671,32 +671,17 @@ def validate_workspace_to_add(path: str) -> Path:
 def safe_resolve_ws(root: Path, requested: str) -> Path:
     """Resolve a relative path inside a workspace root, raising ValueError on traversal.
 
-    Symlinks whose *unresolved* path is within the workspace root are allowed —
-    the user placed them there intentionally.  Only raw ``..`` traversal outside
-    the root is blocked.
+    Both raw ``..`` traversal and symlink escapes are blocked.  Workspace file
+    APIs can be reached by browser UI actions and agent/tool calls, so a symlink
+    inside the workspace must not expand the trusted workspace boundary to an
+    arbitrary host path.
     """
-    import os
-    unresolved = root / requested
-    resolved = unresolved.resolve()
-    # Fast path: resolved path is inside root (covers most cases)
+    root_resolved = root.resolve()
+    resolved = (root / requested).resolve()
     try:
-        resolved.relative_to(root.resolve())
-        return resolved
-    except ValueError:
-        pass
-    # Symlink path: normalize '..' (without following symlinks) and check
-    # os.path.normpath collapses '..' but does NOT follow symlinks.
-    norm = Path(os.path.normpath(str(unresolved)))
-    try:
-        norm.relative_to(root)
+        resolved.relative_to(root_resolved)
     except ValueError:
         raise ValueError(f"Path traversal blocked: {requested}")
-    # Symlink points outside workspace root — additionally block system directories.
-    # Even if the user placed the symlink intentionally, prevent reads from
-    # /etc, /proc, /sys, /dev and other blocked roots (LLM agents can call
-    # read_file_content via tool calls, not just human users).
-    if _is_blocked_system_path(resolved):
-        raise ValueError(f"Path traversal blocked (system dir): {requested}")
     return resolved
 
 
