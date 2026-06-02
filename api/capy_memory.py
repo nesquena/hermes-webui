@@ -465,10 +465,14 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise ValueError("source reference must be a mapping")
     init_memory_tree()
-    origin_seed = _safe_origin_uri(record.get("origin_uri") or record.get("url"), source_id="source")
+    raw_origin = record.get("origin_uri") or record.get("url")
+    origin_seed = _safe_origin_uri(raw_origin, source_id="source")
     fallback_id = "source-" + _sha256(origin_seed)[:12]
     source_id = _safe_public_id(record.get("source_id") or record.get("id"), fallback=fallback_id)
-    origin_uri = _safe_origin_uri(record.get("origin_uri") or record.get("url"), source_id=source_id)
+    origin_uri = _safe_origin_uri(raw_origin, source_id=source_id)
+    raw_origin_text = str(raw_origin or "").strip()
+    if _github_forks_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
+        origin_uri = f"capy-memory://{source_id}"
     display_name = _safe_public_text(
         record.get("title") or record.get("display_name") or record.get("name"),
         limit=200,
@@ -3288,6 +3292,144 @@ def _github_contributors_path_repo(origin_uri: str) -> str:
     return f"{path[2]}/{path[3]}"
 
 
+def _github_raw_hostname_is_exact(origin_uri: str, expected_host: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    raw_host = (parts.netloc or "").rsplit("@", 1)[-1]
+    if raw_host.startswith("["):
+        return False
+    raw_host = raw_host.split(":", 1)[0]
+    return raw_host == expected_host
+
+
+def _github_forks_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _segment_looks_like_forks(raw_segment: str) -> bool:
+        segment = raw_segment.lower()
+        return segment == "forks" or segment.startswith(("forks%", "forks?", "forks\x00"))
+
+    def _matches_fork_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 5 and path[0] == "" and lowered[1] == "repos" and any(
+            _segment_looks_like_forks(segment) for segment in path[4:]
+        )
+
+    return _matches_fork_shape(parts.path) or _matches_fork_shape(unquote(parts.path))
+
+
+def _github_forks_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "forks"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_fork_full_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    full_name = _safe_public_text(value, limit=160)
+    if not full_name or full_name != value.strip() or _refresh_value_is_blocked(full_name):
+        return False
+    parts = full_name.split("/")
+    return len(parts) == 2 and all(_github_repo_path_segment_is_safe(part) for part in parts)
+
+
+def _github_fork_login_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    login = _safe_public_text(value, limit=80)
+    if not login or _refresh_value_is_blocked(login):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", login))
+
+
+def _github_fork_branch_is_safe(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    branch = _safe_public_text(value, limit=120)
+    if not branch or branch != value.strip() or _refresh_value_is_blocked(branch):
+        return False
+    if ".." in branch or "//" in branch or branch.startswith(("/", ".")) or branch.endswith(("/", ".")):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,119}", branch))
+
+
+def _github_fork_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if not _github_fork_full_name_is_safe(row.get("full_name")):
+        return False
+    owner = row.get("owner")
+    if not isinstance(owner, dict) or not _github_fork_login_is_safe(owner.get("login")):
+        return False
+    fork_id = row.get("id")
+    if _is_present_public_value(fork_id) and _safe_optional_nonnegative_int(fork_id) is None:
+        return False
+    if row.get("fork") is not None and row.get("fork") is not True:
+        return False
+    if row.get("private") is not None and not isinstance(row.get("private"), bool):
+        return False
+    raw_name = row.get("name")
+    if raw_name is not None and (not isinstance(raw_name, str) or not _github_repo_path_segment_is_safe(raw_name)):
+        return False
+    if not _github_fork_branch_is_safe(row.get("default_branch")):
+        return False
+    if row.get("updated_at") is not None and not _safe_iso_timestamp(row.get("updated_at")):
+        return False
+    return True
+
+
+def _json_payload_is_github_forks_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_forks_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_fork_row_is_safe(row) for row in payload)
+
+
+def _github_forks_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_forks_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_fork_row_is_safe(row)]
+    parts = [f"GitHub forks for {repo}", f"fork count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        full_name = _safe_public_text(row.get("full_name"), limit=160)
+        owner = row.get("owner") if isinstance(row.get("owner"), dict) else {}
+        login = _safe_public_text(owner.get("login"), limit=80) if isinstance(owner, dict) else ""
+        row_parts = [f"fork: {full_name}", f"owner: {login}"]
+        branch = _safe_public_text(row.get("default_branch"), limit=120) if row.get("default_branch") is not None else ""
+        updated_at = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
+        if branch:
+            row_parts.append(f"branch: {branch}")
+        if updated_at:
+            row_parts.append(f"updated: {updated_at}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_stargazers_path_matches(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -3560,6 +3702,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    forks_repo = _github_forks_path_repo(origin_uri)
+    if forks_repo:
+        if not _json_payload_is_github_forks_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub forks {forks_repo}"
+        summary = _github_forks_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_contributors_metadata(origin_uri, payload):
         title = f"GitHub contributors {(_github_contributors_path_repo(origin_uri) or source_id)}"
         summary = _github_contributors_refresh_summary(origin_uri, payload)
@@ -3792,6 +3946,9 @@ def _refresh_record_from_feed(source_id: str, origin_uri: str, text: str) -> dic
 
 
 def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[str, Any]:
+    raw_origin_uri = str(origin_uri or "").strip()
+    if _github_forks_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
+        raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     if not _source_refresh_allowed(safe_origin_uri):
@@ -3826,6 +3983,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_topics_path_repo(safe_origin_uri) and content_type != "application/json":
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_forks_path_matches(safe_origin_uri) and (
+            not _github_forks_path_repo(safe_origin_uri)
+            or content_type not in {"application/json", "application/feed+json"}
+        ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_stargazers_path_matches(safe_origin_uri) and (
             not _github_stargazers_path_repo(safe_origin_uri)
