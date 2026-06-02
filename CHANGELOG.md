@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Generalized reasoning-effort capability checks in `_candidate_supports_reasoning` to target whole model families (GPT-5+, Claude 4/3.7, Qwen-3, Kimi, Minimax, Mimo, GLM, Step, and DeepSeek) instead of anchoring on hardcoded version numbers or vendor formats. This prevents the thinking-level configuration selector from being hidden on custom providers, new model releases, or when names carry suffixes like `-free` or `:free` (common on integrations such as Kilo Code or OpenCode Zen). The GPT heuristic is now version-anchored (5+) to avoid falsely enabling reasoning_effort for gpt-4o/4.1/3.5 on aggregator providers (#3377).
+
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 
 ### Fixed
