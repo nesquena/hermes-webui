@@ -173,6 +173,7 @@ from api.updates import WEBUI_VERSION
 
 class QuietHTTPServer(ThreadingHTTPServer):
     """Custom HTTP server that silently handles common network errors."""
+    allow_reuse_address = False  # prevent silent port sharing (#3289)
     daemon_threads = True
     request_queue_size = 64
 
