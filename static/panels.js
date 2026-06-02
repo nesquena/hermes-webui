@@ -2666,34 +2666,69 @@ async function loadKanbanTask(taskId){
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
 
+// Phase 2: Single-source-of-truth render.
+//
+// Reads `S.todos` (set by the `todo_state` SSE listener, INFLIGHT
+// restore, or session cold-load — see _hydrateTodosFromSession in
+// ui.js).  When `S.todoStateMeta` is null we have never seen an
+// explicit signal and fall through to the legacy reverse-scan over
+// settled tool messages — this keeps the panel populated against
+// pre-Phase-1 servers and during the upgrade window.
+//
+// The render is short-circuited via `_todosLastRenderedHash` (defined
+// in ui.js): repeated emissions that yield identical DOM are no-ops.
+// Coalescing of bursty live updates happens upstream in
+// scheduleTodosRefresh().
 function loadTodos() {
   const panel = $('todoPanel');
   if (!panel) return;
 
-  const sessionTodoState = S.session && S.session.todo_state;
   let todos;
-  if (sessionTodoState && Array.isArray(sessionTodoState.todos)) {
-    todos = sessionTodoState.todos;
+  if (S.todoStateMeta) {
+    todos = Array.isArray(S.todos) ? S.todos : [];
   } else {
     todos = _legacyTodosFromMessages();
   }
 
   if (!todos.length) {
+    if (typeof _todosLastRenderedHash !== 'undefined' && _todosLastRenderedHash === '__empty__') return;
     panel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:4px 0">${esc(t('todos_no_active'))}</div>`;
+    if (typeof _todosLastRenderedHash !== 'undefined') _todosLastRenderedHash = '__empty__';
     return;
   }
+
+  if (typeof _todosHash === 'function' && typeof _todosLastRenderedHash !== 'undefined') {
+    const hash = _todosHash(todos);
+    if (hash === _todosLastRenderedHash) return;
+    _todosLastRenderedHash = hash;
+  }
+
   const statusIcon = {pending:li('square',14), in_progress:li('loader',14), completed:li('check',14), cancelled:li('x',14)};
   const statusColor = {pending:'var(--muted)', in_progress:'var(--blue)', completed:'rgba(100,200,100,.8)', cancelled:'rgba(200,100,100,.5)'};
-  panel.innerHTML = todos.map(todo => `
+  // Single innerHTML join is the cheapest correct way to materialize
+  // ~10–50 leaf nodes.  All user-controlled content goes through esc().
+  panel.innerHTML = todos.map(td => `
     <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[todo.status]||'var(--muted)'}">${statusIcon[todo.status]||li('square',14)}</span>
+      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[td.status]||'var(--muted)'}">${statusIcon[td.status]||li('square',14)}</span>
       <div style="flex:1;min-width:0">
-        <div style="font-size:13px;color:${todo.status==='completed'?'var(--muted)':todo.status==='in_progress'?'var(--text)':'var(--text)'};${todo.status==='completed'?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(todo.content)}</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(todo.id)} · ${esc(todo.status)}</div>
+        <div style="font-size:13px;color:${td.status==='completed'?'var(--muted)':td.status==='in_progress'?'var(--text)':'var(--text)'};${td.status==='completed'?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(td.content)}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(td.status)}</div>
       </div>
     </div>`).join('');
 }
 
+// Legacy fallback: reverse-scan settled tool messages for the most
+// recent {"todos":[...]} payload.  Used only when no `todo_state`
+// signal has been seen for the current session — primarily during
+// upgrade windows where the server has not yet been redeployed with
+// Phase 1.  Once Phase 1 is universally deployed and a stabilization
+// period has passed, this can be removed (Phase 3).
+//
+// Variable name `sourceMessages` is preserved verbatim from the
+// original loadTodos() implementation so the matching regression
+// test (R-todo-survive-refresh in tests/test_regressions.py) keeps
+// catching any future refactor that drops the raw-session-messages
+// fallback. See the test for the exact contract.
 function _legacyTodosFromMessages() {
   const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;
   if (!Array.isArray(sourceMessages)) return [];
@@ -2707,7 +2742,7 @@ function _legacyTodosFromMessages() {
     if (!content || content.indexOf('"todos"') < 0) continue;
     try {
       const d = JSON.parse(content);
-      if (d && Array.isArray(d.todos) && d.todos.length) return d.todos;
+      if (d && Array.isArray(d.todos)) return d.todos;
     } catch (_) {}
   }
   return [];
