@@ -11913,6 +11913,8 @@ const LOCALES = {
     session_rename_failed_no_row: 'Could not start rename — row not found.',
     renamed_to: 'Renamed to ',
     rename_failed: 'Rename failed: ',
+    moved_to: '이동됨: ',
+    move_failed: '이동 실패: ',
     delete_title: '삭제',
     delete_confirm: (name) => `${name}을(를) 삭제할까요?`,
     delete_dir_confirm: (name) => `"${name}" 폴더와 모든 내용을 삭제할까요?`,
