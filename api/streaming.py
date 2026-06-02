@@ -1795,6 +1795,17 @@ def generate_title_raw_via_aux(
         provider = ''
     model = model or configured.get('model', '') or ''
     base_url = base_url or configured.get('base_url', '') or ''
+    try:
+        from api.profiles import _split_webui_provider_model_value
+
+        normalized_model, normalized_provider = _split_webui_provider_model_value(
+            model or None,
+            provider or None,
+        )
+        model = normalized_model or ''
+        provider = normalized_provider or ''
+    except ValueError:
+        pass
     api_key = ''
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
