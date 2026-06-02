@@ -65,6 +65,14 @@ def _ollama_base_url(base_url: str) -> str:
     return url
 
 
+def _normalize_base_url(base_url: str) -> str:
+    """Strip trailing slash and /v1 suffix so endpoint construction avoids double paths."""
+    url = base_url.strip().rstrip("/")
+    if url.endswith("/v1"):
+        url = url[:-3]
+    return url
+
+
 def _http_get_json(url: str, timeout: float = _CONNECTION_TEST_TIMEOUT) -> tuple[Any, str | None]:
     """Perform a GET request; returns (parsed_json, error_or_None)."""
     req = urllib.request.Request(
@@ -147,7 +155,7 @@ def _lmstudio_test_connection(base_url: str) -> dict[str, Any]:
     Calls GET {base_url}/v1/models — the standard OpenAI-compatible
     models endpoint that LM Studio exposes.
     """
-    url = f"{base_url.strip().rstrip('/')}/v1/models"
+    url = f"{_normalize_base_url(base_url)}/v1/models"
     _, error = _http_get_json(url)
     return {
         "ok": error is None,
@@ -161,7 +169,7 @@ def _lmstudio_list_models(base_url: str) -> list[dict[str, str]]:
 
     Calls GET {base_url}/v1/models and extracts model IDs.
     """
-    url = f"{base_url.strip().rstrip('/')}/v1/models"
+    url = f"{_normalize_base_url(base_url)}/v1/models"
     body, error = _http_get_json(url)
     if error or not isinstance(body, dict):
         return []
@@ -191,7 +199,7 @@ def _custom_test_connection(base_url: str) -> dict[str, Any]:
 
     Calls GET {base_url}/models — the standard OpenAI /v1/models endpoint.
     """
-    url = f"{base_url.strip().rstrip('/')}/models"
+    url = f"{_normalize_base_url(base_url)}/models"
     _, error = _http_get_json(url)
     return {
         "ok": error is None,
@@ -205,7 +213,7 @@ def _custom_list_models(base_url: str) -> list[dict[str, str]]:
 
     Calls GET {base_url}/models and extracts model IDs.
     """
-    url = f"{base_url.strip().rstrip('/')}/models"
+    url = f"{_normalize_base_url(base_url)}/models"
     body, error = _http_get_json(url)
     if error or not isinstance(body, dict):
         return []
