@@ -999,7 +999,7 @@ from api.config import (
     STREAMS,
     STREAMS_LOCK,
     CANCEL_FLAGS,
-    STREAM_LAST_EVENT_ID,
+    STREAM_LAST_EVENT_ID, extract_sse_event_id,
     SERVER_START_TIME,
     _resolve_cli_toolsets,
     _INDEX_HTML_PATH,
@@ -7758,9 +7758,24 @@ def _handle_list_dir(handler, parsed):
 
 
 def _sse_with_id(handler, event, data, event_id=None):
-    if event_id:
-        handler.wfile.write(f"id: {event_id}\n".encode("utf-8"))
-    _sse(handler, event, data)
+    _sse(handler, event, data, event_id=event_id)
+
+
+def _stream_item_parts(item):
+    """Return ``(event, data, event_id)`` for legacy and id-aware stream items."""
+    event_id = None
+    if isinstance(item, (tuple, list)) and len(item) == 3:
+        event, data, event_id = item
+    else:
+        event, data = item
+    return event, data, event_id or extract_sse_event_id(data)
+
+
+def _handler_header(handler, name: str) -> str | None:
+    headers = getattr(handler, "headers", None)
+    if hasattr(headers, "get"):
+        return headers.get(name)
+    return None
 
 
 def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None]:
@@ -7778,8 +7793,9 @@ def _parse_run_journal_event_id(raw: str | None) -> tuple[str | None, int | None
     return run_id or None, seq
 
 
-def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int | None:
-    event_run_id, event_seq = _parse_run_journal_event_id(qs.get("after_event_id", [None])[0])
+def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None, last_event_id: str | None = None) -> int | None:
+    raw_event_id = qs.get("after_event_id", [None])[0] or last_event_id
+    event_run_id, event_seq = _parse_run_journal_event_id(raw_event_id)
     if event_run_id:
         if stream_id and event_run_id != stream_id:
             return None
@@ -7820,11 +7836,11 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
     return True
 
 
-def _runner_stream_cursor_from_query(qs: dict) -> str | None:
+def _runner_stream_cursor_from_query(qs: dict, last_event_id: str | None = None) -> str | None:
     cursor = str(qs.get("cursor", [""])[0] or "").strip()
     if cursor:
         return cursor
-    after_seq = _parse_run_journal_after_seq(qs)
+    after_seq = _parse_run_journal_after_seq(qs, last_event_id=last_event_id)
     return str(after_seq) if after_seq is not None else None
 
 
@@ -7916,9 +7932,10 @@ def _stream_runner_run_events(handler, run_id: str, cursor: str | None = None) -
 def _handle_sse_stream(handler, parsed):
     qs = parse_qs(parsed.query)
     stream_id = qs.get("stream_id", [""])[0]
+    last_event_id = _handler_header(handler, "Last-Event-ID")
     stream = STREAMS.get(stream_id)
     if stream is None:
-        if _stream_runner_run_events(handler, stream_id, _runner_stream_cursor_from_query(qs)):
+        if _stream_runner_run_events(handler, stream_id, _runner_stream_cursor_from_query(qs, last_event_id)):
             return True
         try:
             journal_available = bool(find_run_summary(stream_id)) if stream_id else False
@@ -7933,7 +7950,7 @@ def _handle_sse_stream(handler, parsed):
         handler.send_header("Connection", "close")
         handler.end_headers()
         try:
-            _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs, stream_id))
+            _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs, stream_id, last_event_id))
         except _CLIENT_DISCONNECT_ERRORS:
             pass
         return True
@@ -7947,20 +7964,18 @@ def _handle_sse_stream(handler, parsed):
     try:
         while True:
             try:
-                event, data = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                event, data, event_id = _stream_item_parts(item)
             except queue.Empty:
                 handler.wfile.write(b": heartbeat\n\n")
                 handler.wfile.flush()
                 continue
-            # Stage-364: emit `id:` from STREAM_LAST_EVENT_ID side-channel so
-            # the frontend's `_lastRunJournalSeq` cursor advances during live
-            # streaming. Without this, mid-stream error→replay would arrive
-            # with after_seq=0 and double-render every journaled event.
-            event_id = STREAM_LAST_EVENT_ID.get(stream_id)
-            if event_id:
-                _sse_with_id(handler, event, data, event_id)
-            else:
-                _sse(handler, event, data)
+            # Prefer the id attached to this exact queued payload. The legacy
+            # STREAM_LAST_EVENT_ID side channel remains as a fallback for
+            # non-dict payloads, but must not overwrite per-event ids when the
+            # producer outruns the SSE consumer.
+            event_id = event_id or STREAM_LAST_EVENT_ID.get(stream_id)
+            _sse(handler, event, data, event_id=event_id)
             if event in ("stream_end", "error", "cancel"):
                 break
     except _CLIENT_DISCONNECT_ERRORS:

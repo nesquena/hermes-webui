@@ -4698,6 +4698,36 @@ STREAM_REASONING_TEXT: dict = {}  # stream_id -> reasoning trace accumulated dur
 STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated during streaming (#1361 §B)
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
+
+
+class SSEEventPayload(dict):
+    """Dict payload subclass carrying a non-serialized SSE event id.
+
+    The stream queue contract stays as a 2-tuple ``(event, data)`` so older
+    tests and non-SSE queue consumers keep working.  When ``data`` is a dict,
+    the journal ``event_id`` travels as an attribute on this dict subclass;
+    JSON serialization and ordinary dict equality ignore the attribute.
+    """
+
+
+def attach_sse_event_id(data, event_id):
+    """Return *data* with an attached non-serialized SSE event id when safe."""
+    if not event_id or not isinstance(data, dict):
+        return data
+    try:
+        payload = SSEEventPayload(data)
+        payload._sse_event_id = str(event_id)
+        return payload
+    except Exception:
+        return data
+
+
+def extract_sse_event_id(data) -> str | None:
+    """Read an SSE event id attached by :func:`attach_sse_event_id`."""
+    event_id = getattr(data, "_sse_event_id", None)
+    return str(event_id) if event_id else None
+
+
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
 
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
