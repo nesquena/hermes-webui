@@ -3011,7 +3011,7 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
+  s=s.replace(/MEDIA:([^\s`\)\]]+)/g,(_,raw_ref)=>{
     media_stash.push(raw_ref);
     return '\x00D'+(media_stash.length-1)+'\x00';
   });

@@ -166,6 +166,23 @@ const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|_
 // Canonical Hermes mutators plus MCP filesystem aliases that can create/edit files.
 const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
 
+function _sessionAttachmentRootAbsolute(){
+  const sid=S&&S.session&&S.session.session_id?String(S.session.session_id).trim():'';
+  if(!sid) return '';
+  return `/root/.hermes/webui/attachments/${sid}/`;
+}
+
+function _resolveArtifactOpenPath(path){
+  const raw=String(path||'').trim();
+  const attachmentRoot=_sessionAttachmentRootAbsolute();
+  if(attachmentRoot&&raw.startsWith(attachmentRoot)){
+    const rel=raw.slice(attachmentRoot.length).replace(/^\/+/, '');
+    return {rel, isAttachment: !!rel, absolutePath: raw};
+  }
+  const rel=raw.replace(/^~\//,'').replace(/^\.\//,'');
+  return {rel, isAttachment: false, absolutePath: raw};
+}
+
 function _normalizeArtifactPath(path){
   if(!path) return '';
   path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
@@ -271,9 +288,14 @@ async function _workspacePathExists(path){
 async function openArtifactPath(path){
   if(!path) return;
   switchWorkspacePanelTab('files');
-  const rel = path.replace(/^~\//,'').replace(/^\.\//,'');
+  const resolved = _resolveArtifactOpenPath(path);
+  const rel = resolved.rel;
+  if(!rel){
+    setStatus(t('file_open_failed'));
+    return;
+  }
   try{
-    if(!(await _workspacePathExists(rel))){
+    if(!resolved.isAttachment && !(await _workspacePathExists(rel))){
       setStatus(t('file_open_failed'));
       return;
     }

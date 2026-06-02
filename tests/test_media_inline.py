@@ -41,6 +41,10 @@ class TestMediaRenderMdStash(unittest.TestCase):
         self.assertIn("MEDIA:", UI_JS,
                       "MEDIA: token regex must be present in renderMd()")
 
+    def test_media_token_regex_excludes_trailing_backticks(self):
+        self.assertIn("MEDIA:([^\\s`\\)\\]]+)", UI_JS,
+                      "MEDIA: token regex must stop before closing backticks so code-formatted MEDIA links do not include a stray ` in the path")
+
     def test_media_restore_produces_img_tag(self):
         self.assertIn("msg-media-img", UI_JS,
                       "restore pass must produce <img class='msg-media-img'>")
