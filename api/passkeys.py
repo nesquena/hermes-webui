@@ -141,7 +141,12 @@ def _host_without_port(host: str) -> str:
 
 def rp_context(handler) -> tuple[str, str]:
     host = _host_without_port(handler.headers.get("Host", "localhost"))
-    proto = handler.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
+    try:
+        from api.helpers import _trust_proxy
+        _trusted_proxy = _trust_proxy()
+    except Exception:
+        _trusted_proxy = False
+    proto = handler.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower() if _trusted_proxy else ""
     if proto not in {"http", "https"}:
         try:
             from api.auth import _is_secure_context

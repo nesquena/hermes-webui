@@ -404,7 +404,7 @@ def restore_goal_state(session_id: str, snapshot: Any, *, profile_home: str | Pa
         try:
             mgr.clear()
         except Exception:
-            pass
+            logger.debug("Failed to clear goal state for %s during restore", session_id, exc_info=True)
         return
     if isinstance(mgr, _ProfileGoalManager):
         mgr._state = snapshot

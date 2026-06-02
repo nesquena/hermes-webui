@@ -807,7 +807,7 @@ def _resolve_provider_alias(name: str) -> str:
         if raw in _agent_aliases:
             return _agent_aliases[raw]
     except Exception:
-        pass
+        logger.debug("Unable to load provider aliases from hermes_cli", exc_info=True)
     return _PROVIDER_ALIASES.get(raw, name)
 
 
@@ -2531,7 +2531,7 @@ def set_auxiliary_model(task: str, provider: str, model: str) -> dict:
                     if resolved_base_url:
                         slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
                 except Exception:
-                    pass
+                    logger.debug("Unable to resolve custom provider base_url for auxiliary slot %s", task, exc_info=True)
             aux_cfg[task] = slot_cfg
             config_data["auxiliary"] = aux_cfg
 
@@ -2945,7 +2945,7 @@ def _save_models_cache_to_disk(cache: dict) -> None:
             json.dump(payload, f, indent=2)
         os.rename(tmp, str(_models_cache_path))
     except Exception:
-        pass  # Non-fatal -- cache will rebuild on next call
+        logger.debug("Failed to write available models cache; cache will rebuild on next request", exc_info=True)
 
 
 def _get_fresh_memory_models_cache(now: float) -> dict | None:
@@ -4509,7 +4509,7 @@ def get_available_models() -> dict:
                 for _pid in _pool:
                     _providers_with_keys.add(_resolve_provider_alias(str(_pid)))
         except Exception:
-            pass
+            logger.debug("Unable to collect credential-pool providers for model sorting", exc_info=True)
         try:
             _cfg_providers = cfg.get("providers", {})
             if isinstance(_cfg_providers, dict):
@@ -4517,7 +4517,7 @@ def get_available_models() -> dict:
                     if isinstance(_pv, dict) and (_pv.get("api_key") or _pv.get("key_env")):
                         _providers_with_keys.add(_resolve_provider_alias(str(_pk)))
         except Exception:
-            pass
+            logger.debug("Unable to collect configured providers for model sorting", exc_info=True)
 
         def _group_sort_key(g):
             pid = g.get("provider_id") or ""
@@ -4537,7 +4537,7 @@ def get_available_models() -> dict:
             if isinstance(raw_aliases, dict):
                 model_aliases = {str(k).strip(): str(v).strip() for k, v in raw_aliases.items() if k and v}
         except Exception:
-            pass
+            logger.debug("Unable to read configured model aliases", exc_info=True)
 
         return {
             "active_provider": active_provider,
@@ -4698,6 +4698,36 @@ STREAM_REASONING_TEXT: dict = {}  # stream_id -> reasoning trace accumulated dur
 STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated during streaming (#1361 §B)
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
+
+
+class SSEEventPayload(dict):
+    """Dict payload subclass carrying a non-serialized SSE event id.
+
+    The stream queue contract stays as a 2-tuple ``(event, data)`` so older
+    tests and non-SSE queue consumers keep working.  When ``data`` is a dict,
+    the journal ``event_id`` travels as an attribute on this dict subclass;
+    JSON serialization and ordinary dict equality ignore the attribute.
+    """
+
+
+def attach_sse_event_id(data, event_id):
+    """Return *data* with an attached non-serialized SSE event id when safe."""
+    if not event_id or not isinstance(data, dict):
+        return data
+    try:
+        payload = SSEEventPayload(data)
+        payload._sse_event_id = str(event_id)
+        return payload
+    except Exception:
+        return data
+
+
+def extract_sse_event_id(data) -> str | None:
+    """Read an SSE event id attached by :func:`attach_sse_event_id`."""
+    event_id = getattr(data, "_sse_event_id", None)
+    return str(event_id) if event_id else None
+
+
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
 
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
@@ -5153,7 +5183,7 @@ if _settings_file_exists:
                 encoding="utf-8",
             )
         except Exception:
-            pass
+            logger.debug("Failed to persist startup default workspace cleanup", exc_info=True)
 
 # ── SESSIONS in-memory cache (LRU OrderedDict) ───────────────────────────────
 SESSIONS: collections.OrderedDict = collections.OrderedDict()

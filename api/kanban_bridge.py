@@ -14,11 +14,14 @@ Supported operations:
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import asdict, is_dataclass
 from urllib.parse import parse_qs, unquote
 
 from api.helpers import bad, j
+
+logger = logging.getLogger(__name__)
 
 BOARD_COLUMNS = ["triage", "todo", "ready", "running", "blocked", "done"]
 _TASK_PREFIX = "/api/kanban/tasks/"
@@ -299,7 +302,7 @@ def _set_status_direct(conn, task_id: str, new_status: str) -> bool:
         try:
             kb.recompute_ready(conn)
         except Exception:
-            pass
+            logger.debug("Kanban ready-state recompute failed after task %s status change", task_id, exc_info=True)
     return True
 
 
@@ -362,7 +365,7 @@ def _patch_task(conn, task_id: str, body: dict):
             try:
                 setattr(task, field, value)
             except Exception:
-                pass
+                logger.debug("Kanban task object rejected field %s update", field, exc_info=True)
     if updates:
         assignments = ", ".join(f"{field} = ?" for field in updates)
         conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", [*updates.values(), task_id])
@@ -729,7 +732,7 @@ def _board_counts_for_slug(slug):
         try:
             conn.close()
         except Exception:
-            pass
+            logger.debug("Failed to close Kanban database connection", exc_info=True)
 
 
 def _list_boards_payload(parsed):
@@ -755,7 +758,7 @@ def _list_boards_payload(parsed):
         try:
             kb.clear_current_board()
         except Exception:
-            pass
+            logger.debug("Failed to clear stale current Kanban board pointer", exc_info=True)
         current = default_slug
     out = []
     for raw_meta in boards:
@@ -950,7 +953,7 @@ def _kanban_sse_fetch_new(board, cursor):
         try:
             conn.close()
         except Exception:
-            pass
+            logger.debug("Failed to close Kanban database connection", exc_info=True)
     out = []
     new_cursor = cursor
     for r in rows:
