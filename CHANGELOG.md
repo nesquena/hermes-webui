@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+- Restart-window observability for unexplained post-update exits: `api.updates._write_pre_execv_marker()` (pre-side, written by the old process before `os.execv()`) and the first-line marker at the top of `server.py` (post-side, written before any import). Together with the existing `api.diag_shim` install marker they form a 3-state decision table for WHERE in the new process's life a silent death happened — kernel/loader (pre only), Python startup (pre + first-line, no install), or post-shim-load (pre + first-line + install, no further activity). All marker writes are try/except'd so they cannot prevent the restart or the startup, and use `os.fsync()` per file. See the `silent-sigkill-diagnosis` reference in the `hermes-webui-self-update-bug` skill for the full diagnostic playbook.
+- Optional `strace`-through-`execv` for the rare case where the marker-based approach narrows the kill to a window that needs syscall-level detail. Off by default; enable by setting `HERMES_WEBUI_STRACE_EXECV=1` in the start environment. The trace log lands in `/tmp/hermes-webui-shim/strace-execv.log` next to the markers.
+
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 
 ### Fixed
