@@ -6931,7 +6931,39 @@ function _buildProviderCard(p){
 
   let input=null;
   let saveBtn=null;
-  if(p.configurable){
+  if(p.keyless){
+    const field=document.createElement('div');
+    field.className='provider-card-field';
+    const label=document.createElement('label');
+    label.className='provider-card-label';
+    label.textContent='Endpoint URL';
+    field.appendChild(label);
+
+    const row=document.createElement('div');
+    row.className='provider-card-row';
+    input=document.createElement('input');
+    input.type='text';
+    input.className='provider-card-input';
+    input.placeholder='http://localhost:11434/v1';
+    input.value=p.base_url||'';
+    input.autocomplete='off';
+    saveBtn=document.createElement('button');
+    saveBtn.type='button';
+    saveBtn.className='provider-card-btn provider-card-btn-primary';
+    saveBtn.textContent=t('providers_save');
+    saveBtn.onclick=()=>_saveProviderBaseUrl(p.id);
+    saveBtn.disabled=true;
+    row.appendChild(input);
+    row.appendChild(saveBtn);
+    field.appendChild(row);
+
+    const hint=document.createElement('div');
+    hint.className='provider-card-hint';
+    hint.textContent='Self-hosted provider — no API key required. Configure the endpoint URL for your local model server.';
+    field.appendChild(hint);
+
+    body.appendChild(field);
+  }else if(p.configurable){
     const field=document.createElement('div');
     field.className='provider-card-field';
     const label=document.createElement('label');
@@ -7036,7 +7068,10 @@ function _buildProviderCard(p){
   card.appendChild(body);
 
   if(input&&saveBtn){
-    _providerCardEls.set(p.id,{card,input,saveBtn,hasKey:p.has_key});
+    _providerCardEls.set(p.id,{card,input,saveBtn,hasKey:p.has_key,keyless:!!p.keyless});
+    if(p.keyless){
+      saveBtn.disabled=!input.value.trim();
+    }
     input.addEventListener('input',()=>{saveBtn.disabled=!input.value.trim();});
   }
   header.addEventListener('click',e=>{
@@ -7046,6 +7081,35 @@ function _buildProviderCard(p){
     if(card.classList.contains('open')) setTimeout(()=>input.focus(),0);
   });
   return card;
+}
+
+async function _saveProviderBaseUrl(providerId){
+  const els=_providerCardEls.get(providerId);
+  if(!els) return;
+  const url=els.input.value.trim();
+  if(!url){
+    showToast('Please enter an endpoint URL');
+    return;
+  }
+  els.saveBtn.disabled=true;
+  els.saveBtn.textContent=t('providers_saving');
+  try{
+    const res=await api('/api/providers/base-url',{method:'POST',body:JSON.stringify({provider:providerId,base_url:url})});
+    if(res.ok){
+      showToast(res.display_name+' endpoint URL '+res.action);
+      els.input.value=res.base_url||'';
+      _refreshModelDropdownsAfterProviderChange();
+      await loadProvidersPanel();
+    }else{
+      showToast(res.error||'Failed to save endpoint URL');
+      els.saveBtn.disabled=false;
+      els.saveBtn.textContent=t('providers_save');
+    }
+  }catch(e){
+    showToast('Error: '+e.message);
+    els.saveBtn.disabled=false;
+    els.saveBtn.textContent=t('providers_save');
+  }
 }
 
 async function _saveProviderKey(providerId){

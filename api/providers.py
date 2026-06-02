@@ -34,6 +34,7 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _custom_provider_slug_from_name,
+    _get_config_path,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _read_live_provider_model_ids,
@@ -1762,6 +1763,17 @@ def get_providers() -> dict[str, Any]:
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
 
+    # Add keyless self-hosted providers from onboarding setups so they
+    # appear in Settings → Providers even when they're not in the
+    # hardcoded _PROVIDER_ENV_VAR mapping (#3260).
+    try:
+        from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+        for spid, setup in _SUPPORTED_PROVIDER_SETUPS.items():
+            if setup.get("key_optional"):
+                known_ids.add(spid)
+    except ImportError:
+        pass
+
     for pid in sorted(known_ids):
         display_name = _PROVIDER_DISPLAY.get(pid, pid.replace("-", " ").title())
         is_oauth = _provider_is_oauth(pid)
@@ -1939,12 +1951,31 @@ def get_providers() -> dict[str, Any]:
                 if pid != "nous":
                     models_total = len(models)
 
+        configurable = not is_oauth and pid in _PROVIDER_ENV_VAR
+        keyless = False
+        base_url = ""
+        try:
+            from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+            setup = _SUPPORTED_PROVIDER_SETUPS.get(pid)
+            if setup and setup.get("key_optional"):
+                configurable = True
+                keyless = True
+                model_cfg = cfg.get("model", {})
+                if isinstance(model_cfg, dict):
+                    base_url = str(model_cfg.get("base_url") or "")
+                if not base_url:
+                    base_url = str(setup.get("default_base_url") or "")
+        except ImportError:
+            pass
+
         providers.append({
             "id": pid,
             "display_name": display_name,
             "has_key": has_key,
-            "configurable": not is_oauth and pid in _PROVIDER_ENV_VAR,
+            "configurable": configurable,
             "is_oauth": is_oauth,
+            "keyless": keyless,
+            "base_url": base_url,
             "key_source": key_source,
             "auth_error": auth_error,
             "models": models,
@@ -2173,3 +2204,62 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             reload_config()
     except Exception:
         logger.exception("Failed to clean provider key from config.yaml for %s", provider_id)
+
+
+def set_provider_base_url(provider_id: str, base_url: str | None) -> dict[str, Any]:
+    """Set or update the endpoint URL for a keyless self-hosted provider.
+
+    Writes ``model.base_url`` to the active profile's ``config.yaml`` so
+    the agent runtime picks up the endpoint on the next chat.  This matches
+    the write path used by the first-run onboarding wizard (#3260).
+
+    Returns a status dict with the operation result.
+    """
+    provider_id = provider_id.strip().lower()
+
+    if not provider_id:
+        return {"ok": False, "error": "Provider ID is required."}
+
+    try:
+        from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+    except ImportError:
+        return {"ok": False, "error": "Cannot verify provider setup — onboarding module unavailable."}
+
+    setup = _SUPPORTED_PROVIDER_SETUPS.get(provider_id)
+    if not setup or not setup.get("key_optional"):
+        return {
+            "ok": False,
+            "error": f"'{_PROVIDER_DISPLAY.get(provider_id, provider_id)}' is not a self-hosted keyless provider.",
+        }
+
+    if base_url is not None:
+        base_url = base_url.strip().rstrip("/")
+        if not base_url:
+            return {"ok": False, "error": "Endpoint URL must not be empty."}
+        from urllib.parse import urlparse
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"}:
+            return {"ok": False, "error": "Endpoint URL must start with http:// or https://"}
+
+    cfg = get_config()
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    if base_url is not None:
+        model_cfg["base_url"] = base_url
+    else:
+        model_cfg.pop("base_url", None)
+    cfg["model"] = model_cfg
+
+    config_path = _get_config_path()
+    _save_yaml_config_file(config_path, cfg)
+
+    invalidate_models_cache()
+
+    return {
+        "ok": True,
+        "provider": provider_id,
+        "display_name": _PROVIDER_DISPLAY.get(provider_id, provider_id),
+        "base_url": base_url,
+        "action": "updated" if base_url else "removed",
+    }

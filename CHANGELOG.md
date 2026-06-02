@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- Self-hosted provider setup (Ollama, LM Studio, Custom OpenAI-compatible) in Settings → Providers. Keyless providers now appear as configurable cards with an endpoint URL field instead of an API key field, matching the onboarding wizard's treatment of `key_optional` providers (#3260, @theherrovn-sys).
+
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 
 ### Fixed

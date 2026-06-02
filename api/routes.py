@@ -2854,7 +2854,7 @@ from api.run_journal import (
     read_run_events,
     stale_interrupted_event,
 )
-from api.providers import get_providers, get_provider_quota, get_provider_cost_history, set_provider_key, remove_provider_key
+from api.providers import get_providers, get_provider_quota, get_provider_cost_history, set_provider_key, remove_provider_key, set_provider_base_url
 from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
@@ -5853,6 +5853,18 @@ def handle_post(handler, parsed) -> bool:
         if not provider_id:
             return bad(handler, "provider is required")
         result = remove_provider_key(provider_id)
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+
+    if parsed.path == "/api/providers/base-url":
+        provider_id = (body.get("provider") or "").strip().lower()
+        base_url = body.get("base_url")
+        if not provider_id:
+            return bad(handler, "provider is required")
+        if base_url is not None:
+            base_url = str(base_url).strip() or None
+        result = set_provider_base_url(provider_id, base_url)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
