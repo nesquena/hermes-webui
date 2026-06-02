@@ -130,3 +130,37 @@ def test_get_reasoning_status_includes_supported_efforts(monkeypatch):
     )
     assert status["supported_efforts"] == ["low", "medium", "high"]
     assert status["supports_reasoning_effort"] is True
+    assert status["reasoning_default_on"] is True
+
+
+def test_get_reasoning_status_unrecognized_model_still_offers_efforts(monkeypatch):
+    """Unrecognized models get the full effort list but reasoning_default_on=False."""
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_reasoning_efforts",
+        lambda *a, **k: [],
+    )
+    status = cfg.get_reasoning_status(
+        model_id="some-unknown-model",
+        provider_id="custom:myproxy",
+    )
+    assert len(status["supported_efforts"]) > 0, (
+        "Unrecognized models should still expose effort levels"
+    )
+    assert status["supports_reasoning_effort"] is True
+    assert status["reasoning_default_on"] is False
+
+
+def test_get_reasoning_status_recognized_model_default_on(monkeypatch):
+    """Recognized reasoning models have reasoning_default_on=True."""
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_reasoning_efforts",
+        lambda *a, **k: list(cfg.VALID_REASONING_EFFORTS),
+    )
+    status = cfg.get_reasoning_status(
+        model_id="deepseek-r1",
+        provider_id="custom:newapi",
+    )
+    assert status["reasoning_default_on"] is True
+    assert status["supports_reasoning_effort"] is True

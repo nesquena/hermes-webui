@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Changed
+- The reasoning-effort selector chip is now always visible in the composer footer regardless of whether the model is recognized as reasoning-capable. For recognized models (GPT-5+, Claude 4/3.7+, Qwen-3+, DeepSeek, Kimi, etc.) the chip defaults to "Default" (active reasoning). For unrecognized or ambiguous models the chip defaults to "None" (reasoning off), letting users opt-in to reasoning on any model without needing the heuristic to pre-approve it. The dropdown always shows the full effort scale. This eliminates false-negative scenarios where custom providers, aggregator suffixes, or new model releases previously hid the selector entirely (#3377).
+
 ## [v0.51.360] — 2026-06-11 — Release LY (close idle SSE on hidden tabs)
 
 ### Fixed

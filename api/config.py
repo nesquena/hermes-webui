@@ -2717,12 +2717,16 @@ def get_reasoning_status(
         provider_id=resolve_provider,
         base_url=resolve_base_url,
     )
+    model_recognized = bool(supported_efforts)
+    if not supported_efforts:
+        supported_efforts = list(VALID_REASONING_EFFORTS)
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
         "reasoning_effort": str(effort_raw or "").strip().lower(),
         "supported_efforts": supported_efforts,
-        "supports_reasoning_effort": bool(supported_efforts),
+        "supports_reasoning_effort": True,
+        "reasoning_default_on": model_recognized,
     }
 
 

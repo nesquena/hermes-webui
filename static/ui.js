@@ -2028,40 +2028,32 @@ function _applyReasoningOptions(supportedEfforts){
       opt.style.display='';
       return;
     }
-    if(!supported.size){
-      opt.style.display='none';
-      return;
-    }
-    opt.style.display=supported.has(effort)?'':'none';
+    opt.style.display=(!supported.size||supported.has(effort))?'':'none';
   });
 }
 
 function _applyReasoningChip(eff){
   const meta=arguments[1]||null;
-  const effort=_normalizeReasoningEffort(eff);
-  _currentReasoningEffort=effort;
+  var effort=_normalizeReasoningEffort(eff);
   if(meta&&Array.isArray(meta.supported_efforts)){
     _currentReasoningEffortsSupported=meta.supported_efforts;
   }
+  var defaultOn=(meta&&meta.reasoning_default_on!==undefined)?meta.reasoning_default_on:true;
+  if(!defaultOn&&(!effort||effort==='')){
+    effort='none';
+  }
+  _currentReasoningEffort=effort;
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
   const chip=$('composerReasoningChip');
   const mobileLabel=$('composerMobileReasoningLabel');
   const mobileAction=$('composerMobileReasoningAction');
   if(!wrap||!label) return;
+  wrap.style.display='';
+  if(mobileAction) mobileAction.style.display='';
   const supportedEfforts=(typeof _currentReasoningEffortsSupported==='undefined')
     ?null
     :_currentReasoningEffortsSupported;
-  const supports=Array.isArray(supportedEfforts)
-    ?supportedEfforts.length>0
-    :true;
-  if(!supports){
-    wrap.style.display='none';
-    if(mobileAction) mobileAction.style.display='none';
-    return;
-  }
-  wrap.style.display='';
-  if(mobileAction) mobileAction.style.display='';
   if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
   const text=_formatReasoningEffortLabel(effort);
   label.textContent=text;
@@ -2078,7 +2070,7 @@ function _applyReasoningChip(eff){
 function fetchReasoningChip(){
   api('/api/reasoning'+_reasoningEffortQuery()).then(function(st){
     _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
-  }).catch(function(){_applyReasoningChip('', {supported_efforts:[]});});
+  }).catch(function(){_applyReasoningChip('', {supported_efforts:null,reasoning_default_on:false});});
 }
 
 function syncReasoningChip(){
