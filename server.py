@@ -6,12 +6,31 @@ All business logic lives in api/*.
 import logging
 import os
 import re
+import signal
 import socket
 import sys
 import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# ── SIGPIPE handling ────────────────────────────────────────────────────────
+# Ignore SIGPIPE so that a client closing the connection mid-response (browser
+# tab close, network drop, mobile background, the long-poll endpoint dropped,
+# etc.) does not terminate the whole server process. Python's default action
+# for SIGPIPE is `Term`, which means a single dropped `socket.send()` in any
+# request thread kills the entire WebUI silently — no exception, no log, no
+# `/health` response.
+#
+# With SIG_IGN, the kernel still returns EPIPE to the offending `send()` call
+# (Python surfaces it as `BrokenPipeError`); the per-request handler can
+# either let it propagate (the connection just closes) or catch it. The server
+# itself keeps running. Set at import time so it is in effect before any
+# ThreadingHTTPServer worker thread writes its first response.
+#
+# Reproduced in production on 2026-06-02 — see /tmp/hermes-webui-shim/ for
+# the SIGPIPE marker (signal_number 13) written by api/diag_shim.py.
+signal.signal(signal.SIGPIPE, signal.SIG_IGN)
 
 # ── Test-mode network isolation ─────────────────────────────────────────────
 # When `HERMES_WEBUI_TEST_NETWORK_BLOCK=1` is set in the environment, refuse
