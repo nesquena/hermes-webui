@@ -13,12 +13,16 @@
 - Manual session title regeneration now uses the first five visible user/assistant messages, skips tool output, salvages clean candidates from Kimi-style visible reasoning dumps such as `Possible titles:`, and rejects weak fallback fragments before saving a title.
 
 - Thinking/tool Activity groups now default open so live and settled tool-call thinking is visible without first expanding the disclosure, while individual tool output details remain collapsed until clicked.
+- Idle pinned sessions now render in a `★ Pinned` bucket at the top of the sidebar; pinned sessions that are active or unread still move into the higher-priority Active or Unread buckets instead of duplicating.
 - Running sessions now appear in an Active sidebar bucket above Recent, keeping in-flight work visible even when its last message is older.
+- Pinned sessions now leave the `Pinned` bucket while they need attention: active pinned sessions appear under `Active`, unread pinned sessions appear under `Unread`, and only idle pinned sessions remain under `Pinned`, avoiding duplicate sidebar rows.
 
 ### Fixed
 
+- Markdown table/prose currency amounts like `A$3 **up to A$30,000**` and `US$3 **up to US$30,000**` no longer get misparsed as inline KaTeX math, so dollar signs, bold text, and cell formatting remain intact.
 - `/api/sessions` and session-index rebuilds now normalize legacy ISO-string session timestamps (`created_at`, `updated_at`, `last_message_at`) before sorting, preventing mixed `str`/`float` metadata from crashing the sidebar with HTTP 500 after recovery scans or legacy sidecar loads.
 - Fully-loaded sessions now publish their actual `len(messages)` to sidebar metadata instead of reusing stale metadata-only counts, preventing `_index.json` drift from hiding unread sessions after long turns or recovery merges.
+- New-chat automatic LLM title generation now uses the first five visible user/assistant messages and no longer skips sessions whose opening assistant row is an empty tool-call scaffold.
 - Reloaded or recovered sessions now keep tool-call history visible for interrupted/cancelled turns: settled rendering derives cards from `_partial_tool_calls`, and mixed-history reloads preserve journal-recovered session-level tool cards instead of dropping them whenever older assistant messages already contain tool metadata.
 - LiteLLM Responses Codex GPT-5 models and Grok routes now expose the `high` and `xhigh` reasoning effort options in the WebUI composer instead of hiding the reasoning chip as unsupported.
 

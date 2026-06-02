@@ -3798,12 +3798,14 @@ function renderSessionListFromCache(){
     list.appendChild(empty);
   }
   const orderedSessions=[...sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
-  // Separate pinned from unpinned
-  const pinned=orderedSessions.filter(s=>s.pinned);
-  const unreadUnpinned=orderedSessions.filter(s=>!s.pinned&&!_isSessionEffectivelyStreaming(s)&&_hasUnreadForSession(s));
-  const activeUnpinned=orderedSessions.filter(s=>!s.pinned&&_isSessionEffectivelyStreaming(s));
+  // Bucket priority: Pinned / Active / Unread / Recent / Today / Yesterday /
+  // This week / Last week / Older. Pinned sessions only stay in the Pinned
+  // bucket while idle; active or unread pinned sessions surface in their higher
+  // priority attention bucket instead of appearing twice.
+  const activeSessions=orderedSessions.filter(s=>_isSessionEffectivelyStreaming(s));
+  const unreadSessions=orderedSessions.filter(s=>!_isSessionEffectivelyStreaming(s)&&_hasUnreadForSession(s));
+  const pinnedIdleSessions=orderedSessions.filter(s=>s.pinned&&!_isSessionEffectivelyStreaming(s)&&!_hasUnreadForSession(s));
   const unpinned=orderedSessions.filter(s=>!s.pinned&&!_isSessionEffectivelyStreaming(s)&&!_hasUnreadForSession(s));
-  // Date grouping: Pinned / Active / Unread / Recent / Today / Yesterday / This week / Last week / Older
   const now=_serverNowMs();
   // Collapse state persisted in localStorage
   let _groupCollapsed={};
@@ -3812,9 +3814,9 @@ function renderSessionListFromCache(){
   // Group sessions by date
   const groups=[];
   let curLabel=null,curItems=[];
-  if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
-  if(activeUnpinned.length) groups.push({label:t('session_time_bucket_active'),items:activeUnpinned,isActive:true});
-  if(unreadUnpinned.length) groups.push({label:t('session_time_bucket_unread'),items:unreadUnpinned,isUnread:true});
+  if(pinnedIdleSessions.length) groups.push({label:'★ Pinned',items:pinnedIdleSessions,isPinned:true});
+  if(activeSessions.length) groups.push({label:t('session_time_bucket_active'),items:activeSessions,isActive:true});
+  if(unreadSessions.length) groups.push({label:t('session_time_bucket_unread'),items:unreadSessions,isUnread:true});
   for(const s of unpinned){
     const ts=_sessionTimestampMs(s);
     const label=_sessionTimeBucketLabel(ts, now);

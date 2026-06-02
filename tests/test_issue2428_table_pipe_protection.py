@@ -217,6 +217,37 @@ class TestKatexDollarInTableCell:
         )
 
 
+class TestCurrencyAmountsAreNotParsedAsInlineMath:
+    """Currency text like `A$3` / `US$3` must not be treated as `$...$` math.
+
+    This is the real-world shape from the broker-comparison screenshot: the
+    renderer used to treat the `$` in `A$3` and the next `$` in `A$30,000` as
+    an inline KaTeX pair, which stripped the dollar sign, leaked `**`, and broke
+    table-cell formatting.
+    """
+
+    def test_currency_table_cells_keep_dollar_signs_and_bold(self, driver_path):
+        md = (
+            "| Item | Stake | Superhero |\n"
+            "|---|---|---|\n"
+            "| Brokerage | A$3 **up to A$30,000**, then 0.01% | A$2 **up to A$20,000**, then 0.01% |\n"
+            "| US Brokerage | US$3 **up to US$30,000**, then 0.01% | US$2 **up to US$20,000**, then 0.01% |"
+        )
+        out = _render(driver_path, md)
+        assert 'katex-inline' not in out, out
+        assert '<td>A$3 <strong>up to A$30,000</strong>, then 0.01%</td>' in out, out
+        assert '<td>A$2 <strong>up to A$20,000</strong>, then 0.01%</td>' in out, out
+        assert '<td>US$3 <strong>up to US$30,000</strong>, then 0.01%</td>' in out, out
+        assert '<td>US$2 <strong>up to US$20,000</strong>, then 0.01%</td>' in out, out
+
+    def test_currency_prose_keeps_dollar_signs_and_bold(self, driver_path):
+        md = 'Brokerage: A$3 **up to A$30,000**, then 0.01%. US: US$3 **up to US$30,000**, then 0.01%.'
+        out = _render(driver_path, md)
+        assert 'katex-inline' not in out, out
+        assert 'A$3 <strong>up to A$30,000</strong>, then 0.01%' in out, out
+        assert 'US$3 <strong>up to US$30,000</strong>, then 0.01%.' in out, out
+
+
 class TestComparisonOperatorsAcrossColumns:
     """The first cut of #2428 included `<` and `>` in the protected-bracket
     set. That caused tables containing comparison operators across adjacent

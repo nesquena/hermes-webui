@@ -155,6 +155,26 @@ def test_prompt_prefix_manual_title_is_not_treated_as_provisional():
     assert not _is_provisional_title(manual_prefix, messages)
 
 
+def test_auto_title_scheduling_uses_opening_context_and_user_only_gate():
+    """Initial auto-title must not be blocked by tool-only opening assistants.
+
+    Some agent runs start with an empty assistant tool-call scaffold and only
+    produce useful assistant text after tool output, context-compaction markers,
+    or preserved task-list user rows.  The automatic title path should use the
+    same first-five-visible context as manual title regeneration and should
+    still schedule when only user context is available.
+    """
+    src = Path("api/streaming.py").read_text(encoding="utf-8")
+    setup_idx = src.index("if _should_bg_title:", src.index("_should_bg_title = ("))
+    setup_block = src[setup_idx:src.index("# Read token/cost usage", setup_idx)]
+    assert "_opening_context_snippets(s.messages, limit=5)" in setup_block
+
+    schedule_idx = src.index("if _should_bg_title", src.index("put('metering', meter_stats)"))
+    schedule_block = src[schedule_idx:src.index("else:", schedule_idx)]
+    assert "if _should_bg_title and _u0:" in schedule_block
+    assert "_a0 or \" \"" in schedule_block
+
+
 def test_messages_js_applies_chat_start_title():
     src = Path("static/messages.js").read_text(encoding="utf-8")
     assert "applySessionTitleUpdate" in src

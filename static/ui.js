@@ -227,7 +227,7 @@ function _renderUserFencedBlocks(text){
   // run before inline so $$..$$ isn't mis-parsed as $..$..$..$.
   s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>stashMath('display',m));
   s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>stashMath('display',m));
-  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>stashMath('inline',m));
+  s=s.replace(/(^|[^\w])\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$(?!\w)/g,(_,lead,m)=>lead+stashMath('inline',m));
   s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>stashMath('inline',m));
   // Escape remaining plain text and convert newlines to <br>
   s=esc(s).replace(/\n/g,'<br>');
@@ -3099,9 +3099,10 @@ function renderMd(raw){
   s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Match a single literal backslash before the display delimiter (the common LLM form).
   s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
-  // Inline math: $...$ — require non-space at boundaries to avoid false positives
-  // e.g. "costs $5 and $10" should not trigger (space after opening $)
-  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{if(m.includes(' | '))return '\$'+m+'\$';math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  // Inline math: $...$ — require non-space at boundaries and avoid currency / glued
+  // alnum text false positives such as A$3 ... A$30,000 or foo$x$bar.
+  // Also keep the table-pipe guard so `$5 | $10` cannot straddle columns.
+  s=s.replace(/(^|[^\w])\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$(?!\w)/g,(_,lead,m)=>{if(m.includes(' | ')) return lead+'\$'+m+'\$'; math_stash.push({type:'inline',src:m}); return lead+'\x00M'+(math_stash.length-1)+'\x00';});
   // Also stash \(...\) LaTeX delimiters.
   // Match a single literal backslash before the delimiter (the common LLM form).
   s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});

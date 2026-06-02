@@ -90,20 +90,26 @@ def test_session_sidebar_renders_relative_time_and_meta_rows():
     assert "const ONE_DAY=86400000;" not in SESSIONS_JS
 
 
-def test_session_sidebar_active_bucket_precedes_recent_bucket():
+def test_session_sidebar_pinned_bucket_precedes_attention_and_recent():
     render_fn = _extract_function(SESSIONS_JS, "renderSessionListFromCache")
-    active_split = "const activeUnpinned=orderedSessions.filter(s=>!s.pinned&&_isSessionEffectivelyStreaming(s));"
-    inactive_split = "const unpinned=orderedSessions.filter(s=>!s.pinned&&!_isSessionEffectivelyStreaming(s));"
-    pinned_group = "groups.push({label:'\\u2605 Pinned',items:pinned,isPinned:true})"
-    active_group = "groups.push({label:t('session_time_bucket_active'),items:activeUnpinned,isActive:true})"
+    active_split = "const activeSessions=orderedSessions.filter(s=>_isSessionEffectivelyStreaming(s));"
+    unread_split = "const unreadSessions=orderedSessions.filter(s=>!_isSessionEffectivelyStreaming(s)&&_hasUnreadForSession(s));"
+    pinned_split = "const pinnedIdleSessions=orderedSessions.filter(s=>s.pinned&&!_isSessionEffectivelyStreaming(s)&&!_hasUnreadForSession(s));"
+    inactive_split = "const unpinned=orderedSessions.filter(s=>!s.pinned&&!_isSessionEffectivelyStreaming(s)&&!_hasUnreadForSession(s));"
     recent_loop = "for(const s of unpinned)"
+    active_group = "groups.push({label:t('session_time_bucket_active'),items:activeSessions,isActive:true})"
+    unread_group = "groups.push({label:t('session_time_bucket_unread'),items:unreadSessions,isUnread:true})"
+    pinned_group = "groups.push({label:'★ Pinned',items:pinnedIdleSessions,isPinned:true})"
 
     assert active_split in render_fn
+    assert unread_split in render_fn
+    assert pinned_split in render_fn
     assert inactive_split in render_fn
-    assert pinned_group in render_fn
     assert active_group in render_fn
-    assert render_fn.index(pinned_group) < render_fn.index(active_group) < render_fn.index(recent_loop)
-    assert "session-date-header'+(g.isPinned?' pinned':'')+(g.isActive?' active':'')" in render_fn
+    assert unread_group in render_fn
+    assert pinned_group in render_fn
+    assert render_fn.index(pinned_group) < render_fn.index(active_group) < render_fn.index(unread_group) < render_fn.index(recent_loop)
+    assert "session-date-header'+(g.isPinned?' pinned':'')+(g.isUnread?' unread':'')+(g.isActive?' active':'')" in render_fn
 
 
 def test_session_timestamp_prefers_last_message_at_over_metadata_updated_at():

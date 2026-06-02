@@ -5763,7 +5763,12 @@ def _run_agent_streaming(
                 _u0 = ''
                 _a0 = ''
                 if _should_bg_title:
-                    _u0, _a0 = _first_exchange_snippets(s.messages)
+                    # Use the same wider opening context as manual title
+                    # regeneration.  First turns often begin with empty
+                    # assistant tool-call scaffolds; requiring the first
+                    # exchange to contain assistant text silently prevents
+                    # automatic title generation for those sessions.
+                    _u0, _a0 = _opening_context_snippets(s.messages, limit=5)
                 # Read token/cost usage from the agent object (if available).
                 # Per-turn overwrite (#1857): replace cumulative session totals with the
                 # agent's most recent values, which already represent the current turn's
@@ -6231,10 +6236,10 @@ def _run_agent_streaming(
             meter_stats.setdefault('tps_available', False)
             meter_stats.setdefault('estimated', False)
             put('metering', meter_stats)
-            if _should_bg_title and _u0 and _a0:
+            if _should_bg_title and _u0:
                 threading.Thread(
                     target=_run_background_title_update,
-                    args=(s.session_id, _u0, _a0, str(s.title or '').strip(), put, agent),
+                    args=(s.session_id, _u0, _a0 or " ", str(s.title or '').strip(), put, agent),
                     daemon=True,
                 ).start()
             else:

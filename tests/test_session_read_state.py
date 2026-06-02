@@ -155,14 +155,17 @@ class TestSessionUnreadSidebarContracts:
         assert "serverRead.manual_unread" in body
         assert "_clearSessionCompletionUnread(s.session_id)" in body
 
-    def test_active_group_is_inserted_above_unread_and_recent_without_duplication(self):
+    def test_pinned_idle_group_renders_before_active_unread_and_recent_without_duplication(self):
         src = SESSIONS_JS.read_text(encoding="utf-8")
-        assert "const unreadUnpinned=" in src
+        assert "const activeSessions=" in src
+        assert "const unreadSessions=" in src
+        assert "const pinnedIdleSessions=" in src
         assert "const unpinned=" in src and "!_hasUnreadForSession(s)" in src
         active_idx = src.index("groups.push({label:t('session_time_bucket_active')")
         unread_idx = src.index("groups.push({label:t('session_time_bucket_unread')")
+        pinned_idx = src.index("groups.push({label:'★ Pinned',items:pinnedIdleSessions,isPinned:true})")
         bucket_idx = src.index("for(const s of unpinned){")
-        assert active_idx < unread_idx < bucket_idx
+        assert pinned_idx < active_idx < unread_idx < bucket_idx
 
     def test_unread_indicator_and_read_state_actions_are_wired_without_text_badge(self):
         src = SESSIONS_JS.read_text(encoding="utf-8")
@@ -204,5 +207,10 @@ class TestSessionUnreadSidebarContracts:
 
         css = STYLE.read_text(encoding="utf-8")
         assert ".session-unread-badge" not in css
+        assert ".session-date-header.active" in css
+        assert ".session-date-header.pinned" in css
         assert ".session-date-header.unread" in css
+        assert ".session-date-header.active .session-date-count" in css
+        assert ".session-date-header.pinned .session-date-count" in css
+        assert ".session-date-header.unread .session-date-count" in css
         assert ".session-item.unread::before" in css
