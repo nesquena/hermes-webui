@@ -171,6 +171,29 @@ from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 
 
+def _apply_trusted_auth_cookies(handler) -> None:
+    """Set auth and profile cookies for trusted-header-authenticated requests.
+
+    Called after check_auth() succeeds. If the handler has a _trusted_auth_cookie
+    attribute (set by check_auth() when auto-creating a session), send it to the
+    client. Also set the bound profile cookie if group-based profile binding is
+    configured.
+    """
+    # Set the auto-created session cookie
+    if getattr(handler, '_trusted_auth_cookie', None):
+        from api.auth import set_auth_cookie
+        set_auth_cookie(handler, handler._trusted_auth_cookie)
+        del handler._trusted_auth_cookie
+
+    # Set the bound profile cookie if trusted auth is active
+    from api.auth import is_trusted_auth_enabled, get_bound_profile_from_groups
+    from api.helpers import build_profile_cookie
+    if is_trusted_auth_enabled():
+        bound_profile = get_bound_profile_from_groups(handler)
+        if bound_profile:
+            handler.send_header('Set-Cookie', build_profile_cookie(bound_profile))
+
+
 class QuietHTTPServer(ThreadingHTTPServer):
     """Custom HTTP server that silently handles common network errors."""
     daemon_threads = True
@@ -308,6 +331,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             if not check_auth(self, parsed): return
+            _apply_trusted_auth_cookies(self)
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -347,6 +371,7 @@ class Handler(BaseHTTPRequestHandler):
                 parsed.path == "/api/csp-report" and self.command == "POST"
             )
             if not _is_csp_report_post and not check_auth(self, parsed): return
+            _apply_trusted_auth_cookies(self)
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
