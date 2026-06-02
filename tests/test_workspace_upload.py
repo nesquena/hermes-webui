@@ -514,8 +514,12 @@ class TestWorkspaceUploadSymlinkTarget:
                 {"file": ("pwned.txt", b"should not land outside")},
             )
             # The escaping target must be rejected outright, and nothing may land
-            # outside the workspace.
-            assert status == 403, f"expected 403, got status={status} result={result}"
+            # outside the workspace. Either a 403 (upload-handler symlink-target
+            # rejection) or a 400 ("Path traversal blocked" from safe_resolve_ws,
+            # which #3398 made the workspace boundary enforce consistently for all
+            # symlink escapes) is an acceptable rejection — the invariant is that
+            # the upload does NOT land outside the workspace.
+            assert status in (400, 403), f"expected 400/403, got status={status} result={result}"
             assert not (escape / "pwned.txt").exists()
         finally:
             import shutil

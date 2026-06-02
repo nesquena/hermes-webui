@@ -671,32 +671,17 @@ def validate_workspace_to_add(path: str) -> Path:
 def safe_resolve_ws(root: Path, requested: str) -> Path:
     """Resolve a relative path inside a workspace root, raising ValueError on traversal.
 
-    Symlinks whose *unresolved* path is within the workspace root are allowed —
-    the user placed them there intentionally.  Only raw ``..`` traversal outside
-    the root is blocked.
+    Both raw ``..`` traversal and symlink escapes are blocked.  Workspace file
+    APIs can be reached by browser UI actions and agent/tool calls, so a symlink
+    inside the workspace must not expand the trusted workspace boundary to an
+    arbitrary host path.
     """
-    import os
-    unresolved = root / requested
-    resolved = unresolved.resolve()
-    # Fast path: resolved path is inside root (covers most cases)
+    root_resolved = root.resolve()
+    resolved = (root / requested).resolve()
     try:
-        resolved.relative_to(root.resolve())
-        return resolved
-    except ValueError:
-        pass
-    # Symlink path: normalize '..' (without following symlinks) and check
-    # os.path.normpath collapses '..' but does NOT follow symlinks.
-    norm = Path(os.path.normpath(str(unresolved)))
-    try:
-        norm.relative_to(root)
+        resolved.relative_to(root_resolved)
     except ValueError:
         raise ValueError(f"Path traversal blocked: {requested}")
-    # Symlink points outside workspace root — additionally block system directories.
-    # Even if the user placed the symlink intentionally, prevent reads from
-    # /etc, /proc, /sys, /dev and other blocked roots (LLM agents can call
-    # read_file_content via tool calls, not just human users).
-    if _is_blocked_system_path(resolved):
-        raise ValueError(f"Path traversal blocked (system dir): {requested}")
     return resolved
 
 
@@ -705,26 +690,45 @@ def list_dir(workspace: Path, rel: str='.'):
     if not target.is_dir():
         raise FileNotFoundError(f"Not a directory: {rel}")
     ws_resolved = workspace.resolve()
+    target_resolved = target.resolve()
     entries = []
-    for item in sorted(target.iterdir(), key=lambda p: (not p.is_symlink(), p.is_file(), p.name.lower())):
+
+    def _sort_key(p: Path):
+        is_link = p.is_symlink()
+        is_file = False
+        if not is_link:
+            try:
+                is_file = p.is_file()
+            except OSError:
+                pass
+        return (not is_link, is_file, p.name.lower())
+
+    for item in sorted(target.iterdir(), key=_sort_key):
         if item.is_symlink():
             # Resolve the symlink target and check if it stays within workspace
             try:
                 link_target = item.resolve()
-            except OSError:
+            except (OSError, RuntimeError):
                 continue
             # Cycle detection: skip if symlink points back to current dir,
             # workspace root, or any ancestor of current dir.
             # This must run REGARDLESS of whether target is inside workspace.
-            if (link_target == target.resolve() or link_target == target
+            if (link_target == target_resolved or link_target == target
                     or link_target == ws_resolved):
                 continue
             try:
-                target.resolve().relative_to(link_target)
+                target_resolved.relative_to(link_target)
                 # target is under link_target — link_target is an ancestor → cycle
                 continue
             except ValueError:
                 pass
+            # Hide symlinks that resolve outside the workspace. Traversing them
+            # would be blocked by safe_resolve_ws anyway, so listing them would
+            # advertise entries that can never be opened.
+            try:
+                link_target.relative_to(ws_resolved)
+            except ValueError:
+                continue
             # Block symlinks that resolve to system directories.
             if _is_blocked_system_path(link_target):
                 continue
