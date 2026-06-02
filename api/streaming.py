@@ -3060,7 +3060,7 @@ def _stream_writeback_can_supersede_recovery_marker(session, msg_text):
     return False
 
 
-def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text):
+def _merge_display_messages_after_agent_result(previous_display, previous_context, result_messages, msg_text, *, truncation_watermark=None):
     """Keep UI transcript durable while allowing model context to compact.
 
     If Hermes Agent returns a normal append-only history, append that delta to
@@ -3129,6 +3129,16 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                             _ckey = context_keys[_k]
                             _cmsg = previous_context[_k]
                             if _ckey is not None and _ckey not in _emitted and not _is_context_compression_marker(_cmsg):
+                                # Skip backfill for messages before the truncation watermark.
+                                # After Edit, s.messages is truncated and truncation_watermark
+                                # is set to the last kept message's timestamp. The agent's
+                                # result_messages may contain the full pre-edit history
+                                # (read from state.db). Without this guard, backfill restores
+                                # messages that Edit intentionally removed.
+                                if truncation_watermark is not None:
+                                    _cmsg_ts = _cmsg.get('timestamp')
+                                    if _cmsg_ts is not None and float(_cmsg_ts) < float(truncation_watermark):
+                                        continue
                                 _backfilled.append(copy.deepcopy(_cmsg))
                                 _emitted.add(_ckey)
                         _cursor = _j + 1
@@ -3141,6 +3151,10 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
                 _cmsg = previous_context[_cursor]
                 _cursor += 1
                 if _ckey is not None and _ckey not in _emitted and not _is_context_compression_marker(_cmsg):
+                    if truncation_watermark is not None:
+                        _cmsg_ts = _cmsg.get('timestamp')
+                        if _cmsg_ts is not None and float(_cmsg_ts) < float(truncation_watermark):
+                            continue
                     _backfilled.append(copy.deepcopy(_cmsg))
                     _emitted.add(_ckey)
             if len(_backfilled) > len(previous_display):
@@ -3164,6 +3178,28 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
         ]
         turn_candidates = result_messages[current_user_idx:] if current_user_idx is not None else []
         candidates = marker_candidates + turn_candidates
+
+    # Filter out candidates that were intentionally removed by Edit.
+    # When truncation_watermark is active, candidates may contain the full
+    # pre-edit history from state.db. We must drop messages that were
+    # explicitly truncated — keep only the current user turn onward.
+    if truncation_watermark is not None:
+        _filtered = []
+        _found_current_turn = False
+        for m in candidates:
+            if isinstance(m, dict) and m.get('role') == 'user':
+                _is_current = _looks_like_current_user_turn(m, msg_text)
+                if _is_current:
+                    _found_current_turn = True
+                    _filtered.append(m)
+                # Non-current user turns (pre-edit) — skip.
+                continue
+            if _found_current_turn or _is_context_compression_marker(m):
+                _filtered.append(m)
+            # assistant/tool before we found the current user turn —
+            # these are pre-edit responses from state.db. Skip.
+        if _filtered:
+            candidates = _filtered
 
     merged = previous_display[:]
     seen = {_message_identity(m) for m in merged}
@@ -5371,6 +5407,7 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     _restore_display_reasoning_metadata(_previous_messages, _result_messages),
                     msg_text,
+                    truncation_watermark=getattr(s, 'truncation_watermark', None),
                 )
                 # Strip XML tool-call blocks from assistant message content.
                 # DeepSeek and some other providers emit <function_calls>...</function_calls>
@@ -5518,6 +5555,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
+                                    truncation_watermark=getattr(s, 'truncation_watermark', None),
                                 )
                                 # Skip the error block — jump directly to the
                                 # normal post-result persistence path by
@@ -6558,6 +6596,7 @@ def _run_agent_streaming(
                                     _previous_context_messages,
                                     _restore_reasoning_metadata(_previous_messages, _result_messages),
                                     msg_text,
+                                    truncation_watermark=getattr(s, 'truncation_watermark', None),
                                 )
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
