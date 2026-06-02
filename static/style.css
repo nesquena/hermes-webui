@@ -3310,6 +3310,22 @@ main.main > #mainPlugin{display:none;}
 .providers-section-subheading{font-size:13px;font-weight:600;margin-top:16px;color:var(--text);}
 .providers-section-subhint{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.45;}
 .providers-self-hosted-section{margin-bottom:8px;}
+/* Connection status states for self-hosted provider cards */
+.provider-card-self-hosted.provider-card-connected{border-color:#1f8a4f;box-shadow:0 0 0 1px rgba(31,138,79,.15);}
+.provider-card-self-hosted.provider-card-failed{border-color:#9c3a3a;box-shadow:0 0 0 1px rgba(156,58,58,.15);}
+.provider-card-self-hosted.provider-card-testing{border-color:var(--accent);}
+.provider-card-self-hosted.provider-card-failed .provider-card-name,
+.provider-card-self-hosted.provider-card-failed .provider-card-meta{opacity:.6;}
+.provider-card-conn-status{display:inline-block;margin-left:6px;font-size:13px;vertical-align:middle;}
+.provider-card-refresh-btn{
+  flex:0 0 auto;width:32px;height:32px;padding:0;
+  font-size:15px;line-height:1;border-radius:8px;
+  background:var(--input-bg);border:1px solid var(--border2);
+  color:var(--text);cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+}
+.provider-card-refresh-btn:hover:not(:disabled){border-color:var(--accent);color:var(--accent);}
+.provider-card-refresh-btn:disabled{opacity:.4;cursor:not-allowed;}
 .provider-quota-card{
   border:1px solid var(--border);
   border-radius:12px;

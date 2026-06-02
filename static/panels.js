@@ -6592,17 +6592,17 @@ const _selfHostedCardEls = new Map(); // providerId → {baseUrlInput, modelInpu
 
 function _selfHostedProbeMessage(probe){
   if(!probe||probe.status==='idle')return '';
-  if(probe.status==='probing')return t('onboarding_probe_probing')||'Testing connection…';
+  if(probe.status==='probing')return '⏳ '+(t('onboarding_probe_probing')||'Testing connection…');
   if(probe.status==='ok'){
     const n=(probe.models||[]).length;
     const tmpl=t('onboarding_probe_ok')||'Connected. {n} model(s) available.';
-    return tmpl.replace('{n}',String(n));
+    return '✅ '+tmpl.replace('{n}',String(n));
   }
   const errKey='onboarding_probe_error_'+probe.error;
   const localized=t(errKey);
   const heading=(localized&&localized!==errKey)?localized:(t('onboarding_probe_error_generic')||'Could not reach the configured base URL.');
   const detail=probe.detail?` (${probe.detail})`:'';
-  return heading+detail;
+  return '❌ '+heading+detail;
 }
 
 async function _runSelfHostedProbe(providerId,{force=false}={}){
@@ -6616,6 +6616,7 @@ async function _runSelfHostedProbe(providerId,{force=false}={}){
     probe={status:'idle',error:null,detail:'',models:null,probedKey:''};
     _selfHostedProbeByProvider.set(providerId,probe);
     if(els.probeBanner){els.probeBanner.style.display='none';els.probeBanner.textContent='';}
+    _updateSelfHostedCardStatus(providerId,probe);
     return probe;
   }
   if(!force&&probe.probedKey===probeKey&&probe.status!=='probing')return probe;
@@ -6626,18 +6627,22 @@ async function _runSelfHostedProbe(providerId,{force=false}={}){
     els.probeBanner.className='onboarding-probe-banner onboarding-probe-probing';
     els.probeBanner.textContent=_selfHostedProbeMessage(probe);
   }
+  _updateSelfHostedCardStatus(providerId,probe);
   try{
-    const res=await api('/api/onboarding/probe',{method:'POST',body:JSON.stringify({provider:providerId,base_url:baseUrl,api_key:apiKey||undefined})});
-    if(res&&res.ok){
-      probe={status:'ok',error:null,detail:'',models:Array.isArray(res.models)?res.models:[],probedKey:probeKey};
-      if(els.modelSelect&&probe.models.length){
+    const testRes=await api(`/api/providers/test?provider=${encodeURIComponent(providerId)}&base_url=${encodeURIComponent(baseUrl)}`);
+    if(testRes&&testRes.ok){
+      const modelsRes=await api(`/api/providers/models?provider=${encodeURIComponent(providerId)}&base_url=${encodeURIComponent(baseUrl)}&refresh=true`);
+      const models=(modelsRes&&modelsRes.ok&&Array.isArray(modelsRes.models))?modelsRes.models:[];
+      probe={status:'ok',error:null,detail:'',models,probedKey:probeKey};
+      if(els.modelSelect){
         const prev=els.modelSelect.value;
-        els.modelSelect.innerHTML=probe.models.map(m=>`<option value="${esc(m.id)}">${esc(m.label||m.id)}</option>`).join('');
-        const still=probe.models.some(m=>m.id===prev);
-        els.modelSelect.value=still?prev:probe.models[0].id;
+        els.modelSelect.innerHTML=models.map(m=>`<option value="${esc(m.id)}">${esc(m.label||m.id)}</option>`).join('');
+        const still=models.some(m=>m.id===prev);
+        els.modelSelect.value=still?prev:(models.length?models[0].id:'');
       }
     }else{
-      probe={status:'error',error:(res&&res.error)||'unreachable',detail:(res&&res.detail)||'',models:null,probedKey:probeKey};
+      const err=testRes?testRes.error:'unreachable';
+      probe={status:'error',error:err,detail:(testRes&&testRes.error)||'',models:null,probedKey:probeKey};
     }
   }catch(e){
     probe={status:'error',error:'unreachable',detail:(e&&e.message)||String(e),models:null,probedKey:probeKey};
@@ -6655,7 +6660,47 @@ async function _runSelfHostedProbe(providerId,{force=false}={}){
       els.probeBanner.textContent='';
     }
   }
+  _updateSelfHostedCardStatus(providerId,probe);
   return probe;
+}
+
+async function _refreshSelfHostedModels(providerId){
+  const els=_selfHostedCardEls.get(providerId);
+  if(!els||!els.baseUrlInput)return;
+  const baseUrl=(els.baseUrlInput.value||'').trim();
+  if(!baseUrl||!els.modelSelect)return;
+  if(els._refreshBtn) els._refreshBtn.disabled=true;
+  try{
+    const res=await api(`/api/providers/models?provider=${encodeURIComponent(providerId)}&base_url=${encodeURIComponent(baseUrl)}&refresh=true`);
+    if(res&&res.ok&&Array.isArray(res.models)){
+      const prev=els.modelSelect.value;
+      els.modelSelect.innerHTML=res.models.map(m=>`<option value="${esc(m.id)}">${esc(m.label||m.id)}</option>`).join('');
+      const still=res.models.some(m=>m.id===prev);
+      els.modelSelect.value=still?prev:(res.models.length?res.models[0].id:'');
+    }
+  }catch(e){
+    // silent — probe handles connectivity
+  }
+  if(els._refreshBtn) els._refreshBtn.disabled=false;
+}
+
+function _updateSelfHostedCardStatus(providerId,probe){
+  const cardEl=document.querySelector(`.provider-card-self-hosted[data-provider="${CSS.escape(providerId)}"]`);
+  if(!cardEl)return;
+  cardEl.classList.remove('provider-card-connected','provider-card-failed','provider-card-testing');
+  const statusEl=cardEl.querySelector('.provider-card-conn-status');
+  if(probe.status==='ok'){
+    cardEl.classList.add('provider-card-connected');
+    if(statusEl) statusEl.textContent='✅';
+  }else if(probe.status==='error'){
+    cardEl.classList.add('provider-card-failed');
+    if(statusEl) statusEl.textContent='❌';
+  }else if(probe.status==='probing'){
+    cardEl.classList.add('provider-card-testing');
+    if(statusEl) statusEl.textContent='⏳';
+  }else{
+    if(statusEl) statusEl.textContent='';
+  }
 }
 
 function _scheduleSelfHostedProbe(providerId){
@@ -7029,7 +7074,7 @@ function _buildSelfHostedProviderCard(p){
   header.className='provider-card-header';
   header.innerHTML=`
     <div class="provider-card-info">
-      <div class="provider-card-name">${esc(p.display_name)}</div>
+      <div class="provider-card-name">${esc(p.display_name)}<span class="provider-card-conn-status" data-provider="${esc(p.id)}"></span></div>
       <div class="provider-card-meta">${esc(metaParts.join(' · '))}</div>
     </div>
     ${configured?`<span class="provider-card-badge">${esc(t('providers_status_configured'))}</span>`:''}
@@ -7076,6 +7121,7 @@ function _buildSelfHostedProviderCard(p){
   modelField.appendChild(modelLabel);
   let modelInput=null;
   let modelSelect=null;
+  let _refreshBtn=null;
   if(p.id==='custom'){
     modelInput=document.createElement('input');
     modelInput.type='text';
@@ -7084,8 +7130,13 @@ function _buildSelfHostedProviderCard(p){
     modelInput.placeholder=t('onboarding_custom_model_placeholder')||'model-name';
     modelField.appendChild(modelInput);
   }else{
+    const modelRow=document.createElement('div');
+    modelRow.style.display='flex';
+    modelRow.style.gap='6px';
+    modelRow.style.alignItems='center';
     modelSelect=document.createElement('select');
     modelSelect.className='provider-card-input';
+    modelSelect.style.flex='1';
     const choices=Array.isArray(p.models)&&p.models.length?p.models:[];
     if(choices.length){
       modelSelect.innerHTML=choices.map(m=>`<option value="${esc(m.id||m)}">${esc(m.label||m.id||m)}</option>`).join('');
@@ -7093,7 +7144,15 @@ function _buildSelfHostedProviderCard(p){
     }else if(modelVal){
       modelSelect.innerHTML=`<option value="${esc(modelVal)}">${esc(modelVal)}</option>`;
     }
-    modelField.appendChild(modelSelect);
+    modelRow.appendChild(modelSelect);
+    _refreshBtn=document.createElement('button');
+    _refreshBtn.type='button';
+    _refreshBtn.className='provider-card-refresh-btn';
+    _refreshBtn.title=t('onboarding_model_refresh')||'Refresh models from server';
+    _refreshBtn.innerHTML='↻';
+    _refreshBtn.onclick=()=>_refreshSelfHostedModels(p.id);
+    modelRow.appendChild(_refreshBtn);
+    modelField.appendChild(modelRow);
   }
   body.appendChild(modelField);
   if(p.key_optional){
@@ -7110,9 +7169,9 @@ function _buildSelfHostedProviderCard(p){
     apiKeyInput.autocomplete='off';
     keyField.appendChild(apiKeyInput);
     body.appendChild(keyField);
-    _selfHostedCardEls.set(p.id,{baseUrlInput,modelInput,modelSelect,apiKeyInput,saveBtn:null,probeBanner});
+    _selfHostedCardEls.set(p.id,{baseUrlInput,modelInput,modelSelect,apiKeyInput,saveBtn:null,probeBanner,_refreshBtn});
   }else{
-    _selfHostedCardEls.set(p.id,{baseUrlInput,modelInput,modelSelect,apiKeyInput:null,saveBtn:null,probeBanner});
+    _selfHostedCardEls.set(p.id,{baseUrlInput,modelInput,modelSelect,apiKeyInput:null,saveBtn:null,probeBanner,_refreshBtn});
   }
   const saveRow=document.createElement('div');
   saveRow.className='provider-card-row';

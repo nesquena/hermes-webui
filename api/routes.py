@@ -2862,6 +2862,7 @@ from api.providers import (
     set_provider_key,
     remove_provider_key,
 )
+from api.provider_adapters import test_connection as provider_test_connection, list_models as provider_list_models
 from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
@@ -4419,6 +4420,29 @@ def handle_get(handler, parsed) -> bool:
     # ── Providers (GET) ──
     if parsed.path == "/api/providers":
         return j(handler, get_providers())
+
+    if parsed.path == "/api/providers/test":
+        query = parse_qs(parsed.query)
+        provider_id = (query.get("provider", [""])[0] or "").strip().lower()
+        base_url = (query.get("base_url", [""])[0] or "").strip()
+        if not provider_id:
+            return bad(handler, "provider is required", status=400)
+        if not base_url:
+            return bad(handler, "base_url is required", status=400)
+        result = provider_test_connection(provider_id, base_url)
+        return j(handler, result)
+
+    if parsed.path == "/api/providers/models":
+        query = parse_qs(parsed.query)
+        provider_id = (query.get("provider", [""])[0] or "").strip().lower()
+        base_url = (query.get("base_url", [""])[0] or "").strip()
+        refresh = (query.get("refresh", [""])[0] or "").strip().lower() in {"1", "true", "yes", "on"}
+        if not provider_id:
+            return bad(handler, "provider is required", status=400)
+        if not base_url:
+            return bad(handler, "base_url is required", status=400)
+        result = provider_list_models(provider_id, base_url, refresh=refresh)
+        return j(handler, result)
 
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
