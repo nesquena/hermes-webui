@@ -14,11 +14,13 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -43,6 +45,66 @@ _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 _QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|token|password|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
+
+# Same directory as api.diag_shim.SHIM_DIR — restart-window markers live
+# alongside signal-trap markers so the post-mortem analysis has one place
+# to look. Module-level constant so the pre-execv marker can be written
+# from `_schedule_restart()` without depending on the diag shim being
+# importable at that point (defensive — the shim is already loaded by
+# the time a restart is scheduled, but we don't want a future refactor
+# to make the marker write contingent on that assumption).
+_SHIM_DIR = "/tmp/hermes-webui-shim"
+
+
+def _write_pre_execv_marker() -> None:
+    """Write a 'pre-execv' marker to the diag shim directory.
+
+    Called as the FIRST action of `_schedule_restart()`'s body (after the
+    sleep, inside the `_apply_lock` block), so the marker lands on disk
+    BEFORE the restart is initiated. The presence of this marker, paired
+    with the absence of any `install.json` from a fresh PID, is the
+    canonical evidence that the old process exited but no fresh process
+    appeared — historically the silent-SIGKILL happened in the kernel
+    between `os.execv()` and the new process's first Python instruction;
+    after Path A (subprocess.Popen ctl.sh start + os._exit), it means
+    "old process exited cleanly; the ctl.sh-driven new process should
+    appear within ~2 seconds, written by a NEW PID (not this one)."
+
+    Pairs with the first-line marker at the top of `server.py`:
+      - pre-marker yes, first-line no, no new-PID install.json
+            -> kill in cgroup transition or ctl.sh start failure
+               (the post-Path-A failure mode)
+      - pre-marker yes, first-line yes (new PID), install yes (new PID)
+            -> clean restart via ctl.sh (Path A success)
+
+    Wrapped in try/except — a marker write failure must not prevent the
+    restart. The os.fsync() is per-file, not full os.sync(), so it is
+    cheap and bounded.
+    """
+    try:
+        os.makedirs(_SHIM_DIR, exist_ok=True)
+        path = os.path.join(_SHIM_DIR, f"{os.getpid()}-000-pre-execv.json")
+        payload = {
+            "kind": "pre-execv",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "argv": sys.argv,
+            "executable": sys.executable,
+            "frozen": getattr(sys, "frozen", False),
+            "reason": "about to restart via detached ctl.sh start + os._exit(0)",
+            "strace_on": os.environ.get("HERMES_WEBUI_STRACE_EXECV") == "1",
+        }
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        try:
+            sys.stderr.write(f"[updates] FAILED to write pre-execv marker: {e}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
 
 
 def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CHARS) -> str:
@@ -1013,46 +1075,143 @@ def summarize_update_payload(updates: dict, llm_callback=None, *, target: str | 
 
 
 def _schedule_restart(delay: float = 2.0) -> None:
-    """Re-exec this process after *delay* seconds.
+    """Re-spawn this process after *delay* seconds.
 
     Called after a successful update so that the freshly-pulled code is
     loaded on the next request, rather than running with a mix of old and
     new Python modules in sys.modules.
 
-    os.execv() replaces the current process image with a fresh interpreter
-    running the same argv — sessions are preserved on disk, the HTTP port
-    is reclaimed within the delay window, and the client's own
-    ``setTimeout(() => location.reload(), 2500)`` lands after the restart.
+    Why not ``os.execv()``: the previous implementation used ``os.execv()``
+    to replace the process image in place, which on Termux+PRoot / Android
+    triggers a cgroup reclassification in the ``/apps/uid_*/pid_*`` and
+    ``cpuset:/top-app`` hierarchy that SIGKILLs the new process
+    sub-millisecond, before any user code runs. Confirmed via 3-state
+    decision-table markers (pre-execv fires, first-line and install
+    markers from the new process do not) and via cgroup inspection. The
+    kill window is between ``execve()`` returning in the kernel and the
+    new process's first Python instruction — too fast to be SIGKILLed
+    by anything other than the Android process killer (lmkd / similar),
+    too early for any Python-side diagnostic to fire.
+
+    The fix: spawn a detached ``ctl.sh start`` subprocess from the old
+    process, then exit cleanly. ``ctl.sh start`` is the same code path
+    the cron watchdog uses, which provably survives the cgroup
+    transition (no in-place execv, no ptrace pinning, brand-new process
+    image loaded from scratch). The old process simply dies, and a
+    brand-new one is born seconds later.
 
     Coordinates with ``_apply_lock``: when the user updates both webui
     and agent, the client POSTs them sequentially.  Without coordination
     the restart timer scheduled by the first update's success would fire
     while the second update's git-pull is still running, killing it mid-
     stream and leaving the second repo in an unknown partial state.
-    Blocking on ``_apply_lock`` before ``os.execv`` means a pending
-    second update always completes before the restart happens.
+    Blocking on ``_apply_lock`` before spawning the detached starter
+    means a pending second update always completes before the restart
+    happens.
     """
     import os
+    import subprocess
     import sys
+    import time
 
     def _do():
-        import time
         time.sleep(delay)
-        # Hold _apply_lock through os.execv so no new update can start between
-        # the lock-release and the process replacement.  Any in-flight update
-        # finishes first (since it holds the lock), and then the process is
-        # replaced while still holding the lock — meaning no new update can
-        # sneak in during the brief TOCTOU window that existed with the
-        # original acquire-release-execv sequence.
-        # Threads die when execv replaces the process image, so the lock is
-        # released atomically by the kernel.
+        # Hold _apply_lock through the spawn so no new update can start
+        # between the lock-release and the process exit.  Any in-flight
+        # update finishes first (since it holds the lock), and then we
+        # spawn the detached starter while still holding the lock —
+        # meaning no new update can sneak in during the brief TOCTOU
+        # window that would otherwise exist between release-and-exit.
+        # The lock lives in this process's memory and dies with the
+        # process, so the next process inherits a fresh lock atomically.
         with _apply_lock:
+            # Write the pre-execv marker BEFORE anything else in the
+            # lock block. This is the "the old process committed to
+            # restarting at this exact moment" marker. After Path A, the
+            # diagnostic meaning shifts slightly: the absence of a
+            # matching first-line marker for this PID no longer means
+            # "kernel killed in execv"; it means "old process exited
+            # cleanly, ctl.sh is taking over." The new process's
+            # first-line + install markers from its own PID confirm a
+            # clean restart. See `_write_pre_execv_marker()` docstring
+            # for the decision table.
+            _write_pre_execv_marker()
             _wait_until_restart_safe()
             try:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                # Detached starter: use os.fork() directly for the
+                # most reliable detached process spawn. The child
+                # calls os.setsid() to detach from the parent's
+                # process group/session, then os.execvp() to become
+                # ctl.sh. The parent immediately calls os._exit(0).
+                #
+                # Why fork() instead of subprocess.Popen: the Popen
+                # path (with start_new_session=True) was tested and
+                # did NOT reliably survive the parent's os._exit on
+                # Termux+PRoot / Android — the ctl.sh subprocess
+                # never appeared, the watchdog had to recover. fork()
+                # + setsid() in the child is the most primitive and
+                # most reliable way to spawn a detached process, and
+                # it avoids any Python interpreter-level races
+                # between the daemon thread's Popen and the parent's
+                # _exit. The forked child has its own PID and is a
+                # separate task in the cgroup hierarchy from the
+                # parent, so the parent's cgroup reclassification
+                # kill window (the original bug) doesn't reach it.
+                ctl_path = os.path.join(REPO_ROOT, 'ctl.sh')
+                _child_pid = os.fork()
+                if _child_pid == 0:
+                    # Child branch. We are now a new process that
+                    # has the same memory image as the parent but
+                    # can mutate independently. Detach from the
+                    # parent's session/process group via setsid so
+                    # the parent can os._exit without sending us
+                    # SIGHUP. Then exec into ctl.sh. If anything
+                    # fails, _exit(1) so we don't fall through and
+                    # return to the daemon thread's _do() (which
+                    # would then call os._exit(0) and kill BOTH
+                    # processes — the child we'd become AND the
+                    # parent — confusing the watchdog).
+                    try:
+                        os.setsid()
+                    except Exception:
+                        pass
+                    # 15-second delay in the child before invoking
+                    # ctl.sh: empirically the cpuset:/top-app cgroup
+                    # (Android's top-app) lmkd window kills any new
+                    # python3 process spawned within ~10 seconds of the
+                    # old process's exit in the same cgroup. The cron
+                    # watchdog naturally waits ~5 min between ticks, well
+                    # outside the window, which is why watchdog-recovered
+                    # processes always survive. We can do better: wait
+                    # 15s in the child so the cgroup kill window passes
+                    # before ctl.sh start spawns the new process. This
+                    # reduces post-update downtime from ~5 min (watchdog)
+                    # to ~15s. The 0.3s parent sleep still ensures the
+                    # child has time to setsid() before the parent
+                    # _exits.
+                    time.sleep(15)
+                    try:
+                        os.execvp(ctl_path, [ctl_path, 'start'])
+                    except Exception:
+                        os._exit(1)
+                    # NOTREACHED
+                # Parent branch. _child_pid is the new PID of the
+                # ctl.sh subprocess. Brief wait so the child can
+                # setsid() + execve() into bash before we _exit;
+                # without this, the kernel can race the child
+                # becoming a session leader, and we get a zombie
+                # (or worse, the child is reaped before it can
+                # execve, which would mean ctl.sh never runs).
+                time.sleep(0.3)
+                # True process exit — no atexit, no Python cleanup,
+                # no signal handlers. The diag_shim signal/atexit
+                # markers will NOT fire for this exit (intentional
+                # — there's nothing to learn from a clean os._exit).
+                os._exit(0)
             except Exception:
-                # Last-resort: if execv fails (e.g. frozen binary), just exit
-                # so the process supervisor (start.sh / Docker) restarts us.
+                # Last-resort: if anything above fails (e.g. fork
+                # not allowed), exit so the process supervisor (cron
+                # watchdog) restarts us.
                 os._exit(0)
 
     threading.Thread(target=_do, daemon=True).start()
