@@ -3,6 +3,67 @@ Hermes Web UI -- Main server entry point.
 Thin routing shell: imports Handler, delegates to api/routes.py, runs server.
 All business logic lives in api/*.
 """
+# ── First-line marker (restart-window observability) ───────────────────────
+# MUST be before any other import: this is the tightest post-marker for
+# the silent post-update SIGKILL investigation. The decision table (see
+# api/updates.py._write_pre_execv_marker for the matching pre-side):
+#   pre-execv + first-line + install (no further markers) -> kill is
+#       post-shim-load (the original mystery)
+#   pre-execv + first-line, no install                   -> kill is in
+#       Python startup (bad import, syntax error, C-extension crash)
+#   pre-execv only                                       -> kill is in
+#       execve() / dynamic loader (very rare)
+# Wrapped in try/except so a marker write failure (disk full, perms) can
+# never prevent the server from starting. Uses only stdlib so a broken
+# api.* import can never be the reason this marker fails to write.
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+
+def _write_first_line_marker() -> None:
+    """Write /tmp/hermes-webui-shim/<pid>-001-first-line.json with fsync.
+
+    Called as the very first statement in server.py's module body, before
+    any heavy import (logging, http.server, etc.). The marker lands on
+    disk within microseconds of the kernel handing control to Python, so
+    its presence proves the new process survived execve() and the
+    dynamic loader, and started executing our code.
+
+    Pairs with:
+      - api.updates._write_pre_execv_marker() (pre-side, old process)
+      - api.diag_shim.install() (post-side, after main()'s imports)
+    The 3-state decision table above lets us pin down WHERE in the
+    new process's life a silent death happened.
+    """
+    try:
+        shim_dir = "/tmp/hermes-webui-shim"
+        os.makedirs(shim_dir, exist_ok=True)
+        path = os.path.join(shim_dir, f"{os.getpid()}-001-first-line.json")
+        payload = {
+            "kind": "first-line",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "argv": sys.argv,
+            "executable": sys.executable,
+            "frozen": getattr(sys, "frozen", False),
+            "reason": "first executable statement in server.py, before any import",
+        }
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        try:
+            sys.stderr.write(f"[server] FAILED to write first-line marker: {e}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+
+_write_first_line_marker()
 import logging
 import os
 import re
