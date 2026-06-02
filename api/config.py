@@ -1250,21 +1250,29 @@ _PROVIDER_MODELS = {
 
 _AMBIENT_GH_CLI_MARKERS = frozenset({"gh_cli", "gh auth token"})
 
+# Environment variable sources that are auto-detected and should be filtered
+# when the token is a classic PAT (ghp_*) that Copilot API doesn't support.
+# Note: COPILOT_GITHUB_TOKEN is NOT included here - it's user-specific config.
+_AMBIENT_GH_ENV_SOURCES = frozenset({"env:github_token", "env:gh_token"})
+
 
 def _is_ambient_gh_cli_entry(source: str, label: str, key_source: str) -> bool:
     """True when a credential-pool entry is a seeded gh-cli token rather than
     one the user added explicitly. Filter these so Copilot doesn't appear in
     the dropdown just because `gh` is installed on the system.
 
-    Also filters GITHUB_TOKEN env var entries, which are auto-detected from
-    the environment and should not cause Copilot to appear in the picker
-    when the token is a classic PAT (ghp_*) that Copilot API doesn't support.
+    Also filters GITHUB_TOKEN and GH_TOKEN env var entries, which are
+    auto-detected from the environment and should not cause Copilot to appear
+    in the picker when the token is a classic PAT (ghp_*) that Copilot API
+    doesn't support.
+
+    Note: COPILOT_GITHUB_TOKEN is NOT filtered - it's user-specific config
+    that should always be respected.
     """
     source_lower = source.strip().lower()
     return (
         source_lower in _AMBIENT_GH_CLI_MARKERS
-        # Filter GITHUB_TOKEN env var entries (source="env:GITHUB_TOKEN")
-        or source_lower == "env:github_token"
+        or source_lower in _AMBIENT_GH_ENV_SOURCES
         or label.strip().lower() == "gh auth token"
         or key_source.strip().lower() == "gh auth token"
     )
