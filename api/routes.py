@@ -7087,6 +7087,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/file/rename":
         return _handle_file_rename(handler, body)
 
+    if parsed.path == "/api/file/move":
+        return _handle_file_move(handler, body)
+
     if parsed.path == "/api/file/create-dir":
         return _handle_create_dir(handler, body)
 
@@ -11986,6 +11989,56 @@ def _handle_file_rename(handler, body):
         source.rename(dest)
         new_rel = str(dest.relative_to(Path(s.workspace)))
         return j(handler, {"ok": True, "old_path": body["path"], "new_path": new_rel})
+    except (ValueError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+
+
+def _handle_file_move(handler, body):
+    try:
+        require(body, "session_id", "path", "dest_dir")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session_for_file_ops(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    try:
+        ws_root = Path(s.workspace)
+        source = safe_resolve(ws_root, body["path"])
+        if not source.exists():
+            return bad(handler, "File not found", 404)
+        dest_dir_raw = (body.get("dest_dir") or ".").strip()
+        if not dest_dir_raw:
+            dest_dir_raw = "."
+        if ".." in dest_dir_raw.split("/"):
+            return bad(handler, "Invalid destination")
+        dest_parent = safe_resolve(ws_root, dest_dir_raw)
+        if not dest_parent.is_dir():
+            return bad(handler, "Destination folder not found", 404)
+        if source.is_dir():
+            try:
+                dest_parent.resolve().relative_to(source.resolve())
+                return bad(handler, "Cannot move a folder into itself or its subfolder")
+            except ValueError:
+                pass
+        dest = dest_parent / source.name
+        if dest.resolve() == source.resolve():
+            new_rel = str(source.relative_to(ws_root))
+            return j(
+                handler,
+                {"ok": True, "old_path": body["path"], "new_path": new_rel},
+            )
+        if dest.exists():
+            return bad(
+                handler,
+                f'A file named "{source.name}" already exists in that folder',
+            )
+        source.rename(dest)
+        new_rel = str(dest.relative_to(ws_root))
+        return j(
+            handler,
+            {"ok": True, "old_path": body["path"], "new_path": new_rel},
+        )
     except (ValueError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
 
