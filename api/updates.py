@@ -14,11 +14,13 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -43,6 +45,63 @@ _GIT_DIAGNOSTIC_MAX_CHARS = 300
 _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@")
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 _QUERY_SECRET_RE = re.compile(r"([?&](?:access_token|token|password|auth|key)=)[^&\s'\"]+", re.IGNORECASE)
+
+# Same directory as api.diag_shim.SHIM_DIR — restart-window markers live
+# alongside signal-trap markers so the post-mortem analysis has one place
+# to look. Module-level constant so the pre-execv marker can be written
+# from `_schedule_restart()` without depending on the diag shim being
+# importable at that point (defensive — the shim is already loaded by
+# the time a restart is scheduled, but we don't want a future refactor
+# to make the marker write contingent on that assumption).
+_SHIM_DIR = "/tmp/hermes-webui-shim"
+
+
+def _write_pre_execv_marker() -> None:
+    """Write a 'pre-execv' marker to the diag shim directory.
+
+    Called as the FIRST action of `_schedule_restart()`'s body (after the
+    sleep, inside the `_apply_lock` block), so the marker lands on disk
+    BEFORE `os.execv()` is invoked. The presence of this marker, paired
+    with the absence of any `install.json` from a fresh PID, is the
+    canonical evidence that the silent-SIGKILL happened in the kernel
+    between `execv()` and the new process's first Python instruction.
+
+    Pairs with the first-line marker at the top of `server.py`:
+      - pre-marker yes, first-line no  -> kill in execve/loader
+      - pre-marker yes, first-line yes, install no -> kill in Python
+                                          startup (import error, etc.)
+      - pre-marker yes, first-line yes, install yes, no further markers
+                                          -> kill is post-shim-load
+                                          (the original mystery)
+
+    Wrapped in try/except — a marker write failure must not prevent the
+    restart. The os.fsync() is per-file, not full os.sync(), so it is
+    cheap and bounded.
+    """
+    try:
+        os.makedirs(_SHIM_DIR, exist_ok=True)
+        path = os.path.join(_SHIM_DIR, f"{os.getpid()}-000-pre-execv.json")
+        payload = {
+            "kind": "pre-execv",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "pid": os.getpid(),
+            "ppid": os.getppid(),
+            "argv": sys.argv,
+            "executable": sys.executable,
+            "frozen": getattr(sys, "frozen", False),
+            "reason": "about to os.execv()",
+            "strace_on": os.environ.get("HERMES_WEBUI_STRACE_EXECV") == "1",
+        }
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        try:
+            sys.stderr.write(f"[updates] FAILED to write pre-execv marker: {e}\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
 
 
 def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CHARS) -> str:
@@ -1047,9 +1106,45 @@ def _schedule_restart(delay: float = 2.0) -> None:
         # Threads die when execv replaces the process image, so the lock is
         # released atomically by the kernel.
         with _apply_lock:
+            # Write the pre-execv marker BEFORE anything else in the lock
+            # block. This is the smoking gun for "the old process committed
+            # to restarting at this exact moment" — paired with the
+            # absence of an install.json from any new PID, it proves the
+            # kill happened in the kernel between execv() and the new
+            # process's first Python instruction. See
+            # `_write_pre_execv_marker()` docstring for the decision table.
+            _write_pre_execv_marker()
             _wait_until_restart_safe()
             try:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                # Diagnostic path: route execv through strace when
+                # HERMES_WEBUI_STRACE_EXECV=1 is set in the environment.
+                # This is the only way to capture every syscall of the new
+                # process from its very first instruction, which is required
+                # to diagnose untrappable deaths (SIGKILL / OOM-kill) where
+                # no Python signal/exception/atexit marker can be written by
+                # the shim.  Off by default — the env var must be set in the
+                # ctl.sh start environment for the trace to be captured.
+                # strace -f follows forks (the python3 child of strace),
+                # -ttt gives microsecond timestamps, -T shows per-syscall
+                # duration, -s 256 limits string-arg capture size so the
+                # log doesn't grow without bound.  The trace file lives
+                # next to the diag shim markers in /tmp/hermes-webui-shim/
+                # so it's picked up by the same cleanup sweep.
+                _strace_on = os.environ.get('HERMES_WEBUI_STRACE_EXECV') == '1'
+                _strace_path = '/usr/bin/strace'
+                if _strace_on and os.path.exists(_strace_path):
+                    _strace_log = os.environ.get(
+                        'HERMES_WEBUI_STRACE_LOG',
+                        '/tmp/hermes-webui-shim/strace-execv.log',
+                    )
+                    _strace_argv = (
+                        [_strace_path, '-f', '-ttt', '-T', '-s', '256',
+                         '-o', _strace_log, '--', sys.executable]
+                        + sys.argv
+                    )
+                    os.execv(_strace_path, _strace_argv)
+                else:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
             except Exception:
                 # Last-resort: if execv fails (e.g. frozen binary), just exit
                 # so the process supervisor (start.sh / Docker) restarts us.
