@@ -2854,6 +2854,7 @@ from api.run_journal import (
     read_run_events,
     stale_interrupted_event,
 )
+from api.todo_state import attach_todo_state
 from api.providers import get_providers, get_provider_quota, get_provider_cost_history, set_provider_key, remove_provider_key
 from api.onboarding import (
     apply_onboarding_setup,
@@ -4714,6 +4715,14 @@ def handle_get(handler, parsed) -> bool:
                         journal,
                         active=bool(getattr(s, "active_stream_id", None)),
                     )
+            # Cold-load: derive the latest settled todo snapshot from the full
+            # merged transcript, not the truncated display window. This keeps
+            # the Todos panel correct after refresh even when the latest todo
+            # tool result is outside msg_limit, and treats an explicit empty
+            # todo list as the current state instead of falling through to an
+            # older non-empty write.
+            if load_messages and _all_msgs:
+                attach_todo_state(raw, _all_msgs)
             if _merged_last_message_at:
                 raw["last_message_at"] = max(
                     float(raw.get("last_message_at") or 0),
@@ -4789,6 +4798,7 @@ def handle_get(handler, parsed) -> bool:
                     "messages": msgs,
                     "tool_calls": [],
                 }
+                attach_todo_state(sess, msgs)
                 sess = _merge_cli_sidebar_metadata(sess, cli_meta)
                 return j(handler, {"session": redact_session_data(sess)})
             return bad(handler, "Session not found", 404)

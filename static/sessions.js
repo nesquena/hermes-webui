@@ -1387,6 +1387,8 @@ async function _ensureMessagesLoaded(sid) {
   S.messages = msgs;
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
+    if(Object.prototype.hasOwnProperty.call(data.session,'todo_state')) S.session.todo_state=data.session.todo_state;
+    else delete S.session.todo_state;
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
   }
