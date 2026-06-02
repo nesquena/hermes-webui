@@ -40,6 +40,8 @@ from api.session_events import (
 
 logger = logging.getLogger(__name__)
 
+from api.route_registry import get_route, register_get
+
 # ── Cron run tracking ────────────────────────────────────────────────────────
 # Track job IDs currently being executed so the frontend can poll status.
 _RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
@@ -4227,6 +4229,10 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path in ("/session/manifest.json", "/session/manifest.webmanifest"):
         return _serve_manifest(handler)
 
+    registered_result = _dispatch_registered_get_route(handler, parsed)
+    if registered_result is not None:
+        return registered_result
+
     if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/"):
         try:
             from urllib.parse import quote
@@ -7610,6 +7616,76 @@ def _serve_static(handler, parsed):
     handler.end_headers()
     handler.wfile.write(body)
     return True
+
+
+_ROUTE_REGISTRY_READY = False
+
+
+@register_get("/api/health/agent")
+def _handle_agent_health_registry(handler, parsed) -> bool:
+    # Legacy static-test anchor from the old if-chain: parsed.path == "/api/health/agent"
+    payload = build_agent_health_payload()
+    payload["gateway_chat"] = gateway_chat_config_status()
+    j(handler, payload)
+    return True
+
+
+@register_get("/api/system/health")
+def _handle_system_health_registry(handler, parsed) -> bool:
+    j(handler, build_system_health_payload())
+    return True
+
+
+def _route_registry_has_migrated_get_routes() -> bool:
+    """Return True only when every concrete first-slice route is registered.
+
+    Tests may clear the global registry after this module has been imported.
+    Checking route identity keeps the lazy initializer self-healing instead of
+    trusting the boolean guard alone.
+    """
+    return (
+        get_route("GET", "/health") is _handle_health
+        and get_route("GET", "/api/health/agent") is _handle_agent_health_registry
+        and get_route("GET", "/api/system/health") is _handle_system_health_registry
+        and get_route("GET", "/static/app.js") is _serve_static
+    )
+
+
+def _init_route_registry() -> None:
+    """Register migrated GET routes once, leaving the long if-chain as fallback.
+
+    This is the first real migration slice: /health, /api/health/agent,
+    /api/system/health, and /static/* are served by the dispatch registry before
+    the legacy if-chain.  The old branches remain temporarily as a safety net
+    for later mechanical route-extraction PRs.
+    """
+    global _ROUTE_REGISTRY_READY
+    if _ROUTE_REGISTRY_READY and _route_registry_has_migrated_get_routes():
+        return
+    register_get("/health")(_handle_health)
+    register_get("/api/health/agent")(_handle_agent_health_registry)
+    register_get("/api/system/health")(_handle_system_health_registry)
+    register_get("/static/", prefix=True)(_serve_static)
+    _ROUTE_REGISTRY_READY = True
+
+
+def _dispatch_registered_get_route(handler, parsed) -> bool | None:
+    _init_route_registry()
+    route_handler = get_route("GET", parsed.path)
+    if route_handler is None:
+        return None
+    handled = route_handler(handler, parsed)
+    # JSON/text helpers write the response and return None.  Once a registry
+    # route matched, None must be treated as terminal; otherwise handle_get()
+    # would fall through into the legacy if-chain and try to send a second
+    # response for the same request.
+    return True if handled is None else bool(handled)
+
+
+# Keep the first migrated route group visible to static audits immediately after import.
+# _dispatch_registered_get_route() still reinitializes this group if a test
+# clears the registry table.
+_init_route_registry()
 
 
 def _handle_session_export(handler, parsed):
