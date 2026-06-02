@@ -786,6 +786,12 @@ _PROVIDER_ALIASES = {
     # lets the agent's auxiliary client take the ``no-key-required``
     # OpenAI-compat path. See #1384.
     "local": "custom",
+    # hermes-agent's built-in OpenAI provider (activated by OPENAI_API_KEY /
+    # OPENAI_BASE_URL env vars) registers as ``openai-api`` in
+    # ``hermes_cli.auth.PROVIDER_REGISTRY``.  Without this alias, GPT models
+    # from that slug fall through the group builder and are invisible in the
+    # picker.  Same shape as #815 and #1384.
+    "openai-api": "openai",
 }
 
 
