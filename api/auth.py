@@ -333,7 +333,7 @@ def _passkey_feature_flag_enabled() -> bool:
             if isinstance(raw, str):
                 return raw.strip().lower() in {"1", "true", "yes", "on"}
     except Exception:
-        pass
+        logger.debug("Unable to read passkey feature flag from config", exc_info=True)
     return False
 
 
@@ -504,6 +504,9 @@ def check_auth(handler, parsed) -> bool:
         handler.send_response(401)
         handler.send_header('Content-Type', 'application/json')
         handler.send_header('Content-Length', str(len(body)))
+        handler.send_header('Cache-Control', 'no-store')
+        from api.helpers import _security_headers
+        _security_headers(handler)
         handler.end_headers()
         handler.wfile.write(body)
     else:
@@ -564,7 +567,12 @@ def _is_secure_context(handler=None) -> bool:
     if handler is not None:
         if getattr(handler.request, 'getpeercert', None) is not None:
             return True
-        if handler.headers.get('X-Forwarded-Proto', '') == 'https':
+        try:
+            from api.helpers import _trust_proxy
+            _trusted_proxy = _trust_proxy()
+        except Exception:
+            _trusted_proxy = False
+        if _trusted_proxy and handler.headers.get('X-Forwarded-Proto', '') == 'https':
             return True
     return False
 
