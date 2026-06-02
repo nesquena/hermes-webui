@@ -1,6 +1,5 @@
 """Tests for #3402 part B — OS file/folder import into workspace tree targets."""
 import json
-import re
 import shutil
 import subprocess
 
