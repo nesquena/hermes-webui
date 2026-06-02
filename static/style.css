@@ -3306,6 +3306,9 @@ main.main > #mainPlugin{display:none;}
    Matches hermes-desktop LLM Providers panel. Card uses --sidebar (surface-1),
    hover rows use --surface (surface-2). Body divider uses a subtle tint. */
 #providersList{gap:12px;}
+.providers-section-subheading{font-size:13px;font-weight:600;margin-top:16px;color:var(--text);}
+.providers-section-subhint{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.45;}
+.providers-self-hosted-section{margin-bottom:8px;}
 .provider-quota-card{
   border:1px solid var(--border);
   border-radius:12px;

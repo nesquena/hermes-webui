@@ -172,7 +172,8 @@ class TestIssue1500EnvVarAlignment:
             result = get_providers()
             by_id = {p["id"]: p for p in result["providers"]}
             assert by_id["lmstudio"]["has_key"] is True
-            assert by_id["lmstudio"]["configurable"] is True
+            assert by_id["lmstudio"]["is_self_hosted"] is True
+            assert by_id["lmstudio"]["configurable"] is False
         finally:
             restore()
 
