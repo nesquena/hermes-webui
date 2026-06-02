@@ -594,7 +594,15 @@ const _PRISM_LANG_MAP={
   diff:'diff',patch:'diff',
   txt:'',log:'',csv:'',tsv:'',
 };
+const _PRISM_BASENAME_LANG_MAP={
+  'dockerfile':'docker','makefile':'makefile','gnumakefile':'makefile',
+  'cmakelists.txt':'cmake',
+  '.gitignore':'ignore','.dockerignore':'ignore',
+};
 function _prismLanguageForPath(path){
+  const base=String(path||'').split(/[\\/]/).pop().toLowerCase();
+  if(base.startsWith('dockerfile.')) return 'docker';
+  if(_PRISM_BASENAME_LANG_MAP[base]!==undefined) return _PRISM_BASENAME_LANG_MAP[base];
   const ext=fileExt(path).replace(/^\./,'');
   return _PRISM_LANG_MAP[ext]!==undefined?_PRISM_LANG_MAP[ext]:'plaintext';
 }
