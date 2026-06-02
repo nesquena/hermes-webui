@@ -3112,8 +3112,10 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     if lookup_id.startswith("@") and ":" in lookup_id:
         lookup_id = lookup_id.split(":", 1)[1]
 
-    # Check existing groups for a matching label
-    _norm = lambda s: (s.split("/", 1)[-1] if "/" in s else s).replace("-", ".").lower()
+    # Check existing groups for a matching label.
+    # Skip slash stripping for URI-scheme IDs (e.g. gpt://folder/model) (#3429).
+    _has_scheme = lambda s: "://" in s
+    _norm = lambda s: (s.split("/", 1)[-1] if ("/" in s and not _has_scheme(s)) else s).replace("-", ".").lower()
     norm_lookup = _norm(lookup_id)
     for g in existing_groups:
         for m in g.get("models", []):
@@ -3122,7 +3124,8 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
 
     # Fall back: strip only the first slash-segment (provider prefix),
     # preserving vendor hierarchy for multi-slash IDs (#3360).
-    bare = lookup_id.split("/", 1)[1] if "/" in lookup_id else lookup_id
+    # Skip for URI-scheme IDs whose slashes are path separators (#3429).
+    bare = lookup_id.split("/", 1)[1] if ("/" in lookup_id and not _has_scheme(lookup_id)) else lookup_id
     return " ".join(
         w.upper() if (len(w) <= 3 and w.replace(".", "").isalnum() and not w.isdigit()) else w.capitalize()
         for w in bare.replace("_", "-").split("-")
@@ -3275,14 +3278,18 @@ def get_available_models() -> dict:
             if s.startswith("@") and ":" in s:
                 parts = s.split(":")
                 s = parts[-1] or s
-            # Strip only the first slash-segment (provider prefix), preserving
-            # any remaining vendor hierarchy.  Using parts[-1] here previously
-            # discarded ALL segments except the last, collapsing distinct
-            # multi-slash IDs like 'vendor_a/deepseek-v4-pro' and
-            # 'vendor_b/deepseek/deepseek-v4-pro' to the same key (#3360).
-            if "/" in s:
-                stripped = s.split("/", 1)[1]
-                s = stripped or s
+            # Skip slash-based stripping for URI-scheme IDs (e.g.
+            # gpt://folder/model/latest) whose slashes are path separators,
+            # not provider delimiters (#3429).
+            if "://" not in s:
+                # Strip only the first slash-segment (provider prefix), preserving
+                # any remaining vendor hierarchy.  Using parts[-1] here previously
+                # discarded ALL segments except the last, collapsing distinct
+                # multi-slash IDs like 'vendor_a/deepseek-v4-pro' and
+                # 'vendor_b/deepseek/deepseek-v4-pro' to the same key (#3360).
+                if "/" in s:
+                    stripped = s.split("/", 1)[1]
+                    s = stripped or s
             return s.replace("-", ".")
 
         def _build_configured_model_badges() -> dict[str, dict[str, str]]:

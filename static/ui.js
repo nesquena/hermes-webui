@@ -1434,21 +1434,26 @@ function _normalizeConfiguredModelKey(modelId){
   // Defensive: trailing-colon / trailing-slash falls back to the original key
   // so malformed configs don't collapse distinct ids to '' (matches backend _norm_model_id).
   if(s.startsWith('@')&&s.includes(':')){const last=s.split(':').pop();s=last||s;}
-  // Strip provider-qualified prefixes that contain colons before the first
-  // slash (e.g. 'custom:llm-proxy/model' → 'model').  Without this, badge-
-  // key variants like 'custom:llm-proxy/opencode_go/deepseek-v4-pro' and the
-  // bare 'opencode_go/deepseek-v4-pro' produce different normalized keys and
-  // aren't deduped in the configured section (#3360).
-  if(s.includes('/')&&s.indexOf(':')!==-1&&s.indexOf(':')<s.indexOf('/')){
-    s=s.slice(s.indexOf('/')+1)||s;
+  // Skip slash-based stripping for URI-scheme IDs (e.g. gpt://folder/model)
+  // whose slashes are path separators, not provider delimiters (#3429).
+  const _hasScheme=/^[a-z][a-z0-9+.-]*:\/\//i.test(s);
+  if(!_hasScheme){
+    // Strip provider-qualified prefixes that contain colons before the first
+    // slash (e.g. 'custom:llm-proxy/model' → 'model').  Without this, badge-
+    // key variants like 'custom:llm-proxy/opencode_go/deepseek-v4-pro' and the
+    // bare 'opencode_go/deepseek-v4-pro' produce different normalized keys and
+    // aren't deduped in the configured section (#3360).
+    if(s.includes('/')&&s.indexOf(':')!==-1&&s.indexOf(':')<s.indexOf('/')){
+      s=s.slice(s.indexOf('/')+1)||s;
+    }
+    // Strip only the first slash-segment (provider prefix), preserving any
+    // remaining vendor hierarchy. Using split('/').pop() here previously
+    // discarded ALL segments except the last, collapsing distinct multi-slash
+    // IDs like 'vendor_a/deepseek-v4-pro' and 'vendor_b/deepseek/deepseek-v4-pro'
+    // to the same key, causing badge misattribution and configured-entry
+    // suppression (#3360).
+    if(s.includes('/')) s=s.replace(/^[^/]+\//, '')||s;
   }
-  // Strip only the first slash-segment (provider prefix), preserving any
-  // remaining vendor hierarchy. Using split('/').pop() here previously
-  // discarded ALL segments except the last, collapsing distinct multi-slash
-  // IDs like 'vendor_a/deepseek-v4-pro' and 'vendor_b/deepseek/deepseek-v4-pro'
-  // to the same key, causing badge misattribution and configured-entry
-  // suppression (#3360).
-  if(s.includes('/')) s=s.replace(/^[^/]+\//, '')||s;
   return s.replace(/-/g,'.');
 }
 
@@ -2900,7 +2905,10 @@ function getModelLabel(modelId){
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
   // Safe Ollama-tag fallback: strip only the first slash-segment (provider
   // prefix) so multi-slash IDs preserve their vendor hierarchy (#3360).
-  let _last = modelId.includes('/') ? (modelId.slice(modelId.indexOf('/')+1) || modelId) : modelId;
+  // Skip stripping for URI-scheme IDs (e.g. gpt://folder/model/latest) whose
+  // slashes are path separators, not provider delimiters (#3429).
+  const _hasUriScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(modelId);
+  let _last = (!_hasUriScheme && modelId.includes('/')) ? (modelId.slice(modelId.indexOf('/')+1) || modelId) : modelId;
   // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
   if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
   const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
