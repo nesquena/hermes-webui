@@ -3,6 +3,23 @@
 
 ## [Unreleased]
 
+### Added
+- Added Indonesian (`id-ID`) locale coverage and filled the remaining i18n key parity gap for the new locale.
+- Added regression coverage for run serialization, route-registry dispatch, CSP nonce injection, proxy trust gating, 401 security headers, redaction prefiltering, SSE `Last-Event-ID`, SQLite busy timeout, a11y labels, static console guards, and Docker reproducibility.
+
+### Changed
+- WebUI now serializes agent run execution by default (`HERMES_WEBUI_SERIALIZE_RUNS=1`) to prevent cross-session `os.environ` races in the legacy direct runner.
+- Reverse-proxy headers are now trusted only when `HERMES_WEBUI_TRUST_PROXY=1`; direct clients can no longer spoof forwarded host/proto/IP decisions.
+- HTML shell responses now use a nonce-based `script-src` CSP instead of `script-src 'unsafe-inline'`; non-HTML responses retain the legacy fallback.
+- `state.db` read paths now open SQLite in read-only mode with `busy_timeout`; write paths set the same timeout explicitly.
+- Docker builds no longer run `apt-get upgrade -y`, keeping package drift tied to the selected base image.
+
+### Fixed
+- API 401 responses now carry the same security headers as normal responses.
+- Redaction prefiltering no longer treats every ordinary URL as sensitive, while URL userinfo and secret query parameters are still detected and masked.
+- SSE replay now honors browser-native `Last-Event-ID` as a fallback resume cursor.
+- Icon-only controls and image lightbox navigation have accessible labels, localized media labels, and focus trapping.
+
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 
 ### Fixed
