@@ -1107,6 +1107,7 @@ _PROVIDER_MODELS = {
         {"id": "kimi-k2.5", "label": "Kimi K2.5"},
     ],
     "minimax": [
+        {"id": "MiniMax-M3", "label": "MiniMax M3"},
         {"id": "MiniMax-M2.7", "label": "MiniMax M2.7"},
         {"id": "MiniMax-M2.7-highspeed", "label": "MiniMax M2.7 Highspeed"},
         {"id": "MiniMax-M2.5", "label": "MiniMax M2.5"},
@@ -2645,7 +2646,7 @@ def _current_webui_version() -> str | None:
 # guarantees that even if a future release accidentally reuses the same
 # WebUI version string (or a debug build doesn't have a version), a structural
 # change still invalidates the cache.
-_MODELS_CACHE_SCHEMA_VERSION = 3
+_MODELS_CACHE_SCHEMA_VERSION = 4
 
 
 _models_cache_path = STATE_DIR / "models_cache.json"

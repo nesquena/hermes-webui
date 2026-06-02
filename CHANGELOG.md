@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Assistant message `<think>...` blocks are now extracted into `m.reasoning` at persist time (both streaming inflight state and the SSE `done` finalization), instead of being stored inline in `m.content`. Reasoning-only providers such as `MiniMax-M3` (OpenAI-compat) previously left the thinking trace inside the assistant content, bloating persisted session files by 30-50% and bypassing the `m.reasoning` field that the thinking card reads on reload. A new `_splitThinkFromContent()` helper (in `static/messages.js`) handles all three known tag pairs (`<think>...`, `<|channel>thought\n...<channel|>`, `<|turn|>thinking\n...<turn|>`), preserves any pre-existing `m.reasoning` from a separate `on_reasoning` stream, leaves partial open blocks alone for the live renderer to hide, and supports multiple complete blocks in one message via bounded iteration. No rendering change — the streaming `_parseStreamState` and the persisted-state render path both already consume the split shape.
+
 ## [v0.51.222] — 2026-06-02 — Release GP (stage-p4 — backend bugfix batch: title language drift + orphaned CLI sidecar prune + pin-quota lineage)
 
 ### Fixed
