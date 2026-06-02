@@ -1175,6 +1175,21 @@ def _schedule_restart(delay: float = 2.0) -> None:
                         os.setsid()
                     except Exception:
                         pass
+                    # 15-second delay in the child before invoking
+                    # ctl.sh: empirically the cpuset:/top-app cgroup
+                    # (Android's top-app) lmkd window kills any new
+                    # python3 process spawned within ~10 seconds of the
+                    # old process's exit in the same cgroup. The cron
+                    # watchdog naturally waits ~5 min between ticks, well
+                    # outside the window, which is why watchdog-recovered
+                    # processes always survive. We can do better: wait
+                    # 15s in the child so the cgroup kill window passes
+                    # before ctl.sh start spawns the new process. This
+                    # reduces post-update downtime from ~5 min (watchdog)
+                    # to ~15s. The 0.3s parent sleep still ensures the
+                    # child has time to setsid() before the parent
+                    # _exits.
+                    time.sleep(15)
                     try:
                         os.execvp(ctl_path, [ctl_path, 'start'])
                     except Exception:
