@@ -1444,6 +1444,140 @@ def _github_release_list_row_is_safe(row: Any) -> bool:
     return True
 
 
+def _github_release_assets_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if not _github_raw_hostname_is_exact(origin_uri, "api.github.com"):
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "releases"
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+        or path[6] != "assets"
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", int(path[5])
+
+
+def _github_release_assets_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _assets_segment_matches(segment: str) -> bool:
+        lowered = segment.lower()
+        return lowered == "assets" or lowered.startswith(("assets%", "assets?", "assets\x00"))
+
+    def _release_assets_shape_matches(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 7
+            and path[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "releases"
+            and _assets_segment_matches(path[6])
+        )
+
+    return _release_assets_shape_matches(parts.path) or _release_assets_shape_matches(unquote(parts.path))
+
+
+def _github_release_asset_content_type_is_safe(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    text = value.strip().lower()
+    return bool(re.fullmatch(r"[a-z0-9][a-z0-9.+-]{0,63}/[a-z0-9][a-z0-9.+-]{0,63}", text))
+
+
+def _github_release_asset_is_safe(asset: Any) -> bool:
+    if not isinstance(asset, dict):
+        return False
+    asset_id = _safe_optional_nonnegative_int(asset.get("id"))
+    if asset_id is None or asset_id <= 0:
+        return False
+    raw_name = asset.get("name")
+    if not isinstance(raw_name, str):
+        return False
+    name = _safe_public_text(raw_name, limit=200)
+    if (
+        not name
+        or name != raw_name.strip()
+        or _refresh_value_is_blocked(raw_name)
+        or re.search(r"https?://|www\.|github\.com|api\.github\.com|[/\\?#@]", name, flags=re.IGNORECASE)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._()+,@-]{0,199}", name)
+    ):
+        return False
+    for field in ("size", "download_count"):
+        if field in asset and _safe_optional_nonnegative_int(asset.get(field)) is None:
+            return False
+    raw_state = asset.get("state")
+    if raw_state is not None:
+        state = _safe_public_text(raw_state, limit=40)
+        if state not in {"uploaded", "open"}:
+            return False
+    if not _github_release_asset_content_type_is_safe(asset.get("content_type")):
+        return False
+    for field in ("created_at", "updated_at"):
+        raw_value = asset.get(field)
+        if raw_value is not None and not _safe_iso_timestamp(raw_value):
+            return False
+    for field in ("name", "state", "content_type", "created_at", "updated_at"):
+        if _refresh_value_is_blocked(asset.get(field)):
+            return False
+    return True
+
+
+def _json_payload_is_github_release_assets_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_release_assets_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_release_asset_is_safe(asset) for asset in payload)
+
+
+def _github_release_assets_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    path_info = _github_release_assets_path_info(origin_uri)
+    repo, release_id = path_info if path_info is not None else ("repository", 0)
+    safe_assets = [asset for asset in payload if _github_release_asset_is_safe(asset)]
+    parts = [f"GitHub release #{release_id} assets for {repo}", f"asset count: {len(payload)}"]
+    for asset in safe_assets[:5]:
+        name = _safe_public_text(asset.get("name"), limit=200)
+        asset_id = _safe_optional_nonnegative_int(asset.get("id"))
+        size = _safe_optional_nonnegative_int(asset.get("size"))
+        downloads = _safe_optional_nonnegative_int(asset.get("download_count"))
+        asset_parts = [f"asset: {name}"]
+        if asset_id is not None:
+            asset_parts.append(f"id: {asset_id}")
+        if size is not None:
+            asset_parts.append(f"size bytes: {size}")
+        if downloads is not None:
+            asset_parts.append(f"downloads: {downloads}")
+        state = _safe_public_text(asset.get("state"), limit=40)
+        if state:
+            asset_parts.append(f"state: {state}")
+        content_type = _safe_public_text(asset.get("content_type"), limit=80)
+        if content_type and _github_release_asset_content_type_is_safe(content_type):
+            asset_parts.append(f"content type: {content_type.lower()}")
+        for field, label in (("created_at", "created"), ("updated_at", "updated")):
+            timestamp = _safe_public_text(asset.get(field), limit=80)
+            if timestamp:
+                asset_parts.append(f"{label}: {timestamp}")
+        parts.append("; ".join(asset_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_payload_is_github_latest_release_metadata(origin_uri: str, payload: Any) -> bool:
     if not _github_latest_release_path_repo(origin_uri):
         return False
@@ -4509,6 +4643,17 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    if _json_payload_is_github_release_assets_metadata(origin_uri, payload):
+        release_info = _github_release_assets_path_info(origin_uri)
+        repo, release_id = release_info if release_info is not None else (source_id, 0)
+        title = f"GitHub release {release_id} assets {repo}"
+        summary = _github_release_assets_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_contributors_metadata(origin_uri, payload):
         title = f"GitHub contributors {(_github_contributors_path_repo(origin_uri) or source_id)}"
         summary = _github_contributors_refresh_summary(origin_uri, payload)
@@ -4758,6 +4903,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_latest_release_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_latest_release_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_release_assets_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or _github_release_assets_path_info(raw_origin_uri) is None:
+            raise RuntimeError("refresh fetcher disabled")
     if _github_participation_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_participation_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -4776,6 +4924,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_latest_release_path_matches(safe_origin_uri):
         if not _github_latest_release_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_release_assets_path_matches(safe_origin_uri):
+        if _github_release_assets_path_info(safe_origin_uri) is None or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_participation_path_matches(safe_origin_uri):
@@ -4830,6 +4982,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_latest_release_path_matches(safe_origin_uri) and (
             not _github_latest_release_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_release_assets_path_matches(safe_origin_uri) and (
+            _github_release_assets_path_info(safe_origin_uri) is None
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
