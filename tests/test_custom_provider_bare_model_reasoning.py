@@ -127,6 +127,51 @@ def test_vendor_prefix_keyword_does_not_trigger_reasoning(model_id):
     ) == []
 
 
+# ── GLM models (ZAI / Zhipu AI) ──────────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "zai.glm-5",
+        "zai.glm-4.7",
+        "zai.glm-4.6",
+        "zai.glm-4.7-flash",
+        "glm-5",
+        "glm-4.5",
+    ],
+)
+def test_glm_dot_separated_custom_provider(model_id):
+    efforts = cfg.resolve_model_reasoning_efforts(
+        model_id,
+        provider_id="custom:newapi",
+    )
+    assert set(efforts) >= {"low", "medium", "high"}, (
+        f"{model_id} via custom provider should expose reasoning efforts"
+    )
+
+
+# ── Claude family-before-version naming (claude-opus-4-8, claude-haiku-4-5) ──
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "anthropic.claude-opus-4-8",
+        "anthropic.claude-haiku-4-5",
+        "anthropic.claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-haiku-4-5",
+    ],
+)
+def test_claude_family_version_naming_custom_provider(model_id):
+    efforts = cfg.resolve_model_reasoning_efforts(
+        model_id,
+        provider_id="custom:newapi",
+    )
+    assert set(efforts) >= {"low", "medium", "high"}, (
+        f"{model_id} via custom provider should expose reasoning efforts"
+    )
+
+
 # ── slash-prefixed names must still work (no regression) ─────────────────────
 
 def test_deepseek_slash_prefix_still_works():

@@ -2140,11 +2140,17 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
         return True
     if normalized.startswith(("kimi-k2", "kimi-thinking", "claude-3", "claude-4")):
         return True
+    # claude-opus-4-8 / claude-haiku-4-5 style (family-before-version)
+    if normalized.startswith("claude-") and token_set & {"3", "4"}:
+        return True
     if normalized.startswith("qwen3") or "qwen3" in token_set:
         return True
     if normalized.startswith(("deepseek-v3", "deepseek-v4", "deepseek-r1", "deepseek-r2")):
         return True
     if len(tokens) >= 2 and tokens[0] == "deepseek" and tokens[1] in {"v3", "v4", "r1", "r2"}:
+        return True
+    # GLM models (ZAI / Zhipu AI) — all modern generations (4.5+) support reasoning
+    if normalized.startswith("glm-"):
         return True
     return False
 

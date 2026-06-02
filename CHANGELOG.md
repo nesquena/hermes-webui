@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Reasoning-effort detection now recognises GLM models (`zai.glm-5`, `zai.glm-4.7`, `glm-5`, etc.) and Claude family-before-version names (`claude-opus-4-8`, `claude-haiku-4-5`, `anthropic.claude-opus-4-8`) as thinking-capable when accessed through named custom providers. Both were missed by PR #3327's family list even though the dot-namespace stripping it introduced correctly surfaces the bare model name.
+
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 
 ### Fixed
