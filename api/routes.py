@@ -1042,6 +1042,9 @@ from api.helpers import (
     redact_session_data,
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
+    csp_nonce,
+    apply_script_nonce,
+    _trust_proxy,
 )
 from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
@@ -4251,10 +4254,13 @@ def handle_get(handler, parsed) -> bool:
                 .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
                 .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
             )
+            nonce = csp_nonce()
+            html = apply_script_nonce(inject_extension_tags(html), nonce)
             return t(
                 handler,
-                inject_extension_tags(html),
+                html,
                 content_type="text/html; charset=utf-8",
+                csp_nonce=nonce,
             )
         except Exception as exc:
             return _serve_shell_unavailable(handler, exc)
@@ -6824,8 +6830,8 @@ def handle_post(handler, parsed) -> bool:
         if not is_auth_enabled() and not _os.getenv("HERMES_WEBUI_ONBOARDING_OPEN"):
             import ipaddress
             try:
-                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-                _xri = handler.headers.get("X-Real-IP", "").strip()
+                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip() if _trust_proxy() else ""
+                _xri = handler.headers.get("X-Real-IP", "").strip() if _trust_proxy() else ""
                 _raw = handler.client_address[0]
                 addr = ipaddress.ip_address(_xff or _xri or _raw)
                 is_local = addr.is_loopback or addr.is_private
@@ -6860,8 +6866,8 @@ def handle_post(handler, parsed) -> bool:
             import ipaddress
             try:
                 # Prefer forwarded headers set by reverse proxies
-                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-                _xri = handler.headers.get("X-Real-IP", "").strip()
+                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip() if _trust_proxy() else ""
+                _xri = handler.headers.get("X-Real-IP", "").strip() if _trust_proxy() else ""
                 _raw = handler.client_address[0]
                 _ip_str = _xff or _xri or _raw
                 addr = ipaddress.ip_address(_ip_str)
@@ -6892,8 +6898,8 @@ def handle_post(handler, parsed) -> bool:
         if not is_auth_enabled() and not _os.getenv("HERMES_WEBUI_ONBOARDING_OPEN"):
             import ipaddress
             try:
-                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-                _xri = handler.headers.get("X-Real-IP", "").strip()
+                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip() if _trust_proxy() else ""
+                _xri = handler.headers.get("X-Real-IP", "").strip() if _trust_proxy() else ""
                 _raw = handler.client_address[0]
                 _ip_str = _xff or _xri or _raw
                 addr = ipaddress.ip_address(_ip_str)
