@@ -145,9 +145,26 @@ def _signal_handler(signum, frame):  # noqa: ARG001 — frame is required by sig
         },
     )
 
-    # Re-raise the default disposition so the process actually dies after
-    # the marker is on disk. SIGKILL is untrappable but if we somehow got
-    # here for it, we still want the marker first.
+    # SIGPIPE is special: it does NOT indicate that the process is broken,
+    # just that one specific `socket.send()` lost its peer. server.py sets
+    # SIG_IGN on SIGPIPE at module import time so a dropped client
+    # surfaces as a normal BrokenPipeError on that one request instead of
+    # killing the whole server. If we re-raise SIGPIPE here, we undo that
+    # protection and the process dies anyway. So: write the marker, keep
+    # the SIG_IGN disposition in place, and return. The offending `send()`
+    # in the request thread has already returned EPIPE, so the handler
+    # there can clean up normally.
+    if signum == signal.SIGPIPE:
+        try:
+            signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+        except Exception:
+            pass
+        return
+
+    # All other catchable signals: re-raise with the default disposition so
+    # the process actually dies after the marker is on disk. SIGKILL is
+    # untrappable but if we somehow got here for it, we still want the
+    # marker first.
     try:
         signal.signal(signum, signal.SIG_DFL)
     except Exception:
