@@ -475,6 +475,8 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
     terminal_refresh_failure = False
     if _github_issue_events_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_issue_labels_path_matches(raw_origin_text) and not _github_raw_authority_is_exact(raw_origin_text, "api.github.com"):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_latest_release_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_latest_release_path_repo(raw_origin_text)
@@ -3203,6 +3205,55 @@ def _github_labels_path_repo(origin_uri: str) -> str:
     return f"{path[2]}/{path[3]}"
 
 
+def _github_issue_labels_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if parts.netloc.strip() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "issues"
+        or path[6] != "labels"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", int(path[5])
+
+
+def _github_issue_labels_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 7
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "issues"
+            and lowered[6].startswith("labels")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return any(segment.lower().startswith(("issues%", "labels%")) for segment in raw_path)
+
+
 _GITHUB_LABEL_COMPACT_BLOCKED_TERMS = {
     "apikey",
     "developermessage",
@@ -3308,9 +3359,16 @@ def _json_payload_is_github_labels_metadata(origin_uri: str, payload: Any) -> bo
     return all(_github_label_row_is_safe(row) for row in payload)
 
 
-def _github_labels_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
-    repo = _github_labels_path_repo(origin_uri) or "repository"
-    parts = [f"GitHub repository labels for {repo}", f"label count: {len(payload)}"]
+def _json_payload_is_github_issue_labels_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_issue_labels_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_label_row_is_safe(row) for row in payload)
+
+
+def _github_label_summary_parts(payload: list[Any]) -> list[str]:
+    parts: list[str] = []
     for row in payload[:3]:
         if not _github_label_row_is_safe(row):
             continue
@@ -3318,6 +3376,21 @@ def _github_labels_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
         color = _safe_public_text(row.get("color"), limit=6).lower()
         is_default = str(row.get("default") is True).lower()
         parts.append(f"label: {name}; color: {color}; default: {is_default}")
+    return parts
+
+
+def _github_labels_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_labels_path_repo(origin_uri) or "repository"
+    parts = [f"GitHub repository labels for {repo}", f"label count: {len(payload)}"]
+    parts.extend(_github_label_summary_parts(payload))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_issue_labels_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    info = _github_issue_labels_path_info(origin_uri)
+    repo, number = info if info is not None else ("repository", 0)
+    parts = [f"GitHub issue #{number} labels for {repo}", f"label count: {len(payload)}"]
+    parts.extend(_github_label_summary_parts(payload))
     return _bounded_refresh_summary("; ".join(parts))
 
 
@@ -4165,6 +4238,14 @@ def _github_raw_hostname_is_exact(origin_uri: str, expected_host: str) -> bool:
     return raw_host == expected_host
 
 
+def _github_raw_authority_is_exact(origin_uri: str, expected_host: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    return (parts.netloc or "").strip() == expected_host
+
+
 def _github_forks_path_matches(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -4702,6 +4783,19 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": _github_topics_refresh_summary(origin_uri, payload),
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    if _json_payload_is_github_issue_labels_metadata(origin_uri, payload):
+        info = _github_issue_labels_path_info(origin_uri)
+        repo, number = info if info is not None else (source_id, 0)
+        title = f"GitHub issue #{number} labels {repo}"
+        summary = _github_issue_labels_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": f"github issue labels {repo} #{number}",
+        }
+    if _github_issue_labels_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     if _json_payload_is_github_labels_metadata(origin_uri, payload):
         repo = _github_labels_path_repo(origin_uri) or source_id
         title = f"GitHub labels {repo}"
@@ -4895,6 +4989,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     raw_origin_uri = str(origin_uri or "").strip()
     if _github_issue_events_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
         raise RuntimeError("refresh fetcher disabled")
+    if _github_issue_labels_path_matches(raw_origin_uri):
+        if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or _github_issue_labels_path_info(raw_origin_uri) is None:
+            raise RuntimeError("refresh fetcher disabled")
     if _github_forks_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
         raise RuntimeError("refresh fetcher disabled")
     if _github_license_path_matches(raw_origin_uri):
@@ -4916,6 +5013,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     request_accept = "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8"
     if _github_issue_events_path_matches(safe_origin_uri):
         if _github_issue_events_path_info(safe_origin_uri) is None or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_issue_labels_path_matches(safe_origin_uri):
+        if _github_issue_labels_path_info(safe_origin_uri) is None or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_license_path_matches(safe_origin_uri):
@@ -4950,6 +5051,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_issue_events_path_matches(safe_origin_uri) and (
             _github_issue_events_path_info(safe_origin_uri) is None
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_issue_labels_path_matches(safe_origin_uri) and (
+            _github_issue_labels_path_info(safe_origin_uri) is None
+            or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com")
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -5617,7 +5724,9 @@ def run_source_refresh_jobs(
             payload = {}
         source_id = _safe_public_id(payload.get("source_id"), fallback="source")
         raw_origin_uri = str(payload.get("origin_uri") or "").strip()
-        if (
+        if _github_issue_labels_path_matches(raw_origin_uri) and not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com"):
+            origin_uri = f"capy-memory://{source_id}"
+        elif (
             (
                 _github_issue_events_path_matches(raw_origin_uri)
                 or _github_forks_path_matches(raw_origin_uri)

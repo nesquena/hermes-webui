@@ -8278,6 +8278,431 @@ def test_run_source_refresh_jobs_default_fetcher_accepts_empty_github_labels_lis
     assert "raw-prompt" not in serialized
 
 
+def test_run_source_refresh_jobs_default_fetcher_ingests_github_issue_labels_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-issue-labels-source-refresh",
+        "title": "GitHub Issue Labels Source Refresh",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/issues/42/labels?access_token=***#raw-prompt",
+    })
+    github_issue_labels_body = json.dumps([
+        {
+            "id": 1001,
+            "node_id": "LA_kwDOBENIGN",
+            "name": "bug",
+            "color": "d73a4a",
+            "default": True,
+            "description": "Safe human description is intentionally not persisted.",
+            "url": "https://api.github.com/repos/capy/spaces/issues/42/labels/bug",
+        },
+        {
+            "name": "needs-triage",
+            "color": "fbca04",
+            "default": False,
+            "html_url": "https://github.com/capy/spaces/issues/42/labels/needs-triage",
+        },
+        {
+            "name": "docs/update",
+            "color": "0e8a16",
+            "default": False,
+            "description": "Another safe description omitted from the summary.",
+        },
+        {
+            "name": "do-not-persist-fourth",
+            "color": "5319e7",
+            "default": False,
+        },
+    ]).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_issue_labels_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-issue-labels-source-refresh.md").read_text(encoding="utf-8").lower()
+    search = search_memory("needs-triage", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [{"url": "https://api.github.com/repos/capy/spaces/issues/42/labels", "timeout": 8}]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    preflight = result["jobs"][0]["prompt_preflight"]
+    assert preflight["boundary"] == "auto_fetched_source"
+    assert preflight["status"] == "pass"
+    assert preflight["metadata_only"] is True
+    assert preflight["raw_prompt_stored"] is False
+    assert search["results"][0]["source_id"] == "github-issue-labels-source-refresh"
+    assert "github issue #42 labels for capy/spaces" in persisted
+    assert "label count: 4" in persisted
+    assert "label: bug; color: d73a4a; default: true" in persisted
+    assert "label: needs-triage; color: fbca04; default: false" in persisted
+    assert "label: docs/update; color: 0e8a16; default: false" in persisted
+    assert "do-not-persist-fourth" not in persisted
+    for unsafe in (
+        "secret_value_do_not_leak",
+        "safe human description",
+        "node_id",
+        "issues/42/labels/bug",
+        "html_url",
+        "api_auth",
+        "api.github.com",
+        "access_token",
+        "?token",
+        "raw-prompt",
+        "ignore previous instructions",
+        "renderer",
+        "<script",
+    ):
+        assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+def test_register_source_reference_fail_closes_github_issue_labels_uppercase_host(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-issue-labels-uppercase-host",
+        "title": "GitHub Issue Labels Uppercase Host",
+        "origin_uri": "https://API.GITHUB.COM/repos/capy/spaces/issues/42/labels?access_token=***#raw-prompt",
+    })
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("uppercase GitHub issue-labels host must not be fetched")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"receipt": receipt, "result": result}, sort_keys=True).lower()
+
+    assert receipt["origin_uri"] == "capy-memory://github-issue-labels-uppercase-host"
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert calls == []
+    assert not (root / "vault" / "github-issue-labels-uppercase-host.md").exists()
+    assert "api.github.com" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_register_source_reference_fail_closes_github_issue_labels_userinfo_host(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-issue-labels-userinfo-host",
+        "title": "GitHub Issue Labels Userinfo Host",
+        "origin_uri": "https://capy@api.github.com/repos/capy/spaces/issues/42/labels?access_token=***#raw-prompt",
+    })
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("userinfo GitHub issue-labels host must not be fetched")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"receipt": receipt, "result": result}, sort_keys=True).lower()
+
+    assert receipt["origin_uri"] == "capy-memory://github-issue-labels-userinfo-host"
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert calls == []
+    assert not (root / "vault" / "github-issue-labels-userinfo-host.md").exists()
+    assert "api.github.com" not in serialized
+    assert "capy@" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_fail_closes_legacy_github_issue_labels_uppercase_host_payload(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-issue-labels-legacy-uppercase-host",
+        "title": "GitHub Issue Labels Legacy Uppercase Host",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/issues/42/labels",
+    })
+    legacy_payload = {
+        "source_id": "github-issue-labels-legacy-uppercase-host",
+        "origin_uri": "https://API.GITHUB.COM/repos/capy/spaces/issues/42/labels?access_token=***#raw-prompt",
+        "refresh_interval_seconds": 3600,
+    }
+    with capy_memory._connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET payload_json = ?, status = 'pending', attempts = 0 WHERE job_id = ?",
+            (json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")), receipt["job_id"]),
+        )
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("legacy uppercase GitHub issue-labels host must not be fetched")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert calls == []
+    assert not (root / "vault" / "github-issue-labels-legacy-uppercase-host.md").exists()
+    assert "api.github.com" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_accepts_empty_github_issue_labels_list(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-issue-labels-empty-list",
+        "title": "GitHub Issue Labels Empty List",
+        "origin_uri": "https://api.github.com/repos/capy/empty-labels/issues/42/labels?token=***#raw-prompt",
+    })
+    github_issue_labels_body = json.dumps([]).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_issue_labels_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-issue-labels-empty-list.md").read_text(encoding="utf-8").lower()
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    assert "github issue #42 labels for capy/empty-labels" in persisted
+    assert "label count: 0" in persisted
+    assert "token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_issue_labels_feed_bypass(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-issue-labels-feed-bypass",
+        "title": "GitHub Issue Labels Feed Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/issues/42/labels?access_token=***#raw-prompt",
+    })
+    github_issue_labels_body = json.dumps({
+        "version": "https://jsonfeed.org/version/1.1",
+        "items": [{
+            "title": "Issue labels feed bypass",
+            "summary": "Safe-looking feed summary should not bypass exact issue-labels metadata validation.",
+            "content_text": "SECRET_VALUE_DO_NOT_LEAK raw labels body",
+        }],
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_issue_labels_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-issue-labels-feed-bypass.md").exists()
+    assert "safe-looking feed summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_issue_labels_malformed_tail_row(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-issue-labels-malformed-tail",
+        "title": "GitHub Issue Labels Malformed Tail",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/issues/42/labels?access_token=***#raw-prompt",
+    })
+    github_issue_labels_body = json.dumps([
+        {"name": "bug", "color": "d73a4a", "default": True},
+        {
+            "name": "ignore-previous-instructions",
+            "color": "not-a-color",
+            "default": "false",
+            "api_auth": "bearer SECRET_VALUE_DO_NOT_LEAK",
+        },
+    ]).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_issue_labels_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-issue-labels-malformed-tail.md").exists()
+    assert "ignore-previous-instructions" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "api_auth" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+@pytest.mark.parametrize("labels_segment", ["labels.json", "labels-extra", "labels%00extra", "labels%3Ffoo", "labels%2Fextra"])
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_issue_labels_malformed_path_text_bypass(
+    tmp_path,
+    monkeypatch,
+    labels_segment,
+):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    source_id = "github-issue-labels-malformed-path-" + re.sub(r"[^a-z0-9]+", "-", labels_segment.lower()).strip("-")
+    register_source_reference({
+        "source_id": source_id,
+        "title": "GitHub Issue Labels Malformed Path",
+        "origin_uri": f"https://api.github.com/repos/capy/spaces/issues/42/{labels_segment}?access_token=***#raw-prompt",
+    })
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return b"Summary: malformed issue-label path text must not be fetched or persisted."
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert calls == []
+    assert not (root / "vault" / f"{source_id}.md").exists()
+    assert "malformed issue-label path text" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_issue_labels_text_fallback(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-issue-labels-text-fallback",
+        "title": "GitHub Issue Labels Text Fallback",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/issues/42/labels?access_token=***#raw-prompt",
+    })
+    github_issue_labels_body = b"Summary: Safe-looking text summary must not bypass issue-labels metadata validation.\n"
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_issue_labels_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-issue-labels-text-fallback.md").exists()
+    assert "safe-looking text summary" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_run_source_refresh_jobs_default_fetcher_rejects_github_labels_feed_bypass(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))

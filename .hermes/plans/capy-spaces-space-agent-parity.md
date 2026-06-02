@@ -38,6 +38,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub issue labels metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub issue-label API payloads (`/repos/{owner}/{repo}/issues/{number}/labels`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from safe repository path, issue number, label count, bounded label names, colors, and default flags while omitting label descriptions, URLs, ids/node_ids, API-auth fields, query/fragment markers, prompt-injection text, scripts, renderer/source fields, and secret-like fixture values from receipts/search/vault output.
+  - Empty label lists are valid; JSON Feed and text fallback bypass payloads plus malformed/hostile tail rows fail closed without creating vault records.
+
 - `feat(capy-memory): ingest GitHub release assets metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub release assets API payloads (`/repos/{owner}/{repo}/releases/{release_id}/assets`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, release id, asset count, bounded asset names, ids, sizes, download counts, states, content types, and timestamps while omitting download URLs, uploader objects, API-auth fields, raw prompts, scripts, renderer/source fields, and secret-like fixture values from receipts/search/vault output.
