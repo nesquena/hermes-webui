@@ -11,6 +11,7 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- GitHub issue-event-list source-refresh metadata now has a narrow metadata-only parser for exact lowercase-host allow-listed `/repos/{owner}/{repo}/issues/{number}/events` API payloads, making issue/PR event freshness/source summaries visible only from ids, event types, safe actors, safe labels, and timestamps while failing closed on raw event bodies, commit ids/aliases, actor/label URLs, raw query/fragment/userinfo auth markers, generic JSON Feed/text bypass content, malformed/encoded path or non-lowercase-host variants, non-allow-listed fields, prompts, scripts, renderer/source fields, or secret-looking fixture values.
 - GitHub fork-list source-refresh metadata now has a narrow metadata-only parser for exact lowercase-host allow-listed `/repos/{owner}/{repo}/forks` API payloads, making repository fork freshness/source summaries visible without storing fork descriptions, clone/profile/API URLs, raw query/fragment/userinfo auth markers, generic JSON Feed/text bypass content, malformed/encoded path or non-lowercase-host variants, prompts, scripts, renderer/source fields, or secret-looking fixture values.
 
 - Source widget SDK helper coverage now includes metadata-only `space.spaces.defaultWidgetSize`, `normalizeWidgetSize`, and `parseWidgetSizeToken`, matching Space Agent's default size, normalization, token parsing, clamping, and fallback behavior without exposing generated/source/credential-like request markers.

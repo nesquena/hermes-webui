@@ -471,6 +471,8 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
     source_id = _safe_public_id(record.get("source_id") or record.get("id"), fallback=fallback_id)
     origin_uri = _safe_origin_uri(raw_origin, source_id=source_id)
     raw_origin_text = str(raw_origin or "").strip()
+    if _github_issue_events_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_forks_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
     display_name = _safe_public_text(
@@ -2976,6 +2978,178 @@ _GITHUB_PULL_FILE_STATUSES = {"added", "removed", "modified", "renamed", "copied
 _GITHUB_PULL_REVIEW_STATES = {"approved", "changes_requested", "commented", "dismissed", "pending"}
 
 
+_GITHUB_ISSUE_EVENT_KINDS = {
+    "assigned",
+    "closed",
+    "demilestoned",
+    "labeled",
+    "locked",
+    "merged",
+    "milestoned",
+    "reopened",
+    "renamed",
+    "review_request_removed",
+    "review_requested",
+    "unassigned",
+    "unlabeled",
+    "unlocked",
+}
+
+
+def _github_issue_events_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if not _github_raw_hostname_is_exact(origin_uri, "api.github.com"):
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "issues"
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+        or path[6] != "events"
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", int(path[5])
+
+
+def _github_issue_events_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _matches_issue_events_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 7 and path[0] == "" and lowered[1] == "repos" and lowered[4] == "issues" and lowered[6].startswith("events")
+
+    return _matches_issue_events_shape(parts.path) or _matches_issue_events_shape(unquote(parts.path))
+
+
+_GITHUB_ISSUE_EVENT_UNSAFE_IGNORED_KEYS = _GITHUB_LABEL_UNSAFE_IGNORED_KEYS | {
+    "avatar_url",
+    "commit_id",
+    "commit_url",
+    "events_url",
+    "html_url",
+    "node_id",
+    "repository_url",
+    "timeline_url",
+    "url",
+}
+
+
+def _github_issue_event_value_is_unsafe(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = str(key).strip().lower().replace("-", "_")
+            compact_key = re.sub(r"[^a-z0-9]+", "", normalized_key)
+            if (
+                normalized_key in _GITHUB_ISSUE_EVENT_UNSAFE_IGNORED_KEYS
+                or normalized_key.endswith("_url")
+                or "url" in compact_key
+                or compact_key.startswith("commit")
+                or "body" in compact_key
+                or "content" in compact_key
+                or compact_key.startswith("raw")
+                or compact_key in {"text", "markdown", "description"}
+            ):
+                return True
+            if _github_label_value_is_blocked(key) or _github_issue_event_value_is_unsafe(item):
+                return True
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(_github_issue_event_value_is_unsafe(item) for item in value)
+    if isinstance(value, _PUBLIC_SCALAR_TYPES):
+        text = str(value)
+        if _REFRESH_TITLE_BLOCKED_VALUE_RE.search(text):
+            return True
+    return _github_label_value_is_blocked(value)
+
+
+def _github_issue_event_label_is_safe(row: dict[str, Any]) -> bool:
+    label = row.get("label")
+    if label is None:
+        return True
+    if not isinstance(label, dict) or set(label) - {"name"}:
+        return False
+    raw_name = label.get("name")
+    return raw_name is None or _github_label_name_is_safe(raw_name)
+
+
+def _github_issue_event_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    allowed_keys = {"id", "event", "actor", "label", "created_at"}
+    if set(row) - allowed_keys:
+        return False
+    if _github_issue_event_value_is_unsafe(row):
+        return False
+    event_id = _safe_optional_nonnegative_int(row.get("id"))
+    if event_id is None or event_id <= 0:
+        return False
+    event = _safe_public_text(row.get("event"), limit=80).lower()
+    if event not in _GITHUB_ISSUE_EVENT_KINDS:
+        return False
+    actor = row.get("actor")
+    if actor is not None:
+        if not isinstance(actor, dict) or set(actor) - {"login"}:
+            return False
+        raw_login = actor.get("login")
+        if _is_present_public_value(raw_login) and not _github_comment_login_is_safe(raw_login):
+            return False
+    raw_created = row.get("created_at")
+    if _is_present_public_value(raw_created) and not _safe_iso_timestamp(raw_created):
+        return False
+    return _github_issue_event_label_is_safe(row)
+
+
+def _json_payload_is_github_issue_events_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_issue_events_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_issue_event_row_is_safe(row) for row in payload)
+
+
+def _github_issue_events_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    _repo, number = _github_issue_events_path_info(origin_uri) or ("repository", 0)
+    safe_rows = [row for row in payload if _github_issue_event_row_is_safe(row)]
+    event_counts: dict[str, int] = {}
+    row_summaries: list[str] = []
+    for row in safe_rows:
+        event = _safe_public_text(row.get("event"), limit=80).lower()
+        event_counts[event] = event_counts.get(event, 0) + 1
+        actor = row.get("actor") if isinstance(row.get("actor"), dict) else {}
+        login = _safe_public_text(actor.get("login") if isinstance(actor, dict) else "", limit=80)
+        event_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        created = _safe_public_text(row.get("created_at"), limit=80)
+        row_parts = [f"event {event_id}: {event}"]
+        if login:
+            row_parts[0] = f"event {event_id}: {event} by {login}"
+        label = row.get("label") if isinstance(row.get("label"), dict) else {}
+        label_name = _safe_public_text(label.get("name") if isinstance(label, dict) else "", limit=80)
+        if label_name:
+            row_parts.append(f"label: {label_name}")
+        if created:
+            row_parts.append(f"created: {created}")
+        if len(row_summaries) < 5:
+            row_summaries.append("; ".join(row_parts))
+    parts = [f"GitHub issue #{number} events", f"event count: {len(payload)}"]
+    for event in sorted(event_counts):
+        parts.append(f"event {event}: {event_counts[event]}")
+    parts.extend(row_summaries)
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_issue_comments_path_info(origin_uri: str) -> tuple[str, int] | None:
     try:
         parts = urlsplit(origin_uri)
@@ -3580,6 +3754,19 @@ def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
 
 
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
+    issue_events_info = _github_issue_events_path_info(origin_uri)
+    if issue_events_info is not None:
+        if not _json_payload_is_github_issue_events_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        _repo, number = issue_events_info
+        title = f"GitHub issue #{number} events"
+        summary = _github_issue_events_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     comments_path_info = _github_issue_comments_path_info(origin_uri)
     if comments_path_info is not None:
         if not _json_payload_is_github_issue_comments_metadata(origin_uri, payload):
@@ -3947,17 +4134,24 @@ def _refresh_record_from_feed(source_id: str, origin_uri: str, text: str) -> dic
 
 def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[str, Any]:
     raw_origin_uri = str(origin_uri or "").strip()
+    if _github_issue_events_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
+        raise RuntimeError("refresh fetcher disabled")
     if _github_forks_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
         raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     if not _source_refresh_allowed(safe_origin_uri):
         raise RuntimeError("refresh fetcher disabled")
+    request_accept = "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8"
+    if _github_issue_events_path_matches(safe_origin_uri):
+        if _github_issue_events_path_info(safe_origin_uri) is None or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     request = Request(
         safe_origin_uri,
         headers={
             "User-Agent": "Capy-Memory-Refresh/1.0",
-            "Accept": "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8",
+            "Accept": request_accept,
         },
     )
     with _refresh_open(request, timeout=_REFRESH_FETCH_TIMEOUT_SECONDS) as response:
@@ -3966,6 +4160,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         content_type = _refresh_content_type(response.headers)
         if content_type not in _REFRESH_ALLOWED_CONTENT_TYPES:
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_issue_events_path_matches(safe_origin_uri) and (
+            _github_issue_events_path_info(safe_origin_uri) is None
+            or content_type != "application/json"
+        ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_pulls_path_matches(safe_origin_uri) and (
             not _github_pulls_path_repo(safe_origin_uri)
@@ -4597,7 +4796,11 @@ def run_source_refresh_jobs(
         except json.JSONDecodeError:
             payload = {}
         source_id = _safe_public_id(payload.get("source_id"), fallback="source")
-        origin_uri = _safe_origin_uri(payload.get("origin_uri"), source_id=source_id)
+        raw_origin_uri = str(payload.get("origin_uri") or "").strip()
+        if _github_issue_events_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = _safe_origin_uri(raw_origin_uri, source_id=source_id)
         try:
             _record_source_refresh_progress("memory.ingest.started", source_id=source_id, job_id=job_id)
             if not _source_refresh_allowed(origin_uri):
