@@ -475,6 +475,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
     terminal_refresh_failure = False
     if _github_issue_events_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_latest_release_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_latest_release_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_forks_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
     if _github_license_path_matches(raw_origin_text):
@@ -1333,6 +1338,62 @@ def _github_release_refresh_summary(payload: dict[str, Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_latest_release_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    raw_path = (parts.path or "").split("/")
+    decoded_path = unquote(parts.path or "").split("/")
+    lowered = [segment.lower() for segment in decoded_path]
+    raw_release_segment = raw_path[4].lower() if len(raw_path) > 4 else ""
+    decoded_release_segment = decoded_path[4].lower() if len(decoded_path) > 4 else ""
+    release_segment_matches = (
+        decoded_release_segment == "releases"
+        or decoded_release_segment.startswith("releases\x00")
+        or raw_release_segment.startswith("releases%")
+    )
+    raw_latest_segment = raw_path[5].lower() if len(raw_path) > 5 else ""
+    decoded_latest_segment = decoded_path[5].lower() if len(decoded_path) > 5 else ""
+    latest_segment_matches = (
+        decoded_latest_segment == "latest"
+        or decoded_latest_segment.startswith("latest\x00")
+        or raw_latest_segment.startswith("latest%")
+    )
+    return (
+        len(decoded_path) >= 6
+        and decoded_path[0] == ""
+        and lowered[1] == "repos"
+        and len(decoded_path[2]) > 0
+        and len(decoded_path[3]) > 0
+        and release_segment_matches
+        and latest_segment_matches
+    )
+
+
+def _github_latest_release_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if not _github_raw_hostname_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "releases"
+        or path[5] != "latest"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
 def _github_releases_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -1376,6 +1437,30 @@ def _github_release_list_row_is_safe(row: Any) -> bool:
         if raw_value is not None and not isinstance(raw_value, bool):
             return False
     return True
+
+
+def _json_payload_is_github_latest_release_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_latest_release_path_repo(origin_uri):
+        return False
+    return _github_release_list_row_is_safe(payload)
+
+
+def _github_latest_release_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_latest_release_path_repo(origin_uri) or "repository"
+    release_id = _safe_optional_nonnegative_int(payload.get("id")) or 0
+    name = _safe_public_text(payload.get("name"), limit=200)
+    tag = _safe_public_text(payload.get("tag_name"), limit=120)
+    published = _safe_public_text(payload.get("published_at"), limit=80)
+    parts = [f"GitHub latest release for {repo}", f"release id: {release_id}", f"release: {name or tag}"]
+    if tag:
+        parts.append(f"tag: {tag}")
+    if isinstance(payload.get("draft"), bool):
+        parts.append(f"draft: {str(payload['draft']).lower()}")
+    if isinstance(payload.get("prerelease"), bool):
+        parts.append(f"prerelease: {str(payload['prerelease']).lower()}")
+    if published:
+        parts.append(f"published: {published}")
+    return _bounded_refresh_summary("; ".join(parts))
 
 
 def _json_payload_is_github_releases_metadata(origin_uri: str, payload: Any) -> bool:
@@ -4107,6 +4192,16 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    latest_release_repo = _github_latest_release_path_repo(origin_uri)
+    if latest_release_repo:
+        if not _json_payload_is_github_latest_release_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub latest release {latest_release_repo}",
+            "summary": _github_latest_release_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     stargazers_repo = _github_stargazers_path_repo(origin_uri)
     if stargazers_repo:
         if not _json_payload_is_github_stargazers_metadata(origin_uri, payload):
@@ -4395,6 +4490,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_license_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_license_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_latest_release_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_latest_release_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     if not _source_refresh_allowed(safe_origin_uri):
@@ -4406,6 +4504,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_license_path_matches(safe_origin_uri):
         if not _github_license_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_latest_release_path_matches(safe_origin_uri):
+        if not _github_latest_release_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     request = Request(
@@ -4451,6 +4553,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_license_path_matches(safe_origin_uri) and (
             not _github_license_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_latest_release_path_matches(safe_origin_uri) and (
+            not _github_latest_release_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
