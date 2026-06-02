@@ -3722,6 +3722,19 @@ function renderMd(raw){
         : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
       return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span></div></div>`;
     };
+    const localArtifactCard=(src,name)=>{
+      const safeSrc=esc(src);
+      const safeName=esc(name||'image');
+      const tt=(typeof t==='function')?t:(key=>({media_download:'Download'}[key]||key));
+      // Clean inline image (keeps the existing .msg-media-img lightbox-on-click
+      // behavior) with a hover/focus-revealed Download action overlaid top-right,
+      // matching the ChatGPT/Claude/Gemini pattern. The image stays the hero —
+      // no permanent card chrome. Download is the one affordance the lightbox
+      // (zoom-on-click) doesn't already provide.
+      const dlLabel=esc(tt('media_download'));
+      const dlSvg='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
+      return `<span class="msg-artifact-image"><img class="msg-media-img" src="${safeSrc}" alt="${safeName}" loading="lazy"><a class="msg-artifact-download" href="${safeSrc}" download="${safeName}" title="${dlLabel}" aria-label="${dlLabel}" onclick="event.stopPropagation()">${dlSvg}</a></span>`;
+    };
     if(/^file:\/\//i.test(ref)){
       try{
         const u=new URL(ref);
@@ -3763,7 +3776,7 @@ function renderMd(raw){
     const apiUrl='api/media?path='+encodeURIComponent(ref)+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
     const localKind=mediaKindForName(ref);
     if(localKind==='image'){
-      return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
+      return localArtifactCard(apiUrl,ref.split('/').pop()||'image');
     }
     // SVG → inline image (no download, render directly)
     if(_SVG_EXTS.test(ref)){

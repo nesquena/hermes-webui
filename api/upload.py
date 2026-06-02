@@ -11,8 +11,30 @@ from pathlib import Path
 from api.config import MAX_UPLOAD_BYTES, STATE_DIR
 from api.helpers import j, bad
 from api.models import get_session
-from api.workspace import safe_resolve_ws
+from api.workspace import safe_resolve_ws, resolve_trusted_workspace
 
+
+def _max_extracted_bytes() -> int:
+    """Total-extracted-bytes cap for archive uploads (zip/tar-bomb guard).
+
+    Independently tunable from the upload size cap via
+    HERMES_WEBUI_MAX_EXTRACTED_MB; defaults to 10x the upload cap. Read at call
+    time (not import) so the value reflects the running process's environment
+    and is exercisable by tests against the out-of-process test server.
+    """
+    raw = os.getenv("HERMES_WEBUI_MAX_EXTRACTED_MB", "").strip()
+    if raw:
+        try:
+            mb = float(raw)
+            if mb > 0:
+                return int(mb * 1024 * 1024)
+        except ValueError:
+            pass
+    return 10 * MAX_UPLOAD_BYTES
+
+
+# Back-compat module constant (some call sites / tests reference it). The
+# authoritative value is _max_extracted_bytes(), read at extraction time.
 _MAX_EXTRACTED_BYTES = 10 * MAX_UPLOAD_BYTES
 
 
@@ -146,6 +168,7 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     """
     import zipfile, tarfile, io, os, shutil
 
+    cap = _max_extracted_bytes()
     name = Path(filename).name
     stem = Path(filename).stem  # strip .zip / .tar.gz etc.
 
@@ -158,13 +181,22 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
 
     # Determine destination directory — use archive stem as folder name
     dest_dir = safe_resolve_ws(workspace, stem)
-    # Avoid overwriting existing files by appending a suffix
+    # Avoid overwriting existing files by appending a suffix (bounded — astronomically
+    # unlikely to collide, but never spin forever).
     if dest_dir.exists():
         import string, random
-        while dest_dir.exists():
+        for _ in range(1000):
+            if not dest_dir.exists():
+                break
             suffix = ''.join(random.choices(string.digits, k=3))
-            dest_dir = dest_dir.with_name(stem + '_' + suffix)
+            dest_dir = safe_resolve_ws(workspace, stem).with_name(stem + '_' + suffix)
+        else:
+            raise ValueError('Could not allocate a unique extraction directory')
     dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Member-count cap: a tiny archive with millions of (possibly empty) members
+    # slips under the byte cap but can exhaust inodes / file descriptors. Bound it.
+    _MAX_ARCHIVE_MEMBERS = 10000
 
     extracted_files = []
     total_extracted = 0
@@ -176,15 +208,20 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                     # Skip directories
                     if member.is_dir():
                         continue
+                    if len(extracted_files) >= _MAX_ARCHIVE_MEMBERS:
+                        raise ValueError(
+                            f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
+                            f'Possible archive bomb.'
+                        )
                     # Zip-slip protection
                     member_path = (dest_dir / member.filename).resolve()
                     if not member_path.is_relative_to(dest_dir.resolve()):
                         raise ValueError(f'Zip-slip blocked: {member.filename}')
                     # Zip-bomb protection: track actual extracted bytes (not declared file_size)
-                    if total_extracted > _MAX_EXTRACTED_BYTES:
+                    if total_extracted > cap:
                         raise ValueError(
                             f'Extraction too large ({total_extracted // (1024*1024)} MB > '
-                            f'{_MAX_EXTRACTED_BYTES // (1024*1024)} MB limit). '
+                            f'{cap // (1024*1024)} MB limit). '
                             f'Possible zip bomb.'
                         )
                     member_path.parent.mkdir(parents=True, exist_ok=True)
@@ -195,10 +232,10 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                             if not chunk:
                                 break
                             total_extracted += len(chunk)
-                            if total_extracted > _MAX_EXTRACTED_BYTES:
+                            if total_extracted > cap:
                                 raise ValueError(
                                     f'Extraction too large (> '
-                                    f'{_MAX_EXTRACTED_BYTES // (1024*1024)} MB limit). '
+                                    f'{cap // (1024*1024)} MB limit). '
                                     f'Possible zip bomb.'
                                 )
                             dst.write(chunk)
@@ -209,15 +246,20 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                 for member in tf.getmembers():
                     if not member.isfile():
                         continue
+                    if len(extracted_files) >= _MAX_ARCHIVE_MEMBERS:
+                        raise ValueError(
+                            f'Archive has too many files (> {_MAX_ARCHIVE_MEMBERS}). '
+                            f'Possible archive bomb.'
+                        )
                     # Tar-slip protection
                     member_path = (dest_dir / member.name).resolve()
                     if not member_path.is_relative_to(dest_dir.resolve()):
                         raise ValueError(f'Tar-slip blocked: {member.name}')
                     # Tar-bomb protection: track actual extracted bytes (not declared size)
-                    if total_extracted > _MAX_EXTRACTED_BYTES:
+                    if total_extracted > cap:
                         raise ValueError(
                             f'Extraction too large ({total_extracted // (1024*1024)} MB > '
-                            f'{_MAX_EXTRACTED_BYTES // (1024*1024)} MB limit). '
+                            f'{cap // (1024*1024)} MB limit). '
                             f'Possible zip bomb.'
                         )
                     member_path.parent.mkdir(parents=True, exist_ok=True)
@@ -230,10 +272,10 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
                                 if not chunk:
                                     break
                                 total_extracted += len(chunk)
-                                if total_extracted > _MAX_EXTRACTED_BYTES:
+                                if total_extracted > cap:
                                     raise ValueError(
                                         f'Extraction too large (> '
-                                        f'{_MAX_EXTRACTED_BYTES // (1024*1024)} MB limit). '
+                                        f'{cap // (1024*1024)} MB limit). '
                                         f'Possible zip bomb.'
                                     )
                                 dst.write(chunk)
@@ -320,3 +362,139 @@ def handle_transcribe(handler):
                 Path(temp_path).unlink(missing_ok=True)
             except Exception:
                 pass
+
+
+def handle_workspace_upload(handler):
+    """Upload a file into a session's workspace directory.
+
+    Form fields:
+        session_id – target session
+        path       – subdirectory within the workspace (default: '')
+    File:
+        file – the uploaded file(s)
+    """
+    import traceback as _tb
+    try:
+        content_type = handler.headers.get('Content-Type', '')
+        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        if content_length > MAX_UPLOAD_BYTES:
+            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
+
+        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        session_id = fields.get('session_id', '')
+        subpath = fields.get('path', '')
+
+        if not session_id:
+            return j(handler, {'error': 'Missing session_id'}, status=400)
+
+        if not files:
+            return j(handler, {'error': 'No file field in request'}, status=400)
+
+        # Validate session
+        try:
+            session = get_session(session_id)
+        except KeyError:
+            return j(handler, {'error': 'Session not found'}, status=404)
+
+        # Resolve workspace root from session
+        workspace = resolve_trusted_workspace(session.workspace)
+
+        # Resolve target subdirectory within workspace
+        target_dir = safe_resolve_ws(workspace, subpath) if subpath else workspace
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        results = []
+        for _field_name, (filename, file_bytes) in files.items():
+            if not filename:
+                continue
+
+            safe_name = _sanitize_upload_name(filename)
+            dest = safe_resolve_ws(target_dir, safe_name)
+
+            # Path traversal guard (belt-and-suspenders: safe_resolve_ws above is
+            # the authoritative guard and raises ValueError on traversal; this
+            # check catches any edge case where the resolved path escapes).
+            if not dest.resolve().is_relative_to(workspace.resolve()):
+                return j(handler, {'error': f'Path traversal blocked: {safe_name}'}, status=403)
+
+            # Deduplicate: append -1, -2, etc. if file already exists
+            if dest.exists():
+                stem = dest.stem
+                suffix = dest.suffix
+                for idx in range(1, 1000):
+                    candidate = safe_resolve_ws(target_dir, f'{stem}-{idx}{suffix}')
+                    if not candidate.resolve().is_relative_to(workspace.resolve()):
+                        return j(handler, {'error': 'Path traversal blocked'}, status=403)
+                    if not candidate.exists():
+                        dest = candidate
+                        break
+                else:
+                    return j(handler, {'error': 'Too many uploads with the same filename'}, status=400)
+
+            dest.write_bytes(file_bytes)
+            mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
+
+            # For archives, optionally extract into the target directory
+            is_archive = safe_name.lower().endswith(('.zip', '.tar.gz', '.tgz', '.tar.bz2', '.tar.xz'))
+            if is_archive:
+                import zipfile, tarfile, traceback as _extract_tb
+                try:
+                    extraction = extract_archive(file_bytes, safe_name, target_dir)
+                    # Remove the archive file after successful extraction
+                    dest.unlink(missing_ok=True)
+                    results.append({
+                        'filename': safe_name,
+                        'path': str(extraction.get('dest', target_dir)),
+                        'size': len(file_bytes),
+                        'is_image': False,
+                        'extracted': True,
+                        'extracted_files': extraction.get('files', []),
+                        'extracted_count': extraction.get('extracted', 0),
+                    })
+                    continue
+                except (zipfile.BadZipFile, tarfile.TarError, ValueError) as e:
+                    # Extraction failed — remove the archive file (no partial
+                    # content left behind) and surface the error to the user.
+                    dest.unlink(missing_ok=True)
+                    print(f'[webui] workspace upload extract error: {e}', flush=True)
+                    results.append({
+                        'filename': safe_name,
+                        'path': str(target_dir),
+                        'size': len(file_bytes),
+                        'mime': mime,
+                        'is_image': False,
+                        'extracted': False,
+                        'extract_error': str(e) or 'Archive extraction failed',
+                    })
+                    continue
+                except Exception:
+                    print('[webui] workspace upload extract error: ' + _extract_tb.format_exc(), flush=True)
+                    dest.unlink(missing_ok=True)
+                    results.append({
+                        'filename': safe_name,
+                        'path': str(target_dir),
+                        'size': len(file_bytes),
+                        'mime': mime,
+                        'is_image': False,
+                        'extracted': False,
+                        'extract_error': 'Archive extraction failed',
+                    })
+                    continue
+
+            results.append({
+                'filename': dest.name,
+                'path': str(dest),
+                'size': dest.stat().st_size,
+                'mime': mime,
+                'is_image': mime.startswith('image/'),
+                'extracted': False,
+            })
+
+        if len(results) == 1:
+            return j(handler, results[0])
+        return j(handler, {'files': results, 'count': len(results)})
+    except ValueError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    except Exception:
+        print('[webui] workspace upload error: ' + _tb.format_exc(), flush=True)
+        return j(handler, {'error': 'Upload failed'}, status=500)

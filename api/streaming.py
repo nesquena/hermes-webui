@@ -2263,6 +2263,35 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
         logger.debug("Background title refresh failed for session %s", session_id, exc_info=True)
 
 
+
+
+def generate_session_title_for_session(session, *, prefer_latest: bool = False, agent=None) -> tuple[Optional[str], str, str]:
+    """Generate a session title on demand from persisted conversation messages.
+
+    This helper powers explicit UI title-regeneration controls. It intentionally
+    does not inspect or mutate ``llm_title_generated``; callers decide whether
+    replacing the current title is allowed, then persist the returned title.
+    """
+    messages = getattr(session, 'messages', None) or []
+    if prefer_latest:
+        user_text, assistant_text = _latest_exchange_snippets(messages)
+    else:
+        user_text, assistant_text = _first_exchange_snippets(messages)
+    if not user_text:
+        return None, 'empty_user_message', ''
+    from api import profiles as profiles_api
+
+    with profiles_api.profile_env_for_background_worker(session, "manual title regeneration", logger_override=logger):
+        next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent)
+    if next_title:
+        return next_title, llm_status, raw_preview
+    fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
+    if fallback_title and not _is_generic_fallback_title(fallback_title):
+        reason = f'local_summary:{llm_status}' if llm_status else 'local_summary'
+        return fallback_title, reason, raw_preview
+    return None, llm_status or 'empty_title', raw_preview
+
+
 def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
     """Persist old_sid as a read-only pre-compression snapshot.
 

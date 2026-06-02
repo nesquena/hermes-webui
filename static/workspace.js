@@ -573,6 +573,32 @@ function cancelEditMode(){
   updateEditBtn();
 }
 
+// Map file extensions to Prism.js language identifiers.
+// Prism autoloader fetches missing language components from CDN on demand.
+const _PRISM_LANG_MAP={
+  js:'javascript',mjs:'javascript',jsx:'jsx',ts:'typescript',tsx:'tsx',
+  py:'python',pyw:'python',pyi:'python',
+  rb:'ruby',go:'go',rs:'rust',java:'java',kt:'kotlin',kts:'kotlin',
+  c:'c',h:'c',cpp:'cpp',cxx:'cpp',hpp:'cpp',cc:'cpp',
+  cs:'csharp',swift:'swift',scala:'scala',
+  php:'php',pl:'perl',pm:'perl',r:'r',lua:'lua',
+  sh:'bash',bash:'bash',zsh:'bash',fish:'bash',
+  ps1:'powershell',psm1:'powershell',
+  sql:'sql',graphql:'graphql',
+  json:'json',yaml:'yaml',yml:'yaml',toml:'toml',xml:'xml',
+  html:'markup',htm:'markup',svg:'markup',vue:'markup',
+  css:'css',scss:'scss',sass:'sass',less:'less',
+  md:'markdown',markdown:'markdown',
+  dockerfile:'docker',makefile:'makefile',cmake:'cmake',
+  ini:'ini',cfg:'ini',conf:'ini',properties:'properties',
+  diff:'diff',patch:'diff',
+  txt:'',log:'',csv:'',tsv:'',
+};
+function _prismLanguageForPath(path){
+  const ext=fileExt(path).replace(/^\./,'');
+  return _PRISM_LANG_MAP[ext]!==undefined?_PRISM_LANG_MAP[ext]:'plaintext';
+}
+
 async function openFile(path, opts={}){
   if(!S.session)return;
   const ext=fileExt(path);
@@ -659,7 +685,26 @@ async function openFile(path, opts={}){
         return;
       }
       showPreview('code');
-      $('previewCode').textContent=data.content;
+      // Syntax highlighting with Prism.js (already loaded on the page).
+      const codeEl=document.createElement('code');
+      codeEl.textContent=data.content;
+      const lang=_prismLanguageForPath(path);
+      if(lang) codeEl.className='language-'+lang;
+      const pre=$('previewCode');
+      pre.textContent='';
+      // Prism.highlightElement() propagates the language-* class onto the
+      // parent <pre>, so a previously-previewed code file leaves e.g.
+      // "language-css" on #previewCode. A subsequent plain-text file builds a
+      // class-less <code>, and Prism walks up to that stale ancestor class and
+      // mis-highlights prose. Strip any inherited language-* token from the
+      // <pre> before each render so highlighting never leaks across files.
+      pre.className=pre.className.replace(/\blanguage-\S+/g,'').replace(/\s+/g,' ').trim();
+      pre.appendChild(codeEl);
+      // Only invoke Prism when we actually assigned a language; otherwise the
+      // class-less <code> would inherit any ancestor language-* class.
+      if(lang&&typeof Prism!=='undefined'&&typeof Prism.highlightElement==='function'){
+        Prism.highlightElement(codeEl);
+      }
     }catch(e){
       // If it's a 400/too-large error, offer download instead
       downloadFile(path);
@@ -722,4 +767,76 @@ function openInBrowser(){
   if(!_previewCurrentPath||!S.session) return;
   const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(_previewCurrentPath)}&inline=1`;
   window.open(url,'_blank','noopener');
+}
+
+// ── Workspace upload ──────────────────────────────────────────────────
+function triggerWorkspaceUpload() {
+  const input = $('workspaceFileInput');
+  if (!input) return;
+  input.value = '';
+  input.onchange = async () => {
+    const files = input.files;
+    if (!files || !files.length) return;
+    for (const file of files) {
+      await uploadToWorkspace(file, S.currentDir || '.');
+    }
+    if (S.session) loadDir(S.currentDir);
+  };
+  input.click();
+}
+
+async function uploadToWorkspace(file, dir) {
+  if (!S.session) return;
+  const formData = new FormData();
+  formData.append('session_id', S.session.session_id);
+  formData.append('path', dir || '.');
+  formData.append('file', file, file.name);
+  try {
+    showToast(t('uploading') || 'Uploading\u2026', 2000);
+    const data = await api('/api/workspace/upload', {
+      method: 'POST',
+      body: formData,
+      headers: {},
+      timeoutMs: 120000,
+    });
+    if (data && data.error) {
+      showToast(data.error, 5000, 'error');
+    } else {
+      showToast(t('uploaded') || ('Uploaded ' + (data.filename || file.name)), 2000);
+    }
+  } catch (e) {
+    showToast(t('upload_failed') || ('Upload failed: ' + e.message), 5000, 'error');
+  }
+}
+
+// Drag-and-drop files onto workspace file tree
+if (typeof document !== 'undefined') {
+  const _wsUploadInit = () => {
+    const tree = $('fileTree');
+    if (!tree) return;
+    tree.addEventListener('dragover', (e) => {
+      if (e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files')) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        tree.classList.add('drag-over-upload');
+      }
+    });
+    tree.addEventListener('dragleave', () => {
+      tree.classList.remove('drag-over-upload');
+    });
+    tree.addEventListener('drop', async (e) => {
+      tree.classList.remove('drag-over-upload');
+      if (!e.dataTransfer || !e.dataTransfer.types || !e.dataTransfer.types.includes('Files')) return;
+      e.preventDefault();
+      for (const file of e.dataTransfer.files) {
+        await uploadToWorkspace(file, S.currentDir || '.');
+      }
+      if (S.session) loadDir(S.currentDir);
+    });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _wsUploadInit, {once: true});
+  } else {
+    _wsUploadInit();
+  }
 }

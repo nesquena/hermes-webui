@@ -2840,12 +2840,13 @@ from api.workspace import (
     _strip_surrounding_quotes,
     _workspace_blocked_roots,
 )
-from api.upload import handle_upload, handle_upload_extract, handle_transcribe
+from api.upload import handle_upload, handle_upload_extract, handle_transcribe, handle_workspace_upload
 from api.streaming import (
     _sse,
     _run_agent_streaming,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
+    generate_session_title_for_session,
 )
 from api.gateway_chat import _run_gateway_chat_streaming, webui_gateway_chat_enabled
 from api.run_journal import (
@@ -5458,6 +5459,8 @@ def handle_post(handler, parsed) -> bool:
         return handle_upload(handler)
     if parsed.path == "/api/upload/extract":
         return handle_upload_extract(handler)
+    if parsed.path == "/api/workspace/upload":
+        return handle_workspace_upload(handler)
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
@@ -5738,6 +5741,27 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/sessions/cleanup_zero_message":
         return _handle_sessions_cleanup(handler, body, zero_only=True)
 
+    def _sync_session_title_to_insights(session):
+        """Write title-only session metadata updates through to state.db when enabled."""
+        try:
+            if not load_settings().get("sync_to_insights"):
+                return
+            from api.state_sync import sync_session_usage
+
+            messages = getattr(session, "messages", None) or []
+            sync_session_usage(
+                session_id=session.session_id,
+                input_tokens=getattr(session, "input_tokens", None) or 0,
+                output_tokens=getattr(session, "output_tokens", None) or 0,
+                estimated_cost=getattr(session, "estimated_cost", 0.0),
+                model=getattr(session, "model", ""),
+                title=session.title,
+                message_count=len(messages),
+                profile=getattr(session, "profile", None),
+            )
+        except Exception:
+            logger.debug("Failed to update session title in state.db", exc_info=True)
+
     if parsed.path == "/api/session/rename":
         try:
             require(body, "session_id", "title")
@@ -5753,6 +5777,37 @@ def handle_post(handler, parsed) -> bool:
             s.save()
         publish_session_list_changed("session_rename")
         return j(handler, {"session": s.compact()})
+
+
+    if parsed.path == "/api/session/title/regenerate":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = body["session_id"]
+        prefer_latest = bool(body.get("prefer_latest", False))
+        try:
+            s = get_session(sid)
+            s = _ensure_full_session_before_mutation(sid, s)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        if getattr(s, "read_only", False) or getattr(s, "is_imported", False):
+            return bad(handler, "Read-only imported sessions cannot be renamed", 403)
+        next_title, reason, raw_preview = generate_session_title_for_session(s, prefer_latest=prefer_latest)
+        if not next_title:
+            return bad(handler, f"Could not generate a better title ({reason or 'empty'})", 422)
+        with _get_session_agent_lock(sid):
+            s.title = str(next_title).strip()[:80] or "Untitled"
+            s.llm_title_generated = True
+            s.save(touch_updated_at=False)
+        _sync_session_title_to_insights(s)
+        publish_session_list_changed("session_title_regenerate")
+        return j(handler, {
+            "session": s.compact(),
+            "title": s.title,
+            "status": reason,
+            "raw_preview": (raw_preview or "")[:240],
+        })
 
     if parsed.path == "/api/personality/set":
         try:

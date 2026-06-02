@@ -1012,7 +1012,7 @@
   .session-action-menu{display:block;position:fixed;left:0;top:0;right:auto;bottom:auto;min-width:220px;max-width:min(280px,calc(100vw - 16px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:999;overflow:hidden;max-height:calc(100vh - 16px);overflow-y:auto;transform-origin:top right;will-change:opacity,transform;}
   .session-action-menu.open-animated{animation:session-menu-in .45s cubic-bezier(.2,.8,.2,1);}
   .session-action-opt{width:100%;background:none;border:none;text-align:left;font:inherit;color:var(--text);flex-direction:row!important;gap:0!important;padding:0!important;}
-  .session-action-opt .ws-opt-action{display:flex;flex-direction:row;align-items:center;gap:10px;width:100%;padding:10px 14px;}
+  .session-action-opt .ws-opt-action{display:flex;flex-direction:row;align-items:center;gap:10px;width:100%;padding:8px 14px;}
   .session-action-opt .ws-opt-icon{color:var(--muted);transition:color .12s,opacity .12s;flex-shrink:0;display:flex;align-items:center;width:16px;}
   .session-action-opt:hover .ws-opt-icon{color:var(--text);opacity:1;}
   .session-action-copy{display:flex;flex-direction:column;gap:2px;min-width:0;}
@@ -1561,6 +1561,22 @@
   .img-lightbox-counter{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,.5);color:#fff;font-size:14px;padding:4px 14px;border-radius:12px;pointer-events:none;}
   .msg-media-link{display:inline-flex;align-items:center;gap:5px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:6px;padding:4px 10px;font-size:13px;color:var(--accent-text);text-decoration:none;}
   .msg-media-link:hover{background:var(--accent-bg-strong);}
+  /* Generated local image artifact (#3220): clean inline image with a
+     hover/focus-revealed Download button overlaid top-right. The image keeps
+     its .msg-media-img lightbox-on-click behavior; no permanent card chrome —
+     matches the ChatGPT/Claude/Gemini pattern of letting the image be the hero. */
+  .msg-artifact-image{position:relative;display:inline-block;width:fit-content;max-width:min(360px,100%);vertical-align:bottom;margin:6px 4px 6px 0;line-height:0;}
+  /* Generated images are the subject of the message, not a small attachment
+     thumbnail — render them prominently at natural aspect ratio (the base
+     .msg-media-img is a cropped 120x90 upload thumbnail). Capped + responsive so
+     they never overflow the message column or a mobile viewport. Lightbox-on-click
+     (cursor:zoom-in) is preserved. */
+  .msg-artifact-image .msg-media-img{margin:0;display:block;width:auto;height:auto;max-width:min(360px,100%);max-height:360px;object-fit:contain;border-radius:8px;cursor:zoom-in;}
+  .msg-artifact-download{position:absolute;top:8px;right:8px;width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px;background:rgba(0,0,0,.62);border:1px solid rgba(255,255,255,.25);box-shadow:0 1px 4px rgba(0,0,0,.35);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);color:#fff;text-decoration:none;opacity:0;transform:translateY(-2px);transition:opacity .12s,transform .12s,background .12s;pointer-events:none;}
+  .msg-artifact-image:hover .msg-artifact-download,.msg-artifact-image:focus-within .msg-artifact-download{opacity:1;transform:translateY(0);pointer-events:auto;}
+  .msg-artifact-download:hover{background:rgba(0,0,0,.82);border-color:rgba(255,255,255,.4);}
+  .msg-artifact-download:focus-visible{opacity:1;pointer-events:auto;outline:2px solid var(--accent-bg-strong);outline-offset:1px;}
+  @media (hover:none){.msg-artifact-download{opacity:1;pointer-events:auto;transform:none;}}
 
   /* ── Inline SVG rendering ── */
   .msg-media-svg{display:block;max-width:100%;height:auto;border-radius:6px;margin:6px 0;border:1px solid var(--border);background:var(--surface);}
@@ -1955,6 +1971,7 @@
   .breadcrumb-current{color:var(--text);font-weight:500;}
   .breadcrumb-sep{color:var(--border);margin:0 1px;font-size:11px;}
   .file-tree{flex:1;overflow-y:auto;padding:8px;}
+  .file-tree.drag-over-upload{outline:2px dashed var(--blue,#3b82f6);outline-offset:-2px;border-radius:6px;}
   .file-item{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:8px;cursor:pointer;font-size:12px;color:var(--muted);transition:all .12s;min-width:0;}
   .file-item:hover{background:var(--hover-bg);color:var(--text);}
   .file-item.active{background:var(--accent-bg);color:var(--accent-text);}
@@ -1966,6 +1983,14 @@
   .preview-area.visible{display:flex;opacity:1;}
   .preview-path{font-size:11px;color:var(--muted);padding-bottom:8px;border-bottom:1px solid var(--border);flex-shrink:0;}
   .preview-code{font-family:"SF Mono","Fira Code",ui-monospace,monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;color:var(--pre-text);}
+  /* Workspace preview syntax highlighting (#3337): Prism's prism-tomorrow theme
+     styles BOTH pre[class*="language-"] and code[class*="language-"] with its own
+     gray background + padding. Prism propagates the language-* class onto the
+     <pre> (.preview-code), so without overriding the <pre> too you get a gray
+     prism frame around the navy var(--code-bg) <code> — a jarring two-tone block
+     on dark themes. Mirror the chat-code-block fix (.msg-body pre[class*=...]):
+     force BOTH surfaces to var(--code-bg) so the code panel reads as one tone. */
+  .preview-code[class*="language-"],.preview-code code[class*="language-"]{background:var(--code-bg) !important;}
   /* Image preview */
   .preview-img-wrap{display:flex;align-items:center;justify-content:center;flex:1;padding:8px 0;min-height:0;}
   .preview-img{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.4);}
