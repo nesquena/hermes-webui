@@ -6749,8 +6749,8 @@ async function loadProvidersPanel(){
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
     const allProviders=data.providers||[];
+    const providers=allProviders.filter(p=>p.configurable||p.is_oauth||p.is_custom);
     const selfHosted=allProviders.filter(p=>p.is_self_hosted);
-    const providers=allProviders.filter(p=>!p.is_self_hosted&&(p.configurable||p.is_oauth||p.is_custom));
     list.innerHTML='';
     _providerCardEls.clear();
     _selfHostedCardEls.clear();
