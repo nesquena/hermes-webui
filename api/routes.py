@@ -3635,7 +3635,8 @@ def _handle_insights(handler, parsed) -> bool:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
         if db_path and db_path.exists():
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            from api._sqlite import connect_state_db_ro
+            with closing(connect_state_db_ro(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 cur.execute("""
@@ -3912,7 +3913,8 @@ def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
                 "ms": round((time.time() - t0) * 1000, 1),
             }
         else:
-            with closing(sqlite3.connect(str(db_path))) as conn:
+            from api._sqlite import connect_state_db_ro
+            with closing(connect_state_db_ro(db_path)) as conn:
                 conn.execute("PRAGMA schema_version").fetchone()
             checks["state_db"] = {
                 "status": "ok",
@@ -12573,7 +12575,8 @@ def _persist_handoff_summary_to_state_db(sid: str, message: dict) -> bool:
 
     marker_payload = _extract_handoff_summary_payload(message)
     try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
+        from api._sqlite import connect_state_db_rw
+        with closing(connect_state_db_rw(db_path)) as conn:
             try:
                 if marker_payload is not None:
                     cur = conn.execute(
