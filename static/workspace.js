@@ -830,9 +830,16 @@ if (typeof document !== 'undefined') {
   const _wsUploadInit = () => {
     const tree = $('fileTree');
     if (!tree) return;
+    tree.addEventListener('dragenter', (e) => {
+      if (e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files')) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
     tree.addEventListener('dragover', (e) => {
       if (e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files')) {
         e.preventDefault();
+        e.stopPropagation();
         e.dataTransfer.dropEffect = 'copy';
         tree.classList.add('drag-over-upload');
       }
@@ -844,6 +851,7 @@ if (typeof document !== 'undefined') {
       tree.classList.remove('drag-over-upload');
       if (!e.dataTransfer || !e.dataTransfer.types || !e.dataTransfer.types.includes('Files')) return;
       e.preventDefault();
+      e.stopPropagation();
       for (const file of e.dataTransfer.files) {
         await uploadToWorkspace(file, S.currentDir || '.');
       }
