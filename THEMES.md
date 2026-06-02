@@ -20,7 +20,7 @@ Preview is instant — the UI updates as you click.
 
 **Slash command:** Type `/theme <name>` in the composer. The command accepts
 both theme names (`system`, `dark`, `light`) and skin names (`default`, `ares`,
-`mono`, `slate`, `poseidon`, `sisyphus`, `charizard`, `sienna`,
+`mono`, `slate`, `poseidon`, `poseidon-green`, `sisyphus`, `charizard`, `sienna`,
 `catppuccin`, `nous`, `geist-contrast`). It updates the matching axis and leaves the other one
 alone.
 
@@ -52,6 +52,7 @@ absent for light. System mode tracks the OS preference at runtime.
 | **Mono** | Neutral gray. Distraction-free, for deep focus. |
 | **Slate** | Slate blue-gray. Subtle and grown-up. |
 | **Poseidon** | Ocean blue. Calm and focused for long sessions. |
+| **Poseidon Green** (`poseidon-green`) | Seafoam green sibling to Poseidon. Calm, but greener. |
 | **Sisyphus** | Vivid purple. Distinctive without being loud. |
 | **Charizard** | Warm orange. Energetic and easy on the eyes. |
 | **Sienna** | Warm clay and sand earth palette. Soft and natural. |
@@ -109,9 +110,9 @@ Two ways to ship it:
   appears behind small labels and chips; weak contrast there reads as blur.
 - **The logo gradient uses `--accent` automatically**, so it adapts to your
   skin without any extra work.
-- **No server changes needed.** The `skin` setting in `settings.json` accepts
-  any string, so your custom skin name persists without code changes once you
-  load the CSS.
+- **Built-in skins need both client and server registration.** Add the skin to
+  `static/boot.js`, the early-init allowlist in `static/index.html`, and the
+  server allowlist in `api/config.py` so settings round-trips preserve it.
 
 ---
 

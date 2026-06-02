@@ -1337,6 +1337,7 @@ const _SKINS=[
   {name:'Mono',     colors:['#CCCCCC','#999999','#666666']},
   {name:'Slate',    colors:['#334155','#475569','#64748b']},
   {name:'Poseidon', colors:['#0EA5E9','#0284C7','#0369A1']},
+  {name:'Poseidon Green', value:'poseidon-green', colors:['#34D399','#10B981','#047857']},
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
   {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},

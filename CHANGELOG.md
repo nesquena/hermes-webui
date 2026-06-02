@@ -5,6 +5,8 @@
 
 ### Added
 
+- New opt-in `poseidon-green` skin: a seafoam-green sibling to Poseidon that appears in Settings → Appearance, works with `/theme poseidon-green`, and preserves the existing blue Poseidon skin unchanged.
+- Clicking an inline chat PDF preview now opens a full-page PDF.js modal viewer with continuous multi-page scroll, current-page status, jump-to-page controls, Escape/backdrop close, and a download action, so document review can stay readable without leaving the session.
 - Session unread state is now saved server-side per profile and synced through `/api/sessions`, with a dedicated Unread sidebar group below Active and above Recent, a clearer unread indicator, and explicit `Mark as read` / `Mark as unread` menu actions that do not reorder Recents.
 - Session action menus now include a start-of-conversation "Regenerate title" action that uses Kimi K2.6 to replace stale sidebar titles without moving the session in recent ordering.
 
@@ -19,6 +21,8 @@
 
 ### Fixed
 
+- The current session todo list can now render as an always-visible checklist directly above the message composer, with completed items ticked/struck through and legacy fallback to transcript-derived todo state preserved.
+- Hermes `todo` tool runs now persist a normalized per-session `todos` field that the WebUI Todos panel prefers over transcript scraping, so the task list remains visible across refreshes/settled-session reloads while still falling back to legacy tool-message parsing for older sessions.
 - Markdown tables now render inside a horizontal-scroll wrapper and keep short first columns such as `Priority` from collapsing into vertical letter stacks, while long text/code columns wrap more readably.
 - PDF and other local `MEDIA:` previews/download links now resolve against `document.baseURI` instead of using bare `api/media?...` relative URLs, so deep-linked `/session/<id>` pages no longer misroute preview/download requests to `/session/api/media...`; the PDF preview bootstrap also now uses a real dynamic `import()` for PDF.js instead of a broken mixed `script.src` + inline module body loader that left previews stuck at `Loading PDF (0)…`.
 - Markdown table/prose currency amounts like `A$3 **up to A$30,000**` and `US$3 **up to US$30,000**` no longer get misparsed as inline KaTeX math, so dollar signs, bold text, and cell formatting remain intact.

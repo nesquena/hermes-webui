@@ -13,6 +13,7 @@ SKIN_VALUES = (
     "mono",
     "slate",
     "poseidon",
+    "poseidon-green",
     "sisyphus",
     "charizard",
     "sienna",

@@ -193,8 +193,8 @@ class TestSessionRegenerateTitleMenuItem:
     def test_regenerate_title_translation_keys_present(self):
         src = I18N.read_text(encoding="utf-8")
         assert "session_regenerate_title: 'Regenerate title'" in src
-        assert "session_regenerate_title_desc: 'Generate a fresh title from the beginning with Kimi K2.6'" in src
-        assert "session_regenerating_title: 'Regenerating title with Kimi K2.6…'" in src
+        assert "session_regenerate_title_desc: 'Generate a fresh title from the beginning'" in src
+        assert "session_regenerating_title: 'Regenerating title…'" in src
 
 
 # ════════════════════════════════════════════════════════════════════

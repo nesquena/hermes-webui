@@ -1,7 +1,7 @@
 """Regression tests for manual sidebar title regeneration.
 
 The session three-dot menu now exposes a start-of-conversation title refresh that
-uses Kimi K2.6 via the DreamIT LiteLLM endpoint. These tests pin the backend
+uses the configured auxiliary title-generation route. These tests pin the backend
 contract without making a real provider call.
 """
 
@@ -59,28 +59,33 @@ class _FakeSession:
         }
 
 
-def _post_regenerate_title(monkeypatch, session, fake_title="Kimi Generated Title"):
+def _post_regenerate_title(monkeypatch, session, fake_title: str | None = "Session title regeneration menu"):
     import api.routes as routes
 
     calls = []
     events = []
 
-    def fake_generate(user_text, assistant_text, **kwargs):
-        calls.append({"user_text": user_text, "assistant_text": assistant_text, **kwargs})
-        return fake_title, "llm_aux"
+    def fake_generate(user_text, assistant_text, workspace_context='', **kwargs):
+        calls.append({
+            "user_text": user_text,
+            "assistant_text": assistant_text,
+            "workspace_context": workspace_context,
+            **kwargs,
+        })
+        return fake_title, "llm_aux", ""
 
     monkeypatch.setattr(routes, "get_session", lambda sid: session)
     monkeypatch.setattr(routes, "_ensure_full_session_before_mutation", lambda sid, s: s)
     monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: nullcontext())
     monkeypatch.setattr(routes, "publish_session_list_changed", lambda reason: events.append(reason))
-    monkeypatch.setattr(routes, "generate_title_raw_via_aux", fake_generate)
+    monkeypatch.setattr(routes, "_generate_llm_session_title_via_aux", fake_generate)
 
     handler = _FakeHandler({"session_id": session.session_id})
     routes.handle_post(handler, urlparse("http://example.com/api/session/regenerate_title"))
     return handler, calls, events
 
 
-def test_regenerate_title_uses_opening_context_and_kimi_k26(monkeypatch):
+def test_regenerate_title_uses_opening_context_and_configured_aux(monkeypatch):
     session = _FakeSession([
         {"role": "user", "content": "How can I add title regeneration to sessions?"},
         {"role": "assistant", "content": "Use the existing session action menu."},
@@ -93,9 +98,7 @@ def test_regenerate_title_uses_opening_context_and_kimi_k26(monkeypatch):
     assert handler.status == 200
     payload = handler.json_body()
     assert payload["ok"] is True
-    assert payload["title"] == "Kimi Generated Title"
-    assert payload["model"] == "fireworks/kimi-k2.6-turbo"
-    assert payload["provider"] == "litellm-chat"
+    assert payload["title"] == "Session title regeneration menu"
 
     assert len(calls) == 1
     assert calls[0]["user_text"] == (
@@ -106,11 +109,9 @@ def test_regenerate_title_uses_opening_context_and_kimi_k26(monkeypatch):
         "Assistant 1: Use the existing session action menu.\n"
         "Assistant 2: Second opening answer should be included."
     )
-    assert calls[0]["provider"] == "litellm-chat"
-    assert calls[0]["model"] == "fireworks/kimi-k2.6-turbo"
-    assert calls[0]["base_url"] == "https://llm.dreamit.au/v1"
+    assert calls[0]["workspace_context"] == ""
 
-    assert session.title == "Kimi Generated Title"
+    assert session.title == "Session title regeneration menu"
     assert session.llm_title_generated is True
     assert session.saved_touch_values == [False]
     assert events == ["session_title_regenerated"]
@@ -152,21 +153,17 @@ def test_regenerate_title_rejects_fragmentary_kimi_title_and_uses_fallback(monke
     assert events == ["session_title_regenerated"]
 
 
-def test_regenerate_title_salvages_possible_titles_from_kimi_reasoning(monkeypatch):
+def test_regenerate_title_uses_sanitized_aux_title(monkeypatch):
     session = _FakeSession([
         {"role": "user", "content": "hey, how can we make a more clear unread tag for a session?"},
         {"role": "assistant", "content": "I’ll implement server-side read state and sidebar unread UI."},
     ])
-    raw = (
-        "The user wants a short session title (3-8 words).\n"
-        "Key themes from the conversation:\n"
-        "- User asks about unread tags and syncing read state.\n"
-        "Possible titles:\n"
-        "- Session Read State Sync Implementation\n"
-        "- Unread Tag and Read State Sync\n"
-    )
 
-    handler, calls, events = _post_regenerate_title(monkeypatch, session, fake_title=raw)
+    handler, calls, events = _post_regenerate_title(
+        monkeypatch,
+        session,
+        fake_title="Session Read State Sync Implementation",
+    )
 
     assert handler.status == 200
     payload = handler.json_body()
@@ -188,7 +185,7 @@ def test_regenerate_title_rejects_weak_fallback_title(monkeypatch):
         {"role": "assistant", "content": "I’ll inspect the sidebar read-state path."},
     ])
 
-    handler, calls, events = _post_regenerate_title(monkeypatch, session, fake_title="The user wants a title but did not provide one.")
+    handler, calls, events = _post_regenerate_title(monkeypatch, session, fake_title=None)
 
     assert handler.status == 500
     payload = handler.json_body()

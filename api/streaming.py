@@ -1689,12 +1689,35 @@ def _title_language_mismatch(user_text: str, title: str) -> bool:
     return english_hits >= 2
 
 
-def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
+def _workspace_title_context(workspace: str | None) -> str:
+    workspace_path = str(workspace or '').strip()
+    if not workspace_path:
+        return ''
+    workspace_name = ''
+    try:
+        for ws in load_workspaces():
+            if not isinstance(ws, dict):
+                continue
+            if str(ws.get('path') or '').strip() == workspace_path:
+                workspace_name = str(ws.get('name') or '').strip()
+                break
+    except Exception:
+        workspace_name = ''
+    lines = ['Workspace context:']
+    if workspace_name:
+        lines.append(f'- Name: {workspace_name[:120]}')
+    lines.append(f'- Path: {workspace_path[:300]}')
+    return '\n'.join(lines)
+
+
+def _title_prompts(user_text: str, assistant_text: str, workspace_context: str = '') -> tuple[str, list[str]]:
     qa = (
         f"Opening conversation messages:\n"
         f"User-side context:\n{user_text[:1200]}\n\n"
         f"Assistant-side context:\n{assistant_text[:1200]}"
     )
+    if workspace_context:
+        qa += f"\n\n{workspace_context[:600]}"
     language_rule = _title_prompt_language_rule(user_text)
     prompts = [
         (
@@ -1884,11 +1907,12 @@ def generate_title_raw_via_aux(
     provider: str = '',
     model: str = '',
     base_url: str = '',
+    workspace_context: str = '',
 ) -> tuple[Optional[str], str]:
     """Return (raw_text, status) via auxiliary LLM route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
-    qa, prompts = _title_prompts(user_text, assistant_text)
+    qa, prompts = _title_prompts(user_text, assistant_text, workspace_context)
     configured = _get_aux_title_config()
     caller_supplied_route = bool(provider or model or base_url)
     provider = provider or configured.get('provider', '') or ''
@@ -1951,14 +1975,14 @@ def generate_title_raw_via_aux(
         return None, 'llm_error_aux'
 
 
-def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str]:
+def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, workspace_context: str = '') -> tuple[Optional[str], str]:
     """Return (raw_text, status) via active-agent route."""
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
     if agent is None:
         return None, 'missing_agent'
 
-    qa, prompts = _title_prompts(user_text, assistant_text)
+    qa, prompts = _title_prompts(user_text, assistant_text, workspace_context)
     base_max_tokens = _title_completion_budget(
         getattr(agent, 'provider', ''),
         getattr(agent, 'model', ''),
@@ -2061,9 +2085,9 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
         agent.reasoning_config = prev_reasoning
 
 
-def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str, str]:
+def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str, workspace_context: str = '') -> tuple[Optional[str], str, str]:
     """Generate a title via active-agent route, then sanitize/validate result."""
-    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text)
+    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text, workspace_context)
     if not raw:
         return None, status, ''
     title = _sanitize_generated_title(raw)
@@ -2074,7 +2098,7 @@ def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text:
     return None, 'llm_invalid', str(raw)[:120]
 
 
-def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False) -> tuple[Optional[str], str, str]:
+def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, workspace_context: str = '', agent=None, *, use_agent_model: bool = False) -> tuple[Optional[str], str, str]:
     """Generate a title via dedicated auxiliary LLM route, then sanitize/validate result.
 
     When use_agent_model is False (default), the auxiliary client resolves
@@ -2097,6 +2121,7 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
         provider=provider,
         model=model,
         base_url=base_url,
+        workspace_context=workspace_context,
     )
     if not raw:
         return None, status, ''
@@ -2244,17 +2269,18 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
         from api import profiles as profiles_api
+        workspace_context = _workspace_title_context(getattr(s, 'workspace', '') or '')
 
         with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text, workspace_context)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, workspace_context, agent=agent, use_agent_model=True)
             else:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, workspace_context)
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text, workspace_context)
             source = llm_status
             if not next_title:
                 fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
@@ -2327,17 +2353,18 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
         if not effective or effective in ('Untitled', 'New Chat'):
             return
         from api import profiles as profiles_api
+        workspace_context = _workspace_title_context(getattr(s, 'workspace', '') or '')
 
         with profiles_api.profile_env_for_background_worker(s, "background title", logger_override=logger):
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text, workspace_context)
                 if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, workspace_context, agent=agent, use_agent_model=True)
             else:
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, workspace_context)
                 if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
-                    next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+                    next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text, workspace_context)
         if not next_title:
             _put_title_status(put_event, session_id, 'refresh_skipped', llm_status or 'empty', effective, raw_preview)
             return

@@ -2822,8 +2822,8 @@ from api.streaming import (
     cancel_stream,
     _materialize_pending_user_turn_before_error,
     _opening_context_snippets,
-    generate_title_raw_via_aux,
-    _sanitize_generated_title,
+    _generate_llm_session_title_via_aux,
+    _workspace_title_context,
     _fallback_title_from_exchange,
     _is_generic_fallback_title,
 )
@@ -5649,17 +5649,15 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Read-only imported sessions cannot be modified from WebUI", 400)
 
         user_text, assistant_text = _opening_context_snippets(s.messages, limit=5)
+        workspace_context = _workspace_title_context(getattr(s, 'workspace', '') or '')
         if not user_text:
             return bad(handler, "Need at least one user message to regenerate title", 400)
 
-        raw_title, status = generate_title_raw_via_aux(
+        next_title, status, raw_preview = _generate_llm_session_title_via_aux(
             user_text,
             assistant_text or " ",
-            provider="litellm-chat",
-            model="fireworks/kimi-k2.6-turbo",
-            base_url="https://llm.dreamit.au/v1",
+            workspace_context,
         )
-        next_title = _sanitize_generated_title(raw_title or "")
         if _regenerated_session_title_too_weak(next_title, user_text):
             status = f"weak:{status or 'empty'}"
             next_title = None
@@ -5672,9 +5670,9 @@ def handle_post(handler, parsed) -> bool:
                 and not _regenerated_session_title_too_weak(fallback_title, user_text)
             ):
                 next_title = fallback_title
-                status = f"fallback:{status or 'kimi_empty'}"
+                status = f"fallback:{status or 'title_empty'}"
             elif fallback_title:
-                status = f"weak_fallback:{status or 'kimi_empty'}"
+                status = f"weak_fallback:{status or 'title_empty'}"
 
         if not next_title:
             return bad(handler, f"Could not generate a useful title ({status or 'empty'})", 500)
@@ -5687,8 +5685,6 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {
             "ok": True,
             "title": s.title,
-            "provider": "litellm-chat",
-            "model": "fireworks/kimi-k2.6-turbo",
             "status": status,
             "session": s.compact(),
         })

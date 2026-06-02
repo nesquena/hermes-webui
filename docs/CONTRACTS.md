@@ -68,7 +68,7 @@ that slice.
   variable contract lives in `static/style.css`.
 
 Current appearance has a theme axis (`light`, `dark`, `system`) and a separate
-skin axis (`default`, `ares`, `mono`, `slate`, `poseidon`, `sisyphus`,
+skin axis (`default`, `ares`, `mono`, `slate`, `poseidon`, `poseidon-green`, `sisyphus`,
 `charizard`, `sienna`, `catppuccin`, `nous`, `geist-contrast`) in
 `static/boot.js` and `static/style.css`. Do not follow stale `data-theme`-only theme guidance unless
 the current code and tests prove that model still applies.
