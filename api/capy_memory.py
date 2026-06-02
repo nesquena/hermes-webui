@@ -1701,6 +1701,124 @@ def _github_workflow_jobs_refresh_summary(origin_uri: str, payload: dict[str, An
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_workflow_artifacts_path_run_id(origin_uri: str) -> int | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 8
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or lowered[4] != "actions"
+        or lowered[5] != "runs"
+        or not re.fullmatch(r"[1-9][0-9]*", path[6])
+        or lowered[7] != "artifacts"
+    ):
+        return None
+    return int(path[6])
+
+
+def _github_workflow_artifacts_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    return (
+        (parts.hostname or "").strip().lower() == "api.github.com"
+        and len(path) >= 8
+        and path[0] == ""
+        and lowered[1] == "repos"
+        and lowered[4] == "actions"
+        and lowered[5] == "runs"
+        and lowered[7] == "artifacts"
+    )
+
+
+def _github_workflow_artifact_is_safe(artifact: Any) -> bool:
+    if not isinstance(artifact, dict):
+        return False
+    artifact_id = _safe_optional_nonnegative_int(artifact.get("id"))
+    if artifact_id is None or artifact_id <= 0:
+        return False
+    raw_name = artifact.get("name")
+    if not isinstance(raw_name, str):
+        return False
+    name = _safe_public_text(raw_name, limit=200)
+    if (
+        not name
+        or name != raw_name.strip()
+        or _refresh_value_is_blocked(raw_name)
+        or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(name)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._()+,-]{0,199}", name)
+    ):
+        return False
+    if "size_in_bytes" in artifact and _safe_optional_nonnegative_int(artifact.get("size_in_bytes")) is None:
+        return False
+    if "expired" in artifact and not isinstance(artifact.get("expired"), bool):
+        return False
+    for field in ("created_at", "updated_at", "expires_at"):
+        raw_value = artifact.get(field)
+        if raw_value is not None and not _safe_iso_timestamp(raw_value):
+            return False
+    for field in ("name", "created_at", "updated_at", "expires_at"):
+        if _refresh_value_is_blocked(artifact.get(field)):
+            return False
+    return True
+
+
+def _json_payload_is_github_workflow_artifacts_metadata(origin_uri: str, payload: Any) -> bool:
+    run_id = _github_workflow_artifacts_path_run_id(origin_uri)
+    if run_id is None:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    if total_count is None:
+        return False
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list):
+        return False
+    if not artifacts:
+        return total_count == 0
+    return all(_github_workflow_artifact_is_safe(artifact) for artifact in artifacts)
+
+
+def _github_workflow_artifacts_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    run_id = _github_workflow_artifacts_path_run_id(origin_uri) or 0
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    parts = [f"GitHub workflow run #{run_id} artifacts", f"artifact count: {total_count if total_count is not None else 0}"]
+    raw_artifacts = payload.get("artifacts")
+    artifacts = raw_artifacts if isinstance(raw_artifacts, list) else []
+    for artifact in artifacts[:5]:
+        if not _github_workflow_artifact_is_safe(artifact):
+            continue
+        name = _safe_public_text(artifact.get("name"), limit=200)
+        artifact_id = _safe_optional_nonnegative_int(artifact.get("id"))
+        size = _safe_optional_nonnegative_int(artifact.get("size_in_bytes"))
+        artifact_parts = [f"artifact: {name}"]
+        if artifact_id is not None:
+            artifact_parts.append(f"id: {artifact_id}")
+        if size is not None:
+            artifact_parts.append(f"size bytes: {size}")
+        if isinstance(artifact.get("expired"), bool):
+            artifact_parts.append(f"expired: {str(artifact['expired']).lower()}")
+        for field, label in (("created_at", "created"), ("updated_at", "updated"), ("expires_at", "expires")):
+            timestamp = _safe_public_text(artifact.get(field), limit=80)
+            if timestamp:
+                artifact_parts.append(f"{label}: {timestamp}")
+        parts.append("; ".join(artifact_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_check_runs_path_info(origin_uri: str) -> tuple[str, str] | None:
     try:
         parts = urlsplit(origin_uri)
@@ -3901,6 +4019,15 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    if _json_payload_is_github_workflow_artifacts_metadata(origin_uri, payload):
+        title = f"GitHub workflow run {_github_workflow_artifacts_path_run_id(origin_uri) or 0} artifacts"
+        summary = _github_workflow_artifacts_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_contributors_metadata(origin_uri, payload):
         title = f"GitHub contributors {(_github_contributors_path_repo(origin_uri) or source_id)}"
         summary = _github_contributors_refresh_summary(origin_uri, payload)
@@ -4003,6 +4130,9 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         elif _json_payload_is_github_workflow_jobs_metadata(origin_uri, payload):
             title = f"GitHub workflow run {_github_workflow_jobs_path_run_id(origin_uri) or 0} jobs"
             summary = _github_workflow_jobs_refresh_summary(origin_uri, payload)
+        elif _json_payload_is_github_workflow_artifacts_metadata(origin_uri, payload):
+            title = f"GitHub workflow run {_github_workflow_artifacts_path_run_id(origin_uri) or 0} artifacts"
+            summary = _github_workflow_artifacts_refresh_summary(origin_uri, payload)
         elif _json_payload_is_github_check_runs_metadata(origin_uri, payload):
             check_runs_info = _github_check_runs_path_info(origin_uri)
             check_runs_repo, check_runs_sha = check_runs_info or (source_id, "")
@@ -4190,6 +4320,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_stargazers_path_matches(safe_origin_uri) and (
             not _github_stargazers_path_repo(safe_origin_uri)
+            or content_type not in {"application/json", "application/feed+json"}
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_workflow_artifacts_path_matches(safe_origin_uri) and (
+            _github_workflow_artifacts_path_run_id(safe_origin_uri) is None
             or content_type not in {"application/json", "application/feed+json"}
         ):
             raise RuntimeError("refresh fetcher disabled")
