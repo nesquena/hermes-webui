@@ -690,26 +690,45 @@ def list_dir(workspace: Path, rel: str='.'):
     if not target.is_dir():
         raise FileNotFoundError(f"Not a directory: {rel}")
     ws_resolved = workspace.resolve()
+    target_resolved = target.resolve()
     entries = []
-    for item in sorted(target.iterdir(), key=lambda p: (not p.is_symlink(), p.is_file(), p.name.lower())):
+
+    def _sort_key(p: Path):
+        is_link = p.is_symlink()
+        is_file = False
+        if not is_link:
+            try:
+                is_file = p.is_file()
+            except OSError:
+                pass
+        return (not is_link, is_file, p.name.lower())
+
+    for item in sorted(target.iterdir(), key=_sort_key):
         if item.is_symlink():
             # Resolve the symlink target and check if it stays within workspace
             try:
                 link_target = item.resolve()
-            except OSError:
+            except (OSError, RuntimeError):
                 continue
             # Cycle detection: skip if symlink points back to current dir,
             # workspace root, or any ancestor of current dir.
             # This must run REGARDLESS of whether target is inside workspace.
-            if (link_target == target.resolve() or link_target == target
+            if (link_target == target_resolved or link_target == target
                     or link_target == ws_resolved):
                 continue
             try:
-                target.resolve().relative_to(link_target)
+                target_resolved.relative_to(link_target)
                 # target is under link_target — link_target is an ancestor → cycle
                 continue
             except ValueError:
                 pass
+            # Hide symlinks that resolve outside the workspace. Traversing them
+            # would be blocked by safe_resolve_ws anyway, so listing them would
+            # advertise entries that can never be opened.
+            try:
+                link_target.relative_to(ws_resolved)
+            except ValueError:
+                continue
             # Block symlinks that resolve to system directories.
             if _is_blocked_system_path(link_target):
                 continue

@@ -17,6 +17,8 @@ def test_safe_resolve_blocks_external_symlink_directory(tmp_path):
     with pytest.raises(ValueError, match="Path traversal blocked"):
         list_dir(workspace, "escape")
 
+    assert "escape" not in {entry["name"] for entry in list_dir(workspace, ".")}
+
 
 def test_read_file_blocks_external_symlink_file(tmp_path):
     workspace = tmp_path / "workspace"
@@ -28,6 +30,8 @@ def test_read_file_blocks_external_symlink_file(tmp_path):
 
     with pytest.raises(ValueError, match="Path traversal blocked"):
         read_file_content(workspace, "secret-link.txt")
+
+    assert "secret-link.txt" not in {entry["name"] for entry in list_dir(workspace, ".")}
 
 
 def test_internal_symlink_still_resolves_within_workspace(tmp_path):
@@ -42,3 +46,4 @@ def test_internal_symlink_still_resolves_within_workspace(tmp_path):
 
     assert resolved == (nested / "inside.txt").resolve()
     assert read_file_content(workspace, "inside-link.txt")["content"] == "inside"
+    assert "inside-link.txt" in {entry["name"] for entry in list_dir(workspace, ".")}
