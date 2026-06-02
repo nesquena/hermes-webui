@@ -4643,7 +4643,7 @@ class StreamChannel:
         self._subscribers: list[queue.Queue] = []
         self._offline_buffer: list[tuple[str, object]] = []
 
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self, *, replay_buffer: bool = True) -> queue.Queue:
         q: queue.Queue = queue.Queue()
         with self._lock:
             # Replay buffered events to the new subscriber INSIDE the lock so a
@@ -4651,8 +4651,9 @@ class StreamChannel:
             # finish replaying the older buffered tail. queue.Queue.put_nowait
             # is non-blocking on an unbounded queue, so holding the lock here
             # is safe. Per Opus advisor on stage-292.
-            for item in self._offline_buffer:
-                q.put_nowait(item)
+            if replay_buffer:
+                for item in self._offline_buffer:
+                    q.put_nowait(item)
             self._subscribers.append(q)
         return q
 

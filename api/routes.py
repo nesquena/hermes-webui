@@ -7785,7 +7785,7 @@ def _handle_sse_stream(handler, parsed):
         except _CLIENT_DISCONNECT_ERRORS:
             pass
         return True
-    subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
+    subscriber = stream.subscribe(replay_buffer=False) if hasattr(stream, "subscribe") else stream
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
@@ -7801,7 +7801,10 @@ def _handle_sse_stream(handler, parsed):
         # interruption marker that is only valid after the in-memory stream is
         # gone. Without this active-stream replay, late subscribers see an empty
         # Activity area until the next tool event even though /health reports an
-        # active gateway-tool run.
+        # active gateway-tool run. Do not also preload StreamChannel's offline
+        # buffer for this subscriber: those gap events are journaled by the
+        # producer before they are queued, so replaying both sources would emit
+        # the same tool/token frames twice on late attach.
         try:
             _replay_run_journal(
                 handler,

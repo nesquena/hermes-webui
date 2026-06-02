@@ -133,3 +133,46 @@ def test_active_stream_replays_journaled_activity_for_late_subscribers(tmp_path,
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
+
+
+def test_active_stream_late_subscriber_deduplicates_journal_and_offline_buffer(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+
+    session_id = "late-subscriber-dedup-session"
+    stream_id = "late-subscriber-dedup-stream"
+    tool_payload = {
+        "name": "terminal",
+        "preview": "terminal: pytest",
+        "args": {},
+        "is_error": False,
+        "tid": "call-1",
+    }
+    append_run_event(session_id, stream_id, "tool", tool_payload)
+
+    stream = create_stream_channel()
+    stream.put_nowait(("tool", tool_payload))
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = stream
+    handler = _FakeHandler()
+    thread = threading.Thread(
+        target=_handle_sse_stream,
+        args=(handler, SimpleNamespace(query=f"stream_id={stream_id}&after_seq=0")),
+        daemon=True,
+    )
+
+    try:
+        thread.start()
+        stream.put_nowait(("stream_end", {"status": "done"}))
+        thread.join(timeout=1)
+        assert not thread.is_alive(), "active stream should finish after live stream_end"
+
+        payload = handler.wfile.getvalue().decode("utf-8")
+        assert handler.status == 200
+        assert payload.count("event: tool") == 1
+        assert payload.count('"tid": "call-1"') == 1
+        assert "event: stream_end" in payload
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)

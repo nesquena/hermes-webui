@@ -11,7 +11,7 @@ def test_reattach_path_uses_replay_when_status_reports_journal():
 
     assert "st.replay_available" in block
     assert "replayOnly=true" in block
-    assert "replayOnly?_runJournalReplayParams():''" in block
+    assert "reconnecting?_runJournalReplayParams():''" in block
     assert "_clearOwnerInflightState()" in block
 
 
