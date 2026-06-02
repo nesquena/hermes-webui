@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- New blank WebUI chats now stay visible and selected in the sidebar before the
+  first message is sent, including when New Chat is opened while the sidebar is
+  filtered to CLI sessions.
+
 ## [v0.51.210] — 2026-06-02 — Release GD (stage-batch1 — model-picker multi-slash fix + extensionless preview highlighting)
 
 ### Fixed

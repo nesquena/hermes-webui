@@ -520,6 +520,7 @@ async function newSession(flash, options={}){
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=data.session;S.messages=data.session.messages||[];
+    if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     S.lastUsage={...(data.session.last_usage||{})};
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
@@ -3662,6 +3663,34 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   renderSessionListFromCache();
 }
 
+function _sessionRowsWithActiveEphemeralSession(rows){
+  rows=Array.isArray(rows)?rows:[];
+  if(!S.session||!S.session.session_id) return rows;
+  const sid=S.session.session_id;
+  if(rows.some(s=>s&&s.session_id===sid)) return rows;
+  const nowSec=Math.floor(Date.now()/1000);
+  const activeRow={
+    ...S.session,
+    session_id:sid,
+    title:S.session.title||'New Chat',
+    display_title:S.session.display_title||S.session.title||'New Chat',
+    message_count:0,
+    last_message_at:S.session.last_message_at||S.session.updated_at||nowSec,
+    updated_at:S.session.updated_at||S.session.last_message_at||nowSec,
+    profile:S.session.profile||S.activeProfile||'default',
+    is_streaming:false,
+  };
+  return [activeRow,...rows];
+}
+
+function _ensureActiveSessionRowPresent(rows, sourceRows){
+  rows=Array.isArray(rows)?rows:[];
+  const activeSid=_activeSessionIdForSidebar();
+  if(!activeSid||rows.some(s=>s&&s.session_id===activeSid)) return rows;
+  const activeRow=(Array.isArray(sourceRows)?sourceRows:[]).find(s=>s&&s.session_id===activeSid);
+  return activeRow?[activeRow,...rows]:rows;
+}
+
 function clearOptimisticSessionStreaming(sid){
   sid=sid||(S.session&&S.session.session_id)||'';
   if(!sid) return;
@@ -3822,14 +3851,16 @@ function renderSessionListFromCache(){
   const searchQueryRaw=($('sessionSearch').value||'').trim();
   const q=searchQueryRaw.toLowerCase();
   const activeSidForSidebar=_activeSessionIdForSidebar();
+  const sidebarRows=_sessionRowsWithActiveEphemeralSession(_allSessions);
   // Merge direct session-id/link matches, title matches, then content matches (deduped).
   // Direct matches must not disable content search: if a user pasted the same
   // session id into another conversation, that content hit should still appear.
-  const allMatched=_sessionSearchMergeMatches(_allSessions,searchQueryRaw,_contentSearchResults);
-  // Never surface ephemeral 0-message sessions in the sidebar — they only become
-  // real once the first message is sent. The server already filters them, but this
-  // guard ensures a brand-new active session doesn't flash into the list while
-  // _allSessions is stale from a prior render (#1171).
+  const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
+  const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
+  // Keep inactive ephemeral 0-message sessions out of the sidebar — they only
+  // become real once the first message is sent. The server already filters them.
+  // Exception: the active freshly-created chat is injected above so it remains
+  // visible/selected until the user sends the first turn or switches away.
   const withMessages=allMatched.filter(s=>
     (s.message_count||0)>0 ||
     _sessionAttentionState(s) ||
