@@ -594,8 +594,23 @@ def main() -> None:
         print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
+
+    # ── Diagnostic signal trap (local-only, observability for unexplained exits) ──
+    # Installs SIGTERM/SIGINT/SIGSEGV/etc. handlers that write JSON markers to
+    # /tmp/hermes-webui-shim/ before dying, and wraps serve_forever with an
+    # exception capture. See api/diag_shim.py for details.
     try:
-        httpd.serve_forever()
+        from api.diag_shim import install as _install_diag, wrap_serve_forever as _wrap_serve
+        _install_diag()
+        _serve = _wrap_serve(httpd.serve_forever, label="httpd.serve_forever")
+    except Exception as _diag_err:
+        # Never let the diag shim break the server — fall through to plain serve_forever.
+        sys.stderr.write(f"[diag_shim] install failed: {_diag_err}\n")
+        sys.stderr.flush()
+        _serve = httpd.serve_forever
+
+    try:
+        _serve()
     finally:
         _log_shutdown_audit()
         # Stop the gateway watcher on shutdown
