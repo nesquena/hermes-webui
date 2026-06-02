@@ -2,7 +2,9 @@ import io
 import threading
 from types import SimpleNamespace
 
+import api.models as models
 from api.config import STREAMS, STREAMS_LOCK, create_stream_channel
+from api.run_journal import append_run_event
 from api.routes import _handle_sse_stream
 
 
@@ -78,6 +80,56 @@ def test_same_stream_in_two_tabs_receives_identical_token_sequence():
             assert '"text": "H"' in payload
             assert '"text": "allo"' in payload
             assert "event: stream_end" in payload
+    finally:
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+
+
+def test_active_stream_replays_journaled_activity_for_late_subscribers(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+
+    session_id = "late-subscriber-session"
+    stream_id = "late-subscriber-stream"
+    append_run_event(
+        session_id,
+        stream_id,
+        "tool",
+        {
+            "name": "terminal",
+            "preview": "terminal: pytest",
+            "args": {},
+            "is_error": False,
+            "tid": "call-1",
+        },
+    )
+
+    stream = create_stream_channel()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = stream
+    handler = _FakeHandler()
+    thread = threading.Thread(
+        target=_handle_sse_stream,
+        args=(handler, SimpleNamespace(query=f"stream_id={stream_id}&after_seq=0")),
+        daemon=True,
+    )
+
+    try:
+        thread.start()
+        stream.put_nowait(("token", {"text": "later"}))
+        stream.put_nowait(("stream_end", {"status": "done"}))
+        thread.join(timeout=1)
+        assert not thread.is_alive(), "active stream should finish after live stream_end"
+
+        payload = handler.wfile.getvalue().decode("utf-8")
+        assert handler.status == 200
+        assert f"id: {stream_id}:1" in payload
+        assert "event: tool" in payload
+        assert '"name": "terminal"' in payload
+        assert '"preview": "terminal: pytest"' in payload
+        assert '"text": "later"' in payload
+        assert "interrupted" not in payload
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)

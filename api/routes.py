@@ -7635,7 +7635,13 @@ def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int 
         return 0
 
 
-def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
+def _replay_run_journal(
+    handler,
+    stream_id: str,
+    after_seq: int | None,
+    *,
+    include_stale: bool = True,
+) -> bool:
     summary = find_run_summary(stream_id)
     if not summary:
         return False
@@ -7651,7 +7657,7 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
             entry.get("payload"),
             entry.get("event_id"),
         )
-    if not summary.get("terminal"):
+    if include_stale and not summary.get("terminal"):
         stale = stale_interrupted_event(
             str(summary.get("session_id") or ""),
             stream_id,
@@ -7787,6 +7793,25 @@ def _handle_sse_stream(handler, parsed):
     handler.send_header("Connection", "close")
     handler.end_headers()
     try:
+        # Active WebUI-owned streams can still have already-journaled events
+        # (for example, when a user opens a session after the gateway worker has
+        # started running tools, or when the browser reconnects after losing the
+        # first EventSource). Subscribe first so future live events queue up,
+        # then replay durable history without synthesizing the stale-worker
+        # interruption marker that is only valid after the in-memory stream is
+        # gone. Without this active-stream replay, late subscribers see an empty
+        # Activity area until the next tool event even though /health reports an
+        # active gateway-tool run.
+        try:
+            _replay_run_journal(
+                handler,
+                stream_id,
+                _parse_run_journal_after_seq(qs, stream_id),
+                include_stale=False,
+            )
+            handler.wfile.flush()
+        except Exception:
+            logger.debug("Failed to replay active run journal for stream %s", stream_id, exc_info=True)
         while True:
             try:
                 event, data = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
