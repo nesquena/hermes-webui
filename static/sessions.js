@@ -961,11 +961,12 @@ function _isCliSession(session) {
 
 function _sessionSourceLabel(filter, count) {
   const n = Number(count) || 0;
+  if (filter === 'all') return `All sessions (${n})`;
   return filter === 'cli' ? `CLI sessions (${n})` : `WebUI sessions (${n})`;
 }
 
 function _setSessionSourceFilter(filter) {
-  const next = filter === 'cli' ? 'cli' : 'webui';
+  const next = (filter === 'cli' || filter === 'all') ? filter : 'webui';
   if (_sessionSourceFilter === next) return;
   _sessionSourceFilter = next;
   _activeProject = null;
@@ -978,7 +979,7 @@ function _setSessionSourceFilter(filter) {
 function _restoreSessionSourceFilter() {
   try {
     const raw = localStorage.getItem('hermes-session-source-filter');
-    if (raw === 'cli' || raw === 'webui') _sessionSourceFilter = raw;
+    if (raw === 'cli' || raw === 'webui' || raw === 'all') _sessionSourceFilter = raw;
   } catch (_e) {}
 }
 
@@ -3844,9 +3845,11 @@ function renderSessionListFromCache(){
   if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
     _sessionSourceFilter='webui';
   }
-  const sourceFiltered = _sessionSourceFilter==='cli'
-    ? withMessages.filter(s=>_isCliSession(s))
-    : withMessages.filter(s=>!_isCliSession(s));
+  const sourceFiltered = _sessionSourceFilter==='all'
+    ? withMessages
+    : (_sessionSourceFilter==='cli'
+        ? withMessages.filter(s=>_isCliSession(s))
+        : withMessages.filter(s=>!_isCliSession(s)));
   // The server is authoritative for profile scoping (#1611): it filters by
   // active profile when no query param is set, and returns the aggregate when
   // we send ?all_profiles=1. The renamed-root cross-alias (a row tagged
@@ -3901,8 +3904,8 @@ function renderSessionListFromCache(){
   if(window._showCliSessions || cliSessionCount>0){
     const sourceTabs=document.createElement('div');
     sourceTabs.className='session-source-tabs';
-    for(const filter of ['webui','cli']){
-      const count=filter==='cli'?cliSessionCount:webuiSessionCount;
+    for(const filter of ['all','webui','cli']){
+      const count=filter==='all'?withMessages.length:(filter==='cli'?cliSessionCount:webuiSessionCount);
       const btn=document.createElement('button');
       btn.type='button';
       btn.className='session-source-tab'+(_sessionSourceFilter===filter?' active':'');
