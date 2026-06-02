@@ -6587,6 +6587,126 @@ async function _loadPluginPage(path, label) {
 // ── Providers panel ─────────────────────────────────────────────────────────
 
 const _providerCardEls = new Map(); // providerId → {card, statusDot, input, saveBtn, removeBtn}
+const _selfHostedProbeByProvider = new Map(); // providerId → probe state
+const _selfHostedCardEls = new Map(); // providerId → {baseUrlInput, modelInput|modelSelect, apiKeyInput, saveBtn, probeBanner}
+
+function _selfHostedProbeMessage(probe){
+  if(!probe||probe.status==='idle')return '';
+  if(probe.status==='probing')return t('onboarding_probe_probing')||'Testing connection…';
+  if(probe.status==='ok'){
+    const n=(probe.models||[]).length;
+    const tmpl=t('onboarding_probe_ok')||'Connected. {n} model(s) available.';
+    return tmpl.replace('{n}',String(n));
+  }
+  const errKey='onboarding_probe_error_'+probe.error;
+  const localized=t(errKey);
+  const heading=(localized&&localized!==errKey)?localized:(t('onboarding_probe_error_generic')||'Could not reach the configured base URL.');
+  const detail=probe.detail?` (${probe.detail})`:'';
+  return heading+detail;
+}
+
+async function _runSelfHostedProbe(providerId,{force=false}={}){
+  const els=_selfHostedCardEls.get(providerId);
+  if(!els||!els.baseUrlInput)return {status:'idle'};
+  const baseUrl=(els.baseUrlInput.value||'').trim();
+  const apiKey=els.apiKeyInput?(els.apiKeyInput.value||'').trim():'';
+  const probeKey=`${providerId}|${baseUrl}|${apiKey}`;
+  let probe=_selfHostedProbeByProvider.get(providerId)||{status:'idle',error:null,detail:'',models:null,probedKey:''};
+  if(!baseUrl){
+    probe={status:'idle',error:null,detail:'',models:null,probedKey:''};
+    _selfHostedProbeByProvider.set(providerId,probe);
+    if(els.probeBanner){els.probeBanner.style.display='none';els.probeBanner.textContent='';}
+    return probe;
+  }
+  if(!force&&probe.probedKey===probeKey&&probe.status!=='probing')return probe;
+  probe={status:'probing',error:null,detail:'',models:null,probedKey:probeKey};
+  _selfHostedProbeByProvider.set(providerId,probe);
+  if(els.probeBanner){
+    els.probeBanner.style.display='block';
+    els.probeBanner.className='onboarding-probe-banner onboarding-probe-probing';
+    els.probeBanner.textContent=_selfHostedProbeMessage(probe);
+  }
+  try{
+    const res=await api('/api/onboarding/probe',{method:'POST',body:JSON.stringify({provider:providerId,base_url:baseUrl,api_key:apiKey||undefined})});
+    if(res&&res.ok){
+      probe={status:'ok',error:null,detail:'',models:Array.isArray(res.models)?res.models:[],probedKey:probeKey};
+      if(els.modelSelect&&probe.models.length){
+        const prev=els.modelSelect.value;
+        els.modelSelect.innerHTML=probe.models.map(m=>`<option value="${esc(m.id)}">${esc(m.label||m.id)}</option>`).join('');
+        const still=probe.models.some(m=>m.id===prev);
+        els.modelSelect.value=still?prev:probe.models[0].id;
+      }
+    }else{
+      probe={status:'error',error:(res&&res.error)||'unreachable',detail:(res&&res.detail)||'',models:null,probedKey:probeKey};
+    }
+  }catch(e){
+    probe={status:'error',error:'unreachable',detail:(e&&e.message)||String(e),models:null,probedKey:probeKey};
+  }
+  _selfHostedProbeByProvider.set(providerId,probe);
+  if(els.probeBanner){
+    const msg=_selfHostedProbeMessage(probe);
+    if(msg){
+      els.probeBanner.style.display='block';
+      const cls={ok:'onboarding-probe-ok',probing:'onboarding-probe-probing',error:'onboarding-probe-error'}[probe.status]||'';
+      els.probeBanner.className='onboarding-probe-banner '+cls;
+      els.probeBanner.textContent=msg;
+    }else{
+      els.probeBanner.style.display='none';
+      els.probeBanner.textContent='';
+    }
+  }
+  return probe;
+}
+
+function _scheduleSelfHostedProbe(providerId){
+  const els=_selfHostedCardEls.get(providerId);
+  if(!els)return;
+  if(els._probeTimer)clearTimeout(els._probeTimer);
+  els._probeTimer=setTimeout(()=>{_runSelfHostedProbe(providerId);},400);
+}
+
+async function _saveSelfHostedProvider(providerId){
+  const els=_selfHostedCardEls.get(providerId);
+  if(!els||!els.saveBtn)return;
+  const baseUrl=(els.baseUrlInput.value||'').trim();
+  const apiKey=els.apiKeyInput?(els.apiKeyInput.value||'').trim():'';
+  const model=els.modelSelect
+    ? (els.modelSelect.value||'').trim()
+    : (els.modelInput.value||'').trim();
+  if(!baseUrl){
+    showToast(t('onboarding_error_base_url_required')||'Base URL is required');
+    return;
+  }
+  if(!model){
+    showToast(t('onboarding_error_model_required')||'Model is required');
+    return;
+  }
+  const probe=await _runSelfHostedProbe(providerId,{force:true});
+  if(probe.status!=='ok'){
+    showToast(_selfHostedProbeMessage(probe)||t('onboarding_error_probe_failed')||'Could not reach the configured base URL.');
+    return;
+  }
+  els.saveBtn.disabled=true;
+  els.saveBtn.textContent=t('providers_saving');
+  try{
+    const body={provider:providerId,model,base_url:baseUrl};
+    if(apiKey) body.api_key=apiKey;
+    const res=await api('/api/providers/self-hosted',{method:'POST',body:JSON.stringify(body)});
+    if(res.ok){
+      showToast(t('providers_self_hosted_saved')||`${res.display_name||providerId} saved`);
+      _refreshModelDropdownsAfterProviderChange();
+      await loadProvidersPanel();
+    }else{
+      showToast(res.error||'Failed to save provider');
+      els.saveBtn.disabled=false;
+      els.saveBtn.textContent=t('providers_self_hosted_save')||t('providers_save');
+    }
+  }catch(e){
+    showToast('Error: '+(e.message||String(e)));
+    els.saveBtn.disabled=false;
+    els.saveBtn.textContent=t('providers_self_hosted_save')||t('providers_save');
+  }
+}
 
 async function _fetchProviderQuotaStatus(force=false){
   const endpoint=force?`/api/provider/quota?refresh=1&ts=${Date.now()}`:'/api/provider/quota';
@@ -6602,18 +6722,45 @@ async function loadProvidersPanel(){
   try{
     const data=await api('/api/providers');
     const quota=await _fetchProviderQuotaStatus(false).catch(e=>({ok:false,status:'unavailable',quota:null,message:e.message||t('provider_quota_unavailable'),client_fetched_at:new Date().toISOString()}));
-    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth||p.is_custom);
+    const allProviders=data.providers||[];
+    const selfHosted=allProviders.filter(p=>p.is_self_hosted);
+    const providers=allProviders.filter(p=>!p.is_self_hosted&&(p.configurable||p.is_oauth||p.is_custom));
     list.innerHTML='';
     _providerCardEls.clear();
+    _selfHostedCardEls.clear();
+    _selfHostedProbeByProvider.clear();
     const quotaCard=_buildProviderQuotaCard(quota);
     if(quotaCard) list.appendChild(quotaCard);
-    if(providers.length===0){
+    if(providers.length===0&&selfHosted.length===0){
       list.style.display='none';
       if(empty) empty.style.display='';
       return;
     }
     if(empty) empty.style.display='none';
     list.style.display='';
+    if(selfHosted.length){
+      const section=document.createElement('div');
+      section.className='providers-self-hosted-section';
+      const heading=document.createElement('div');
+      heading.className='providers-section-subheading';
+      heading.textContent=t('providers_self_hosted_section_title')||t('provider_category_self_hosted')||'Open / self-hosted';
+      section.appendChild(heading);
+      const hint=document.createElement('div');
+      hint.className='providers-section-subhint';
+      hint.textContent=t('providers_self_hosted_section_hint')||t('onboarding_base_url_help')||'';
+      section.appendChild(hint);
+      const inner=document.createElement('div');
+      inner.className='providers-self-hosted-list';
+      inner.style.display='flex';
+      inner.style.flexDirection='column';
+      inner.style.gap='12px';
+      inner.style.marginTop='8px';
+      for(const p of selfHosted){
+        inner.appendChild(_buildSelfHostedProviderCard(p));
+      }
+      section.appendChild(inner);
+      list.appendChild(section);
+    }
     for(const p of providers){
       list.appendChild(_buildProviderCard(p));
     }
@@ -6865,6 +7012,128 @@ function _buildProviderQuotaCard(status){
       try{localStorage.setItem('hermes-provider-quota-pool-open',poolDetails.open?'1':'0');}catch(e){}
     });
   }
+  return card;
+}
+
+function _buildSelfHostedProviderCard(p){
+  const card=document.createElement('div');
+  card.className='provider-card provider-card-self-hosted';
+  card.dataset.provider=p.id;
+  const configured=!!(p.self_hosted_configured||p.has_key);
+  const modelCount=Number.isFinite(p.models_total)?p.models_total:(Array.isArray(p.models)?p.models.length:0);
+  const metaParts=[];
+  if(modelCount>0) metaParts.push(modelCount+(modelCount===1?' model':' models'));
+  metaParts.push(configured?(t('providers_status_configured')||'Configured'):(t('providers_status_not_configured_label')||'Not configured'));
+  const header=document.createElement('button');
+  header.type='button';
+  header.className='provider-card-header';
+  header.innerHTML=`
+    <div class="provider-card-info">
+      <div class="provider-card-name">${esc(p.display_name)}</div>
+      <div class="provider-card-meta">${esc(metaParts.join(' · '))}</div>
+    </div>
+    ${configured?`<span class="provider-card-badge">${esc(t('providers_status_configured'))}</span>`:''}
+    <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
+  `;
+  card.appendChild(header);
+  const body=document.createElement('div');
+  body.className='provider-card-body';
+  const baseUrlVal=(p.base_url||p.default_base_url||'').trim();
+  const modelVal=(p.current_model||p.default_model||'').trim();
+  const baseField=document.createElement('div');
+  baseField.className='provider-card-field';
+  const baseLabel=document.createElement('label');
+  baseLabel.className='provider-card-label';
+  baseLabel.textContent=t('onboarding_base_url_label')||'Base URL';
+  baseField.appendChild(baseLabel);
+  const baseUrlInput=document.createElement('input');
+  baseUrlInput.type='text';
+  baseUrlInput.className='provider-card-input';
+  baseUrlInput.value=baseUrlVal;
+  baseUrlInput.placeholder=t('onboarding_base_url_placeholder')||'http://localhost:11434/v1';
+  baseUrlInput.autocomplete='off';
+  baseField.appendChild(baseUrlInput);
+  const probeRow=document.createElement('div');
+  probeRow.className='onboarding-probe-row';
+  probeRow.style.justifyContent='flex-start';
+  const probeBtn=document.createElement('button');
+  probeBtn.type='button';
+  probeBtn.className='onboarding-probe-btn';
+  probeBtn.textContent=t('onboarding_probe_test_button')||'Test connection';
+  probeBtn.onclick=()=>_runSelfHostedProbe(p.id,{force:true});
+  probeRow.appendChild(probeBtn);
+  baseField.appendChild(probeRow);
+  const probeBanner=document.createElement('p');
+  probeBanner.className='onboarding-probe-banner';
+  probeBanner.style.display='none';
+  baseField.appendChild(probeBanner);
+  body.appendChild(baseField);
+  const modelField=document.createElement('div');
+  modelField.className='provider-card-field';
+  const modelLabel=document.createElement('label');
+  modelLabel.className='provider-card-label';
+  modelLabel.textContent=t('onboarding_model_label')||'Model';
+  modelField.appendChild(modelLabel);
+  let modelInput=null;
+  let modelSelect=null;
+  if(p.id==='custom'){
+    modelInput=document.createElement('input');
+    modelInput.type='text';
+    modelInput.className='provider-card-input';
+    modelInput.value=modelVal;
+    modelInput.placeholder=t('onboarding_custom_model_placeholder')||'model-name';
+    modelField.appendChild(modelInput);
+  }else{
+    modelSelect=document.createElement('select');
+    modelSelect.className='provider-card-input';
+    const choices=Array.isArray(p.models)&&p.models.length?p.models:[];
+    if(choices.length){
+      modelSelect.innerHTML=choices.map(m=>`<option value="${esc(m.id||m)}">${esc(m.label||m.id||m)}</option>`).join('');
+      if(modelVal) modelSelect.value=modelVal;
+    }else if(modelVal){
+      modelSelect.innerHTML=`<option value="${esc(modelVal)}">${esc(modelVal)}</option>`;
+    }
+    modelField.appendChild(modelSelect);
+  }
+  body.appendChild(modelField);
+  if(p.key_optional){
+    const keyField=document.createElement('div');
+    keyField.className='provider-card-field';
+    const keyLabel=document.createElement('label');
+    keyLabel.className='provider-card-label';
+    keyLabel.textContent=t('onboarding_api_key_label_optional')||'API key (optional)';
+    keyField.appendChild(keyLabel);
+    const apiKeyInput=document.createElement('input');
+    apiKeyInput.type='password';
+    apiKeyInput.className='provider-card-input';
+    apiKeyInput.placeholder=t('onboarding_api_key_placeholder_optional')||'';
+    apiKeyInput.autocomplete='off';
+    keyField.appendChild(apiKeyInput);
+    body.appendChild(keyField);
+    _selfHostedCardEls.set(p.id,{baseUrlInput,modelInput,modelSelect,apiKeyInput,saveBtn:null,probeBanner});
+  }else{
+    _selfHostedCardEls.set(p.id,{baseUrlInput,modelInput,modelSelect,apiKeyInput:null,saveBtn:null,probeBanner});
+  }
+  const saveRow=document.createElement('div');
+  saveRow.className='provider-card-row';
+  saveRow.style.marginTop='6px';
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='provider-card-btn provider-card-btn-primary';
+  saveBtn.textContent=t('providers_self_hosted_save')||t('providers_save');
+  saveBtn.onclick=()=>_saveSelfHostedProvider(p.id);
+  saveRow.appendChild(saveBtn);
+  body.appendChild(saveRow);
+  const els=_selfHostedCardEls.get(p.id);
+  if(els) els.saveBtn=saveBtn;
+  card.appendChild(body);
+  baseUrlInput.addEventListener('input',()=>_scheduleSelfHostedProbe(p.id));
+  baseUrlInput.addEventListener('blur',()=>_runSelfHostedProbe(p.id));
+  const apiKeyInput=els&&els.apiKeyInput;
+  if(apiKeyInput){
+    apiKeyInput.addEventListener('blur',()=>_runSelfHostedProbe(p.id));
+  }
+  header.addEventListener('click',()=>card.classList.toggle('open'));
   return card;
 }
 

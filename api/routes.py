@@ -2854,7 +2854,14 @@ from api.run_journal import (
     read_run_events,
     stale_interrupted_event,
 )
-from api.providers import get_providers, get_provider_quota, get_provider_cost_history, set_provider_key, remove_provider_key
+from api.providers import (
+    apply_self_hosted_provider_setup,
+    get_providers,
+    get_provider_quota,
+    get_provider_cost_history,
+    set_provider_key,
+    remove_provider_key,
+)
 from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
@@ -5853,6 +5860,18 @@ def handle_post(handler, parsed) -> bool:
         if not provider_id:
             return bad(handler, "provider is required")
         result = remove_provider_key(provider_id)
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+
+    if parsed.path == "/api/providers/self-hosted":
+        provider_id = (body.get("provider") or "").strip().lower()
+        if not provider_id:
+            return bad(handler, "provider is required")
+        try:
+            result = apply_self_hosted_provider_setup(body)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
