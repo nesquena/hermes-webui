@@ -329,7 +329,7 @@ function renderSessionArtifacts(){
     if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
     return p;
   };
-  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(displayPath(item.path))}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+  root.innerHTML = items.map(item => html`<button type="button" class="workspace-artifact-item" data-artifact-path="${item.path}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${displayPath(item.path)}</div><div class="workspace-artifact-meta">${item.source || 'session'}</div></button>`).join('');
 }
 
 async function _workspacePathExists(path){

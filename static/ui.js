@@ -17,6 +17,10 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
 const OFFLINE_RECHECK_MS=2500;
+function debugLog(...args){ if(window.__HERMES_DEBUG__) console.debug(...args); }
+function html(strings,...values){
+  return strings.reduce((out,chunk,i)=>out+chunk+(i<values.length?esc(values[i]):''),'');
+}
 let _offlineVisible=false;
 let _offlineReason='browser';
 let _offlineProbeTimer=null;
@@ -530,6 +534,28 @@ if(document.readyState==='complete'){
 }
 
 /* ── Image lightbox — click any .msg-media-img to enlarge ─────────────────── */
+function trapFocus(container, onClose){
+  const previous=document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const selector='a[href],button:not([disabled]),textarea,input,select,[tabindex]:not([tabindex="-1"])';
+  const focusables=()=>Array.from(container.querySelectorAll(selector)).filter(el=>!el.hasAttribute('disabled')&&el.offsetParent!==null);
+  const handler=e=>{
+    if(e.key==='Escape'){ if(onClose)onClose(); return; }
+    if(e.key!=='Tab')return;
+    const items=focusables();
+    if(!items.length){ e.preventDefault(); container.focus(); return; }
+    const first=items[0], last=items[items.length-1];
+    if(e.shiftKey&&document.activeElement===first){ e.preventDefault(); last.focus(); }
+    else if(!e.shiftKey&&document.activeElement===last){ e.preventDefault(); first.focus(); }
+  };
+  document.addEventListener('keydown',handler);
+  const first=focusables()[0];
+  setTimeout(()=>{ (first||container).focus(); },0);
+  return ()=>{
+    document.removeEventListener('keydown',handler);
+    if(previous&&typeof previous.focus==='function') setTimeout(()=>previous.focus(),0);
+  };
+}
+
 function _openImgLightbox(imgEl) {
   if(!imgEl || !imgEl.src) return;
   const src=imgEl.src, alt=imgEl.alt||'';
@@ -558,14 +584,16 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   const lb = document.createElement('div');
   lb.className = 'img-lightbox';
   lb.setAttribute('role', 'dialog');
-  lb.setAttribute('aria-label', alt || 'Image');
+  const label = alt || t('media_image_label');
+  lb.setAttribute('aria-label', label);
+  lb.tabIndex = -1;
   const img = document.createElement('img');
   img.src = src;
-  img.alt = alt || '';
+  img.alt = label;
   img.onclick = e => e.stopPropagation();
   const cls = document.createElement('button');
   cls.className = 'img-lightbox-close';
-  cls.setAttribute('aria-label', 'Close');
+  cls.setAttribute('aria-label', t('terminal_close'));
   cls.textContent = '×';
   cls.onclick = () => _closeImgLightbox(lb);
   lb.appendChild(img);
@@ -577,13 +605,13 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   if(lb._navImages){
     const prevBtn = document.createElement('button');
     prevBtn.className = 'img-lightbox-nav img-lightbox-nav-prev';
-    prevBtn.setAttribute('aria-label', 'Previous image');
+    prevBtn.setAttribute('aria-label', t('media_previous_image'));
     prevBtn.innerHTML = '‹';
     prevBtn.onclick = e => { e.stopPropagation(); _navigateLightbox(lb, -1); };
     lb.appendChild(prevBtn);
     const nextBtn = document.createElement('button');
     nextBtn.className = 'img-lightbox-nav img-lightbox-nav-next';
-    nextBtn.setAttribute('aria-label', 'Next image');
+    nextBtn.setAttribute('aria-label', t('media_next_image'));
     nextBtn.innerHTML = '›';
     nextBtn.onclick = e => { e.stopPropagation(); _navigateLightbox(lb, 1); };
     lb.appendChild(nextBtn);
@@ -594,6 +622,7 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   }
   lb.onclick = () => _closeImgLightbox(lb);
   document.body.appendChild(lb);
+  lb._releaseFocusTrap = trapFocus(lb, () => _closeImgLightbox(lb));
   // Single keyboard handler — reads lb._navX live, no remove/add churn.
   lb._keyHandler = e => {
     if(e.key==='Escape'){ _closeImgLightbox(lb); return; }
@@ -614,14 +643,16 @@ function _navigateLightbox(lb, direction) {
   const lbImg = lb.querySelector('img');
   if(!lbImg) return;
   lbImg.src = nextImg.src;
-  lbImg.alt = nextImg.alt || '';
-  lb.setAttribute('aria-label', nextImg.alt || 'Image');
+  const nextLabel = nextImg.alt || t('media_image_label');
+  lbImg.alt = nextLabel;
+  lb.setAttribute('aria-label', nextLabel);
   // Update counter via stored reference — no DOM query.
   if(lb._counterEl) lb._counterEl.textContent = (newIndex+1) + ' / ' + images.length;
 }
 function _closeImgLightbox(lb) {
   if(!lb || !lb.parentNode) return;
   document.removeEventListener('keydown', lb._keyHandler);
+  if(lb._releaseFocusTrap){ lb._releaseFocusTrap(); lb._releaseFocusTrap=null; }
   lb.style.animation = 'lb-in .12s ease reverse';
   setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
 }
@@ -1381,10 +1412,10 @@ async function _fetchLiveModels(provider, sel){
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
-      console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
+      debugLog('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
   }catch(e){
-    console.debug('[hermes] Live model fetch failed for',provider,e.message);
+    debugLog('[hermes] Live model fetch failed for',provider,e.message);
   }finally{
     _liveModelFetchPending.delete(provider);
   }
