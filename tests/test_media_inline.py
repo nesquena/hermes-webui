@@ -54,11 +54,17 @@ class TestMediaRenderMdStash(unittest.TestCase):
                       "restore pass must produce download link for non-image files")
 
     def test_media_api_url_pattern(self):
-        self.assertIn("api/media?path=", UI_JS,
-                      "renderMd must build api/media?path=... URL for local files")
+        self.assertIn("_mediaApiHref(", UI_JS,
+                      "renderMd must build local media URLs through the shared media URL helper")
+
+    def test_local_media_urls_are_resolved_against_document_baseuri(self):
+        self.assertIn("function _appHref", UI_JS,
+                      "renderMd must define a base-aware app URL helper for local media")
+        self.assertIn("new URL(rel,document.baseURI||location.href)", UI_JS,
+                      "local media URLs must resolve against document.baseURI so /session/<id> deep links do not turn api/media into /session/api/media")
 
     def test_local_media_api_url_carries_session_id_when_available(self):
-        self.assertIn("session_id='+encodeURIComponent(mediaSessionId)", UI_JS,
+        self.assertIn("_mediaApiHref(ref,{sessionId:mediaSessionId})", UI_JS,
                       "local MEDIA: image URLs must include session_id so the server can authorize session-referenced artifacts")
 
     def test_local_audio_video_media_tokens_request_inline_streaming(self):

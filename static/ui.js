@@ -156,6 +156,25 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function _appHref(path){
+  const raw=String(path||'');
+  if(!raw) return raw;
+  try{
+    const rel=raw.startsWith('/')?raw.slice(1):raw;
+    const url=new URL(rel,document.baseURI||location.href);
+    return `${url.pathname}${url.search}${url.hash}`;
+  }catch(_){
+    return raw;
+  }
+}
+function _mediaApiHref(path,opts){
+  const o=opts||{};
+  const query=['path='+encodeURIComponent(path)];
+  if(o.sessionId) query.push('session_id='+encodeURIComponent(o.sessionId));
+  if(o.inline) query.push('inline=1');
+  if(o.download) query.push('download=1');
+  return _appHref('api/media?'+query.join('&'));
+}
 function _matchBacktickFenceLine(line){
   const m=String(line||'').match(/^[ ]{0,3}(`{3,})([^`]*)$/);
   if(!m) return null;
@@ -3251,7 +3270,7 @@ function renderMd(raw){
     // Surround with blank lines so the final paragraph splitter treats the
     // generated table as its own block even when the regex consumes one of the
     // markdown block's trailing newlines.
-    return `\n\n<table><thead>${header}</thead><tbody>${body}</tbody></table>\n\n`;
+    return `\n\n<div class="md-table-wrap"><table class="md-table"><thead>${header}</thead><tbody>${body}</tbody></table></div>\n\n`;
   });
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
@@ -3291,9 +3310,9 @@ function renderMd(raw){
     if(/^file:\/\//i.test(href)){
       try{
         const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
-        return 'api/media?path='+encodeURIComponent(path)+'&inline=1';
+        return _mediaApiHref(path,{inline:true});
       }catch(_){
-        return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1';
+        return _mediaApiHref(href.replace(/^file:\/\//i,''),{inline:true});
       }
     }
     return href;
@@ -3305,8 +3324,8 @@ function renderMd(raw){
     if(/^(javascript|data|vbscript):/i.test(compact)) return false;
     if(/^https?:\/\//i.test(raw)) return true;
     if(/^(mailto:|tel:)/i.test(raw)) return true;
-    if(img && /^api\//i.test(raw)) return true;
-    if(!img && (/^api\//i.test(raw) || /^#/.test(raw))) return true;
+    if(img && (/^api\//i.test(raw) || /^\//.test(raw))) return true;
+    if(!img && (/^api\//i.test(raw) || /^\//.test(raw) || /^#/.test(raw))) return true;
     return false;
   }
   function _attrs(raw){
@@ -3327,15 +3346,18 @@ function renderMd(raw){
     const closing=!!m[1];
     const name=m[2].toLowerCase();
     const rawAttrs=m[3]||'';
-    const plain=['strong','em','del','pre','h1','h2','h3','h4','h5','h6','ul','ol','table','thead','tbody','tr','th','td','blockquote','p','br','hr'];
-    if(closing) return plain.includes(name)||['a','div','span','li','code'].includes(name)?`</${name}>`:'';
+    const plain=['strong','em','del','pre','h1','h2','h3','h4','h5','h6','ul','ol','thead','tbody','tr','th','td','blockquote','p','br','hr'];
+    if(closing) return plain.includes(name)||['a','div','span','li','code','table'].includes(name)?`</${name}>`:'';
     if(name==='code'){
       const a=_attrs(rawAttrs);
       const cls=/^language-[a-z0-9_+-]+$/i.test(a.class||'')?` class="${esc(a.class)}"`:'';
       return `<code${cls}>`;
     }
-    if(plain.includes(name)) return `<${name}>`;
     const a=_attrs(rawAttrs);
+    if(name==='table'){
+      return `<table${_cls(a.class,['md-table'])}>`;
+    }
+    if(plain.includes(name)) return `<${name}>`;
     if(name==='li'){
       const value=/^\d+$/.test(a.value||'')?` value="${esc(a.value)}"`:'';
       const style=(a.style||'').replace(/\s+/g,'').toLowerCase()==='margin-left:16px'?` style="margin-left:16px"`:'';
@@ -3345,7 +3367,7 @@ function renderMd(raw){
       return `<span${_cls(a.class,['task-done','task-todo','katex-inline'])}${a['data-katex']==='inline'?' data-katex="inline"':''}>`;
     }
     if(name==='div'){
-      const cls=_cls(a.class,['pre-header','mermaid-block','katex-block']);
+      const cls=_cls(a.class,['pre-header','mermaid-block','katex-block','md-table-wrap']);
       const mermaid=a['data-mermaid-id']?` data-mermaid-id="${esc(a['data-mermaid-id'])}"`:'';
       const katex=a['data-katex']==='display'?' data-katex="display"':'';
       return `<div${cls}${mermaid}${katex}>`;
@@ -3415,7 +3437,7 @@ function renderMd(raw){
     return '\x00E'+(_pre_stash.length-1)+'\x00';
   });
   const parts=s.split(/\n{2,}/);
-  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|table|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
+  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|table|div|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
@@ -3467,7 +3489,8 @@ function renderMd(raw){
     }
     // Local file path
     const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
-    const apiUrl='api/media?path='+encodeURIComponent(ref)+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
+    const apiUrl=_mediaApiHref(ref,{sessionId:mediaSessionId});
+    const sessionAttr=mediaSessionId?` data-session-id="${esc(mediaSessionId)}"`:'';
     const localKind=mediaKindForName(ref);
     if(localKind==='image'){
       return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
@@ -3484,24 +3507,24 @@ function renderMd(raw){
     // PDF files → render first page preview with lazy-load
     if(_PDF_EXTS.test(ref)){
       const fname=esc(ref.split('/').pop()||ref);
-      return `<div class="pdf-preview-load" data-path="${esc(ref)}"><span class="pdf-preview-spinner">⏳</span> ${t('pdf_loading')} ${fname}...</div>`;
+      return `<div class="pdf-preview-load" data-path="${esc(ref)}"${sessionAttr}><span class="pdf-preview-spinner">⏳</span> ${t('pdf_loading')} ${fname}...</div>`;
     }
     // HTML files → render inline in sandboxed iframe with lazy-load
     if(_HTML_EXTS.test(ref)){
-      return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${t('html_loading')}</div>`;
+      return `<div class="html-preview-load" data-path="${esc(ref)}"${sessionAttr}><span class="html-preview-spinner">⏳</span> ${t('html_loading')}</div>`;
     }
     // .patch/.diff files → render inline as colored diff instead of download
     const fname=esc(ref.split('/').pop()||ref);
     if(/\.(patch|diff)$/i.test(ref)){
-      return `<div class="diff-inline-load" data-path="${esc(ref)}">${t('diff_loading')} ${fname}...</div>`;
+      return `<div class="diff-inline-load" data-path="${esc(ref)}"${sessionAttr}>${t('diff_loading')} ${fname}...</div>`;
     }
     // CSV files → lazy-load and render as table
     if(_CSV_EXTS.test(ref)){
-      return `<div class="csv-inline-load" data-path="${esc(ref)}">${t('csv_loading')} ${fname}...</div>`;
+      return `<div class="csv-inline-load" data-path="${esc(ref)}"${sessionAttr}>${t('csv_loading')} ${fname}...</div>`;
     }
     // Excalidraw files → lazy-load inline embed
     if(_EXCALIDRAW_EXTS.test(ref)){
-      return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${t('excalidraw_loading')} ${fname}...</div>`;
+      return `<div class="excalidraw-inline-load" data-path="${esc(ref)}"${sessionAttr}>${t('excalidraw_loading')} ${fname}...</div>`;
     }
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
@@ -7510,7 +7533,8 @@ function loadDiffInline(container){
   root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const sessionId=el.dataset.sessionId||'';
+    fetch(_mediaApiHref(path,{sessionId}))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
@@ -7538,7 +7562,8 @@ function loadCsvInline(container){
   root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const sessionId=el.dataset.sessionId||'';
+    fetch(_mediaApiHref(path,{sessionId}))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>CSV_MAX_SIZE){
@@ -7574,7 +7599,8 @@ function loadExcalidrawInline(container){
   root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const sessionId=el.dataset.sessionId||'';
+    fetch(_mediaApiHref(path,{sessionId}))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
@@ -7592,7 +7618,7 @@ function loadExcalidrawInline(container){
           return;
         }
         const fname=esc(path.split('/').pop());
-        const downloadUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const downloadUrl=_mediaApiHref(path,{sessionId,download:true});
         el.outerHTML=`<div class="excalidraw-embed-wrap" title="${t('excalidraw_simplified')}">
   <div class="msg-artifact-header">
     <span class="msg-media-label">${t('excalidraw_label')}</span>
@@ -7694,20 +7720,48 @@ function _renderExcalidrawCanvases(){
 // download link in that case. The 4 MB size cap is checked client-side after
 // the full buffer is received — ideally the server would enforce it before
 // streaming (out of scope for this client-side PR).
-let _pdfjsReady=false, _pdfjsLoading=false;
+let _pdfjsReady=false, _pdfjsLoading=false, _pdfjsLoadPromise=null;
+function _ensurePdfJsLoaded(){
+  if(_pdfjsReady&&window._pdfjsLib) return Promise.resolve(window._pdfjsLib);
+  if(_pdfjsLoadPromise) return _pdfjsLoadPromise;
+  _pdfjsLoading=true;
+  const pdfJsSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
+  const pdfJsWorkerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
+  _pdfjsLoadPromise=import(pdfJsSrc).then(pdfjsLib=>{
+    pdfjsLib.GlobalWorkerOptions.workerSrc=pdfJsWorkerSrc;
+    window._pdfjsLib=pdfjsLib;
+    window._pdfjsReady=true;
+    _pdfjsReady=true;
+    window.dispatchEvent(new Event('pdfjs-ready'));
+    return pdfjsLib;
+  }).catch(err=>{
+    _pdfjsLoadPromise=null;
+    _pdfjsLoading=false;
+    throw err;
+  });
+  return _pdfjsLoadPromise;
+}
 function loadPdfInline(container){
   const PDF_MAX_SIZE=4*1024*1024; // 4 MB cap for inline PDF preview
   const root=container||document;
   root.querySelectorAll('.pdf-preview-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
+    const sessionId=el.dataset.sessionId||'';
     const fname=path.split('/').pop()||path;
+    const downloadHref=()=>_mediaApiHref(path,{sessionId,download:true});
+    const mediaHref=(opts)=>_mediaApiHref(path,{sessionId,...(opts||{})});
+    const renderPdfFallback=(messageKey)=>{
+      if(!el.parentNode) return;
+      const dlUrl=downloadHref();
+      el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t(messageKey)}</span></div>`;
+    };
     const loadPdf=(pdfjsLib)=>{
-      fetch('api/media?path='+encodeURIComponent(path))
+      fetch(mediaHref())
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
-            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
+            renderPdfFallback('pdf_too_large');
             return;
           }
           return pdfjsLib.getDocument({data:buf}).promise;
@@ -7725,7 +7779,7 @@ function loadPdfInline(container){
               // Canvas bitmap is runtime state, not part of HTML serialization.
               // Attach the canvas as a DOM node — interpolating its serialized
               // form into a template string parses back as an empty canvas.
-              const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+              const dlUrl=downloadHref();
               const wrap=document.createElement('div');
               wrap.className='pdf-preview-wrap';
               wrap.innerHTML=`<div class="pdf-preview-header"><span>📄 ${esc(fname)}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body"></div>`;
@@ -7735,37 +7789,24 @@ function loadPdfInline(container){
           });
         })
         .catch(()=>{
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-          el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+          renderPdfFallback('pdf_error');
         });
     };
-    if(_pdfjsReady){
-      loadPdf(window._pdfjsLib);
-    } else if(!_pdfjsLoading){
-      _pdfjsLoading=true;
-      const s=document.createElement('script');
-      s.src='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
-      s.type='module';
-      s.textContent=`
-        import * as pdfjsLib from '${s.src}';
-        pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
-        window._pdfjsLib=pdfjsLib;
-        window._pdfjsReady=true;
-        window.dispatchEvent(new Event('pdfjs-ready'));
-      `;
-      document.head.appendChild(s);
-      window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
-      setTimeout(()=>{
-        if(!_pdfjsReady){
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-          if(el.parentNode){
-            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
-          }
-        }
-      },15000);
-    } else {
-      window.addEventListener('pdfjs-ready',()=>{ loadPdf(window._pdfjsLib); },{once:true});
-    }
+    let bootTimedOut=false;
+    const bootTimeout=setTimeout(()=>{
+      bootTimedOut=true;
+      renderPdfFallback('pdf_error');
+    },15000);
+    _ensurePdfJsLoaded()
+      .then(pdfjsLib=>{
+        if(bootTimedOut) return;
+        clearTimeout(bootTimeout);
+        loadPdf(pdfjsLib);
+      })
+      .catch(()=>{
+        clearTimeout(bootTimeout);
+        renderPdfFallback('pdf_error');
+      });
   });
 }
 
@@ -7776,21 +7817,22 @@ function loadHtmlInline(container){
   root.querySelectorAll('.html-preview-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
+    const sessionId=el.dataset.sessionId||'';
     const fname=path.split('/').pop()||path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    fetch(_mediaApiHref(path,{sessionId}))
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
+          const openUrl=_mediaApiHref(path,{sessionId,inline:true});
           el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const openUrl='api/media?path='+encodeURIComponent(path)+'&inline=1';
+        const openUrl=_mediaApiHref(path,{sessionId,inline:true});
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
-        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const dlUrl=_mediaApiHref(path,{sessionId,download:true});
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
   });

@@ -1129,6 +1129,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Raw file:// anchors are rewritten to /api/media before the user can click them.
   const _SMD_SAFE_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.|api)/i;
   const _SMD_SAFE_IMG_URL_RE=/^(?:https?:|mailto:|tel:|\/|#|\?|\.)/i;
+  function _smdAppHref(path){
+    const raw=String(path||'');
+    if(!raw) return raw;
+    try{
+      const rel=raw.startsWith('/')?raw.slice(1):raw;
+      const url=new URL(rel,document.baseURI||location.href);
+      return `${url.pathname}${url.search}${url.hash}`;
+    }catch(_){
+      return raw;
+    }
+  }
+  function _smdMediaHref(path,opts){
+    const o=opts||{};
+    const query=['path='+encodeURIComponent(path)];
+    if(o.sessionId) query.push('session_id='+encodeURIComponent(o.sessionId));
+    if(o.inline) query.push('inline=1');
+    if(o.download) query.push('download=1');
+    return _smdAppHref('api/media?'+query.join('&'));
+  }
   function _smdLinkHref(raw){
     const href=String(raw||'');
     if(/^workspace:\/\//i.test(href)){
@@ -1140,11 +1159,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     if(!/^file:\/\//i.test(href)) return href;
+    const sessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
     try{
       const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
-      return 'api/media?path='+encodeURIComponent(path)+'&inline=1';
+      return _smdMediaHref(path,{sessionId,inline:true});
     }catch(_){
-      return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1';
+      return _smdMediaHref(href.replace(/^file:\/\//i,''),{sessionId,inline:true});
     }
   }
   function _smdFileHref(raw){

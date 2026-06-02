@@ -689,7 +689,8 @@ class TestSmdUrlSchemeSanitization:
 
     def test_file_anchor_rewrite_helper_exists(self):
         assert "_smdFileHref" in MESSAGES_JS
-        assert "api/media?path=" in MESSAGES_JS
+        assert "_smdMediaHref(" in MESSAGES_JS
+        assert "new URL(rel,document.baseURI||location.href)" in MESSAGES_JS
 
     def test_sanitize_called_after_smd_write(self):
         # _smdWrite must invoke _sanitizeSmdLinks on assistantBody after feeding the parser,

@@ -1,4 +1,6 @@
-  @font-face {
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Markdown table fit evidence</title>
+<style>  @font-face {
     font-family: "DreamIT Roboto";
     src: url("fonts/dreamit/roboto-regular.ttf") format("truetype");
     font-weight: 400;
@@ -4811,3 +4813,25 @@ main.main.showing-logs > #mainLogs{display:flex;}
 @media (min-width:1600px) {
   .composer-box{max-width:1600px;margin:0 auto;}
 }
+</style>
+<style>
+  body{margin:0;background:var(--bg);color:var(--text);font-family:var(--font-ui);}
+  .evidence-frame{width:980px;margin:32px auto;padding:24px;border:1px solid var(--border);border-radius:16px;background:var(--main-bg);}
+  .messages-inner{max-width:none;padding:0;}
+</style>
+</head><body class="dark">
+<div class="evidence-frame">
+  <div class="messages-inner">
+    <div class="msg-row" data-role="assistant">
+      <div class="msg-role assistant"><span class="role-icon assistant">H</span>Assistant</div>
+      <div class="msg-body">
+        <h2>Highest-priority improvements</h2>
+        <div class="md-table-wrap"><table class="md-table"><thead><tr><th>Priority</th><th>Suggestion</th><th>Evidence</th><th>Why it matters</th><th>Recommended fix</th></tr></thead><tbody>
+          <tr><td>High</td><td>Preserve table readability in code-review output.</td><td><code>index.live.php:81-88</code>, <code>$_POST['domain']</code>, <code>getCurrentMXRecords()</code></td><td>Wide Markdown tables should scroll rather than crushing short labels into vertical letter stacks.</td><td>Wrap generated tables in <code>.md-table-wrap</code>, keep first-column labels nowrap, and let long code/text columns wrap.</td></tr>
+          <tr><td>Medium</td><td>Keep inline code readable.</td><td><code>hasLocalAuthority()</code> and <code>getCurrentMXRecords()</code></td><td>Technical evidence cells often contain long tokens that need controlled wrapping.</td><td>Allow code spans to wrap with <code>overflow-wrap:anywhere</code>.</td></tr>
+        </tbody></table></div>
+      </div>
+    </div>
+  </div>
+</div>
+</body></html>

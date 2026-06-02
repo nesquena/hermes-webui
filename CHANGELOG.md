@@ -19,6 +19,8 @@
 
 ### Fixed
 
+- Markdown tables now render inside a horizontal-scroll wrapper and keep short first columns such as `Priority` from collapsing into vertical letter stacks, while long text/code columns wrap more readably.
+- PDF and other local `MEDIA:` previews/download links now resolve against `document.baseURI` instead of using bare `api/media?...` relative URLs, so deep-linked `/session/<id>` pages no longer misroute preview/download requests to `/session/api/media...`; the PDF preview bootstrap also now uses a real dynamic `import()` for PDF.js instead of a broken mixed `script.src` + inline module body loader that left previews stuck at `Loading PDF (0)…`.
 - Markdown table/prose currency amounts like `A$3 **up to A$30,000**` and `US$3 **up to US$30,000**` no longer get misparsed as inline KaTeX math, so dollar signs, bold text, and cell formatting remain intact.
 - `/api/sessions` and session-index rebuilds now normalize legacy ISO-string session timestamps (`created_at`, `updated_at`, `last_message_at`) before sorting, preventing mixed `str`/`float` metadata from crashing the sidebar with HTTP 500 after recovery scans or legacy sidecar loads.
 - Fully-loaded sessions now publish their actual `len(messages)` to sidebar metadata instead of reusing stale metadata-only counts, preventing `_index.json` drift from hiding unread sessions after long turns or recovery merges.

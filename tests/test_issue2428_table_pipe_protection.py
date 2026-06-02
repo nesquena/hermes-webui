@@ -106,6 +106,16 @@ def _table_cells(html: str) -> list[str]:
     return [c for _, c in out]
 
 
+def test_rendered_markdown_tables_get_scroll_wrapper_and_table_class(driver_path):
+    """Rendered Markdown tables should carry classes used by the responsive table CSS."""
+    md = "| Priority | Suggestion |\n|---|---|\n| High | Fix table layout |"
+    html = _render(driver_path, md)
+
+    assert '<div class="md-table-wrap"><table class="md-table">' in html
+    assert "<th>Priority</th>" in html
+    assert "<td>High</td>" in html
+
+
 class TestSinglePipeInBracketsStaysInOneCell:
     """Original #2428 bug: cells containing a single pipe inside parens or
     brackets used to split into two cells. _protectPipes was added to handle

@@ -35,7 +35,7 @@ def _make_link(url, label):
 
 def markdown_href(url):
     if url.lower().startswith("file://"):
-        return "api/media?path=" + __import__("urllib.parse").parse.quote(url[7:], safe="") + "&inline=1"
+        return "/api/media?path=" + __import__("urllib.parse").parse.quote(url[7:], safe="") + "&inline=1"
     return url
 
 
@@ -182,7 +182,7 @@ def test_labeled_file_link_renders_as_single_anchor():
     md = f'[Halal Cart Chicken]({url})'
     result = render_links_only(md)
     assert result.count('<a ') == 1, f"Expected 1 <a> tag, got: {result}"
-    assert 'href="api/media?path=%2FUsers%2Fagent%2FDocuments%2FObsidian%2FMeal-Prep%2Fhalal-cart.html&inline=1"' in result
+    assert 'href="/api/media?path=%2FUsers%2Fagent%2FDocuments%2FObsidian%2FMeal-Prep%2Fhalal-cart.html&inline=1"' in result
     assert 'Halal Cart Chicken' in result
     assert '[Halal Cart Chicken]' not in result
 
@@ -282,8 +282,14 @@ def test_js_source_sanitizes_quotes_in_href():
 def test_js_source_rewrites_file_links_to_media_endpoint():
     """Browser pages cannot reliably navigate to file://, so renderMd must use /api/media."""
     assert "function _markdownHref" in UI_JS
-    assert "api/media?path=" in UI_JS
+    assert "_mediaApiHref(" in UI_JS
     assert "file:\\/\\/" in UI_JS
+
+
+def test_js_source_uses_base_aware_media_helper_for_local_files():
+    assert "function _appHref" in UI_JS
+    assert "new URL(rel,document.baseURI||location.href)" in UI_JS
+    assert "_mediaApiHref(" in UI_JS
 
 # ── Code-inside-bold tests (pre-existing bug, fixed in same PR) ───────────────
 

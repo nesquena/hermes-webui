@@ -116,8 +116,22 @@ class TestLoadPdfInlineFunction:
     def test_fetches_via_api_media(self):
         ui = _read_js('ui.js')
         idx = ui.find('function loadPdfInline')
-        body = ui[idx:idx + 1500]
-        assert 'api/media?path=' in body, 'Must fetch PDF via api/media endpoint'
+        body = ui[idx:idx + 1800]
+        assert '_mediaApiHref(' in body, 'Must build PDF fetch/download URLs through the media URL helper'
+
+    def test_pdf_media_helper_is_base_aware(self):
+        ui = _read_js('ui.js')
+        assert 'function _appHref' in ui, 'Local media helpers must resolve against document.baseURI'
+        assert 'new URL(rel,document.baseURI||location.href)' in ui, 'Deep-linked session pages need base-aware local media URLs'
+
+    def test_media_helper_is_defined_before_render_and_loaders(self):
+        ui = _read_js('ui.js')
+        helper_idx = ui.find('function _mediaApiHref')
+        render_idx = ui.find('function renderMd')
+        pdf_idx = ui.find('function loadPdfInline')
+        assert helper_idx != -1, 'Media helper must exist at module scope'
+        assert render_idx != -1 and pdf_idx != -1, 'renderMd and loadPdfInline must exist'
+        assert helper_idx < render_idx < pdf_idx, 'Media helper must be defined before renderMd/loadPdfInline so global preview loaders can call it'
 
     def test_has_size_cap(self):
         ui = _read_js('ui.js')
@@ -134,9 +148,17 @@ class TestLoadPdfInlineFunction:
 
     def test_lazy_loads_pdfjs_from_cdn(self):
         ui = _read_js('ui.js')
-        idx = ui.find('function loadPdfInline')
-        body = ui[idx:idx + 3000]
+        idx = ui.find('function _ensurePdfJsLoaded')
+        body = ui[idx:idx + 1200]
         assert 'pdfjs' in body, 'Must lazy-load PDF.js from CDN'
+        assert 'import(pdfJsSrc)' in body, 'PDF.js loader must use dynamic import so the bootstrap code actually runs'
+
+    def test_pdfjs_loader_does_not_mix_script_src_with_inline_module_body(self):
+        ui = _read_js('ui.js')
+        idx = ui.find('function _ensurePdfJsLoaded')
+        body = ui[idx:idx + 1400]
+        assert "document.createElement('script')" not in body, 'PDF.js bootstrap must not rely on dynamically created <script src=...> with inline module text'
+        assert 's.textContent=' not in body, 'PDF.js bootstrap must not attach inline module text to a script with src because browsers ignore the inline body'
 
     def test_pdfjs_state_variables(self):
         ui = _read_js('ui.js')
@@ -161,8 +183,8 @@ class TestLoadHtmlInlineFunction:
     def test_fetches_via_api_media(self):
         ui = _read_js('ui.js')
         idx = ui.find('function loadHtmlInline')
-        body = ui[idx:idx + 1000]
-        assert 'api/media?path=' in body, 'Must fetch HTML via api/media endpoint'
+        body = ui[idx:idx + 1200]
+        assert '_mediaApiHref(' in body, 'Must build HTML fetch/open URLs through the media URL helper'
 
     def test_has_size_cap(self):
         ui = _read_js('ui.js')
@@ -237,14 +259,28 @@ class TestCSSClasses:
     def test_pdf_preview_header(self):
         css = _read_css()
         assert '.pdf-preview-header' in css
+        m = re.search(r'\.pdf-preview-header\{[^}]+\}', css)
+        assert m, '.pdf-preview-header rule must exist'
+        rule = m.group()
+        assert 'flex-wrap:wrap' in rule, 'PDF preview header should wrap on narrow layouts so filename and download link do not collide'
 
     def test_pdf_preview_body(self):
         css = _read_css()
         assert '.pdf-preview-body' in css
+        m = re.search(r'\.pdf-preview-body\{[^}]+\}', css)
+        assert m, '.pdf-preview-body rule must exist'
+        rule = m.group()
+        assert 'overflow:auto' in rule, 'PDF preview body should scroll instead of hiding oversized pages'
+        assert 'max-height:min(78vh,960px)' in rule, 'PDF preview body should use a viewport-relative height cap instead of a fixed 500px crop'
 
     def test_pdf_preview_canvas(self):
         css = _read_css()
         assert '.pdf-preview-canvas' in css
+        m = re.search(r'\.pdf-preview-canvas\{[^}]+\}', css)
+        assert m, '.pdf-preview-canvas rule must exist'
+        rule = m.group()
+        assert 'width:auto' in rule, 'PDF canvas should keep its intrinsic width instead of being forced to shrink to the chat column'
+        assert 'max-width:none' in rule, 'PDF canvas should not be hard-clamped to 100% width'
 
     def test_pdf_preview_fallback(self):
         css = _read_css()
