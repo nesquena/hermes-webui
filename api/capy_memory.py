@@ -494,6 +494,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_traffic_views_path_repo(origin_uri)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_traffic_clones_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_traffic_clones_path_repo(origin_uri)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_license_path_matches(raw_origin_text):
         source_refresh_kind = "github_license"
         terminal_refresh_failure = True
@@ -3003,7 +3008,7 @@ def _github_deployment_statuses_refresh_summary(origin_uri: str, payload: list[A
     return _bounded_refresh_summary("; ".join(parts))
 
 
-def _github_traffic_views_path_matches(origin_uri: str) -> bool:
+def _github_traffic_path_matches(origin_uri: str, leaf: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
     except ValueError:
@@ -3018,7 +3023,7 @@ def _github_traffic_views_path_matches(origin_uri: str) -> bool:
             and path_segments[0] == ""
             and lowered[1] == "repos"
             and lowered[4] == "traffic"
-            and lowered[5] == "views"
+            and lowered[5] == leaf
         )
 
     raw_path = parts.path.split("/")
@@ -3028,12 +3033,12 @@ def _github_traffic_views_path_matches(origin_uri: str) -> bool:
     if _segments_match(decoded_path):
         return True
     return any(
-        segment.lower().startswith(("traffic%", "views%"))
+        segment.lower().startswith(("traffic%", f"{leaf}%"))
         for segment in raw_path
     )
 
 
-def _github_traffic_views_path_repo(origin_uri: str) -> str:
+def _github_traffic_path_repo(origin_uri: str, leaf: str) -> str:
     try:
         parts = urlsplit(origin_uri)
     except ValueError:
@@ -3046,12 +3051,28 @@ def _github_traffic_views_path_repo(origin_uri: str) -> str:
         or path[0] != ""
         or path[1] != "repos"
         or path[4] != "traffic"
-        or path[5] != "views"
+        or path[5] != leaf
         or not _github_repo_path_segment_is_safe(path[2])
         or not _github_repo_path_segment_is_safe(path[3])
     ):
         return ""
     return f"{path[2]}/{path[3]}"
+
+
+def _github_traffic_views_path_matches(origin_uri: str) -> bool:
+    return _github_traffic_path_matches(origin_uri, "views")
+
+
+def _github_traffic_views_path_repo(origin_uri: str) -> str:
+    return _github_traffic_path_repo(origin_uri, "views")
+
+
+def _github_traffic_clones_path_matches(origin_uri: str) -> bool:
+    return _github_traffic_path_matches(origin_uri, "clones")
+
+
+def _github_traffic_clones_path_repo(origin_uri: str) -> str:
+    return _github_traffic_path_repo(origin_uri, "clones")
 
 
 def _github_traffic_view_row_is_safe(row: Any) -> bool:
@@ -3105,6 +3126,44 @@ def _github_traffic_views_refresh_summary(origin_uri: str, payload: dict[str, An
         count = _safe_optional_nonnegative_int(row.get("count")) or 0
         uniques = _safe_optional_nonnegative_int(row.get("uniques")) or 0
         parts.append(f"{timestamp}; views: {count}; uniques: {uniques}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _json_payload_is_github_traffic_clones_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_traffic_clones_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if any(key in payload for key in ("version", "items")):
+        return False
+    if _safe_optional_nonnegative_int(payload.get("count")) is None:
+        return False
+    if _safe_optional_nonnegative_int(payload.get("uniques")) is None:
+        return False
+    clones = payload.get("clones")
+    if not isinstance(clones, list) or len(clones) > 52:
+        return False
+    return all(_github_traffic_view_row_is_safe(row) for row in clones)
+
+
+def _github_traffic_clones_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_traffic_clones_path_repo(origin_uri) or "repository"
+    total_clones = _safe_optional_nonnegative_int(payload.get("count")) or 0
+    unique_cloners = _safe_optional_nonnegative_int(payload.get("uniques")) or 0
+    raw_clones = payload.get("clones")
+    clones = raw_clones if isinstance(raw_clones, list) else []
+    safe_rows = [row for row in clones if _github_traffic_view_row_is_safe(row)]
+    parts = [
+        f"GitHub traffic clones for {repo}",
+        f"total clones: {total_clones}",
+        f"unique cloners: {unique_cloners}",
+        f"clone samples: {len(clones)}",
+    ]
+    for row in safe_rows[:5]:
+        timestamp = _safe_iso_timestamp(row.get("timestamp"))
+        count = _safe_optional_nonnegative_int(row.get("count")) or 0
+        uniques = _safe_optional_nonnegative_int(row.get("uniques")) or 0
+        parts.append(f"{timestamp}; clones: {count}; uniques: {uniques}")
     return _bounded_refresh_summary("; ".join(parts))
 
 
@@ -4827,6 +4886,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_traffic_views_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    traffic_clones_repo = _github_traffic_clones_path_repo(origin_uri)
+    if traffic_clones_repo:
+        if not _json_payload_is_github_traffic_clones_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub traffic clones {traffic_clones_repo}",
+            "summary": _github_traffic_clones_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_traffic_clones_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     participation_repo = _github_participation_path_repo(origin_uri)
     if participation_repo:
         if not _json_payload_is_github_participation_metadata(origin_uri, payload):
@@ -5343,6 +5414,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_traffic_views_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_traffic_views_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_traffic_clones_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_traffic_clones_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     if not _source_refresh_allowed(safe_origin_uri):
@@ -5378,6 +5452,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_traffic_views_path_matches(safe_origin_uri):
         if not _github_traffic_views_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_traffic_clones_path_matches(safe_origin_uri):
+        if not _github_traffic_clones_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     request = Request(
@@ -5454,6 +5532,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_traffic_views_path_matches(safe_origin_uri) and (
             not _github_traffic_views_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_traffic_clones_path_matches(safe_origin_uri) and (
+            not _github_traffic_clones_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
