@@ -4576,6 +4576,17 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-run-dispatch-btn:hover{
   background:color-mix(in srgb,var(--accent,#FFD700) 24%,transparent);
 }
+.kanban-view-toggle{
+  color:var(--muted);
+}
+.kanban-view-toggle[aria-pressed="true"]{
+  border-color:color-mix(in srgb,var(--accent,#FFD700) 58%,var(--border));
+  background:color-mix(in srgb,var(--accent,#FFD700) 13%,transparent);
+  color:var(--accent,#FFD700);
+}
+.kanban-view-toggle[aria-pressed="true"]:hover{
+  background:color-mix(in srgb,var(--accent,#FFD700) 22%,transparent);
+}
 .kanban-task-preview-body{font-size:12px;color:var(--muted);line-height:1.45;margin-bottom:6px;}
 .kanban-status-actions{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px;}
 .kanban-status-actions .btn{font-size:11px;padding:4px 8px;}
