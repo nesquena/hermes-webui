@@ -516,7 +516,21 @@ async function newSession(flash, options={}){
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
-      reqBody.model_provider=newModelState.model_provider||null;
+      // Cold-start / picker-without-provider fallback: when the dropdown option's
+      // data-provider is empty/'default' or the persisted state predates provider
+      // tracking, newModelState.model_provider is null. POST /api/session/new's
+      // fast path in _resolve_compatible_session_model_state requires both model
+      // AND a truthy model_provider; without it, the request falls into
+      // get_available_models() and a 3-4s cold catalog rebuild. window._activeProvider
+      // is hydrated at boot (ui.js) and on config refresh (panels.js), so it's a
+      // safe default that matches the user's configured route. S.session.model_provider
+      // is the previous-session fallback when the dropdown is unhydrated. Closes
+      // the open follow-up from #2518.
+      reqBody.model_provider=
+        newModelState.model_provider
+        || (window._activeProvider||null)
+        || (S.session&&S.session.model_provider)
+        || null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=data.session;S.messages=data.session.messages||[];
