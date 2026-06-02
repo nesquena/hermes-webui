@@ -1138,37 +1138,64 @@ def _schedule_restart(delay: float = 2.0) -> None:
             _write_pre_execv_marker()
             _wait_until_restart_safe()
             try:
-                # Detached starter: waits one second for this process
-                # to fully exit and release the port + PID file, then
-                # invokes ctl.sh start, which detects the absent
-                # process and spawns a fresh one. We use
-                # start_new_session=True so the starter is in its own
-                # session/process group and is NOT killed when this
-                # process exits. We use DEVNULL for all three streams
-                # so the starter's stdio doesn't accidentally keep
-                # this process's pipe FDs alive (which would defeat
-                # the exit). The 0.3s sleep after the spawn gives the
-                # starter time to fork into the background before we
-                # os._exit, so it doesn't get reaped as a zombie
-                # before it can setsid.
+                # Detached starter: use os.fork() directly for the
+                # most reliable detached process spawn. The child
+                # calls os.setsid() to detach from the parent's
+                # process group/session, then os.execvp() to become
+                # ctl.sh. The parent immediately calls os._exit(0).
+                #
+                # Why fork() instead of subprocess.Popen: the Popen
+                # path (with start_new_session=True) was tested and
+                # did NOT reliably survive the parent's os._exit on
+                # Termux+PRoot / Android — the ctl.sh subprocess
+                # never appeared, the watchdog had to recover. fork()
+                # + setsid() in the child is the most primitive and
+                # most reliable way to spawn a detached process, and
+                # it avoids any Python interpreter-level races
+                # between the daemon thread's Popen and the parent's
+                # _exit. The forked child has its own PID and is a
+                # separate task in the cgroup hierarchy from the
+                # parent, so the parent's cgroup reclassification
+                # kill window (the original bug) doesn't reach it.
                 ctl_path = os.path.join(REPO_ROOT, 'ctl.sh')
-                subprocess.Popen(
-                    [ctl_path, 'start'],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                    close_fds=True,
-                )
+                _child_pid = os.fork()
+                if _child_pid == 0:
+                    # Child branch. We are now a new process that
+                    # has the same memory image as the parent but
+                    # can mutate independently. Detach from the
+                    # parent's session/process group via setsid so
+                    # the parent can os._exit without sending us
+                    # SIGHUP. Then exec into ctl.sh. If anything
+                    # fails, _exit(1) so we don't fall through and
+                    # return to the daemon thread's _do() (which
+                    # would then call os._exit(0) and kill BOTH
+                    # processes — the child we'd become AND the
+                    # parent — confusing the watchdog).
+                    try:
+                        os.setsid()
+                    except Exception:
+                        pass
+                    try:
+                        os.execvp(ctl_path, [ctl_path, 'start'])
+                    except Exception:
+                        os._exit(1)
+                    # NOTREACHED
+                # Parent branch. _child_pid is the new PID of the
+                # ctl.sh subprocess. Brief wait so the child can
+                # setsid() + execve() into bash before we _exit;
+                # without this, the kernel can race the child
+                # becoming a session leader, and we get a zombie
+                # (or worse, the child is reaped before it can
+                # execve, which would mean ctl.sh never runs).
                 time.sleep(0.3)
-                # True process exit — no atexit, no Python cleanup, no
-                # signal handlers. The diag_shim signal/atexit markers
-                # will NOT fire for this exit (intentional — there's
-                # nothing to learn from a clean os._exit).
+                # True process exit — no atexit, no Python cleanup,
+                # no signal handlers. The diag_shim signal/atexit
+                # markers will NOT fire for this exit (intentional
+                # — there's nothing to learn from a clean os._exit).
                 os._exit(0)
             except Exception:
-                # Last-resort: if anything above fails (e.g. ctl.sh
-                # missing), exit so the process supervisor (cron
+                # Last-resort: if anything above fails (e.g. fork
+                # not allowed), exit so the process supervisor (cron
                 # watchdog) restarts us.
                 os._exit(0)
 
