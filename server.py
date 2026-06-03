@@ -184,6 +184,13 @@ class QuietHTTPServer(ThreadingHTTPServer):
         self.accept_loop_requests_total = 0
         self.accept_loop_last_request_at = 0.0
 
+    def server_bind(self):
+        if sys.platform == 'win32':
+            self.allow_reuse_address = False
+            SO_EXCLUSIVEADDRUSE = getattr(socket, 'SO_EXCLUSIVEADDRUSE', -5)
+            self.socket.setsockopt(socket.SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
     def _handle_request_noblock(self):
         """Record accept-loop progress before dispatching a request handler.
 
@@ -477,6 +484,25 @@ def _log_shutdown_audit(reason: str = "serve_forever_exit") -> None:
     )
 
 
+def _abort_if_already_serving(host: str, port: int) -> None:
+    """Refuse to start if a live HTTP server is already responding on this port."""
+    probe_host = '127.0.0.1' if host in ('0.0.0.0', '', '::') else host
+    try:
+        with socket.create_connection((probe_host, port), timeout=2) as s:
+            s.sendall(b'GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n')
+            s.settimeout(2)
+            data = s.recv(512)
+            if data:
+                print(
+                    f'[!!] FATAL: Another server is already responding on'
+                    f' {probe_host}:{port}. Stop the existing instance first.',
+                    flush=True,
+                )
+                sys.exit(1)
+    except (ConnectionRefusedError, ConnectionResetError, OSError, socket.timeout):
+        pass
+
+
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
 
@@ -572,6 +598,7 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
 
+    _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 
     # ── TLS/HTTPS setup (optional) ─────────────────────────────────────────
@@ -597,6 +624,7 @@ def main() -> None:
     try:
         httpd.serve_forever()
     finally:
+        httpd.server_close()
         _log_shutdown_audit()
         # Stop the gateway watcher on shutdown
         try:

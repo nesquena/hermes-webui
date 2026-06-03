@@ -57,6 +57,46 @@ def _last_workspace_file() -> Path:
     return _profile_state_dir() / 'last_workspace.txt'
 
 
+def _is_remote_terminal_backend(terminal_cfg: dict | None) -> bool:
+    """Return True when the active terminal backend runs outside this WebUI host."""
+    if not isinstance(terminal_cfg, dict):
+        return False
+    backend = str(terminal_cfg.get('backend') or '').strip().lower()
+    return backend not in ('', 'local')
+
+
+def _remote_terminal_cwd() -> str | None:
+    """Return target-side terminal cwd for remote profiles, without local stat()."""
+    try:
+        from api.config import get_config
+
+        terminal_cfg = get_config().get('terminal', {})
+        if not _is_remote_terminal_backend(terminal_cfg):
+            return None
+        cwd = str(terminal_cfg.get('cwd') or '').strip()
+        if not cwd or cwd == '.':
+            return None
+        return cwd
+    except Exception:
+        logger.debug("Failed to read remote terminal cwd", exc_info=True)
+        return None
+
+
+def _remote_terminal_workspace_candidate(path: str | Path) -> Path | None:
+    """Return a non-stat'ed target-side Path when it is under terminal.cwd."""
+    cwd = _remote_terminal_cwd()
+    if not cwd:
+        return None
+    raw = _strip_surrounding_quotes(str(path)).strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser().resolve()
+    base = Path(cwd).expanduser().resolve()
+    if candidate == base or _is_within(candidate, base):
+        return candidate
+    return None
+
+
 def _profile_default_workspace() -> str:
     """Read the profile's default workspace from its config.yaml.
 
@@ -65,25 +105,31 @@ def _profile_default_workspace() -> str:
       2. 'default_workspace' — alternate explicit key
       3. 'terminal.cwd'      — hermes-agent terminal working dir (most common)
 
+    For remote/SSH terminal profiles, ``terminal.cwd`` lives on the target
+    machine, not on the WebUI server. In that case return it without a
+    server-local existence check so WebUI can send the correct workspace hint
+    to the agent/tool backend.
+
     Falls back to the live DEFAULT_WORKSPACE from api.config.
     """
     try:
         from api.config import get_config
         cfg = get_config()
+        terminal_cfg = cfg.get('terminal', {})
+        remote_terminal = _is_remote_terminal_backend(terminal_cfg)
         # Explicit webui workspace keys first
         for key in ('workspace', 'default_workspace'):
             ws = cfg.get(key)
             if ws:
                 p = Path(str(ws)).expanduser().resolve()
-                if p.is_dir():
+                if remote_terminal or p.is_dir():
                     return str(p)
         # Fall through to terminal.cwd — the agent's configured working directory
-        terminal_cfg = cfg.get('terminal', {})
         if isinstance(terminal_cfg, dict):
             cwd = terminal_cfg.get('cwd', '')
             if cwd and str(cwd) not in ('.', ''):
                 p = Path(str(cwd)).expanduser().resolve()
-                if p.is_dir():
+                if remote_terminal or p.is_dir():
                     return str(p)
     except (ImportError, Exception):
         logger.debug("Failed to load profile default workspace config")
@@ -225,19 +271,35 @@ def save_workspaces(workspaces: list) -> None:
 
 
 def get_last_workspace() -> str:
+    remote_cwd = _remote_terminal_cwd()
+
+    def valid_last_workspace(raw: str) -> str | None:
+        if not raw:
+            return None
+        if remote_cwd:
+            # For remote/SSH profiles, last_workspace is target-side state. Do
+            # not accept stale server-local paths merely because they exist on
+            # the WebUI host; require the value to stay under terminal.cwd.
+            if _remote_terminal_workspace_candidate(raw) is not None:
+                return raw
+            return None
+        if Path(raw).is_dir():
+            return raw
+        return None
+
     lw_file = _last_workspace_file()
     if lw_file.exists():
         try:
-            p = lw_file.read_text(encoding='utf-8').strip()
-            if p and Path(p).is_dir():
+            p = valid_last_workspace(lw_file.read_text(encoding='utf-8').strip())
+            if p:
                 return p
         except Exception:
             logger.debug("Failed to read last workspace from %s", lw_file)
     # Fallback: try global file
     if _GLOBAL_LW_FILE.exists():
         try:
-            p = _GLOBAL_LW_FILE.read_text(encoding='utf-8').strip()
-            if p and Path(p).is_dir():
+            p = valid_last_workspace(_GLOBAL_LW_FILE.read_text(encoding='utf-8').strip())
+            if p:
                 return p
         except Exception:
             logger.debug("Failed to read global last workspace")
@@ -574,8 +636,17 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     candidate = Path(path).expanduser().resolve()
 
     access_error = _workspace_access_error(candidate)
+    remote_candidate = _remote_terminal_workspace_candidate(path)
     if access_error:
-        raise ValueError(access_error)
+        # For remote terminal profiles, workspace paths belong to the target
+        # machine. Allow paths under terminal.cwd so session switching can
+        # update the workspace hint even though this WebUI host cannot stat
+        # the target-side path.
+        if remote_candidate is None:
+            raise ValueError(access_error)
+
+    if remote_candidate is not None:
+        return remote_candidate
 
     # (A) Trusted if under the user's home directory — cross-platform via Path.home()
     # Must be checked before system roots to allow symlinks like /var/home.
@@ -658,8 +729,16 @@ def validate_workspace_to_add(path: str) -> Path:
     candidate = Path(path).expanduser().resolve()
 
     access_error = _workspace_access_error(candidate)
+    remote_candidate = _remote_terminal_workspace_candidate(path)
     if access_error:
-        raise ValueError(access_error)
+        # Remote terminal profiles validate workspace existence on the target
+        # machine, not on the WebUI server. Permit target-side paths under
+        # terminal.cwd.
+        if remote_candidate is None:
+            raise ValueError(access_error)
+
+    if remote_candidate is not None:
+        return remote_candidate
 
     # Home directory is always trusted regardless of where it lives on disk
     # (e.g. /var/home/... on systemd-homed Fedora/RHEL).
