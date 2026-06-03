@@ -21,8 +21,13 @@ class MockPopen:
             raise subprocess.TimeoutExpired(self.args, timeout)
         return self.stdout.getvalue(), self.stderr.getvalue()
 
+    def wait(self):
+        return self.returncode
+
 
 def test_handle_health_restart_success(monkeypatch):
+    import threading
+    routes._RESTART_LOCK = threading.Lock()
     # Mock profiles home path
     monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
 
@@ -55,6 +60,8 @@ def test_handle_health_restart_success(monkeypatch):
 
 
 def test_handle_health_restart_failure(monkeypatch):
+    import threading
+    routes._RESTART_LOCK = threading.Lock()
     # Mock profiles home path
     monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
     monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
@@ -80,6 +87,8 @@ def test_handle_health_restart_failure(monkeypatch):
 
 
 def test_handle_health_restart_exception(monkeypatch):
+    import threading
+    routes._RESTART_LOCK = threading.Lock()
     # Mock profiles home path
     monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
     monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
@@ -103,6 +112,8 @@ def test_handle_health_restart_exception(monkeypatch):
 
 
 def test_handle_health_restart_timeout(monkeypatch):
+    import threading
+    routes._RESTART_LOCK = threading.Lock()
     # Mock profiles home path
     monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
     monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
@@ -123,3 +134,51 @@ def test_handle_health_restart_timeout(monkeypatch):
 
     assert result is True
     assert responses == [({"ok": True, "message": "Gateway service restart initiated (in progress)"}, 200)]
+
+
+def test_handle_health_restart_concurrency(monkeypatch):
+    import threading
+    import time
+    routes._RESTART_LOCK = threading.Lock()
+    
+    # Mock profiles home path
+    monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
+    monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
+
+    # Mock Popen that blocks on communicate
+    barrier = threading.Barrier(2)
+
+    class BlockingMockPopen(MockPopen):
+        def communicate(self, timeout=None):
+            barrier.wait()  # synchronize with test thread
+            time.sleep(0.5)  # hold the lock briefly
+            return self.stdout.getvalue(), self.stderr.getvalue()
+
+    def mock_popen(args, stdout=None, stderr=None, text=True, env=None):
+        return BlockingMockPopen(args, stdout, stderr, text, env)
+
+    monkeypatch.setattr(subprocess, "Popen", mock_popen)
+
+    responses = []
+    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append((payload, kw.get("status", 200))) or True)
+
+    handler1 = types.SimpleNamespace()
+    handler2 = types.SimpleNamespace()
+
+    # Run first restart in a separate thread (it will block on communicate)
+    t1 = threading.Thread(target=routes._handle_health_restart, args=(handler1,))
+    t1.start()
+
+    # Wait until the first thread starts Popen and blocks on communicate
+    barrier.wait()
+
+    # Attempt a second restart concurrently; it should fail immediately with 429
+    result2 = routes._handle_health_restart(handler2)
+
+    t1.join()
+
+    assert result2 is True
+    # The second response must be a 429 Conflict / Too Many Requests
+    assert responses[0][0]["ok"] is False
+    assert "Restart already in progress" in responses[0][0]["error"]
+    assert responses[0][1] == 429
