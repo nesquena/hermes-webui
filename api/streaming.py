@@ -3404,20 +3404,6 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             continue
         if _is_context_compression_marker(msg) and key is not None and key in seen:
             continue
-        # General dedup safety net: after context compression, old messages
-        # from prior turns can share the same identity with messages already
-        # in the visible transcript. The three special-case checks above
-        # handle current-user-checkpoint, adjacent-assistant, and compression
-        # markers, but left a gap where non-adjacent duplicates (user turns
-        # from earlier compression cycles, tool messages, etc.) slipped
-        # through. Skip any message whose identity is already tracked unless
-        # it is the current user turn (handled by the checkpoint logic above).
-        if (
-            key is not None
-            and key in seen
-            and not ((key == current_user_key) or is_current_user_turn)
-        ):
-            continue
         display_msg = msg
         if (
             ((key is not None and key == current_user_key) or is_current_user_turn)
