@@ -98,6 +98,7 @@ class TestClarifyCardHTML:
         assert 'id="clarifyChoices"' in html, "clarify choices container missing"
         assert 'id="clarifyInput"' in html, "clarify input missing"
         assert 'id="clarifySubmit"' in html, "clarify submit button missing"
+        assert 'id="clarifyCollapse"' in html, "clarify collapse button missing"
 
     def test_clarify_card_has_data_i18n(self):
         html = read(REPO / "static/index.html")
@@ -167,7 +168,9 @@ class TestClarifyCardCSS:
             ".clarify-response",
             ".clarify-input",
             ".clarify-submit",
+            ".clarify-collapse",
             ".clarify-hint",
+            ".clarify-card.collapsed",
         ):
             assert cls in css, f"CSS class '{cls}' missing"
 
@@ -316,6 +319,13 @@ class TestClarifyMessagesJS:
         src = read(REPO / "static/messages.js")
         for token in ("startClarifyPolling", "stopClarifyPolling", "hideClarifyCard", "_clarifySessionId"):
             assert token in src, f"{token} missing from messages.js"
+
+    def test_clarify_card_can_collapse_without_hiding_prompt(self):
+        src = read(REPO / "static/messages.js")
+        assert "function toggleClarifyCardCollapsed" in src, "clarify collapse toggle missing"
+        assert "aria-expanded" in src, "clarify collapse button should expose expanded state"
+        assert "card.classList.remove(\"collapsed\")" in src, \
+            "new clarification prompts should reopen rather than stay collapsed"
 
 
 # ── boot.js keyboard shortcut ────────────────────────────────────────────────
@@ -482,14 +492,16 @@ class TestApprovalCardTimerLogic:
                 f'After stopApprovalPolling(), hideApprovalCard called without force=true (got: {match!r})'
 
     def test_poll_loop_still_uses_no_force(self):
-        """Poll loop hideApprovalCard() (when pending gone) keeps no-force — correct behavior."""
+        """Poll loop approval hides (when pending gone) keep no-force behavior."""
         src = self._get_js().read_text()
-        # Line 446: else { hideApprovalCard(); } — this is the poll-loop path
-        # The 30s guard should protect this call (don't force from poll ticks)
-        assert 'else { hideApprovalCard(); }' in src or \
+        # Poll/SSE empty-state hides should preserve the 30s visibility guard.
+        # Owner-scoped prompt cleanup now routes this through the helper, whose
+        # default force=false is behavior-equivalent to the old hideApprovalCard().
+        assert '_hideApprovalCardIfOwner(sid);' in src or \
+               'else { hideApprovalCard(); }' in src or \
                'else {hideApprovalCard();}' in src or \
                'else { hideApprovalCard() }' in src, \
-            'Poll loop should still call hideApprovalCard() without force=true'
+            'Poll loop should still hide approval prompts without force=true'
 
     def test_show_approval_card_signature_dedup(self):
         """showApprovalCard uses a signature to avoid resetting timer on repeat polls."""
@@ -602,8 +614,10 @@ class TestClarifyCardTimerLogic:
                       src, re.DOTALL)
         assert m, 'cancel event handler not found'
         body = m.group(0)
-        assert "hideClarifyCard(true, 'cancelled')" in body, \
-            'explicit stream cancel must not use the timeout/terminal draft preservation path'
+        assert (
+            "hideClarifyCard(true, 'cancelled')" in body
+            or "_clearClarifyForOwner('cancelled')" in body
+        ), 'explicit stream cancel must not use the timeout/terminal draft preservation path'
 
     def test_clarify_urgent_countdown_has_non_color_cue(self):
         css = self._get_css().read_text()
@@ -613,21 +627,31 @@ class TestClarifyCardTimerLogic:
         assert any(prop in body for prop in ('box-shadow', 'outline', 'border', 'text-decoration')), \
             'urgent countdown styling must include a non-color visual cue'
 
-    def test_respond_clarify_calls_hide_with_force(self):
+    def test_respond_clarify_sends_clarify_id_and_waits_for_ack(self):
         src = self._get_js().read_text()
         import re
         m = re.search(r'async function respondClarify.*?(?=\nasync function|\nfunction |\Z)',
                       src, re.DOTALL)
         assert m, 'respondClarify function not found'
         body = m.group(0)
+        assert 'clarify_id' in body, \
+            'respondClarify must send clarify_id to the backend for stable matching (issue #2639)'
         assert 'hideClarifyCard(true' in body, \
-            'respondClarify must call hideClarifyCard(true) so card hides immediately after user clicks'
+            'respondClarify must still hide the card on successful acknowledgement'
         assert "'sent'" in body, \
             'respondClarify must mark user-submitted hides so drafts are not re-stashed'
+        assert 'result && result.ok' in body, \
+            'respondClarify must check ok before hiding the clarify card (issue #2639)'
+        # The card must NOT be hidden before the API call — it should wait for the response.
+        hide_idx = body.index('hideClarifyCard(true')
+        api_idx = body.index('/api/clarify/respond')
+        assert hide_idx > api_idx, \
+            'respondClarify must wait for the API response before calling hideClarifyCard (issue #2639)'
 
     def test_clarify_poll_loop_uses_no_force(self):
         src = self._get_js().read_text()
-        assert "else { hideClarifyCard(false, 'expired'); }" in src or \
+        assert "_hideClarifyCardIfOwner(sid, false, 'expired');" in src or \
+               "else { hideClarifyCard(false, 'expired'); }" in src or \
                "else {hideClarifyCard(false,'expired');}" in src, \
             'Clarify poll loop should hide without force=true'
 

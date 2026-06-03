@@ -2,42 +2,107 @@ async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,document.baseURI||location.href);
+  const timeoutMs=Object.prototype.hasOwnProperty.call(opts,'timeoutMs')?opts.timeoutMs:30000;
+  const timeoutToast=opts.timeoutToast!==false;
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
-  // Server errors (4xx/5xx) are NOT retried — only connection failures.
+  // Server errors (4xx/5xx) and client-side timeouts are NOT retried.
   let lastErr;
   for(let attempt=0;attempt<3;attempt++){
+    let controller=null;
+    let timeoutId=null;
+    let didTimeout=false;
+    let upstreamSignal=null;
+    let upstreamAbort=null;
     try{
-      const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
-      if(!res.ok){
-        // 401 means the auth session expired. Redirect to /login so the user can
-        // re-authenticate. This is especially important for iOS PWA (standalone mode)
-        // where a server-side 302 → /login opens in Safari instead of within the PWA.
-        if(res.status===401){window.location.href='/login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
-        const text=await res.text();
-        // Parse JSON error body and surface the human-readable message,
-        // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
-        let message=text;
-        try{const j=JSON.parse(text);message=j.error||j.message||text;}catch(e){}
-        // Attach the raw HTTP context so callers can branch on status (404 stale-session
-        // cleanup, 401 redirect, 503 retry, etc.) without re-parsing the message string.
-        const err=new Error(message);
-        err.status=res.status;
-        err.statusText=res.statusText;
-        err.body=text;
-        throw err;
+      const fetchOpts={...opts};
+      delete fetchOpts.timeoutMs;
+      delete fetchOpts.timeoutToast;
+
+      const useTimeout=Number.isFinite(Number(timeoutMs))&&Number(timeoutMs)>0;
+      if(useTimeout&&typeof AbortController!=='undefined'){
+        controller=new AbortController();
+        upstreamSignal=fetchOpts.signal||null;
+        if(upstreamSignal){
+          upstreamAbort=()=>controller.abort(upstreamSignal.reason);
+          if(upstreamSignal.aborted) upstreamAbort();
+          else upstreamSignal.addEventListener('abort',upstreamAbort,{once:true});
+        }
+        fetchOpts.signal=controller.signal;
       }
-      const ct=res.headers.get('content-type')||'';
-      return ct.includes('application/json')?res.json():res.text();
+      const requestPromise=(async()=>{
+        const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...fetchOpts});
+        if(!res.ok){
+          // 401 means the auth session expired. Redirect to login so the user can
+          // re-authenticate. This is especially important for iOS PWA (standalone mode)
+          // and for subpath mounts like /hermes/, where /login escapes to the site root.
+          if(res.status===401){window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
+          const text=await res.text();
+          // Parse JSON error body and surface the human-readable message,
+          // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
+          let message=text;
+          try{const j=JSON.parse(text);message=j.error||j.message||text;}catch(e){}
+          // Attach the raw HTTP context so callers can branch on status (404 stale-session
+          // cleanup, 401 redirect, 503 retry, etc.) without re-parsing the message string.
+          const err=new Error(message);
+          err.status=res.status;
+          err.statusText=res.statusText;
+          err.body=text;
+          throw err;
+        }
+        const ct=res.headers.get('content-type')||'';
+        return ct.includes('application/json')?await res.json():await res.text();
+      })();
+      return useTimeout?await Promise.race([
+        requestPromise,
+        new Promise((_,reject)=>{
+          timeoutId=setTimeout(()=>{
+            didTimeout=true;
+            if(controller) controller.abort();
+            const err=new Error('Request timed out. Please try again.');
+            err.name='TimeoutError';
+            err.timeout=true;
+            reject(err);
+          },Number(timeoutMs));
+        })
+      ]):await requestPromise;
     }catch(e){
       lastErr=e;
+      const isTimeout=didTimeout||(e&&(e.timeout===true||e.name==='TimeoutError'));
+      if(isTimeout){
+        const err=(e&&e.name==='TimeoutError')?e:new Error('Request timed out. Please try again.');
+        err.name='TimeoutError';
+        err.timeout=true;
+        if(timeoutToast&&typeof showToast==='function') showToast('Request timed out. Please try again.',5000,'error');
+        throw err;
+      }
       // Only retry on network errors (TypeError from fetch), not on HTTP errors
       // that were already thrown above. Re-throw 401 redirects immediately.
       if(e.message&&/401/.test(e.message)) throw e;
       if(attempt<2 && e instanceof TypeError) continue;
       throw e;
+    }finally{
+      if(timeoutId) clearTimeout(timeoutId);
+      if(upstreamSignal&&upstreamAbort) upstreamSignal.removeEventListener('abort',upstreamAbort);
     }
   }
   throw lastErr;
+}
+
+function recordClientSSEError(source, details={}){
+  try{
+    const payload={
+      event:'sse_error',
+      source:String(source||'unknown'),
+      ready_state:details.ready_state,
+      session_id:details.session_id||null,
+      stream_id:details.stream_id||null,
+      visibility_state:(typeof document!=='undefined'&&document.visibilityState)||'unknown',
+      online:(typeof navigator!=='undefined'&&typeof navigator.onLine==='boolean')?navigator.onLine:null,
+      url_path:(typeof location!=='undefined'&&location.pathname)||'/',
+      reason:details.reason||'EventSource.onerror',
+    };
+    void api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000,timeoutToast:false}).catch(()=>{});
+  }catch(_){}
 }
 
 // Persist/restore expanded directory state per workspace in localStorage
@@ -58,16 +123,203 @@ function _restoreExpandedDirs(){
   }catch(e){S._expandedDirs=new Set();}
 }
 
+let _workspacePanelActiveTab = 'files';
+let _renderSessionArtifactsTimer = null;
+
+function _setWorkspacePanelTabDataset(){
+  const panel = document.querySelector('.rightpanel');
+  if(panel) panel.dataset.activeTab = _workspacePanelActiveTab;
+}
+
+function scheduleRenderSessionArtifacts(){
+  if(_renderSessionArtifactsTimer) clearTimeout(_renderSessionArtifactsTimer);
+  _renderSessionArtifactsTimer = setTimeout(()=>{
+    _renderSessionArtifactsTimer = null;
+    renderSessionArtifacts();
+  }, 100);
+}
+
+if(typeof document !== 'undefined'){
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _setWorkspacePanelTabDataset, {once:true});
+  else _setWorkspacePanelTabDataset();
+}
+
+function switchWorkspacePanelTab(tab){
+  _workspacePanelActiveTab = tab === 'artifacts' ? 'artifacts' : 'files';
+  _setWorkspacePanelTabDataset();
+  const filesTab = $('workspaceFilesTab');
+  const artifactsTab = $('workspaceArtifactsTab');
+  if(filesTab){
+    filesTab.classList.toggle('active', _workspacePanelActiveTab === 'files');
+    filesTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'files' ? 'true' : 'false');
+  }
+  if(artifactsTab){
+    artifactsTab.classList.toggle('active', _workspacePanelActiveTab === 'artifacts');
+    artifactsTab.setAttribute('aria-selected', _workspacePanelActiveTab === 'artifacts' ? 'true' : 'false');
+  }
+  const artifacts = $('workspaceArtifacts');
+  if(artifacts) artifacts.hidden = _workspacePanelActiveTab !== 'artifacts';
+  if(_workspacePanelActiveTab === 'artifacts') renderSessionArtifacts();
+}
+
+const ARTIFACT_IGNORE_RE = /(^|\/)(?:\.git|\.hg|\.svn|node_modules|\.venv|venv|__pycache__|dist|build|\.next|\.cache)(?:\/|$)/;
+// Canonical Hermes mutators plus MCP filesystem aliases that can create/edit files.
+const ARTIFACT_MUTATION_TOOLS = new Set(['write_file','patch','edit_file','create_file','mcp_filesystem_write_file','mcp_filesystem_edit_file']);
+
+function _sessionAttachmentRootAbsolute(){
+  const sid=S&&S.session&&S.session.session_id?String(S.session.session_id).trim():'';
+  if(!sid) return '';
+  return `/root/.hermes/webui/attachments/${sid}/`;
+}
+
+function _resolveArtifactOpenPath(path){
+  const raw=String(path||'').trim();
+  const attachmentRoot=_sessionAttachmentRootAbsolute();
+  if(attachmentRoot&&raw.startsWith(attachmentRoot)){
+    const rel=raw.slice(attachmentRoot.length).replace(/^\/+/, '');
+    return {rel, isAttachment: !!rel, absolutePath: raw};
+  }
+  const rel=raw.replace(/^~\//,'').replace(/^\.\//,'');
+  return {rel, isAttachment: false, absolutePath: raw};
+}
+
+function _normalizeArtifactPath(path){
+  if(!path) return '';
+  path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
+  if(!path || path.length > 240 || path.includes('://')) return '';
+  if(ARTIFACT_IGNORE_RE.test(path)) return '';
+  if(!/[./]/.test(path)) return '';
+  return path;
+}
+
+function _artifactCandidatesFromText(text){
+  if(!text || typeof text !== 'string') return [];
+  const out = [];
+  const seen = new Set();
+  const add = (path) => {
+    path = _normalizeArtifactPath(path);
+    if(!path || seen.has(path)) return;
+    seen.add(path); out.push({path, kind:'diff'});
+  };
+  // Fallback text mining is intentionally narrow: only diff/patch fences imply
+  // the session changed a file. Prose mentions such as "edited package.json" are
+  // too noisy for an Artifacts list that should track write/edit outputs.
+  const fenced = /```(?:diff|patch)\s*\n[\s\S]*?```/gi;
+  let m;
+  while((m = fenced.exec(text))){
+    const block = m[0];
+    const fm = block.match(/(?:^|\n)(?:\+\+\+|---)\s+(?:[ab]\/)?([^\n\t]+)/);
+    if(fm) add(fm[1].trim());
+  }
+  return out;
+}
+
+function _artifactCandidatesFromToolCall(tc){
+  if(!tc) return [];
+  const name = String(tc.name || '').replace(/^functions\./,'');
+  const args = tc.arguments || tc.args || tc.input || {};
+  const result = tc.result || tc.output || tc.snippet || '';
+  const out = [];
+  const add = (path, source=name || 'tool') => {
+    path = _normalizeArtifactPath(path);
+    if(path) out.push({path, kind:source});
+  };
+  if(ARTIFACT_MUTATION_TOOLS.has(name) && args && typeof args === 'object'){
+    for(const key of ['path','file_path','source','destination']) add(args[key]);
+    if(Array.isArray(args.paths)) args.paths.forEach(p=>add(p));
+    if(Array.isArray(args.edits)) args.edits.forEach(e=>add(e&&e.path));
+  }
+  const resultText = typeof result === 'string' ? result : (result ? JSON.stringify(result) : '');
+  // Tool results may include unified diffs from patch-style tools; scan those
+  // narrowly after structured args so diff headers can still contribute paths.
+  for(const a of _artifactCandidatesFromText(resultText)) out.push(a);
+  if(!out.length && ARTIFACT_MUTATION_TOOLS.has(name)){
+    const argsText = typeof args === 'string' ? args : JSON.stringify(args || {});
+    for(const a of _artifactCandidatesFromText(argsText)) out.push(a);
+  }
+  return out;
+}
+
+function collectSessionArtifacts(){
+  const items = [];
+  const seen = new Set();
+  const push = (path, source) => {
+    path = _normalizeArtifactPath(path);
+    if(!path || seen.has(path)) return;
+    seen.add(path); items.push({path, source});
+  };
+  for(const tc of (S.toolCalls || [])){
+    for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
+  }
+  for(const msg of (S.messages || [])){
+    const text = msg && (msg.content || msg.text || msg.message || '');
+    for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
+  }
+  return items.slice(0, 50);
+}
+
+function renderSessionArtifacts(){
+  const root = $('workspaceArtifacts');
+  const count = $('workspaceArtifactsCount');
+  if(!root) return;
+  const items = collectSessionArtifacts();
+  if(count) count.textContent = String(items.length);
+  if(!S.session){
+    root.innerHTML = '<div class="workspace-artifact-empty">Open a conversation to see files changed in this session.</div>';
+    return;
+  }
+  if(!items.length){
+    root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
+    return;
+  }
+  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+}
+
+async function _workspacePathExists(path){
+  if(!S.session||!path) return false;
+  const parts=String(path).split('/').filter(Boolean);
+  const name=parts.pop();
+  if(!name) return false;
+  const dir=parts.length?parts.join('/'):'.';
+  const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dir)}`);
+  return (data.entries||[]).some(entry=>entry&&((entry.path===path)||entry.name===name));
+}
+
+async function openArtifactPath(path){
+  if(!path) return;
+  switchWorkspacePanelTab('files');
+  const resolved = _resolveArtifactOpenPath(path);
+  const rel = resolved.rel;
+  if(!rel){
+    setStatus(t('file_open_failed'));
+    return;
+  }
+  try{
+    if(!resolved.isAttachment && !(await _workspacePathExists(rel))){
+      setStatus(t('file_open_failed'));
+      return;
+    }
+  }catch(_){
+    setStatus(t('file_open_failed'));
+    return;
+  }
+  openFile(rel);
+}
+
 async function loadDir(path){
   if(!S.session)return;
+  const sessionId=S.session.session_id;
   try{
     if(!path||path==='.'){
       S._dirCache={};
       _restoreExpandedDirs();  // restore per-workspace expanded state on root load
     }
     S.currentDir=path||'.';
-    const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
+    const data=await api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}`);
+    if(!S.session||S.session.session_id!==sessionId)return;
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
+    // #2673 — refresh Artifacts tab when its source data (the file tree) updates.
+    if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
     // Pre-fetch contents of restored expanded dirs so they render without a second click
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
     if(!path||path==='.'){
@@ -75,19 +327,20 @@ async function loadDir(path){
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
       if(pending.length){
         const results=await Promise.all(pending.map(dirPath=>
-          api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dirPath)}`)
+          api(`/api/list?session_id=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(dirPath)}`)
             .then(dc=>({dirPath,entries:dc.entries||[]}))
             .catch(()=>({dirPath,entries:[]}))
         ));
+        if(!S.session||S.session.session_id!==sessionId)return;
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
       if(expanded.size>0)renderFileTree();
     }
     if(typeof clearPreview==='function'){
       if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview();});
+        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview({keepPanelOpen:true});});
       }else{
-        clearPreview();
+        clearPreview({keepPanelOpen:true});
       }
     }
     // Fetch git info for workspace root (non-blocking)
@@ -98,8 +351,10 @@ async function loadDir(path){
 async function _refreshGitBadge(){
   const badge=$('gitBadge');
   if(!badge||!S.session)return;
+  const sessionId=S.session.session_id;
   try{
-    const data=await api(`/api/git-info?session_id=${encodeURIComponent(S.session.session_id)}`);
+    const data=await api(`/api/git-info?session_id=${encodeURIComponent(sessionId)}`);
+    if(!S.session||S.session.session_id!==sessionId)return;
     if(data.git&&data.git.is_git){
       const g=data.git;
       let text=g.branch||'git';
@@ -113,7 +368,10 @@ async function _refreshGitBadge(){
       badge.style.display='none';
       badge.textContent='';
     }
-  }catch(e){badge.style.display='none';}
+  }catch(e){
+    if(!S.session||S.session.session_id!==sessionId)return;
+    badge.style.display='none';
+  }
 }
 
 function navigateUp(){
@@ -130,6 +388,8 @@ const HTML_EXTS   = new Set(['.html','.htm']);
 const PDF_EXTS    = new Set(['.pdf']);
 const AUDIO_EXTS  = new Set(['.mp3','.wav','.m4a','.aac','.ogg','.oga','.opus','.flac']);
 const VIDEO_EXTS  = new Set(['.mp4','.mov','.m4v','.webm','.ogv','.avi','.mkv']);
+const MD_PREVIEW_RICH_RENDER_MAX_BYTES = 64 * 1024;
+const MD_PREVIEW_RICH_RENDER_MAX_LINES = 1500;
 // Binary formats that should download rather than preview
 const DOWNLOAD_EXTS = new Set([
   '.docx','.doc','.xlsx','.xls','.pptx','.ppt','.odt','.ods','.odp',
@@ -140,6 +400,31 @@ const DOWNLOAD_EXTS = new Set([
 ]);
 
 function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }
+
+function markdownPreviewByteLength(content){
+  const text=String(content||'');
+  if(typeof Blob==='function') return new Blob([text]).size;
+  if(typeof TextEncoder==='function') return new TextEncoder().encode(text).length;
+  return unescape(encodeURIComponent(text)).length;
+}
+
+function markdownPreviewLineCount(content){
+  const text=String(content||'');
+  if(!text) return 1;
+  return text.split('\n').length;
+}
+
+function shouldRenderMarkdownPreviewAsPlainText(content){
+  return markdownPreviewByteLength(content)>MD_PREVIEW_RICH_RENDER_MAX_BYTES
+    || markdownPreviewLineCount(content)>MD_PREVIEW_RICH_RENDER_MAX_LINES;
+}
+
+function largeMarkdownPlainTextStatus(content){
+  const bytes=markdownPreviewByteLength(content);
+  const lines=markdownPreviewLineCount(content);
+  const sizeLabel=bytes>=1024?`${Math.round(bytes/1024)} KB`:`${bytes} B`;
+  return `Large markdown file (${sizeLabel}, ${lines} lines) shown as plain text. Click Edit to view raw.`;
+}
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
 let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
@@ -272,8 +557,14 @@ async function openFile(path){
     // Markdown: fetch text, render with renderMd, display as formatted HTML
     try{
       const data=await api(`/api/file?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
-      showPreview('md');
       _previewRawContent = data.content;
+      if(shouldRenderMarkdownPreviewAsPlainText(data.content)){
+        showPreview('code');
+        $('previewCode').textContent=data.content;
+        setStatus(largeMarkdownPlainTextStatus(data.content));
+        return;
+      }
+      showPreview('md');
       $('previewMd').innerHTML=renderMd(data.content);
       requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
     }catch(e){setStatus(t('file_open_failed'));}
@@ -337,7 +628,7 @@ function renderFileBreadcrumb(filePath) {
   const root = document.createElement('span');
   root.className = 'breadcrumb-seg breadcrumb-link';
   root.textContent = '~';
-  root.onclick = () => { clearPreview(); loadDir('.'); };
+  root.onclick = () => { loadDir('.'); };
   bar.appendChild(root);
 
   const parts = filePath.split('/');
@@ -354,7 +645,7 @@ function renderFileBreadcrumb(filePath) {
     if (i < parts.length - 1) {
       seg.className = 'breadcrumb-seg breadcrumb-link';
       const target = accumulated;
-      seg.onclick = () => { clearPreview(); loadDir(target); };
+      seg.onclick = () => { loadDir(target); };
     } else {
       seg.className = 'breadcrumb-seg breadcrumb-current';
     }

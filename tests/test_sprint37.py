@@ -94,7 +94,10 @@ def test_workspace_panel_restore_before_sync():
 def test_workspace_panel_preload_marker_restored_in_head():
     """index.html must preload the workspace panel state before the main stylesheet paints."""
     marker = "document.documentElement.dataset.workspacePanel"
-    css_link = '<link rel="stylesheet" href="static/style.css">'
+    # The stylesheet href carries `?v=__WEBUI_VERSION__` for SW cache busting (#1507).
+    # We just need the link's start position; the version query doesn't change the
+    # ordering invariant this test enforces.
+    css_link = '<link rel="stylesheet" href="static/style.css'
     marker_pos = HTML.find(marker)
     css_pos = HTML.find(css_link)
     assert marker_pos >= 0, "index.html must preload documentElement.dataset.workspacePanel from localStorage"

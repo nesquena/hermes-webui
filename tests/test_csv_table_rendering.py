@@ -53,14 +53,14 @@ def test_loadCsvInline_function():
     """Verify loadCsvInline lazy-load function exists."""
     with open('static/ui.js') as f:
         src = f.read()
-    assert 'function loadCsvInline()' in src, "Missing loadCsvInline function"
+    assert 'function loadCsvInline' in src, "Missing loadCsvInline function"
 
 
 def test_csv_inline_max_size():
     """Verify CSV inline rendering has a size cap."""
     with open('static/ui.js') as f:
         src = f.read()
-    csv_section = src[src.find('function loadCsvInline()'):src.find('function loadCsvInline()') + 2000]
+    csv_section = src[src.find('function loadCsvInline'):src.find('function loadCsvInline') + 2000]
     assert 'CSV_MAX_SIZE' in csv_section, "Should have CSV_MAX_SIZE constant"
     assert 'csv_too_large' in csv_section, "Should use csv_too_large i18n for oversized files"
 
@@ -69,7 +69,7 @@ def test_csv_auto_detect_separator():
     """Verify CSV handler auto-detects separator."""
     with open('static/ui.js') as f:
         src = f.read()
-    csv_section = src[src.find('function loadCsvInline()'):src.find('function loadCsvInline()') + 2000]
+    csv_section = src[src.find('function loadCsvInline'):src.find('function loadCsvInline') + 2000]
     assert 'separators' in csv_section, "Should have separator detection"
     assert ';' in csv_section, "Should detect semicolon separator"
     assert 'tab' in csv_section.lower() or '\\t' in csv_section, "Should detect tab separator"
@@ -86,24 +86,26 @@ def test_csv_error_handling():
     """Verify CSV error and empty data handling."""
     with open('static/ui.js') as f:
         src = f.read()
-    csv_section = src[src.find('function loadCsvInline()'):src.find('function loadCsvInline()') + 2500]
+    csv_section = src[src.find('function loadCsvInline'):src.find('function loadCsvInline') + 2500]
     assert 'csv_error' in csv_section, "Should use csv_error i18n on fetch failure"
     assert 'csv_no_data' in csv_section, "Should use csv_no_data i18n for insufficient data"
 
 
 def test_csv_loadCsvInline_called_after_render():
-    """Verify loadCsvInline is called in requestAnimationFrame after rendering."""
+    """Verify loadCsvInline is called by the consolidated post-render pass."""
     with open('static/ui.js') as f:
         src = f.read()
-    assert src.count('loadCsvInline()') >= 2, \
-        "loadCsvInline should be called at least twice (initial render + cache restore)"
+    assert 'requestAnimationFrame(()=>postProcessRenderedMessages(inner))' in src
+    idx = src.find('function postProcessRenderedMessages')
+    body = src[idx:idx + 500]
+    assert 'loadCsvInline(container)' in body, "post-process should call loadCsvInline once per render"
 
 
 def test_csv_line_ending_normalization():
     """Verify CSV handler normalizes line endings."""
     with open('static/ui.js') as f:
         src = f.read()
-    csv_section = src[src.find('function loadCsvInline()'):src.find('function loadCsvInline()') + 2000]
+    csv_section = src[src.find('function loadCsvInline'):src.find('function loadCsvInline') + 2000]
     assert '\\r\\n' in csv_section, "Should handle \\r\\n line endings"
     assert '\\r' in csv_section, "Should handle \\r line endings"
 

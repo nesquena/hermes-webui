@@ -166,9 +166,29 @@ def test_sse_cancel_handler_calls_set_busy():
     # Find the closing of this handler block (next top-level addEventListener)
     next_handler = src.find("source.addEventListener(", idx + 50)
     block = src[idx:next_handler] if next_handler != -1 else src[idx:idx + 3000]
-    assert "setBusy(false)" in block, (
-        "SSE cancel handler no longer calls setBusy(false)"
+    assert (
+        "setBusy(false)" in block
+        or "_setActivePaneIdleIfOwner()" in block
+    ), (
+        "SSE cancel handler no longer idles the owning active pane"
     )
+    if "_setActivePaneIdleIfOwner()" in block:
+        helper_idx = src.find("function _setActivePaneIdleIfOwner")
+        assert helper_idx != -1
+        next_function = src.find("\n  function ", helper_idx + 1)
+        helper = src[helper_idx:next_function if next_function != -1 else helper_idx + 800]
+        assert "setBusy(false)" in helper
+        # The helper MUST preserve the v0.51.12 (#1753) 3-way OR guard so
+        # idling the active pane on a background completion is gated on the
+        # permissive-fallback disjunct ("no other inflight on the active pane")
+        # in addition to "is active" / "no session". Without this, a user
+        # viewing pane A (idle) while pane B completes in the background
+        # would not get pane A's composer state cleared. Catches the exact
+        # regression v0.51.14's auto-fix repaired in PR #1761.
+        assert "!INFLIGHT[S.session.session_id]" in helper, (
+            "_setActivePaneIdleIfOwner must preserve the !INFLIGHT[...] "
+            "permissive-fallback disjunct from PR #1753 (v0.51.12)."
+        )
 
 
 # ── 7. i18n key preserved ─────────────────────────────────────────────────────
@@ -192,16 +212,14 @@ def test_cancel_marker_flagged_as_error_to_skip_in_api_history():
     _error: True so _sanitize_messages_for_api() strips it from the
     conversation_history sent to the agent on the next user message.
 
-    Without this flag, the LLM sees "*Task cancelled.*" as a prior assistant
+    Without this flag, the LLM sees "Task cancelled" as a prior assistant
     turn and may reference it in subsequent responses ("As I mentioned, I was
     cancelled...") — a behavioral regression introduced when this PR started
     persisting the marker to the session.
     """
     src = read("api/streaming.py")
-    idx = src.find("'content': '*Task cancelled.*'")
-    if idx == -1:
-        idx = src.find('"content": "*Task cancelled.*"')
-    assert idx != -1, "cancel marker content string not found in cancel_stream()"
+    idx = src.find("'content': _cancelled_turn_content(message")
+    assert idx != -1, "cancel marker content writer not found in cancel_stream()"
 
     # Walk back to the start of the dict literal (opening brace)
     brace_open = src.rfind("{", 0, idx)

@@ -25,7 +25,8 @@ export ENV_OBFUSCATE_PART="TOKEN API KEY"
 if [ -z "${ENV_IGNORELIST+x}" ]; then error_exit "ENV_IGNORELIST not set"; fi
 if [ -z "${ENV_OBFUSCATE_PART+x}" ]; then error_exit "ENV_OBFUSCATE_PART not set"; fi
 
-whoami=`whoami`
+# whoami fails under set -e if the UID has no /etc/passwd entry (k8s runAsUser).
+whoami=$(whoami 2>/dev/null || echo "uid-$(id -u)")
 script_dir=$(dirname $0)
 script_name=$(basename $0)
 echo ""; echo ""
@@ -36,25 +37,25 @@ script_fullname=$0
 echo "  - script_fullname: ${script_fullname}"
 ignore_value="VALUE_TO_IGNORE"
 
-# everyone can read our files by default
-umask 0022
+# Keep init scratch files private to the container user that owns them.
+umask 0077
 
-# Write a world-writeable file (preferably inside /tmp -- ie within the container)
-write_worldtmpfile() {
+write_privtmpfile() {
   tmpfile=$1
-  if [ -z "${tmpfile}" ]; then error_exit "write_worldfile: missing argument"; fi
-  if [ -f $tmpfile ]; then rm -f $tmpfile; fi
-  echo -n $2 > ${tmpfile}
-  chmod 777 ${tmpfile}
+  if [ -z "${tmpfile}" ]; then error_exit "write_privtmpfile: missing argument"; fi
+  if [ -f "$tmpfile" ]; then rm -f "$tmpfile"; fi
+  printf '%s' "$2" > "$tmpfile"
+  chmod 600 "$tmpfile"
 }
 
 itdir=/tmp/hermeswebui_init
-if [ ! -d $itdir ]; then mkdir $itdir; chmod 777 $itdir; fi
-if [ ! -d $itdir ]; then error_exit "Failed to create $itdir"; fi
+if [ ! -d "$itdir" ]; then mkdir -p "$itdir"; fi
+chmod 700 "$itdir" || error_exit "Failed to secure $itdir"
+if [ ! -d "$itdir" ]; then error_exit "Failed to create $itdir"; fi
 
 # Set user and group id
 # logic: if not set and file exists, use file value, else use default. Create file for persistence when the container is re-run
-# reasoning: needed when using docker compose as the file will exist in the stopped container, and changing the value from environment variables or configuration file must be propagated from hermeswebuitoo to hermeswebuitoo transition (those values are the only ones loaded before the environment variables dump file are loaded)
+# reasoning: needed when using docker compose as the file will exist in the stopped container, and changing the value from environment variables or configuration file must be propagated from the root init phase to the hermeswebui runtime phase
 it=$itdir/hermeswebui_user_uid
 if [ -z "${WANTED_UID+x}" ]; then
   if [ -f $it ]; then WANTED_UID=$(cat $it); fi
@@ -88,7 +89,7 @@ if [ -z "${WANTED_UID+x}" ] || [ "${WANTED_UID}" = "1024" ]; then
   fi
 fi
 WANTED_UID=${WANTED_UID:-1024}
-write_worldtmpfile $it "$WANTED_UID"
+write_privtmpfile $it "$WANTED_UID"
 echo "-- WANTED_UID: \"${WANTED_UID}\""
 
 it=$itdir/hermeswebui_user_gid
@@ -120,7 +121,7 @@ if [ -z "${WANTED_GID+x}" ] || [ "${WANTED_GID}" = "1024" ]; then
   fi
 fi
 WANTED_GID=${WANTED_GID:-1024}
-write_worldtmpfile $it "$WANTED_GID"
+write_privtmpfile $it "$WANTED_GID"
 echo "-- WANTED_GID: \"${WANTED_GID}\""
 
 echo "== Most Environment variables set"
@@ -180,27 +181,96 @@ load_env() {
   fi
 }
 
-# hermeswebuitoo is a specfiic user not existing by default on ubuntu, we can check its whomai
-if [ "A${whoami}" == "Ahermeswebuitoo" ]; then 
-  echo "-- Running as hermeswebuitoo, will switch hermeswebui to the desired UID/GID"
-  # The script is started as hermeswebuitoo -- UID/GID 1025/1025
+chown_home_hermeswebui() {
+  # macOS Docker bind mounts can expose hermes-agent git object packs as
+  # read-only host files. The runtime only needs to read those existing objects;
+  # requiring chown on them makes startup fail before WebUI can run (#2237).
+  #
+  # Multi-container compose (#2470) additionally mounts the entire
+  # hermes-agent-src volume read-only on the WebUI side because the WebUI only
+  # reads it for `uv pip install`. On a :ro mount, chown returns EROFS for any
+  # file inside the subtree, which would propagate to `set -e` and kill startup
+  # before the WebUI can run. Either way, the WebUI never writes to the agent
+  # source — prune the entire hermes-agent path from the chown walk so a
+  # read-only or partially-read-only mount doesn't break the rest of the home
+  # ownership alignment.
+  find /home/hermeswebui \
+    -path "/home/hermeswebui/.hermes/hermes-agent" -prune \
+    -o -exec chown -h "${WANTED_UID}:${WANTED_GID}" {} +
+}
+
+# The production image does not ship sudo. The entrypoint starts as root only
+# long enough to align the hermeswebui UID/GID with mounted volumes, prepare
+# root-owned paths, and then drop privileges for the server process.
+if [ "A${whoami}" == "Aroot" ]; then
+  echo "-- Running as root for one-time container init; will switch to hermeswebui"
 
   # We are altering the UID/GID of the hermeswebui user to the desired ones and restarting as that user
-  # using usermod for the already create hermeswebui user, knowing it is not already in use
+  # using usermod for the already created hermeswebui user, knowing it is not already in use
   # per usermod manual: "You must make certain that the named user is not executing any processes when this command is being executed"
-  sudo groupmod -o -g ${WANTED_GID} hermeswebui || error_exit "Failed to set GID of hermeswebui user"
-  sudo usermod -o -u ${WANTED_UID} hermeswebui || error_exit "Failed to set UID of hermeswebui user"
-  sudo chown -R ${WANTED_UID}:${WANTED_GID} /home/hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"
-  save_env /tmp/hermeswebuitoo_env.txt  
+  # Guard for read-only root filesystem (podman with read_only=true, issue #1470).
+  _readonly_root=false
+  if ! sh -c 'test -w /etc/group && test -w /etc/passwd' 2>/dev/null; then
+    _readonly_root=true
+    echo "  !! Detected read-only root filesystem — /etc/group or /etc/passwd is not writable"
+  fi
+  if [ "A${_readonly_root}" == "Atrue" ]; then
+    _current_hermeswebui_gid=$(id -g hermeswebui 2>/dev/null || echo "")
+    _current_hermeswebui_uid=$(id -u hermeswebui 2>/dev/null || echo "")
+    if [ "A${_current_hermeswebui_gid}" == "A${WANTED_GID}" ] && [ "A${_current_hermeswebui_uid}" == "A${WANTED_UID}" ]; then
+      echo "  -- Skipping groupmod/usermod — hermeswebui already has UID ${WANTED_UID} GID ${WANTED_GID} and root fs is read-only"
+    else
+      error_exit "Cannot modify /etc/group or /etc/passwd (read-only root fs). Set UID=${_current_hermeswebui_uid} and GID=${_current_hermeswebui_gid} to match, or run without read_only=true. See issue #1470."
+    fi
+  else
+    groupmod -o -g "${WANTED_GID}" hermeswebui || error_exit "Failed to set GID of hermeswebui user"
+    usermod -o -u "${WANTED_UID}" hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+  fi
+
+  chown_home_hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"
+
+  echo ""; echo "-- Preparing /app for the hermeswebui runtime user"
+  mkdir -p /app || error_exit "Failed to create /app directory"
+  chown hermeswebui:hermeswebui /app || error_exit "Failed to set owner of /app to hermeswebui user"
+  rsync -av --chown=hermeswebui:hermeswebui /apptoo/ /app/ || error_exit "Failed to sync /apptoo to /app with correct ownership"
+
+  if [ -z "${HERMES_WEBUI_DEFAULT_WORKSPACE+x}" ]; then export HERMES_WEBUI_DEFAULT_WORKSPACE="/workspace"; fi
+  if [ ! -d "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then
+    mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit "Failed to create default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"
+  fi
+  if [ ! -d "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then error_exit "HERMES_WEBUI_DEFAULT_WORKSPACE directory does not exist at $HERMES_WEBUI_DEFAULT_WORKSPACE"; fi
+  chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE" 2>/dev/null || echo "!! WARNING: Could not chown $HERMES_WEBUI_DEFAULT_WORKSPACE (continuing)"
+
+  export UV_CACHE_DIR=${UV_CACHE_DIR:-/uv_cache}
+  mkdir -p "${UV_CACHE_DIR}" || error_exit "Failed to create ${UV_CACHE_DIR} directory"
+  chown hermeswebui:hermeswebui "${UV_CACHE_DIR}" || error_exit "Failed to set owner of ${UV_CACHE_DIR} to hermeswebui user"
+
+  chown -R "${WANTED_UID}:${WANTED_GID}" "$itdir" || error_exit "Failed to set owner of $itdir"
+  # Issue #2010 — Railway / user-namespaced runtimes: in-container UID 0 may map
+  # to a host UID outside the writable subuid range, so /tmp writes fail despite
+  # id -u == 0. Probe writability and fall back through $itdir → /app.
+  ENV_FILE="/tmp/hermeswebui_root_env.txt"
+  if ! ( : > "$ENV_FILE" ) 2>/dev/null; then
+    ENV_FILE="${itdir:-/tmp/hermeswebui_init}/hermeswebui_root_env.txt"
+    mkdir -p "$(dirname "$ENV_FILE")" 2>/dev/null
+    if ! ( : > "$ENV_FILE" ) 2>/dev/null; then
+      ENV_FILE="/app/.hermeswebui_root_env"
+    fi
+    echo "  !! /tmp not writable by root — falling back to $ENV_FILE (user-namespaced runtime?)"
+  fi
+  save_env "$ENV_FILE"
+  chown "${WANTED_UID}:${WANTED_GID}" "$ENV_FILE" || error_exit "Failed to set owner of $ENV_FILE"
+  chmod 600 "$ENV_FILE" || error_exit "Failed to secure $ENV_FILE"
+  export _HW_ROOT_ENV_PATH="$ENV_FILE"
+
   # restart the script as hermeswebui set with the correct UID/GID this time
   echo "-- Restarting as hermeswebui user with UID ${WANTED_UID} GID ${WANTED_GID}"
-  sudo su hermeswebui $script_fullname || error_exit "subscript failed"
-  ok_exit "Clean exit"
+  exec su -s /bin/bash -c "exec \"${script_fullname}\"" hermeswebui || error_exit "subscript failed"
 fi
 
-# If we are here, the script is started as another user than hermeswebuitoo
-# because the whoami value for the hermeswebui user can be any existing user, we can not check against it
-# instead we check if the UID/GID are the expected ones
+# If we are here, the script is started as an unprivileged runtime user.
+# Because the whoami value for the hermeswebui user can be any existing user, we cannot check against it;
+# instead we check if the UID/GID are the expected ones.
 if [ "$WANTED_GID" != "$new_gid" ]; then error_exit "hermeswebui MUST be running as UID ${WANTED_UID} GID ${WANTED_GID}, current UID ${new_uid} GID ${new_gid}"; fi
 if [ "$WANTED_UID" != "$new_uid" ]; then error_exit "hermeswebui MUST be running as UID ${WANTED_UID} GID ${WANTED_GID}, current UID ${new_uid} GID ${new_gid}"; fi
 
@@ -209,18 +279,21 @@ if [ "$WANTED_UID" != "$new_uid" ]; then error_exit "hermeswebui MUST be running
 # We are therefore running as hermeswebui
 echo ""; echo "== Running as hermeswebui"
 
-# Load environment variables one by one if they do not exist from /tmp/hermeswebuitoo_env.txt
-it=/tmp/hermeswebuitoo_env.txt
-if [ -f $it ]; then
-  echo "-- Loading not already set environment variables from $it"
-  load_env $it true
+# Load environment variables one by one if they do not exist from the root init phase
+tmp_root_env="${_HW_ROOT_ENV_PATH:-/tmp/hermeswebui_root_env.txt}"
+if [ -f $tmp_root_env ]; then
+  echo "-- Loading not already set environment variables from $tmp_root_env"
+  load_env $tmp_root_env true
 fi
 
 ##
-echo ""; echo "-- Making sure /app is owned by the hermeswebui user to avoid permission issues when running the server "
-sudo mkdir -p /app || error_exit "Failed to create /app directory"
-sudo chown hermeswebui:hermeswebui /app || error_exit "Failed to set owner of /app to hermeswebui user"
-sudo rsync -av --chown=hermeswebui:hermeswebui /apptoo/ /app/ || error_exit "Failed to sync /apptoo to /app with correct ownership"
+if [ ! -f /app/server.py ] && [ -d /apptoo ]; then
+  echo ""; echo "-- Seeding /app from /apptoo (rootless startup)"
+  cp -a /apptoo/. /app/ || error_exit "Failed to seed /app from /apptoo (is /app writable by the runtime user?)"
+fi
+
+echo ""; echo "-- Verifying /app is writable by the hermeswebui runtime user"
+if [ ! -d /app ]; then error_exit "/app directory does not exist"; fi
 it=/app/.testfile; touch $it || error_exit "Failed to verify /app directory"
 rm -f $it || error_exit "Failed to delete test file in /app"
 
@@ -228,7 +301,7 @@ rm -f $it || error_exit "Failed to delete test file in /app"
 
 echo ""; echo "== Checking required environment variables for hermes-webui"
 
-echo ""; echo "-- HERMES_WEBUI_VERSION: Where to store sessions, workspaces, and other state (default: ~/.hermes/webui-mvp)"
+echo ""; echo "-- HERMES_WEBUI_STATE_DIR: Where to store sessions, workspaces, and other state (default: ~/.hermes/webui)"
 if [ -z "${HERMES_WEBUI_STATE_DIR+x}" ]; then error_exit "HERMES_WEBUI_STATE_DIR not set"; fi; 
 echo "-- HERMES_WEBUI_STATE_DIR: $HERMES_WEBUI_STATE_DIR"
 if [ ! -d "$HERMES_WEBUI_STATE_DIR" ]; then mkdir -p $HERMES_WEBUI_STATE_DIR || error_exit "Failed to create state directory at $HERMES_WEBUI_STATE_DIR"; fi
@@ -239,19 +312,18 @@ rm -f $it || error_exit "Failed to delete test file in $HERMES_WEBUI_STATE_DIR"
 echo ""; echo "-- HERMES_WEBUI_DEFAULT_WORKSPACE: Default workspace directory shown on first launch"
 if [ -z "${HERMES_WEBUI_DEFAULT_WORKSPACE+x}" ]; then echo "HERMES_WEBUI_DEFAULT_WORKSPACE not set, setting to /workspace"; export HERMES_WEBUI_DEFAULT_WORKSPACE="/workspace"; fi;
 echo "-- HERMES_WEBUI_DEFAULT_WORKSPACE: $HERMES_WEBUI_DEFAULT_WORKSPACE"
-# Use sudo for mkdir — Docker may auto-create bind-mount directories as root (#357).
-# Skip mkdir if the directory already exists (e.g. a read-only mount — #670).
+# The root init phase creates/chowns missing bind-mount directories before
+# dropping privileges. After that, the runtime user only verifies access.
 if [ ! -d "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then
-  sudo mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit "Failed to create default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"
+  mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit "Failed to create default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"
 fi
 if [ ! -d "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then error_exit "HERMES_WEBUI_DEFAULT_WORKSPACE directory does not exist at $HERMES_WEBUI_DEFAULT_WORKSPACE"; fi
-# Only chown and write-test if the workspace is writable. Read-only bind-mounts
-# (:ro) are valid — the workspace is used for browsing, not writing by the server.
+# Only write-test if the workspace is writable. Read-only bind-mounts (:ro)
+# are valid — the workspace is used for browsing, not writing by the server.
 if [ -w "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then
-  sudo chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE" || echo "!! WARNING: Could not chown $HERMES_WEBUI_DEFAULT_WORKSPACE (continuing)"
   it="$HERMES_WEBUI_DEFAULT_WORKSPACE/.testfile"; touch $it && rm -f $it || echo "!! WARNING: Could not write to $HERMES_WEBUI_DEFAULT_WORKSPACE (continuing)"
 else
-  echo "-- HERMES_WEBUI_DEFAULT_WORKSPACE is read-only — skipping chown/write check (read-only workspace is supported)"
+  echo "-- HERMES_WEBUI_DEFAULT_WORKSPACE is read-only — skipping write check (read-only workspace is supported)"
 fi
 
 echo ""; echo "==================="
@@ -266,9 +338,9 @@ else
 fi
 export UV_PROJECT_ENVIRONMENT=venv
 
-export UV_CACHE_DIR=/uv_cache
-sudo mkdir -p ${UV_CACHE_DIR} || error_exit "Failed to create /uv_cache directory"
-sudo chown hermeswebui:hermeswebui ${UV_CACHE_DIR} || error_exit "Failed to set owner of ${UV_CACHE_DIR} to hermeswebui user"
+export UV_CACHE_DIR=${UV_CACHE_DIR:-/uv_cache}
+mkdir -p "${UV_CACHE_DIR}" || error_exit "Failed to create ${UV_CACHE_DIR} directory"
+test -w "${UV_CACHE_DIR}" || error_exit "${UV_CACHE_DIR} is not writable by hermeswebui"
 
 cd /app
 if [ -f /app/venv/bin/python3 ]; then
@@ -319,7 +391,49 @@ else
     fi
   done
   if [ -n "$_agent_src" ]; then
-    uv pip install "$_agent_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+    if [ -w "$_agent_src" ]; then
+      echo ""
+      echo "!! WARNING: hermes-agent source mount is writable from the WebUI container."
+      echo "!!   Path: $_agent_src"
+      echo "!! The multi-container compose defaults use a read-only mount for defence-in-depth."
+      echo "!! If this is not an intentional local development checkout, switch the WebUI"
+      echo "!! agent source volume/bind mount to read-only. See docs/rfcs/agent-source-boundary.md."
+      echo ""
+    fi
+    # The agent source can be mounted read-only (see docker-compose.two-container.yml
+    # / docker-compose.three-container.yml — the WebUI only reads this volume to
+    # install the agent's Python dependencies and never writes to it). setuptools'
+    # `egg_info` build step, however, touches `hermes_agent.egg-info/` inside the
+    # source tree even under PEP 517 build isolation, which `EROFS`-fails on a
+    # `:ro` mount and (under `set -e`) kills startup of every multi-container
+    # deploy. Stage the source into a writable tmpfs copy so the build can write
+    # its metadata side-by-side without touching the underlying mount.
+    #
+    # The copy excludes any pre-baked `*.egg-info` / `build` / `dist` artifacts
+    # to avoid the timestamp-update path setuptools takes when one is present,
+    # and `--reflink=auto` makes the copy near-free on overlay2/btrfs where
+    # supported. We rebuild on every container start (the agent source can
+    # change across volume re-init); cost is one rsync of ~10MB of Python source.
+    _stage_src="/tmp/hermes-agent-build"
+    rm -rf "$_stage_src"
+    mkdir -p "$_stage_src"
+    if command -v rsync >/dev/null 2>&1; then
+      rsync -a \
+        --exclude='*.egg-info' --exclude='build' --exclude='dist' \
+        --exclude='__pycache__' --exclude='.git' \
+        "$_agent_src"/ "$_stage_src"/ \
+        || error_exit "Failed to stage hermes-agent source to writable build dir"
+    else
+      # Fallback when rsync isn't in the image — straight cp -a, then drop
+      # the build artifacts that would trip setuptools.
+      cp -a "$_agent_src"/. "$_stage_src"/ \
+        || error_exit "Failed to copy hermes-agent source to writable build dir"
+      rm -rf "$_stage_src"/*.egg-info "$_stage_src"/build "$_stage_src"/dist 2>/dev/null || true
+      find "$_stage_src" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    fi
+    uv pip install "$_stage_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+      || error_exit "Failed to install hermes-agent's requirements"
+    rm -rf "$_stage_src"
   else
     echo ""
     echo "!! WARNING: hermes-agent source not found."

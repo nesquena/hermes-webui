@@ -18,6 +18,9 @@ import threading
 import time
 import sys
 import os
+import io
+import json
+import types
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -27,6 +30,253 @@ def read(rel):
 
 
 # ── api/updates.py ────────────────────────────────────────────────────────────
+
+class TestUpdateChecker:
+    def test_build_compare_url_requires_all_pieces(self):
+        import api.updates as upd
+
+        assert upd._build_compare_url(
+            'https://github.com/nesquena/hermes-webui', 'abc1234', 'def5678'
+        ) == 'https://github.com/nesquena/hermes-webui/compare/abc1234...def5678'
+        assert upd._build_compare_url(None, 'abc1234', 'def5678') is None
+        assert upd._build_compare_url('https://github.com/nesquena/hermes-webui', None, 'def5678') is None
+        assert upd._build_compare_url('https://github.com/nesquena/hermes-webui', 'abc1234', None) is None
+
+    def test_build_compare_url_rejects_unsafe_remote_urls(self):
+        import api.updates as upd
+
+        assert upd._build_compare_url('javascript:alert(1)', 'abc1234', 'def5678') is None
+        assert upd._build_compare_url('file:///tmp/hermes-webui', 'abc1234', 'def5678') is None
+        assert upd._build_compare_url('https:github.com/nesquena/hermes-webui', 'abc1234', 'def5678') is None
+        assert upd._build_compare_url('https://github.com/nesquena/hermes-webui', 'abc1234', 'def5678')
+
+    def test_check_repo_includes_compare_url_from_normalized_remote_and_merge_base(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[:2] == ['rev-list', '--count']:
+                return '2', True
+            if args[0] == 'merge-base':
+                return 'abcdef1234567890', True
+            if args[:3] == ['rev-parse', '--short', 'abcdef1234567890']:
+                return 'abcdef1', True
+            if args[:3] == ['rev-parse', '--short', 'origin/master']:
+                return 'def5678', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'git@github.com:NousResearch/hermes-agent.git', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'agent')
+
+        assert result['repo_url'] == 'https://github.com/NousResearch/hermes-agent'
+        assert result['current_sha'] == 'abcdef1'
+        assert result['latest_sha'] == 'def5678'
+        assert result['compare_url'] == 'https://github.com/NousResearch/hermes-agent/compare/abcdef1...def5678'
+
+    def test_check_repo_omits_compare_url_when_merge_base_missing(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[:2] == ['rev-list', '--count']:
+                return '2', True
+            if args[0] == 'merge-base':
+                return 'fatal: no merge base', False
+            if args[:3] == ['rev-parse', '--short', 'origin/master']:
+                return 'def5678', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'https://github.com/nesquena/hermes-webui.git', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'webui')
+
+        assert result['current_sha'] is None
+        assert result['latest_sha'] == 'def5678'
+        assert result['compare_url'] is None
+
+    def test_repo_url_strips_only_dot_git_suffix(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[:2] == ['rev-list', '--count']:
+                return '0', True
+            if args[0] == 'merge-base':
+                return 'abcdef1234567890', True
+            if args[:2] == ['rev-parse', '--short']:
+                return 'abcdef1', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'https://github.com/nesquena/hermes-webui.git', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'webui')
+
+        assert result['repo_url'] == 'https://github.com/nesquena/hermes-webui'
+
+    def test_repo_url_converts_ssh_and_strips_only_dot_git_suffix(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/main', True
+            if args[:2] == ['rev-list', '--count']:
+                return '0', True
+            if args[0] == 'merge-base':
+                return 'abcdef1234567890', True
+            if args[:2] == ['rev-parse', '--short']:
+                return 'abcdef1', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'git@github.com:NousResearch/hermes-agent.git', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'agent')
+
+        assert result['repo_url'] == 'https://github.com/NousResearch/hermes-agent'
+
+    def test_repo_url_strips_dot_git_before_trailing_slashes(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[:2] == ['rev-list', '--count']:
+                return '2', True
+            if args[0] == 'merge-base':
+                return 'abcdef1234567890', True
+            if args[:2] == ['rev-parse', '--short']:
+                return 'abcdef1', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'https://github.com/nesquena/hermes-webui.git/', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'webui')
+
+        assert result['repo_url'] == 'https://github.com/nesquena/hermes-webui'
+
+    def test_release_check_ignores_post_release_branch_commits(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:3] == ['tag', '--list', 'v*']:
+                return 'v2026.5.7\nv2026.4.30', True
+            if args[:3] == ['describe', '--tags', '--abbrev=0']:
+                return 'v2026.5.7', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'https://github.com/NousResearch/hermes-agent.git', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/main', True
+            if args[:2] == ['rev-list', '--count']:
+                return '16', True
+            if args[0] == 'merge-base':
+                return '3800972dd', True
+            return '', False
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'agent')
+
+        assert result['release_based'] is True
+        assert result['current_version'] == 'v2026.5.7'
+        assert result['latest_version'] == 'v2026.5.7'
+        assert result['behind'] == 0
+
+    def test_release_check_counts_release_gap(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:3] == ['tag', '--list', 'v*']:
+                return 'v0.51.35\nv0.51.34\nv0.51.33', True
+            if args[:3] == ['describe', '--tags', '--abbrev=0']:
+                return 'v0.51.34', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'https://github.com/nesquena/hermes-webui.git', True
+            return '', False
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'webui')
+
+        assert result['release_based'] is True
+        assert result['current_version'] == 'v0.51.34'
+        assert result['latest_version'] == 'v0.51.35'
+        assert result['behind'] == 1
+        assert result['branch'] == 'v0.51.35'
+
+    def test_detect_agent_version_reads_copied_source_tree(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        agent_dir = tmp_path / 'hermes-agent'
+        package_dir = agent_dir / 'hermes_cli'
+        package_dir.mkdir(parents=True)
+        (package_dir / '__init__.py').write_text('__version__ = "0.14.0"\n', encoding='utf-8')
+
+        monkeypatch.setattr(upd, '_AGENT_DIR', str(agent_dir))
+        monkeypatch.setattr(upd, '_describe_git_version', lambda path: None)
+        monkeypatch.setattr(upd, '_detect_agent_version_from_gateway_health', lambda: None)
+
+        assert upd._detect_agent_version() == '0.14.0'
+
+    def test_detect_agent_version_falls_back_to_gateway_health(self, monkeypatch):
+        import api.updates as upd
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"status":"ok","platform":"hermes-agent","version":"0.14.1"}'
+
+        seen = []
+
+        def fake_urlopen(url, timeout=0):
+            seen.append((url, timeout))
+            return FakeResponse()
+
+        monkeypatch.setattr(upd, '_AGENT_DIR', None)
+        monkeypatch.setenv('GATEWAY_HEALTH_URL', 'http://hermes-agent:8642/health')
+        monkeypatch.setattr(upd.urllib.request, 'urlopen', fake_urlopen)
+
+        assert upd._detect_agent_version() == '0.14.1'
+        assert seen == [('http://hermes-agent:8642/health', 0.75)]
+
 
 class TestConflictError:
     """#813 — conflict error must include flag + recovery command."""
@@ -117,6 +367,150 @@ class TestScheduleRestart:
         assert execv_called, "_schedule_restart must eventually call os.execv"
 
 
+class TestApplyUpdateRestartSafety:
+    """Self-update must not re-exec while chat streams are active."""
+
+    def test_apply_update_refuses_when_stream_active(self, tmp_path, monkeypatch):
+        import queue
+        import api.updates as upd
+        from api.config import STREAMS, STREAMS_LOCK
+
+        (tmp_path / '.git').mkdir()
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        called = []
+        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (called.append(a) or ('', True)))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+
+        with STREAMS_LOCK:
+            old = dict(STREAMS)
+            STREAMS.clear()
+            STREAMS['stream_active'] = queue.Queue()
+        try:
+            result = upd.apply_update('webui')
+        finally:
+            with STREAMS_LOCK:
+                STREAMS.clear()
+                STREAMS.update(old)
+
+        assert result['ok'] is False
+        assert result.get('active_streams') == 1
+        assert result.get('restart_blocked') is True
+        assert 'active chat stream' in result['message']
+        assert called == []
+
+    def test_force_update_refuses_when_stream_active(self, tmp_path, monkeypatch):
+        import queue
+        import api.updates as upd
+        from api.config import STREAMS, STREAMS_LOCK
+
+        (tmp_path / '.git').mkdir()
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (_ for _ in ()).throw(AssertionError('must not run git')))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+
+        with STREAMS_LOCK:
+            old = dict(STREAMS)
+            STREAMS.clear()
+            STREAMS['stream_active'] = queue.Queue()
+        try:
+            result = upd.apply_force_update('agent')
+        finally:
+            with STREAMS_LOCK:
+                STREAMS.clear()
+                STREAMS.update(old)
+
+        assert result['ok'] is False
+        assert result.get('active_streams') == 1
+        assert result.get('restart_blocked') is True
+        assert 'active chat stream' in result['message']
+
+    def test_apply_update_refuses_when_active_run_without_stream(self, tmp_path, monkeypatch):
+        import api.updates as upd
+        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
+
+        (tmp_path / '.git').mkdir()
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        called = []
+        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (called.append(a) or ('', True)))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+
+        with STREAMS_LOCK:
+            old_streams = dict(STREAMS)
+            STREAMS.clear()
+        with ACTIVE_RUNS_LOCK:
+            old_runs = dict(ACTIVE_RUNS)
+            ACTIVE_RUNS.clear()
+            ACTIVE_RUNS['run_active'] = {'session_id': 's1', 'stream_id': 'missing-stream'}
+        try:
+            result = upd.apply_update('webui')
+        finally:
+            with ACTIVE_RUNS_LOCK:
+                ACTIVE_RUNS.clear()
+                ACTIVE_RUNS.update(old_runs)
+            with STREAMS_LOCK:
+                STREAMS.clear()
+                STREAMS.update(old_streams)
+
+        assert result['ok'] is False
+        assert result.get('active_streams') == 0
+        assert result.get('active_runs') == 1
+        assert result.get('restart_blocked') is True
+        assert 'active agent run' in result['message']
+        assert called == []
+
+    def test_force_update_refuses_when_active_run_without_stream(self, tmp_path, monkeypatch):
+        import api.updates as upd
+        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK, STREAMS, STREAMS_LOCK
+
+        (tmp_path / '.git').mkdir()
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (_ for _ in ()).throw(AssertionError('must not run git')))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+
+        with STREAMS_LOCK:
+            old_streams = dict(STREAMS)
+            STREAMS.clear()
+        with ACTIVE_RUNS_LOCK:
+            old_runs = dict(ACTIVE_RUNS)
+            ACTIVE_RUNS.clear()
+            ACTIVE_RUNS['run_active'] = {'session_id': 's1', 'stream_id': 'missing-stream'}
+        try:
+            result = upd.apply_force_update('agent')
+        finally:
+            with ACTIVE_RUNS_LOCK:
+                ACTIVE_RUNS.clear()
+                ACTIVE_RUNS.update(old_runs)
+            with STREAMS_LOCK:
+                STREAMS.clear()
+                STREAMS.update(old_streams)
+
+        assert result['ok'] is False
+        assert result.get('active_streams') == 0
+        assert result.get('active_runs') == 1
+        assert result.get('restart_blocked') is True
+        assert 'active agent run' in result['message']
+
+    def test_wait_until_restart_safe_waits_for_active_run_to_clear(self, monkeypatch):
+        import api.updates as upd
+
+        snapshots = [
+            {'restart_blocked': True, 'active_streams': 0, 'active_runs': 1},
+            {'restart_blocked': False, 'active_streams': 0, 'active_runs': 0},
+        ]
+        sleeps = []
+        monkeypatch.setattr(upd, '_restart_blocker_snapshot', lambda: snapshots.pop(0))
+        monkeypatch.setattr(upd.time, 'sleep', lambda seconds: sleeps.append(seconds))
+
+        result = upd._wait_until_restart_safe(poll_seconds=0.25)
+
+        assert result['restart_blocked'] is False
+        assert sleeps == [0.25]
+
+
 class TestSuccessfulUpdateReturnsRestartScheduled:
     """#814 — successful apply_update must return restart_scheduled: True."""
 
@@ -127,6 +521,8 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
 
         def fake_run(args, cwd, timeout=10):
             if args[0] == 'fetch':
+                return '', True
+            if args[0] == 'tag':
                 return '', True
             if args[:2] == ['status', '--porcelain']:
                 return '', True   # clean tree
@@ -147,6 +543,72 @@ class TestSuccessfulUpdateReturnsRestartScheduled:
         assert result.get('restart_scheduled') is True, (
             "successful update must set restart_scheduled: True"
         )
+
+    def test_apply_update_pulls_latest_release_tag_when_updates_are_release_based(
+        self, tmp_path, monkeypatch
+    ):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+        ran = []
+
+        def fake_run(args, cwd, timeout=10):
+            ran.append(args)
+            if args[0] == 'fetch':
+                return '', True
+            if args[0] == 'tag':
+                return 'v0.51.106\nv0.51.105\nv0.51.104', True
+            if args == ['describe', '--tags', '--abbrev=0']:
+                return 'v0.51.105', True
+            if args == ['merge-base', '--is-ancestor', 'v0.51.106', 'HEAD']:
+                return '', False
+            if args[:2] == ['status', '--porcelain']:
+                return '', True
+            if args[0] == 'pull':
+                return 'Updating release tag', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+
+        result = upd.apply_update('webui')
+        assert result['ok'] is True
+        assert ['fetch', 'origin', '--quiet', '--tags', '--force'] in ran
+        assert ['pull', '--ff-only', 'origin', 'v0.51.106'] in ran
+        assert ['rev-parse', '--abbrev-ref', '@{upstream}'] not in ran
+
+    def test_apply_update_falls_back_to_tracking_branch_without_release_tags(
+        self, tmp_path, monkeypatch
+    ):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+        ran = []
+
+        def fake_run(args, cwd, timeout=10):
+            ran.append(args)
+            if args[0] == 'fetch':
+                return '', True
+            if args[0] == 'tag':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'fork/feature-branch', True
+            if args[:2] == ['status', '--porcelain']:
+                return '', True
+            if args[0] == 'pull':
+                return 'Already up to date.', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: None)
+
+        result = upd.apply_update('agent')
+        assert result['ok'] is True
+        assert ['pull', '--ff-only', 'fork', 'feature-branch'] in ran
 
 
 class TestApplyForceUpdate:
@@ -206,7 +668,172 @@ class TestForceUpdateRoute:
         )
 
 
-# ── static/ui.js ──────────────────────────────────────────────────────────────
+class TestUpdateSummaryRouteModelSelection:
+    """Update summaries should use a known text auxiliary model before main model fallback."""
+
+    def test_summary_route_prefers_documented_compression_auxiliary_model(self):
+        src = read('api/routes.py')
+
+        assert 'get_text_auxiliary_client' in src
+        assert '"compression"' in src
+        assert '"update_summary"' not in src
+        assert 'main_runtime=main_runtime' in src
+        assert 'update summary auxiliary model failed; falling back to main model' in src
+        assert 'from run_agent import AIAgent' in src
+
+    def test_summary_route_auxiliary_model_uses_active_profile_env(self, monkeypatch, tmp_path):
+        import api.config as cfg
+        import api.profiles as profiles
+        import api.routes as routes
+        import api.updates as updates
+
+        class FakeHandler:
+            def __init__(self, payload):
+                raw = json.dumps(payload).encode('utf-8')
+                self.headers = {'Content-Length': str(len(raw))}
+                self.rfile = io.BytesIO(raw)
+                self.wfile = io.BytesIO()
+                self.status = None
+
+            def send_response(self, status):
+                self.status = status
+
+            def send_header(self, _key, _value):
+                pass
+
+            def end_headers(self):
+                pass
+
+            def response_payload(self):
+                return json.loads(self.wfile.getvalue().decode('utf-8'))
+
+        captured = {}
+        profile_home = tmp_path / 'profiles' / 'work'
+        fake_skill_module = types.ModuleType('tools.skills_tool')
+        setattr(fake_skill_module, 'HERMES_HOME', 'default-home')
+        setattr(fake_skill_module, 'SKILLS_DIR', 'default-home/skills')
+        monkeypatch.setitem(sys.modules, 'tools.skills_tool', fake_skill_module)
+
+        monkeypatch.setattr(profiles, 'get_hermes_home_for_profile', lambda profile: profile_home)
+        monkeypatch.setattr(
+            profiles,
+            'get_profile_runtime_env',
+            lambda home: {'HERMES_TEST_PROFILE_ENV': 'work-runtime'},
+        )
+        monkeypatch.setattr(cfg, 'get_effective_default_model', lambda: 'openai/test-main')
+
+        def fake_resolve_model_provider(model):
+            thread_env = getattr(cfg._thread_ctx, 'env', {})
+            captured['model_resolution_env'] = {
+                'HERMES_HOME': os.environ.get('HERMES_HOME'),
+                'HERMES_TEST_PROFILE_ENV': os.environ.get('HERMES_TEST_PROFILE_ENV'),
+                'THREAD_HERMES_HOME': thread_env.get('HERMES_HOME'),
+                'THREAD_HERMES_TEST_PROFILE_ENV': thread_env.get('HERMES_TEST_PROFILE_ENV'),
+            }
+            return model, 'openai', 'https://example.test/v1'
+
+        monkeypatch.setattr(cfg, 'resolve_model_provider', fake_resolve_model_provider)
+        monkeypatch.setattr(cfg, 'resolve_custom_provider_connection', lambda provider: (None, None))
+
+        fake_runtime_provider = types.ModuleType('hermes_cli.runtime_provider')
+        fake_runtime_provider.resolve_runtime_provider = lambda requested=None: {
+            'api_key': 'fake-key',
+            'provider': requested or 'openai',
+            'base_url': 'https://example.test/v1',
+        }
+        fake_hermes_cli = types.ModuleType('hermes_cli')
+        fake_hermes_cli.__path__ = []
+        fake_hermes_cli.runtime_provider = fake_runtime_provider
+        monkeypatch.setitem(sys.modules, 'hermes_cli', fake_hermes_cli)
+        monkeypatch.setitem(sys.modules, 'hermes_cli.runtime_provider', fake_runtime_provider)
+
+        class FakeAuxClient:
+            class chat:
+                class completions:
+                    @staticmethod
+                    def create(model, messages):
+                        captured['aux_create'] = {'model': model, 'messages': messages}
+                        return types.SimpleNamespace(
+                            choices=[
+                                types.SimpleNamespace(
+                                    message=types.SimpleNamespace(
+                                        content='Notice: Profile-routed update summaries work.'
+                                    )
+                                )
+                            ]
+                        )
+
+        def fake_get_text_auxiliary_client(task, main_runtime=None):
+            thread_env = getattr(cfg._thread_ctx, 'env', {})
+            captured['aux_env'] = {
+                'HERMES_HOME': os.environ.get('HERMES_HOME'),
+                'HERMES_TEST_PROFILE_ENV': os.environ.get('HERMES_TEST_PROFILE_ENV'),
+                'THREAD_HERMES_HOME': thread_env.get('HERMES_HOME'),
+                'THREAD_HERMES_TEST_PROFILE_ENV': thread_env.get('HERMES_TEST_PROFILE_ENV'),
+                'SKILL_MODULE_HOME': getattr(fake_skill_module, 'HERMES_HOME'),
+                'SKILL_MODULE_DIR': getattr(fake_skill_module, 'SKILLS_DIR'),
+            }
+            captured['aux_task'] = task
+            captured['main_runtime'] = dict(main_runtime or {})
+            return FakeAuxClient(), 'profile-compression-model'
+
+        fake_auxiliary_client = types.ModuleType('agent.auxiliary_client')
+        fake_auxiliary_client.get_text_auxiliary_client = fake_get_text_auxiliary_client
+        fake_agent = types.ModuleType('agent')
+        fake_agent.__path__ = []
+        fake_agent.auxiliary_client = fake_auxiliary_client
+        monkeypatch.setitem(sys.modules, 'agent', fake_agent)
+        monkeypatch.setitem(sys.modules, 'agent.auxiliary_client', fake_auxiliary_client)
+
+        with updates._cache_lock:
+            updates._summary_cache.clear()
+
+        monkeypatch.setenv('HERMES_HOME', 'default-home')
+        monkeypatch.setenv('HERMES_TEST_PROFILE_ENV', 'default-runtime')
+
+        body = {
+            'target': 'webui',
+            'updates': {
+                'webui': {
+                    'behind': 1,
+                    'current_sha': 'profile-env-before',
+                    'latest_sha': f'profile-env-after-{time.time_ns()}',
+                    'compare_url': 'https://example.test/compare',
+                },
+            },
+        }
+        handler = FakeHandler(body)
+
+        profiles.set_request_profile('work')
+        try:
+            routes.handle_post(handler, types.SimpleNamespace(path='/api/updates/summary'))
+        finally:
+            profiles.clear_request_profile()
+
+        assert handler.status == 200
+        payload = handler.response_payload()
+        assert payload['generated_by'] == 'llm'
+        assert captured['aux_task'] == 'compression'
+        assert captured['model_resolution_env'] == {
+            'HERMES_HOME': str(profile_home),
+            'HERMES_TEST_PROFILE_ENV': 'work-runtime',
+            'THREAD_HERMES_HOME': str(profile_home),
+            'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
+        }
+        assert captured['aux_env'] == {
+            'HERMES_HOME': str(profile_home),
+            'HERMES_TEST_PROFILE_ENV': 'work-runtime',
+            'THREAD_HERMES_HOME': str(profile_home),
+            'THREAD_HERMES_TEST_PROFILE_ENV': 'work-runtime',
+            'SKILL_MODULE_HOME': profile_home,
+            'SKILL_MODULE_DIR': profile_home / 'skills',
+        }
+        assert captured['aux_create']['model'] == 'profile-compression-model'
+        assert getattr(fake_skill_module, 'HERMES_HOME') == 'default-home'
+        assert getattr(fake_skill_module, 'SKILLS_DIR') == 'default-home/skills'
+        assert os.environ.get('HERMES_HOME') == 'default-home'
+        assert os.environ.get('HERMES_TEST_PROFILE_ENV') == 'default-runtime'
+
 
 class TestUiJsUpdateBanner:
     """#813 + #814 — UI must show persistent error, force button, and correct toast."""
@@ -289,13 +916,14 @@ class TestUiJsUpdateBanner:
         )
 
     def test_wait_for_server_polls_health(self):
-        """_waitForServerThenReload() must fetch /health to determine readiness."""
+        """_waitForServerThenReload() must fetch health to determine readiness."""
         src = read('static/ui.js')
         m = re.search(r'function\s+_waitForServerThenReload\b.*?\n\}', src, re.DOTALL)
         assert m, "_waitForServerThenReload() not found"
         fn = m.group(0)
-        assert '/health' in fn, (
-            "_waitForServerThenReload must poll /health to detect server readiness"
+        assert "new URL('health'" in fn, (
+            "_waitForServerThenReload must poll the mount-relative health endpoint "
+            "to detect server readiness"
         )
         assert 'location.reload' in fn, (
             "_waitForServerThenReload must call location.reload() once the server is ready"
@@ -334,6 +962,26 @@ class TestUiJsUpdateBanner:
         assert 'updateError' in fn, (
             "_showUpdateError must write to the #updateError element for persistent display"
         )
+
+
+class TestUpdateBannerUx:
+    def test_update_banner_includes_release_labels(self):
+        src = read('static/ui.js')
+        assert 'function _formatUpdateTargetStatus' in src
+        assert 'info.release_based' in src
+        assert 'info.current_version' in src
+        assert 'info.latest_version' in src
+        assert "_formatUpdateTargetStatus('WebUI',data.webui)" in src
+        assert "_formatUpdateTargetStatus('Agent',data.agent)" in src
+
+    def test_settings_update_check_uses_same_repo_branch_formatter(self):
+        src = read('static/panels.js')
+        m = re.search(r'async function checkUpdatesNow\b.*?\n\}', src, re.DOTALL)
+        assert m, "checkUpdatesNow() not found"
+        fn = m.group(0)
+        assert '_formatUpdateTargetStatus' in fn
+        assert "formatUpdatePart('WebUI',data.webui)" in fn
+        assert "formatUpdatePart('Agent',data.agent)" in fn
 
 
 # ── static/index.html ─────────────────────────────────────────────────────────
@@ -447,6 +1095,418 @@ class TestSequentialUpdateRestartCoordination:
         )
 
 
+
+class TestUpdateCompareSource:
+    def test_simulated_update_check_payload_includes_both_safe_compare_urls(self):
+        src = read('api/routes.py')
+        assert '"repo_url": "https://github.com/nesquena/hermes-webui"' in src
+        assert '"compare_url": "https://github.com/nesquena/hermes-webui/compare/abc1234...def5678"' in src
+        assert '"repo_url": "https://github.com/NousResearch/hermes-agent"' in src
+        assert '"compare_url": "https://github.com/NousResearch/hermes-agent/compare/aaa0001...bbb0002"' in src
+
+    def test_update_banner_html_uses_multi_target_links_container(self):
+        src = read('static/index.html')
+        assert 'id="updateWhatsNewLinks"' in src
+        assert 'id="updateWhatsNew"' not in src
+
+    def test_update_banner_frontend_uses_data_driven_compare_helpers(self):
+        src = read('static/ui.js')
+        assert 'function _isSafeUpdateCompareUrl(url)' in src
+        assert 'function _updateCompareUrl(info)' in src
+        assert 'function _updateWhatsNewTargets(data)' in src
+        assert 'function _renderUpdateWhatsNewLinks(data)' in src
+        assert "$('updateWhatsNewLinks')" in src
+        assert "compare_url" in src
+        assert "repo_url+'/compare/'+currentSha+'...'+latestSha" in src
+        assert "_isSafeUpdateCompareUrl(compareUrl)?compareUrl:null" in src
+        assert "_renderUpdateWhatsNewLinks(data);" in src
+        assert "data.webui.repo_url" not in src
+        assert "$('updateWhatsNew')" not in src
+
+    def test_update_banner_clears_stale_links_when_no_updates_remain(self):
+        src = read('static/ui.js')
+        start = src.find('function _showUpdateBanner(data)')
+        assert start != -1, "_showUpdateBanner not found"
+        fn = src[start:src.find('function dismissUpdate()', start)]
+        empty_idx = fn.find('if(!parts.length)')
+        assert empty_idx != -1, "_showUpdateBanner must handle empty update payloads"
+        empty_block = fn[empty_idx:fn.find('return;', empty_idx) + len('return;')]
+        assert '_renderUpdateWhatsNewLinks(data);' in empty_block
+        assert "classList.remove('visible')" in empty_block
+
+    def test_manual_up_to_date_check_clears_update_banner(self):
+        src = read('static/panels.js')
+        up_to_date_idx = src.find("settings_up_to_date")
+        assert up_to_date_idx != -1, "manual update up-to-date branch not found"
+        block = src[up_to_date_idx:up_to_date_idx + 300]
+        assert "_showUpdateBanner(data)" in block
+
+
+class TestWhatsNewSummaryToggle:
+    def test_settings_default_and_persistence_allow_whats_new_summary_toggle(self):
+        src = read('api/config.py')
+        assert '"whats_new_summary_enabled": False' in src
+        bool_keys_start = src.find('_SETTINGS_BOOL_KEYS')
+        assert bool_keys_start != -1
+        bool_keys = src[bool_keys_start:src.find('}', bool_keys_start)]
+        assert '"whats_new_summary_enabled"' in bool_keys
+
+    def test_settings_panel_places_summary_toggle_next_to_update_check(self):
+        src = read('static/index.html')
+        check_idx = src.find('id="settingsCheckUpdates"')
+        summary_idx = src.find('id="settingsWhatsNewSummary"')
+        assert check_idx != -1, "settingsCheckUpdates checkbox missing"
+        assert summary_idx != -1, "settingsWhatsNewSummary checkbox missing"
+        assert check_idx < summary_idx, "summary toggle should sit after the update-check toggle"
+        nearby = src[summary_idx:summary_idx + 900]
+        assert 'settings_label_whats_new_summary' in nearby
+        assert 'settings_desc_whats_new_summary' in nearby
+
+    def test_settings_js_loads_saves_and_boots_summary_toggle(self):
+        panels = read('static/panels.js')
+        boot = read('static/boot.js')
+        assert "$('settingsWhatsNewSummary')" in panels
+        assert 'payload.whats_new_summary_enabled' in panels
+        assert 'settings.whats_new_summary_enabled' in panels
+        assert 'body.whats_new_summary_enabled' in panels
+        assert 'window._whatsNewSummaryEnabled' in boot
+        assert 'whats_new_summary_enabled' in boot
+
+    def test_update_banner_summary_flow_keeps_diff_links_after_summary(self):
+        src = read('static/ui.js')
+        assert 'function _renderUpdateSummaryPanel' in src
+        assert 'async function showWhatsNewSummary' in src
+        assert "api('/api/updates/summary'" in src
+        assert 'updateSummaryDiffLinks' in src
+        assert 'Regular diff comparison' in src
+        assert 'updateSummarySections' in src
+        assert 'Generate WebUI update summary' in src
+        assert 'Generate Agent update summary' in src
+        assert 'View generated WebUI update summary' in src
+        assert 'View generated Agent update summary' in src
+        assert 'Re-generate WebUI update summary' in src
+        assert 'Re-generate Agent update summary' in src
+        assert 'window._whatsNewGeneratedSummaries' in src
+        assert 'sessionStorage' in src
+        assert 'hermes-whats-new-generated-summaries' in src
+        assert 'function _loadStoredUpdateSummaries' in src
+        assert 'function _persistGeneratedSummaries' in src
+        assert 'function _pruneGeneratedSummaries' in src
+        assert 'function _updateSummarySignature' in src
+        assert 'function _updateSummaryButtonLabel' in src
+        assert 'showWhatsNewSummary(target.key)' in src
+        assert 'target?{[target]:data[target]}:data' in src
+        assert 'target:target||null' in src
+        assert '_renderUpdateWhatsNewLinks(data,{mode' in src
+        assert 'window._whatsNewSummaryEnabled' in src
+
+    def test_summary_endpoint_and_prompt_are_human_readable_not_technical(self):
+        routes = read('api/routes.py')
+        updates = read('api/updates.py')
+        assert '"/api/updates/summary"' in routes
+        assert 'summarize_update_payload' in routes
+        assert 'def summarize_update_payload' in updates
+        assert 'human-readable' in updates
+        assert 'avoid technical jargon' in updates
+        assert 'regular diff comparison' in updates
+        assert 'Return only prefixed bullets' in updates
+        assert 'def _format_update_summary_sections' in updates
+
+    def test_update_summary_formats_llm_text_into_stable_sections(self):
+        from api.updates import summarize_update_payload
+
+        payload = {
+            'webui': {'behind': 2, 'current_sha': 'abc', 'latest_sha': 'def', 'compare_url': 'https://example.test/webui'},
+            'agent': {'behind': 1, 'current_sha': 'aaa', 'latest_sha': 'bbb', 'compare_url': 'https://example.test/agent'},
+        }
+        result = summarize_update_payload(
+            payload,
+            llm_callback=lambda _system, _prompt: 'The settings panel is easier to understand. Update prompts are clearer.',
+            use_cache=False,
+        )
+        assert result['summary_sections'][0]['title'] == "What you'll notice"
+        assert result['summary_sections'][1]['title'] == 'Worth knowing'
+        assert result['summary_sections'][0]['items']
+        assert result['summary_sections'][1]['items']
+        assert 'regular diff comparison' not in ' '.join(result['summary_sections'][1]['items']).lower()
+        assert 'What you\'ll notice' in result['summary']
+        assert 'Worth knowing' in result['summary']
+        assert '- The settings panel is easier to understand.' in result['summary']
+
+    def test_update_summary_deduplicates_notice_items_from_worth_knowing(self):
+        from api.updates import summarize_update_payload
+
+        payload = {
+            'webui': {'behind': 2, 'current_sha': 'abc', 'latest_sha': 'def', 'compare_url': 'https://example.test/webui'},
+        }
+        result = summarize_update_payload(
+            payload,
+            llm_callback=lambda _system, _prompt: 'The settings panel is easier to understand. Update prompts are clearer.',
+            use_cache=False,
+        )
+        notice_items = result['summary_sections'][0]['items']
+        worth_section = next((section for section in result['summary_sections'] if section['title'] == 'Worth knowing'), None)
+
+        assert notice_items == [
+            'The settings panel is easier to understand.',
+            'Update prompts are clearer.',
+        ]
+        assert worth_section is None
+        assert 'Worth knowing' not in result['summary']
+        assert 'This summary covers WebUI' not in result['summary']
+
+    def test_update_summary_deduplicates_repeated_agent_summary_bullets(self):
+        from api.updates import summarize_update_payload
+
+        duplicate_menu_item = (
+            'The `hermes tools` menus should open noticeably faster, especially when checking available tools or auth state.'
+        )
+        duplicate_quality_item = (
+            'These updates are small quality-of-life improvements focused on smoother messaging and less waiting in the CLI.'
+        )
+        result = summarize_update_payload(
+            {
+                'agent': {
+                    'behind': 2,
+                    'current_sha': 'abc',
+                    'latest_sha': 'def',
+                    'compare_url': 'https://example.test/agent',
+                },
+            },
+            llm_callback=lambda _system, _prompt: '\n'.join(
+                [
+                    'Slack thread commands now also work with `!cmd`, giving you an easier fallback when slash commands are awkward or unavailable.',
+                    duplicate_menu_item,
+                    duplicate_quality_item,
+                    duplicate_menu_item,
+                    duplicate_quality_item,
+                ]
+            ),
+            use_cache=False,
+        )
+        sections = {section['title']: section['items'] for section in result['summary_sections']}
+
+        assert duplicate_menu_item in sections["What you'll notice"]
+        assert duplicate_quality_item in sections["What you'll notice"]
+        assert 'Worth knowing' not in sections
+        assert result['summary'].count(duplicate_menu_item) == 1
+        assert result['summary'].count(duplicate_quality_item) == 1
+
+    def test_update_summary_keeps_all_categorized_notice_and_worth_bullets(self):
+        from api.updates import summarize_update_payload
+
+        result = summarize_update_payload(
+            {'webui': {'behind': 8, 'current_sha': 'abc', 'latest_sha': 'def', 'compare_url': 'https://example.test/webui'}},
+            llm_callback=lambda _system, _prompt: '\n'.join(
+                [
+                    'Notice: The settings panel loads faster.',
+                    'Notice: Update prompts are easier to read.',
+                    'Notice: Chat status is clearer during reconnects.',
+                    'Notice: Tool results stay grouped by source.',
+                    'Notice: Mobile controls remain visible.',
+                    'Worth knowing: Some labels were renamed to match the new flow.',
+                    'Worth knowing: The full diff is still available from the update banner.',
+                ]
+            ),
+            use_cache=False,
+        )
+        sections = {section['title']: section['items'] for section in result['summary_sections']}
+
+        assert sections["What you'll notice"] == [
+            'The settings panel loads faster.',
+            'Update prompts are easier to read.',
+            'Chat status is clearer during reconnects.',
+            'Tool results stay grouped by source.',
+            'Mobile controls remain visible.',
+        ]
+        assert sections['Worth knowing'] == [
+            'Some labels were renamed to match the new flow.',
+            'The full diff is still available from the update banner.',
+        ]
+
+    def test_update_summary_keeps_unknown_prefixed_bullets_as_notice(self):
+        from api.updates import summarize_update_payload
+
+        result = summarize_update_payload(
+            {'webui': {'behind': 3, 'current_sha': 'abc', 'latest_sha': 'def', 'compare_url': 'https://example.test/webui'}},
+            llm_callback=lambda _system, _prompt: '\n'.join(
+                [
+                    'Notice: The settings panel loads faster.',
+                    'Caveat: Restart once after applying the update.',
+                    'Action required: Reopen the update banner if the summary was already cached.',
+                    'Worth knowing: The full diff is still available from the update banner.',
+                ]
+            ),
+            use_cache=False,
+        )
+        sections = {section['title']: section['items'] for section in result['summary_sections']}
+
+        assert sections["What you'll notice"] == [
+            'The settings panel loads faster.',
+            'Caveat: Restart once after applying the update.',
+            'Action required: Reopen the update banner if the summary was already cached.',
+        ]
+        assert sections['Worth knowing'] == [
+            'The full diff is still available from the update banner.',
+        ]
+
+    def test_update_summary_panel_is_scrollable_for_long_summaries(self):
+        style = read('static/style.css')
+
+        assert '#updateSummaryPanel{max-height:min(34vh,260px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:var(--accent) transparent;}' in style
+
+    def test_update_summary_many_updates_caps_commit_input_and_discloses_scope(self, monkeypatch):
+        import api.updates as upd
+
+        subjects = [f'Commit subject {idx}' for idx in range(1, 25)]
+        monkeypatch.setattr(
+            upd,
+            '_commit_subjects_for_update_with_limit',
+            lambda _info, *, limit=24: (subjects[:limit], True),
+        )
+        prompts = []
+
+        def fake_llm(_system, prompt):
+            prompts.append(prompt)
+            return '\n'.join([
+                'Notice: Several user-facing fixes are ready.',
+                'Notice: Settings and update messaging should be easier to understand.',
+                'Notice: The update flow should feel safer and clearer.',
+                'Notice: Mobile update controls should stay reachable.',
+                'Worth knowing: Some lower-level cleanup supports the visible update changes.',
+            ])
+
+        result = upd.summarize_update_payload(
+            {
+                'webui': {
+                    'behind': 57,
+                    'current_sha': 'abc',
+                    'latest_sha': 'def',
+                    'compare_url': 'https://example.test/webui',
+                }
+            },
+            target='webui',
+            llm_callback=fake_llm,
+            use_cache=False,
+        )
+
+        assert len(subjects) == 24
+        assert prompts
+        assert 'Showing latest 24 of 57 commit subjects; summarize trends, not every commit.' in prompts[0]
+        assert 'Commit subject 24' in prompts[0]
+        assert 'Commit subject 25' not in prompts[0]
+        sections = {section['title']: section['items'] for section in result['summary_sections']}
+        assert sections["What you'll notice"] == [
+            'Several user-facing fixes are ready.',
+            'Settings and update messaging should be easier to understand.',
+            'The update flow should feel safer and clearer.',
+            'Mobile update controls should stay reachable.',
+        ]
+        assert sections['Worth knowing'] == [
+            'Some lower-level cleanup supports the visible update changes.',
+            'WebUI has 57 updates; this summary uses the latest 24 commit subjects, with the full comparison still available in the diff link.',
+        ]
+        assert result['targets'][0]['commits_truncated'] is True
+
+    def test_update_summary_cache_reuses_same_update_summary(self):
+        import api.updates as upd
+
+        upd._summary_cache.clear()
+        calls = []
+        payload = {
+            'webui': {'behind': 2, 'current_sha': 'abc', 'latest_sha': 'def', 'compare_url': 'https://example.test/webui'},
+        }
+
+        def fake_llm(_system, _prompt):
+            calls.append(True)
+            return f'- Stable cached summary #{len(calls)}'
+
+        first = upd.summarize_update_payload(payload, llm_callback=fake_llm)
+        second = upd.summarize_update_payload(payload, llm_callback=fake_llm)
+        changed = upd.summarize_update_payload(
+            {'webui': {'behind': 3, 'current_sha': 'abc', 'latest_sha': 'xyz', 'compare_url': 'https://example.test/webui2'}},
+            llm_callback=fake_llm,
+        )
+        assert len(calls) == 2
+        assert second['summary'] == first['summary']
+        assert second['cached'] is True
+        assert changed['summary'] != first['summary']
+
+    def test_update_summary_cache_is_bounded_lru(self):
+        import api.updates as upd
+
+        upd._summary_cache.clear()
+        calls = []
+
+        def payload(n):
+            return {
+                'webui': {
+                    'behind': n + 1,
+                    'current_sha': f'old-{n}',
+                    'latest_sha': f'new-{n}',
+                    'compare_url': f'https://example.test/webui/{n}',
+                },
+            }
+
+        def fake_llm(_system, prompt):
+            calls.append(prompt)
+            return f'- Generated summary #{len(calls)}'
+
+        try:
+            for i in range(upd._SUMMARY_CACHE_MAX):
+                upd.summarize_update_payload(payload(i), llm_callback=fake_llm)
+
+            assert len(upd._summary_cache) == upd._SUMMARY_CACHE_MAX
+            assert len(calls) == upd._SUMMARY_CACHE_MAX
+
+            first_again = upd.summarize_update_payload(payload(0), llm_callback=fake_llm)
+            assert first_again['cached'] is True
+            assert len(calls) == upd._SUMMARY_CACHE_MAX
+
+            upd.summarize_update_payload(payload(upd._SUMMARY_CACHE_MAX), llm_callback=fake_llm)
+            assert len(upd._summary_cache) == upd._SUMMARY_CACHE_MAX
+
+            still_cached = upd.summarize_update_payload(payload(0), llm_callback=fake_llm)
+            assert still_cached['cached'] is True
+            assert len(calls) == upd._SUMMARY_CACHE_MAX + 1
+
+            evicted = upd.summarize_update_payload(payload(1), llm_callback=fake_llm)
+            assert evicted['cached'] is False
+            assert len(calls) == upd._SUMMARY_CACHE_MAX + 2
+        finally:
+            upd._summary_cache.clear()
+
+    def test_update_summary_can_be_generated_per_target_and_cached_separately(self):
+        import api.updates as upd
+
+        upd._summary_cache.clear()
+        calls = []
+        payload = {
+            'webui': {'behind': 2, 'current_sha': 'web-a', 'latest_sha': 'web-b', 'compare_url': 'https://example.test/webui'},
+            'agent': {'behind': 1, 'current_sha': 'agent-a', 'latest_sha': 'agent-b', 'compare_url': 'https://example.test/agent'},
+        }
+
+        def fake_llm(_system, prompt):
+            calls.append(prompt)
+            if 'Agent:' in prompt:
+                return '- Agent startup is clearer.'
+            return '- WebUI settings are easier to use.'
+
+        webui = upd.summarize_update_payload(payload, target='webui', llm_callback=fake_llm)
+        agent = upd.summarize_update_payload(payload, target='agent', llm_callback=fake_llm)
+        webui_again = upd.summarize_update_payload(payload, target='webui', llm_callback=fake_llm)
+
+        assert len(calls) == 2
+        assert webui['target'] == 'webui'
+        assert agent['target'] == 'agent'
+        assert [t['name'] for t in webui['targets']] == ['webui']
+        assert [t['name'] for t in agent['targets']] == ['agent']
+        assert 'WebUI settings are easier to use.' in webui['summary']
+        assert 'Agent startup is clearer.' in agent['summary']
+        assert webui_again['cached'] is True
+        assert webui_again['summary'] == webui['summary']
+
+
 # ── Regression: force button reset on retry ──────────────────────────────────
 
 class TestForceButtonResetOnRetry:
@@ -509,4 +1569,3 @@ class TestCheckForUpdatesButton:
         assert count >= 5, (
             f"settings_check_now found in only {count} locale blocks (expected ≥5: en, ru, es, zh, zh-Hant)"
         )
-

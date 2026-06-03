@@ -10,13 +10,71 @@ Structural tests — no server required. Verify:
 - SAFE_TAGS updated to allow <span> (for inline math)
 - renderKatexBlocks() is wired into the requestAnimationFrame call
 """
+import json
 import pathlib
 import re
+import subprocess
+import textwrap
 
 REPO = pathlib.Path(__file__).parent.parent
 UI_JS   = (REPO / 'static' / 'ui.js').read_text(encoding='utf-8')
 INDEX   = (REPO / 'static' / 'index.html').read_text(encoding='utf-8')
 CSS     = (REPO / 'static' / 'style.css').read_text(encoding='utf-8')
+
+
+def _extract_function(src: str, name: str) -> str:
+    marker = f"function {name}("
+    start = src.index(marker)
+    brace = src.index("{", start)
+    depth = 1
+    pos = brace + 1
+    while depth and pos < len(src):
+        ch = src[pos]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        pos += 1
+    assert depth == 0, f"could not extract {name}()"
+    return src[start:pos]
+
+
+def _run_renderers(markdown: str) -> dict:
+    js = textwrap.dedent(
+        r'''
+        const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+        const _PDF_EXTS=/\.pdf$/i;
+        const _SVG_EXTS=/\.svg$/i;
+        const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm|oga)$/i;
+        const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
+        function t(k){ return k; }
+        function _mediaPlayerHtml(){ return ''; }
+        global.document={baseURI:'http://example.test/'};
+        '''
+    )
+    js += "\n" + _extract_function(UI_JS, "_matchBacktickFenceLine")
+    js += "\n" + _extract_function(UI_JS, "_isBacktickFenceClose")
+    js += "\n" + _extract_function(UI_JS, "_renderUserFencedBlocks")
+    js += "\n" + _extract_function(UI_JS, "renderMd")
+    js += textwrap.dedent(
+        r'''
+        const input=process.argv[1];
+        console.log(JSON.stringify({
+          assistant: renderMd(input),
+          user: _renderUserFencedBlocks(input),
+        }));
+        '''
+    )
+    proc = subprocess.run(
+        ["node", "-e", js, markdown],
+        cwd=REPO,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    return json.loads(proc.stdout)
 
 
 # ── renderMd pipeline ──────────────────────────────────────────────────────────
@@ -41,6 +99,57 @@ def test_katex_block_placeholder_emitted():
         '.katex-block placeholder div not emitted by renderMd restore pass'
 
 
+def test_backslash_latex_delimiters_render_to_katex_placeholders():
+    """Common LLM LaTeX delimiters \\[...\\] and \\(...\\) render in assistant and user bubbles."""
+    sample = """\\[
+\\text{SoundPower}(f)=10\\log_{10}(x)
+\\]
+
+where \\(L_i(f)\\) = SPL at angle \\(i\\)."""
+    rendered = _run_renderers(sample)
+    for role in ("assistant", "user"):
+        html = rendered[role]
+        assert 'class="katex-block" data-katex="display"' in html, html
+        assert 'class="katex-inline" data-katex="inline"' in html, html
+        assert "\\[" not in html and "\\]" not in html, html
+        assert "\\(" not in html and "\\)" not in html, html
+
+
+def test_user_code_block_with_latex_syntax_renders_as_literal_code():
+    """User-bubble code blocks containing \\[..\\] / \\(..\\) / $$..$$ must
+    render as literal code source, not as KaTeX. _renderUserFencedBlocks
+    must stash code fences BEFORE math (mirroring renderMd's ordering); if
+    math is stashed first, a user-typed code block containing LaTeX-like
+    syntax gets a `<div class="katex-block">` placeholder dropped INSIDE
+    `<pre><code>`, and the user's literal source is silently replaced by
+    rendered math.
+    """
+    sample = "```\n\\[ a + b \\] is wrong\n\\(L_i\\) too\n$$matrix$$\n```"
+    rendered = _run_renderers(sample)
+    user_html = rendered["user"]
+    # The whole code block should remain literal, no KaTeX wrappers inside.
+    assert "<pre><code>" in user_html, user_html
+    assert "katex-block" not in user_html, user_html
+    assert "katex-inline" not in user_html, user_html
+    # Backslashes survive HTML escape unchanged; the user's source is intact.
+    assert "\\[ a + b \\]" in user_html, user_html
+    assert "\\(L_i\\)" in user_html, user_html
+    assert "$$matrix$$" in user_html, user_html
+
+
+def test_user_bubble_top_level_latex_still_renders_after_fence_reorder():
+    """Sibling regression: top-level math (outside any code fence) must
+    still render through KaTeX in user bubbles after the fence-first
+    reorder. Guards against an over-correction that disables user-bubble
+    math rendering entirely.
+    """
+    sample = "math: \\[ x + y \\]\n\nand inline \\(L_i\\)"
+    rendered = _run_renderers(sample)
+    user_html = rendered["user"]
+    assert 'class="katex-block" data-katex="display"' in user_html, user_html
+    assert 'class="katex-inline" data-katex="inline"' in user_html, user_html
+
+
 def test_katex_inline_placeholder_emitted():
     """renderMd restore pass must emit .katex-inline spans for inline math."""
     assert 'katex-inline' in UI_JS, \
@@ -57,7 +166,7 @@ def test_data_katex_attribute_present():
 
 def test_render_katex_blocks_function_exists():
     """renderKatexBlocks() function must exist in ui.js."""
-    assert 'function renderKatexBlocks()' in UI_JS, \
+    assert 'function renderKatexBlocks' in UI_JS, \
         'renderKatexBlocks() function not found in ui.js'
 
 
@@ -67,14 +176,15 @@ def test_katex_lazy_load_follows_mermaid_pattern():
     assert '_katexReady' in UI_JS,   '_katexReady flag not found'
 
 
-def test_katex_js_loaded_from_cdn():
-    """KaTeX JS must be loaded from jsdelivr CDN."""
-    assert 'katex@0.16' in UI_JS, \
-        'KaTeX JS CDN URL not found in ui.js — expected katex@0.16.x'
+def test_katex_js_loaded_from_vendored_asset():
+    """KaTeX JS must be loaded from the vendored local asset."""
+    assert 'static/vendor/katex/0.16.22/katex.min.js' in UI_JS, \
+        'KaTeX JS vendored URL not found in ui.js — expected local 0.16.22 asset'
+    assert 'https://cdn.jsdelivr.net/npm/katex@0.16' not in UI_JS
 
 
 def test_katex_js_has_sri_hash():
-    """KaTeX JS CDN tag must have an SRI integrity hash."""
+    """KaTeX JS tag must keep an SRI integrity hash for the pinned asset."""
     # The hash is in the script.integrity assignment
     assert "script.integrity='sha384-" in UI_JS or 'script.integrity="sha384-' in UI_JS, \
         'KaTeX JS SRI integrity hash not found in ui.js'
@@ -93,21 +203,18 @@ def test_katex_throw_on_error_false():
 
 
 def test_render_katex_blocks_wired_into_raf():
-    """renderKatexBlocks() must be called in the same requestAnimationFrame as renderMermaidBlocks()."""
-    # Check that renderKatexBlocks appears somewhere near requestAnimationFrame
-    raf_idx = UI_JS.find('requestAnimationFrame')
-    # Find the rAF call that also contains renderKatexBlocks
-    has_katex_in_raf = any(
-        'renderKatexBlocks' in UI_JS[m.start():m.start()+200]
-        for m in re.finditer(r'requestAnimationFrame', UI_JS)
-    )
-    assert has_katex_in_raf, \
-        'renderKatexBlocks() not found in any requestAnimationFrame call — math will not render'
+    """renderKatexBlocks() must run from the post-render requestAnimationFrame pass."""
+    raf_call = 'requestAnimationFrame(()=>postProcessRenderedMessages(inner))'
+    assert raf_call in UI_JS, 'post-render requestAnimationFrame pass not found'
+    idx = UI_JS.find('function postProcessRenderedMessages')
+    body = UI_JS[idx:idx + 500]
+    assert 'renderMermaidBlocks(container)' in body
+    assert 'renderKatexBlocks(container)' in body
 
 
 def test_mermaid_render_failure_removes_temporary_error_dom():
     """Failed Mermaid renders must not leave Mermaid's body-level syntax-error SVG visible."""
-    fn_start = UI_JS.find('function renderMermaidBlocks()')
+    fn_start = UI_JS.find('function renderMermaidBlocks')
     assert fn_start != -1, 'renderMermaidBlocks() function not found in ui.js'
     fn = UI_JS[fn_start:fn_start + 2200]
     cleanup = "const tmp=document.getElementById('d'+id);\n      if(tmp) tmp.remove();"
@@ -123,15 +230,16 @@ def test_mermaid_render_failure_removes_temporary_error_dom():
 # ── index.html ────────────────────────────────────────────────────────────────
 
 def test_katex_css_in_index_html():
-    """KaTeX CSS must be loaded in index.html."""
-    assert 'katex@0.16' in INDEX, \
-        'KaTeX CSS CDN link not found in index.html'
+    """KaTeX CSS must be loaded from the vendored local asset."""
+    assert 'static/vendor/katex/0.16.22/katex.min.css' in INDEX, \
+        'KaTeX CSS vendored link not found in index.html'
+    assert 'https://cdn.jsdelivr.net/npm/katex@0.16' not in INDEX
 
 
-def test_katex_css_has_sri_hash():
-    """KaTeX CSS link in index.html must have an SRI integrity hash."""
-    assert 'sha384-5TcZemv2l' in INDEX or 'integrity' in INDEX and 'katex' in INDEX, \
-        'KaTeX CSS SRI integrity hash not found in index.html'
+def test_katex_css_is_pinned_local_asset():
+    """KaTeX CSS is pinned by vendored path instead of CDN integrity metadata."""
+    assert 'static/vendor/katex/0.16.22/katex.min.css' in INDEX, \
+        'KaTeX CSS local pinned asset not found in index.html'
 
 
 # ── style.css ─────────────────────────────────────────────────────────────────

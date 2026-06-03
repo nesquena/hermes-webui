@@ -199,23 +199,15 @@ def test_inline_code_after_fence():
 
 
 def test_renderMd_fence_regex_is_line_anchored():
-    """The fence regex in renderMd must include `(^|\\n)` opener and `(?=\\n|$)` closer.
-
-    Pattern: (^|\\n)[ ]{0,3}```(?:([\\s\\S]*?)\\n)?[ ]{0,3}```(?=\\n|$)
-    The `(?:...\\n)?` makes the body optional so empty fences (```\\n```) still match.
-    """
-    assert re.search(
-        r"s=s\.replace\(/\(\^\|\\n\)\[ \]\{0,3\}```\(\?:\(\[\\s\\S\]\*\?\)\\n\)\?\[ \]\{0,3\}```\(\?=\\n\|\$\)/g",
-        UI_JS,
-    ), "renderMd fence regex is not line-anchored — regression of #1438"
+    """The fence regex in renderMd must keep line anchoring and fence-length matching."""
+    pattern = r"s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)/g"
+    assert pattern in UI_JS, "renderMd fence regex lost line anchoring or #1696 fence-length matching"
 
 
 def test_renderUserFencedBlocks_fence_regex_is_line_anchored():
     """The fence regex in _renderUserFencedBlocks must also be line-anchored."""
-    assert re.search(
-        r"s=s\.replace\(/\(\^\|\\n\)\[ \]\{0,3\}```\(\[a-zA-Z0-9_\+\-\]\*\)\\n\(\?:\(\[\\s\\S\]\*\?\)\\n\)\?\[ \]\{0,3\}```\(\?=\\n\|\$\)/g",
-        UI_JS,
-    ), "_renderUserFencedBlocks fence regex is not line-anchored — regression of #1438"
+    pattern = r"s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)/g"
+    assert UI_JS.count(pattern) >= 2, "render/user fence regexes lost line anchoring or #1696 fence-length matching"
 
 
 def test_stripForTTS_fence_regex_is_line_anchored():
@@ -274,8 +266,10 @@ def test_diff_fence_with_inner_backticks_in_content():
     # Pattern explanation: ui.js source contains literal backslash-n in regex literals
     # (ONE backslash + 'n'). In a Python raw string, r"\\n" compiles to a regex pattern
     # matching ONE literal backslash followed by 'n'.
-    matches = re.findall(r"```\(\?=\\n\|\$\)", UI_JS)
-    assert len(matches) >= 3, (
-        f"all 3 fence sites (renderMd, _renderUserFencedBlocks, _stripForTTS) "
-        f"must have line-anchored close fence; found {len(matches)} occurrences"
+    new_matches = UI_JS.count(r"[ ]{0,3}\2`*[ \t]*(?=\n|$)")
+    old_tts_matches = re.findall(r"```\(\?=\\n\|\$\)", UI_JS)
+    assert new_matches >= 2 and len(old_tts_matches) >= 1, (
+        f"renderMd/_renderUserFencedBlocks must have fence-length-aware line-anchored "
+        f"closers and _stripForTTS must keep a line-anchored closer; found "
+        f"new={new_matches}, tts={len(old_tts_matches)}"
     )

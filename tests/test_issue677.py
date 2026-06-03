@@ -25,18 +25,23 @@ class TestScrollPinningFix:
         instead when S.activeStreamId is set.
         """
         # Find renderMessages function
-        rm_start = UI_JS.find("function renderMessages()")
+        rm_start = UI_JS.find("function renderMessages(")
         assert rm_start != -1, "renderMessages() not found in ui.js"
         rm_end = UI_JS.find("\nfunction ", rm_start + 1)
         rm_body = UI_JS[rm_start:rm_end]
+        helper_start = UI_JS.find("function _scrollAfterMessageRender")
+        assert helper_start != -1, "renderMessages scroll helper not found in ui.js"
+        helper_end = UI_JS.find("\nfunction ", helper_start + 1)
+        helper_body = UI_JS[helper_start:helper_end]
 
         # Must check activeStreamId before deciding which scroll fn to call
-        assert "activeStreamId" in rm_body, (
+        assert "activeStreamId" in helper_body, (
             "renderMessages() must check S.activeStreamId before scrolling — "
             "unconditional scrollToBottom() overrides user scroll position (#677)"
         )
-        # scrollIfPinned must be called inside renderMessages (stream path)
-        assert "scrollIfPinned()" in rm_body, (
+        # scrollIfPinned must be called through the renderMessages scroll policy (stream path)
+        assert "_scrollAfterMessageRender(preserveScroll, scrollSnapshot);" in rm_body
+        assert "scrollIfPinned()" in helper_body, (
             "renderMessages() must call scrollIfPinned() during streaming (#677)"
         )
 
@@ -107,20 +112,23 @@ class TestScrollPinningFix:
             "style.css must define .scroll-to-bottom-btn styles (#677)"
         )
 
-    def test_scroll_to_bottom_button_is_sticky(self):
-        """Scroll-to-bottom button must use position:sticky so it stays visible (#677)."""
+    def test_scroll_to_bottom_button_is_overlayed(self):
+        """Scroll-to-bottom button stays visible as an overlay outside transcript layout (#677)."""
         btn_css_pos = STYLE_CSS.find(".scroll-to-bottom-btn")
         assert btn_css_pos != -1
         btn_css = STYLE_CSS[btn_css_pos:btn_css_pos + 300]
-        assert "sticky" in btn_css, (
-            ".scroll-to-bottom-btn must use position:sticky to stay at bottom of viewport (#677)"
+        assert "position:absolute" in btn_css, (
+            ".scroll-to-bottom-btn must be an overlay so it stays visible without "
+            "participating in transcript scroll layout (#677)"
         )
 
     def test_scroll_listener_hides_button_when_pinned(self):
         """Scroll listener must hide the button when user is near the bottom (#677)."""
         scroll_listener_start = UI_JS.find("el.addEventListener('scroll'")
         assert scroll_listener_start != -1, "scroll event listener not found"
-        listener_block = UI_JS[scroll_listener_start:scroll_listener_start + 300]
+        # After #1360 fix, the nearBottom + btn logic lives inside an rAF
+        # callback — extend search window to cover the full listener block.
+        listener_block = UI_JS[scroll_listener_start:scroll_listener_start + 600]
         assert "scrollToBottomBtn" in listener_block, (
             "Scroll listener must show/hide scrollToBottomBtn based on _scrollPinned (#677)"
         )

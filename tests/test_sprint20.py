@@ -31,7 +31,10 @@ def test_mic_button_present_in_html():
 def test_mic_button_has_mic_btn_class():
     """btnMic must carry the mic-btn CSS class for styling hooks."""
     html, _ = get_text("/")
-    assert 'class="icon-btn mic-btn"' in html
+    # Tolerate additional utility classes (e.g. has-tooltip from #1775).
+    import re
+    assert re.search(r'class="[^"]*\bicon-btn\b[^"]*\bmic-btn\b[^"]*"', html), \
+        "btnMic must have both 'icon-btn' and 'mic-btn' classes"
 
 
 def test_mic_button_hidden_by_default():

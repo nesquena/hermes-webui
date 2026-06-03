@@ -9,6 +9,7 @@ in the agent execution layer.
 from __future__ import annotations
 
 import errno
+import atexit
 import codecs
 import fcntl
 import os
@@ -20,6 +21,7 @@ import struct
 import subprocess
 import termios
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,6 +35,13 @@ def _winsize(rows: int, cols: int) -> bytes:
     rows = max(8, min(int(rows or 24), 80))
     cols = max(20, min(int(cols or 80), 240))
     return struct.pack("HHHH", rows, cols, 0, 0)
+
+
+def _safe_close_fd(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
 
 
 @dataclass
@@ -67,6 +76,119 @@ class TerminalSession:
 
 _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
+_spawn_queue: queue.Queue = queue.Queue()
+_spawn_supervisor_started = False
+_spawn_supervisor_lock = threading.Lock()
+_spawn_supervisor_thread: threading.Thread | None = None
+
+
+@dataclass
+class _SpawnRequest:
+    kwargs: dict
+    done: threading.Event = field(default_factory=threading.Event)
+    timed_out: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    proc: subprocess.Popen | None = None
+    error: BaseException | None = None
+
+
+def _reap_abandoned_spawn(proc: subprocess.Popen) -> bool:
+    if proc.poll() is not None:
+        return True
+    try:
+        os.killpg(proc.pid, signal.SIGHUP)
+    except (OSError, ProcessLookupError):
+        try:
+            proc.terminate()
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            try:
+                proc.kill()
+            except (OSError, ProcessLookupError):
+                pass
+        try:
+            proc.wait(timeout=1.0)
+        except (subprocess.TimeoutExpired, ProcessLookupError):
+            pass
+    if proc.poll() is None:
+        print("terminal abandoned spawn cleanup failed", flush=True)
+        return False
+    return True
+
+
+def _spawn_supervisor_loop() -> None:
+    while True:
+        request = None
+        try:
+            request = _spawn_queue.get()
+            try:
+                proc = subprocess.Popen(**request.kwargs)
+                with request.lock:
+                    if request.timed_out.is_set():
+                        _reap_abandoned_spawn(proc)
+                    else:
+                        request.proc = proc
+                    request.done.set()
+            except BaseException as exc:
+                with request.lock:
+                    try:
+                        request.error = exc
+                    except BaseException:
+                        pass
+                    request.done.set()
+        except BaseException as exc:
+            if request is not None:
+                try:
+                    request.error = exc
+                except BaseException:
+                    pass
+                try:
+                    request.done.set()
+                except BaseException:
+                    pass
+            time.sleep(0.01)
+
+
+def _spawn_supervisor_entry() -> None:
+    while True:
+        try:
+            _spawn_supervisor_loop()
+        except BaseException:
+            time.sleep(0.01)
+            pass
+
+
+def _ensure_spawn_supervisor() -> None:
+    global _spawn_supervisor_started, _spawn_supervisor_thread
+    with _spawn_supervisor_lock:
+        if _spawn_supervisor_started and _spawn_supervisor_thread and _spawn_supervisor_thread.is_alive():
+            return
+        thread = threading.Thread(target=_spawn_supervisor_entry, daemon=True)
+        thread.start()
+        _spawn_supervisor_thread = thread
+        _spawn_supervisor_started = True
+
+
+_ensure_spawn_supervisor()
+
+
+# NOTE on parent-death-signal: a previous version of this module set
+# PR_SET_PDEATHSIG via a preexec_fn to terminate orphaned PTY shells when the
+# WebUI process crashed.  That broke every Linux user (#2853): WebUI runs a
+# ThreadingHTTPServer, so the Popen call happens on a short-lived per-request
+# thread, and PR_SET_PDEATHSIG is per-thread.  The PTY shell registered the
+# spawning thread as its "parent" and was killed with SIGTERM the instant that
+# thread joined — within ~10 ms of opening the terminal — surfacing as the
+# `[terminal closed]` banner.  The graceful path is covered by
+# `atexit.register(close_all_terminals)` and the explicit `close_terminal`
+# call sites; hard kills of the WebUI process leak the shell, which is the
+# tradeoff for working on Linux at all.
 
 
 def _decode_terminal_output(decoder, data: bytes) -> str:
@@ -170,16 +292,41 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             }
         )
         shell = _shell_path()
-        proc = subprocess.Popen(
-            _shell_argv(shell),
-            cwd=cwd,
-            env=env,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            close_fds=True,
-            start_new_session=True,
+        # Keep the shell in its own process group for explicit cleanup via
+        # close_terminal()/close_all_terminals(); do not use PDEATHSIG here.
+        request = _SpawnRequest(
+            {
+                "args": _shell_argv(shell),
+                "cwd": cwd,
+                "env": env,
+                "stdin": slave_fd,
+                "stdout": slave_fd,
+                "stderr": slave_fd,
+                "close_fds": True,
+                # Required so cleanup can signal the whole interactive shell tree.
+                "start_new_session": True,
+            }
         )
+        _ensure_spawn_supervisor()
+        _spawn_queue.put(request)
+        try:
+            if not request.done.wait(timeout=5.0):
+                timed_out = False
+                with request.lock:
+                    if not request.done.is_set():
+                        request.timed_out.set()
+                        timed_out = True
+                if timed_out:
+                    raise TimeoutError("terminal spawn timeout - supervisor unresponsive")
+            if request.error:
+                raise request.error
+            proc = request.proc
+            if proc is None:
+                raise RuntimeError("terminal spawn failed without process")
+        except BaseException:
+            _safe_close_fd(master_fd)
+            _safe_close_fd(slave_fd)
+            raise
         os.close(slave_fd)
         _set_nonblocking(master_fd)
 
@@ -240,9 +387,24 @@ def close_terminal(session_id: str) -> bool:
                     os.killpg(term.proc.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+                try:
+                    term.proc.wait(timeout=1.0)
+                except (subprocess.TimeoutExpired, ProcessLookupError):
+                    pass
     finally:
         try:
             os.close(term.master_fd)
         except OSError:
             pass
     return True
+
+
+def close_all_terminals() -> None:
+    """Best-effort reap of embedded shells during graceful WebUI shutdown."""
+    with _LOCK:
+        session_ids = list(_TERMINALS)
+    for session_id in session_ids:
+        close_terminal(session_id)
+
+
+atexit.register(close_all_terminals)

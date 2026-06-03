@@ -32,6 +32,7 @@ def _ensure_state_db(path):
         CREATE TABLE sessions (
             id TEXT PRIMARY KEY,
             source TEXT,
+            session_source TEXT,
             title TEXT,
             model TEXT,
             started_at REAL NOT NULL,
@@ -45,14 +46,14 @@ def _ensure_state_db(path):
     return conn
 
 
-def _insert_state_row(conn, sid, *, parent=None, ended_at=None, end_reason=None, started_at=None):
+def _insert_state_row(conn, sid, *, title=None, parent=None, ended_at=None, end_reason=None, started_at=None, source='webui', session_source=None):
     conn.execute(
         """
         INSERT INTO sessions
-        (id, source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
-        VALUES (?, 'webui', ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
+        (id, source, session_source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason)
+        VALUES (?, ?, ?, ?, 'openai/gpt-5', ?, 2, ?, ?, ?)
         """,
-        (sid, sid, started_at or time.time(), parent, ended_at, end_reason),
+        (sid, source, session_source, title or sid, started_at or time.time(), parent, ended_at, end_reason),
     )
     conn.commit()
 
@@ -95,6 +96,40 @@ def test_all_sessions_exposes_state_db_lineage_metadata_for_webui_json_sessions(
         assert rows["lineage_api_tip"].get("_lineage_root_id") == "lineage_api_root"
         assert rows["lineage_api_tip"].get("_compression_segment_count") == 2
         assert "_lineage_root_id" not in rows["lineage_api_root"]
+    finally:
+        conn.close()
+
+
+def test_all_sessions_keeps_explicit_forks_out_of_state_db_lineage_metadata(_isolate):
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_root", title="Visible root", updated_at=t0)
+        _save_webui_session("lineage_api_fork", title="Explicit fork", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_api_root",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "lineage_api_fork",
+            parent="lineage_api_root",
+            started_at=t0 + 6,
+            session_source="fork",
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+
+        fork = rows["lineage_api_fork"]
+        assert fork.get("parent_session_id") == "lineage_api_root"
+        assert fork.get("relationship_type") == "child_session"
+        assert fork.get("parent_title") == "lineage_api_root"
+        assert fork.get("_parent_lineage_root_id") == "lineage_api_root"
+        assert "_lineage_root_id" not in fork
+        assert "_compression_segment_count" not in fork
     finally:
         conn.close()
 
@@ -200,5 +235,116 @@ def test_cli_close_parent_preserves_cross_surface_continuation_lineage(_isolate)
 
         assert rows["lineage_api_webui_child"].get("parent_session_id") == "lineage_api_cli_parent"
         assert rows["lineage_api_webui_child"].get("_lineage_root_id") == "lineage_api_cli_parent"
+    finally:
+        conn.close()
+
+
+def test_cross_surface_child_session_metadata_marks_orphan_top_level_candidate(_isolate):
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_telegram_parent", title="Telegram parent", updated_at=t0)
+        _save_webui_session("lineage_api_webui_tip", title="WebUI tip", updated_at=t0 + 10)
+        _insert_state_row(
+            conn,
+            "lineage_api_telegram_parent",
+            source="telegram",
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason="compression",
+        )
+        _insert_state_row(
+            conn,
+            "lineage_api_webui_tip",
+            source="webui",
+            parent="lineage_api_telegram_parent",
+            started_at=t0 + 6,
+        )
+
+        rows = {row["session_id"]: row for row in all_sessions()}
+        tip = rows["lineage_api_webui_tip"]
+
+        assert tip.get("relationship_type") == "child_session"
+        assert tip.get("parent_source") == "telegram"
+        assert tip.get("_cross_surface_child_session") is True
+    finally:
+        conn.close()
+
+
+def test_state_db_webui_source_overrides_stale_cli_json_metadata(_isolate):
+    """State-db WebUI mirrors should clear stale CLI source fields in sidebar rows."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        session = Session(
+            session_id="lineage_api_stale_cli_source",
+            title="WebUI Chatnachrichten verschwinden nach Neustart #9",
+            messages=[{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}],
+            updated_at=t0,
+            is_cli_session=True,
+            source_tag="cli",
+            raw_source="cli",
+            session_source="cli",
+            source_label="CLI",
+        )
+        session.save(touch_updated_at=False)
+        _insert_state_row(
+            conn,
+            "lineage_api_stale_cli_source",
+            source="webui",
+            started_at=t0,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions()}["lineage_api_stale_cli_source"]
+
+        assert row["source_tag"] == "webui"
+        assert row["raw_source"] == "webui"
+        assert row["session_source"] == "webui"
+        assert row["source_label"] == "WebUI"
+        assert row["is_cli_session"] is False
+    finally:
+        conn.close()
+
+
+def test_generic_webui_title_gets_read_only_state_db_display_title(_isolate):
+    """Sidebar rows can display the fresher state.db title without mutating JSON."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_stale_title", title="Hermes WebUI #8", updated_at=t0)
+        _insert_state_row(
+            conn,
+            "lineage_api_stale_title",
+            title="Hermes WebUI #177",
+            started_at=t0,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions()}["lineage_api_stale_title"]
+
+        assert row["title"] == "Hermes WebUI #8"
+        assert row["display_title"] == "Hermes WebUI #177"
+        assert row["_state_db_title"] == "Hermes WebUI #177"
+    finally:
+        conn.close()
+
+
+def test_state_db_display_title_does_not_override_custom_json_title(_isolate):
+    """Manual/custom JSON titles stay authoritative even when state.db differs."""
+    conn = _ensure_state_db(_isolate)
+    t0 = time.time() - 100
+    try:
+        _save_webui_session("lineage_api_custom_title", title="Customer escalation notes", updated_at=t0)
+        _insert_state_row(
+            conn,
+            "lineage_api_custom_title",
+            title="Hermes WebUI #177",
+            started_at=t0,
+        )
+
+        row = {row["session_id"]: row for row in all_sessions()}["lineage_api_custom_title"]
+
+        assert row["title"] == "Customer escalation notes"
+        assert "display_title" not in row
+        assert "_state_db_title" not in row
     finally:
         conn.close()

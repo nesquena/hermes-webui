@@ -17,6 +17,7 @@ from api.streaming import (
     _attachment_name,
     _build_native_multimodal_message,
     _NATIVE_IMAGE_MAX_BYTES,
+    _sanitize_messages_for_api,
 )
 from api.routes import _normalize_chat_attachments
 
@@ -318,6 +319,51 @@ class TestBuildNativeMultimodalMessage:
             assert data_url.startswith('data:image/png;base64,')
             assert len(result) == 2
 
+    def test_text_image_mode_strips_historical_image_url_parts(self):
+        """#2297: text-only providers must not replay old native image parts."""
+        history = [
+            {
+                'role': 'user',
+                'content': [
+                    {'type': 'text', 'text': 'what is in this image?'},
+                    {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AAA='}},
+                ],
+                'attachments': [{'name': 'photo.png'}],
+                'timestamp': 123,
+            },
+            {'role': 'assistant', 'content': 'It is a chart.'},
+        ]
+        cfg = {'agent': {'image_input_mode': 'text'}}
+
+        sanitized = _sanitize_messages_for_api(history, cfg=cfg)
+
+        assert sanitized[0] == {'role': 'user', 'content': 'what is in this image?'}
+        assert 'image_url' not in str(sanitized)
+        assert 'attachments' not in sanitized[0]
+        assert sanitized[1] == {'role': 'assistant', 'content': 'It is a chart.'}
+
+    def test_native_image_mode_keeps_historical_image_url_parts(self):
+        """Vision-capable/native mode keeps existing multimodal history intact."""
+        content = [
+            {'type': 'text', 'text': 'describe'},
+            {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,AAA='}},
+        ]
+        cfg = {'agent': {'image_input_mode': 'native'}}
+
+        sanitized = _sanitize_messages_for_api([{'role': 'user', 'content': content}], cfg=cfg)
+
+        assert sanitized == [{'role': 'user', 'content': content}]
+
+    def test_sync_chat_history_sanitizer_receives_config(self):
+        """#2398: fallback POST /api/chat must use the text-mode history sanitizer too."""
+        src = Path('api/routes.py').read_text()
+        call = 'conversation_history=_sanitize_messages_for_api(_previous_context_messages, cfg=get_config())'
+        assert call in src, (
+            'The legacy synchronous /api/chat endpoint must pass current config into '
+            '_sanitize_messages_for_api so historical image_url parts are stripped '
+            'for text-mode providers just like the streaming endpoint.'
+        )
+
     def test_fake_png_rejected_by_magic_bytes(self):
         """A file named .png that is not actually an image must be rejected."""
         with TemporaryDirectory() as d:
@@ -378,3 +424,105 @@ class TestIsValidImage:
             p = Path(d) / 'a.png'
             _make_png(p)
             assert _is_valid_image(p, 'image/png; charset=utf-8')
+
+
+class TestAttachmentRootIntegration:
+    """Stage-361 regression: #2319 moved chat uploads to ~/.hermes/webui/attachments/<sid>/.
+
+    Pre-fix, _build_native_multimodal_message required uploads to be under
+    workspace_root, which silently rejected every image upload from the new
+    attachment inbox (vision models silently lost image context).
+
+    The fix adds the configured attachment root as a second allowed location
+    via _attachment_root() from api.upload, single source of truth.
+    """
+
+    def test_attachment_root_path_allowed_for_native_multimodal(self, tmp_path, monkeypatch):
+        """Image landing in the attachment inbox is accepted, not silently dropped."""
+        # Set up isolated attachment root
+        attachment_root = tmp_path / "attachments"
+        attachment_root.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+
+        # The image lives in the attachment inbox, NOT in the workspace
+        session_inbox = attachment_root / "sess123"
+        session_inbox.mkdir()
+        image_path = session_inbox / "photo.png"
+        _make_png(image_path)
+
+        # Workspace is a different, unrelated directory
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        atts = _normalize_chat_attachments([{
+            "name": "photo.png",
+            "path": str(image_path),
+            "mime": "image/png",
+            "size": image_path.stat().st_size,
+            "is_image": True,
+        }])
+        result = _build_native_multimodal_message("", "describe this", atts, str(workspace))
+
+        # PRE-FIX: result would be a plain string (image silently rejected).
+        # POST-FIX: result is a list with the image_url part included.
+        assert isinstance(result, list), (
+            "Stage-361 regression: image in attachment inbox was silently rejected. "
+            "Expected list with image_url part, got string fallback. "
+            "The pre-fix workspace_root-only guard at api/streaming.py needs to also "
+            "allow paths under _attachment_root() (api/upload.py)."
+        )
+        assert result[1]["type"] == "image_url"
+        assert result[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    def test_path_outside_both_workspace_and_attachment_root_still_rejected(self, tmp_path, monkeypatch):
+        """Paths outside BOTH allowed roots remain rejected — no security regression."""
+        attachment_root = tmp_path / "attachments"
+        attachment_root.mkdir()
+        monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        # Image in /tmp or wherever — neither under workspace nor attachment root
+        rogue_dir = tmp_path / "rogue"
+        rogue_dir.mkdir()
+        rogue_image = rogue_dir / "bad.png"
+        _make_png(rogue_image)
+
+        atts = _normalize_chat_attachments([{
+            "name": "bad.png",
+            "path": str(rogue_image),
+            "mime": "image/png",
+            "size": rogue_image.stat().st_size,
+            "is_image": True,
+        }])
+        result = _build_native_multimodal_message("", "hi", atts, str(workspace))
+
+        # Should fall back to string — rogue path rejected by both root checks
+        assert isinstance(result, str), (
+            "Security regression: path outside both workspace and attachment "
+            "root was accepted. The _allowed_roots check should reject."
+        )
+
+    def test_workspace_path_still_allowed(self, tmp_path, monkeypatch):
+        """Workspace-resident images still work (backward compat with pre-#2319 uploads)."""
+        attachment_root = tmp_path / "attachments"
+        attachment_root.mkdir()
+        monkeypatch.setenv("HERMES_WEBUI_ATTACHMENT_DIR", str(attachment_root))
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        image_path = workspace / "ws-image.png"
+        _make_png(image_path)
+
+        atts = _normalize_chat_attachments([{
+            "name": "ws-image.png",
+            "path": str(image_path),
+            "mime": "image/png",
+            "size": image_path.stat().st_size,
+            "is_image": True,
+        }])
+        result = _build_native_multimodal_message("", "describe", atts, str(workspace))
+
+        assert isinstance(result, list)
+        assert result[1]["type"] == "image_url"

@@ -2,6 +2,7 @@
 Hermes Web UI -- HTTP helper functions.
 """
 import json as _json
+import os
 import re as _re
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
@@ -45,7 +46,7 @@ def _security_headers(handler):
         "default-src 'self' https://*.cloudflareaccess.com; "
         "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-        "img-src 'self' data: https: blob:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; connect-src 'self'; "
+        "img-src 'self' data: https: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://cdn.jsdelivr.net; "
         "manifest-src 'self' https://*.cloudflareaccess.com; "
         "base-uri 'self'; form-action 'self'"
     )
@@ -111,7 +112,8 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 
 def _build_redact_fn():
     """Return a redactor backed by hermes-agent plus local fallback patterns."""
-    # Minimal fallback covering the most common credential prefixes.
+    # Fallback mirrors the agent's known credential prefixes so WebUI API
+    # responses remain a hard redaction boundary even without hermes-agent.
     # Keep this active even when hermes-agent is importable so API responses do
     # not regress if the agent redactor misses a token shape.
     _CRED_RE = _re.compile(
@@ -123,10 +125,34 @@ def _build_redact_fn():
         r"|ghu_[A-Za-z0-9]{10,}"          # GitHub user-to-server token
         r"|ghs_[A-Za-z0-9]{10,}"          # GitHub server-to-server token
         r"|ghr_[A-Za-z0-9]{10,}"          # GitHub refresh token
+        r"|xox[baprs]-[A-Za-z0-9-]{10,}"  # Slack tokens
+        r"|AIza[A-Za-z0-9_-]{30,}"        # Google API keys
+        r"|pplx-[A-Za-z0-9]{10,}"         # Perplexity
+        r"|fal_[A-Za-z0-9_-]{10,}"        # Fal.ai
+        r"|fc-[A-Za-z0-9]{10,}"           # Firecrawl
+        r"|bb_live_[A-Za-z0-9_-]{10,}"    # BrowserBase
+        r"|gAAAA[A-Za-z0-9_=-]{20,}"      # Codex encrypted tokens
         r"|AKIA[A-Z0-9]{16}"              # AWS Access Key ID
-        r"|xox[baprs]-[A-Za-z0-9-]{10,}" # Slack tokens
-        r"|hf_[A-Za-z0-9]{10,}"          # HuggingFace token
-        r"|SG\.[A-Za-z0-9_-]{10,}"       # SendGrid API key
+        r"|sk_live_[A-Za-z0-9]{10,}"      # Stripe secret key (live)
+        r"|sk_test_[A-Za-z0-9]{10,}"      # Stripe secret key (test)
+        r"|rk_live_[A-Za-z0-9]{10,}"      # Stripe restricted key
+        r"|SG\.[A-Za-z0-9_-]{10,}"        # SendGrid API key
+        r"|hf_[A-Za-z0-9]{10,}"           # HuggingFace token
+        r"|r8_[A-Za-z0-9]{10,}"           # Replicate API token
+        r"|npm_[A-Za-z0-9]{10,}"          # npm access token
+        r"|pypi-[A-Za-z0-9_-]{10,}"       # PyPI API token
+        r"|dop_v1_[A-Za-z0-9]{10,}"       # DigitalOcean PAT
+        r"|doo_v1_[A-Za-z0-9]{10,}"       # DigitalOcean OAuth
+        r"|am_[A-Za-z0-9_-]{10,}"         # AgentMail API key
+        r"|sk_[A-Za-z0-9_]{10,}"          # ElevenLabs TTS key
+        r"|tvly-[A-Za-z0-9]{10,}"         # Tavily search API key
+        r"|exa_[A-Za-z0-9]{10,}"          # Exa search API key
+        r"|gsk_[A-Za-z0-9]{10,}"          # Groq Cloud API key
+        r"|syt_[A-Za-z0-9]{10,}"          # Matrix access token
+        r"|retaindb_[A-Za-z0-9]{10,}"     # RetainDB API key
+        r"|hsk-[A-Za-z0-9]{10,}"          # Hindsight API key
+        r"|mem0_[A-Za-z0-9]{10,}"         # Mem0 Platform API key
+        r"|brv_[A-Za-z0-9]{10,}"          # ByteRover API key
         r")(?![A-Za-z0-9_-])"
     )
     _AUTH_HDR_RE = _re.compile(r"(Authorization:\s*Bearer\s+)(\S+)", _re.IGNORECASE)
@@ -178,6 +204,103 @@ def _build_redact_fn():
 _redact_fn_cached = _build_redact_fn()
 
 
+_SENSITIVE_CASE_MARKERS = (
+    "sk-",
+    "ghp_",
+    "github_pat_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "AKIA",
+    "xoxb-",
+    "xoxa-",
+    "xoxp-",
+    "xoxr-",
+    "xoxs-",
+    "AIza",
+    "pplx-",
+    "fal_",
+    "fc-",
+    "bb_live_",
+    "gAAAA",
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "SG.",
+    "hf_",
+    "r8_",
+    "npm_",
+    "pypi-",
+    "dop_v1_",
+    "doo_v1_",
+    "am_",
+    "sk_",
+    "tvly-",
+    "exa_",
+    "gsk_",
+    "syt_",
+    "retaindb_",
+    "hsk-",
+    "mem0_",
+    "brv_",
+    "eyJ",
+    "-----BEGIN",
+)
+_SENSITIVE_LOWER_MARKERS = (
+    "authorization: bearer ",
+    "private key",
+    "postgres://",
+    "postgresql://",
+    "mysql://",
+    "mongodb://",
+    "redis://",
+    "amqp://",
+    "://",  # stage-348 Opus SHOULD-FIX: catch http(s)/ws(s)/ftp URL userinfo + sensitive query params (#2171 follow-up)
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "api_key",
+    "apikey",
+    "client_secret",
+    "auth_token",
+    "raw_secret",
+    "secret_input",
+    "key_material",
+    "x-amz-signature",
+    "token=",
+    "secret=",
+    "password=",
+    "authorization=",
+    "key=",
+    '"token"',
+    '"secret"',
+    '"password"',
+    '"bearer"',
+)
+_SENSITIVE_TELEGRAM_MARKER_RE = _re.compile(r"(?:bot)?\d{8,}:[-A-Za-z0-9_]{30,}")
+_SENSITIVE_DISCORD_MARKER_RE = _re.compile(r"<@!?\d{17,20}>")
+_SENSITIVE_PHONE_MARKER_RE = _re.compile(r"(?<![A-Za-z0-9])\+[1-9]\d{6,14}(?![A-Za-z0-9])")
+
+
+def _might_contain_sensitive_text(text: str) -> bool:
+    """Cheap prefilter before the full agent+fallback redaction pass."""
+    if not isinstance(text, str) or not text:
+        return False
+    if any(marker in text for marker in _SENSITIVE_CASE_MARKERS):
+        return True
+    lower = text.lower()
+    if any(marker in lower for marker in _SENSITIVE_LOWER_MARKERS):
+        return True
+    if ":" in text and _SENSITIVE_TELEGRAM_MARKER_RE.search(text):
+        return True
+    if "<@" in text and _SENSITIVE_DISCORD_MARKER_RE.search(text):
+        return True
+    if "+" in text and _SENSITIVE_PHONE_MARKER_RE.search(text):
+        return True
+    return False
+
+
 def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
     """Redact sensitive text from API responses. Respects api_redact_enabled setting.
 
@@ -192,6 +315,8 @@ def _redact_text(text: str, *, _enabled: bool | None = None) -> str:
         from api.config import load_settings
         _enabled = bool(load_settings().get("api_redact_enabled", True))
     if not _enabled:
+        return text
+    if not _might_contain_sensitive_text(text):
         return text
     return _redact_fn_cached(text)
 
@@ -212,9 +337,9 @@ def _redact_value(v, *, _enabled: bool | None = None):
 
 
 def redact_session_data(session_dict: dict) -> dict:
-    """Redact credentials from message content and tool_call data before API response.
+    """Redact credentials from message-like session fields before API response.
 
-    Applies to: messages[], tool_calls[], and title.
+    Applies to: messages[], tool_calls[], todos[], and title.
     The underlying session file is not modified; redaction is response-layer only.
 
     Reads the ``api_redact_enabled`` setting ONCE for the entire response and
@@ -232,13 +357,33 @@ def redact_session_data(session_dict: dict) -> dict:
         result['messages'] = _redact_value(result['messages'], _enabled=_enabled)
     if 'tool_calls' in result:
         result['tool_calls'] = _redact_value(result['tool_calls'], _enabled=_enabled)
+    if 'todos' in result:
+        result['todos'] = _redact_value(result['todos'], _enabled=_enabled)
     return result
 
 
 def read_body(handler) -> dict:
     """Read and JSON-parse a POST request body (capped at 20MB)."""
-    length = int(handler.headers.get('Content-Length', 0))
+    raw_length = handler.headers.get('Content-Length', 0)
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError):
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f'Invalid Content-Length: {raw_length!r}')
+    if length < 0:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f'Invalid Content-Length: {length}')
     if length > MAX_BODY_BYTES:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
         raise ValueError(f'Request body too large ({length} bytes, max {MAX_BODY_BYTES})')
     raw = handler.rfile.read(length) if length else b'{}'
     try:
@@ -252,8 +397,13 @@ def read_body(handler) -> dict:
 PROFILE_COOKIE_NAME = 'hermes_profile'
 
 
+def get_profile_cookie_name() -> str:
+    """Return the cookie name used to persist the active WebUI profile."""
+    return os.getenv('WEBUI_PROFILE_COOKIE_NAME', PROFILE_COOKIE_NAME)
+
+
 def get_profile_cookie(handler) -> str | None:
-    """Extract the hermes_profile cookie value from the request, or None."""
+    """Extract the active-profile cookie value from the request, or None."""
     cookie_header = handler.headers.get('Cookie', '')
     if not cookie_header:
         return None
@@ -263,7 +413,8 @@ def get_profile_cookie(handler) -> str | None:
         cookie.load(cookie_header)
     except _hc.CookieError:
         return None
-    morsel = cookie.get(PROFILE_COOKIE_NAME)
+    cookie_name = get_profile_cookie_name()
+    morsel = cookie.get(cookie_name)
     if morsel and morsel.value:
         # Validate against profile-name pattern before trusting
         from api.profiles import _PROFILE_ID_RE
@@ -274,7 +425,7 @@ def get_profile_cookie(handler) -> str | None:
 
 
 def build_profile_cookie(name: str) -> str:
-    """Build a Set-Cookie header value for the hermes_profile cookie.
+    """Build a Set-Cookie header value for the active-profile cookie.
 
     Always persist the selected profile in the cookie, including 'default'.
     Clearing the cookie causes the backend to fall back to process-global
@@ -287,8 +438,9 @@ def build_profile_cookie(name: str) -> str:
     """
     import http.cookies as _hc
     cookie = _hc.SimpleCookie()
-    cookie[PROFILE_COOKIE_NAME] = name
-    cookie[PROFILE_COOKIE_NAME]['path'] = '/'
-    cookie[PROFILE_COOKIE_NAME]['httponly'] = True
-    cookie[PROFILE_COOKIE_NAME]['samesite'] = 'Lax'
-    return cookie[PROFILE_COOKIE_NAME].OutputString()
+    cookie_name = get_profile_cookie_name()
+    cookie[cookie_name] = name
+    cookie[cookie_name]['path'] = '/'
+    cookie[cookie_name]['httponly'] = True
+    cookie[cookie_name]['samesite'] = 'Lax'
+    return cookie[cookie_name].OutputString()

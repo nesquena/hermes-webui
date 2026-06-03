@@ -2,8 +2,12 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Hermes</title>
+<!-- base href enables subpath mount support; all static paths must stay relative (no leading slash).
+     MUST appear before manifest/favicon links so browsers resolve relative URLs against the
+     correct base when the page is served from /session/<id> routes. See #2226. -->
+<script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
 <link rel="icon" type="image/svg+xml" href="static/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="static/favicon-32.png">
 <link rel="shortcut icon" href="static/favicon.ico">
@@ -13,22 +17,68 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Hermes">
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
-<!-- base href enables subpath mount support; all static paths must stay relative (no leading slash) -->
-<script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
-<script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
-<script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
+<script>(function(){try{var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,'poseidon-green':1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.classList.add('dark');}})()</script>
+<script>(function(){try{var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;}catch(e){}})()</script>
+<!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
+<meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#141425" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" id="hermes-theme-color" content="#0D0D1A">
+<script>(function(){try{var t=localStorage.getItem('hermes-theme')||'dark';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#FAF7F0';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
-<link rel="stylesheet" href="static/style.css">
+<script>(function(){try{if(localStorage.getItem('hermes-webui-sidebar-collapsed')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
+<link rel="preload" href="static/pwa-startup.js?v=__WEBUI_VERSION__" as="script">
+<script src="static/pwa-startup.js?v=__WEBUI_VERSION__"></script>
+<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__,csrfToken:__CSRF_TOKEN_JSON__};</script>
+<script>(function(){
+  var cfg=window.__HERMES_CONFIG__||{},token=cfg.csrfToken||'';
+  if(!token||!window.fetch)return;
+  var originalFetch=window.fetch.bind(window);
+  function sameOriginUnsafe(input,init){
+    var method=((init&&init.method)||(input&&input.method)||'GET').toUpperCase();
+    if(!/^(POST|PUT|PATCH|DELETE)$/.test(method))return false;
+    try{
+      var raw=(typeof input==='string'||input instanceof URL)?input:(input&&input.url)||'';
+      var url=new URL(raw,document.baseURI||location.href);
+      if(url.origin!==location.origin)return false;
+      return !/\/api\/(auth\/login|csp-report)$/.test(url.pathname);
+    }catch(_){return false;}
+  }
+  window.fetch=function(input,init){
+    if(sameOriginUnsafe(input,init)){
+      var opts=init?Object.assign({},init):{};
+      var headers=new Headers(opts.headers!==undefined?opts.headers:((input&&input.headers)||{}));
+      if(!headers.has('X-Hermes-CSRF-Token'))headers.set('X-Hermes-CSRF-Token',token);
+      opts.headers=headers;
+      return originalFetch(input,opts);
+    }
+    return originalFetch(input,init);
+  };
+  if(navigator.sendBeacon){
+    var originalBeacon=navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon=function(url,data){
+      try{
+        if(sameOriginUnsafe(url,{method:'POST'})){
+          var headers={'X-Hermes-CSRF-Token':token};
+          if(data&&data.type)headers['Content-Type']=data.type;
+          originalFetch(url,{method:'POST',credentials:'include',headers:headers,body:data,keepalive:true});
+          return true;
+        }
+      }catch(_){}
+      return originalBeacon(url,data);
+    };
+  }
+})()</script>
+<link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
-  <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" integrity="sha384-5TcZemv2l/9On385z///+d7MSYlvIEw9FuZTIdZ14vJLqWphw7e7ZPuOiCHJcFCP" crossorigin="anonymous">
+  <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
+  <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
   <!-- streaming-markdown: incremental DOM-building markdown parser for live streams -->
   <!-- Self-hosted from npm:streaming-markdown@0.2.15 — no CDN dependency.           -->
   <!-- sha384 of smd.min.js @0.2.15: sha384-T6r95ocN9t3W8tUK2Fa6FPaO7bJryyjyW0WCalrUnpgtm2qXr5xcN4vwPYEJ6vHa -->
   <!-- ES module imports do not support the integrity= attribute (W3C limitation);    -->
   <!-- version is pinned in the vendored file path; hash documented above for audit. -->
   <script type="module">
-    import * as smd from '/static/vendor/smd.min.js';
+    import * as smd from './static/vendor/smd.min.js';
     // SRI verification happens at the ES module level via importmap or SW; pinning version in URL.
     // sha384 of smd.min.js @0.2.15: sha384-T6r95ocN9t3W8tUK2Fa6FPaO7bJryyjyW0WCalrUnpgtm2qXr5xcN4vwPYEJ6vHa
     window.smd = smd;
@@ -53,10 +103,22 @@
       });
     }
   </script>
+  <script>
+    // Salvaged from PR #1721 (@malulian) — RTL bootstrap.
+    // Apply saved RTL state synchronously before any chat content paints, so
+    // RTL users don't see an LTR flash on initial load.
+    (function(){
+      try{
+        if(localStorage.getItem('hermes-rtl')==='true'){
+          document.documentElement.classList.add('chat-content-rtl');
+        }
+      }catch(_){}
+    })();
+  </script>
 </head>
 <body>
 <header class="app-titlebar" role="banner">
-  <button class="app-titlebar-hamburger" id="btnHamburger" onclick="toggleMobileSidebar()" type="button" title="Menu" aria-label="Menu">
+  <button class="app-titlebar-hamburger has-tooltip has-tooltip--bottom" id="btnHamburger" onclick="toggleMobileSidebar()" type="button" data-tooltip="Menu" aria-label="Menu">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
   </button>
   <div class="app-titlebar-inner">
@@ -78,45 +140,62 @@
     <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
   </div>
   <div class="app-titlebar-spacer" aria-hidden="true"></div>
+  <button class="app-titlebar-reload" id="btnReload" onclick="window.location.reload()" type="button" aria-label="Reload" title="Reload page">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16">
+      <polyline points="23 4 23 10 17 10"/>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </svg>
+  </button>
 </header>
 <div class="layout">
   <nav class="rail" aria-label="Primary navigation">
-    <button class="rail-btn nav-tab active" data-panel="chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat" aria-label="Chat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
-    <button class="rail-btn nav-tab" data-panel="tasks" onclick="switchPanel('tasks')" title="Tasks" data-i18n-title="tab_tasks" aria-label="Tasks"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
-    <button class="rail-btn nav-tab" data-panel="skills" onclick="switchPanel('skills')" title="Skills" data-i18n-title="tab_skills" aria-label="Skills"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
-    <button class="rail-btn nav-tab" data-panel="memory" onclick="switchPanel('memory')" title="Memory" data-i18n-title="tab_memory" aria-label="Memory"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
-    <button class="rail-btn nav-tab" data-panel="workspaces" onclick="switchPanel('workspaces')" title="Spaces" data-i18n-title="tab_workspaces" aria-label="Spaces"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
-    <button class="rail-btn nav-tab" data-panel="profiles" onclick="switchPanel('profiles')" title="Agent profiles" data-i18n-title="tab_profiles" aria-label="Agent profiles"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
-    <button class="rail-btn nav-tab" data-panel="todos" onclick="switchPanel('todos')" title="Current task list" data-i18n-title="tab_todos" aria-label="Todos"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
-    <button class="rail-btn nav-tab" data-panel="insights" onclick="switchPanel('insights')" title="Insights" data-i18n-title="tab_insights" aria-label="Insights"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
+    <button class="rail-btn nav-tab active has-tooltip" data-panel="chat" onclick="switchPanel('chat',{fromRailClick:true})" data-tooltip="Chat" data-i18n-title="tab_chat" aria-label="Chat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks" aria-label="Tasks"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban" aria-label="Kanban"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16"/><path d="M16 4v16"/><path d="M3 10h18"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills" aria-label="Skills"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="memory" onclick="switchPanel('memory',{fromRailClick:true})" data-tooltip="Memory" data-i18n-title="tab_memory" aria-label="Memory"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="workspaces" onclick="switchPanel('workspaces',{fromRailClick:true})" data-tooltip="Spaces" data-i18n-title="tab_workspaces" aria-label="Spaces"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="profiles" onclick="switchPanel('profiles',{fromRailClick:true})" data-tooltip="Agent profiles" data-i18n-title="tab_profiles" aria-label="Agent profiles"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="todos" onclick="switchPanel('todos',{fromRailClick:true})" data-tooltip="Current task list" data-i18n-title="tab_todos" aria-label="Todos"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="insights" onclick="switchPanel('insights',{fromRailClick:true})" data-tooltip="Insights" data-i18n-title="tab_insights" aria-label="Insights"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
+    <button class="rail-btn nav-tab dashboard-link has-tooltip" id="dashboardRailBtn" data-dashboard-link style="display:none" onclick="openHermesDashboard(event)" data-tooltip="Hermes Dashboard" data-i18n-title="tab_dashboard" aria-label="Hermes Dashboard"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="logs" onclick="switchPanel('logs',{fromRailClick:true})" data-tooltip="Logs" data-i18n-title="tab_logs" aria-label="Logs"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/><path d="M8 9h2"/></svg></button>
     <div class="rail-spacer"></div>
-    <button class="rail-btn nav-tab" data-panel="settings" onclick="switchPanel('settings')" title="Settings" data-i18n-title="tab_settings" aria-label="Settings"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="settings" onclick="switchPanel('settings',{fromRailClick:true})" data-tooltip="Settings" data-i18n-title="tab_settings" aria-label="Settings"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
   </nav>
   <aside class="sidebar">
 
     <div class="sidebar-nav">
-      <button class="nav-tab active" data-panel="chat" data-label="Chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
-      <button class="nav-tab" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks')" title="Tasks" data-i18n-title="tab_tasks"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
-      <button class="nav-tab" data-panel="skills" data-label="Skills" onclick="switchPanel('skills')" title="Skills" data-i18n-title="tab_skills"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
-      <button class="nav-tab" data-panel="memory" data-label="Memory" onclick="switchPanel('memory')" title="Memory" data-i18n-title="tab_memory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
-      <button class="nav-tab" data-panel="workspaces" data-label="Spaces" onclick="switchPanel('workspaces')" title="Spaces" data-i18n-title="tab_workspaces"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
-      <button class="nav-tab" data-panel="profiles" data-label="Profiles" onclick="switchPanel('profiles')" title="Agent profiles" data-i18n-title="tab_profiles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
-      <button class="nav-tab" data-panel="todos" data-label="Todos" onclick="switchPanel('todos')" title="Current task list" data-i18n-title="tab_todos"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
-      <button class="nav-tab" data-panel="insights" data-label="Insights" onclick="switchPanel('insights')" title="Insights" data-i18n-title="tab_insights"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
+      <button class="nav-tab active has-tooltip has-tooltip--bottom" data-panel="chat" data-label="Chat" onclick="switchPanel('chat',{fromRailClick:true})" data-tooltip="Chat" data-i18n-title="tab_chat"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="kanban" data-label="Kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 4v16"/><path d="M16 4v16"/><path d="M3 10h18"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="skills" data-label="Skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="memory" data-label="Memory" onclick="switchPanel('memory',{fromRailClick:true})" data-tooltip="Memory" data-i18n-title="tab_memory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="workspaces" data-label="Spaces" onclick="switchPanel('workspaces',{fromRailClick:true})" data-tooltip="Spaces" data-i18n-title="tab_workspaces"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="profiles" data-label="Profiles" onclick="switchPanel('profiles',{fromRailClick:true})" data-tooltip="Agent profiles" data-i18n-title="tab_profiles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="todos" data-label="Todos" onclick="switchPanel('todos',{fromRailClick:true})" data-tooltip="Current task list" data-i18n-title="tab_todos"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="insights" data-label="Insights" onclick="switchPanel('insights',{fromRailClick:true})" data-tooltip="Insights" data-i18n-title="tab_insights"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg></button>
+      <button class="nav-tab dashboard-link has-tooltip has-tooltip--bottom" id="dashboardMobileBtn" data-dashboard-link data-label="Dashboard" style="display:none" onclick="openHermesDashboard(event)" data-tooltip="Hermes Dashboard" data-i18n-title="tab_dashboard"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg><span class="dashboard-external-badge" aria-hidden="true"></span></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="logs" data-label="Logs" onclick="switchPanel('logs',{fromRailClick:true})" data-tooltip="Logs" data-i18n-title="tab_logs"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h8"/><path d="M8 9h2"/></svg></button>
       <!-- Settings button mirrored here for mobile (rail is desktop-only via @media >=768px). Keep in sync with rail entry. -->
-      <button class="nav-tab" data-panel="settings" onclick="switchPanel('settings')" title="Settings" data-i18n-title="tab_settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="settings" onclick="switchPanel('settings',{fromRailClick:true})" data-tooltip="Settings" data-i18n-title="tab_settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
     </div>
+    <!-- Flash-prevention: apply hidden tab visibility from localStorage synchronously
+         before any paint. Mirrors the theme/skin/font-size inline scripts in <head>.
+         The boot.js _restoreTabVisibility IIFE is a secondary fallback that also
+         handles the active-tab switch. -->
+    <script>(function(){try{var h=localStorage.getItem('hermes-webui-hidden-tabs');if(!h)return;var p=JSON.parse(h);if(!Array.isArray(p))return;var a=new Set(['chat','settings']);p.forEach(function(id){if(a.has(id))return;document.querySelectorAll('[data-panel="'+id+'"]').forEach(function(el){el.classList.add('nav-tab-hidden');});});try{var ac=document.querySelector('.rail .rail-btn.nav-tab.active[data-panel]')||document.querySelector('.sidebar-nav .nav-tab.active[data-panel]');if(ac&&ac.classList.contains('nav-tab-hidden')){ac.classList.remove('active');var c=document.querySelector('.rail .rail-btn.nav-tab[data-panel="chat"]')||document.querySelector('.sidebar-nav .nav-tab[data-panel="chat"]');if(c)c.classList.add('active');}}catch(_){}}catch(e){}})();</script>
     <!-- Chat panel -->
     <div class="panel-view active" id="panelChat">
       <div class="panel-head">
         <span data-i18n="tab_chat">Chat</span>
         <div class="panel-head-actions">
-          <button class="panel-head-btn" id="btnNewChat" title="New conversation (Cmd+K)" data-i18n-title="new_conversation" aria-label="New conversation">
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom-right" id="btnNewChat" data-tooltip="New conversation (Cmd+K)" data-i18n-title="new_conversation" aria-label="New conversation">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           </button>
         </div>
       </div>
-      <div class="session-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off"></div>
+      <div class="session-search sidebar-search"><div class="session-search-field"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()" autocomplete="off"><button type="button" id="sessionSearchClear" class="session-search-clear has-tooltip has-tooltip--bottom-right" aria-label="Clear conversation filter" data-tooltip="Clear conversation filter" onclick="clearSessionSearch()" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div></div>
       <div class="session-list" id="sessionList"></div>
     </div>
     <!-- Tasks (cron) panel -->
@@ -124,18 +203,49 @@
       <div class="panel-head">
         <span data-i18n="scheduled_jobs">Scheduled jobs</span>
         <div class="panel-head-actions">
-          <button class="panel-head-btn" id="cronRefreshBtn" onclick="loadCrons(true)" title="Refresh job list" aria-label="Refresh job list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
-          <button class="panel-head-btn" onclick="openCronCreate()" title="New job" data-i18n-title="new_job" aria-label="New job"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="cronRefreshBtn" onclick="loadCrons(true)" data-tooltip="Refresh job list" aria-label="Refresh job list"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openCronCreate()" data-tooltip="New job" data-i18n-title="new_job" aria-label="New job"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
+      <div id="cronGatewayNotice" class="detail-alert cron-gateway-notice" style="display:none"></div>
       <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+    </div>
+    <!-- Kanban panel -->
+    <div class="panel-view" id="panelKanban">
+      <div class="panel-head">
+        <span data-i18n="tab_kanban">Kanban</span>
+        <div class="panel-head-actions">
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="kanbanNewTaskBtn" onclick="openKanbanCreate()" data-tooltip="New task" data-i18n-title="kanban_new_task" aria-label="New task"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="kanbanRefreshBtn" onclick="loadKanban(true)" data-tooltip="Refresh" data-i18n-title="kanban_refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+        </div>
+      </div>
+      <div class="kanban-filter-stack">
+        <div class="sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="kanbanSearch" placeholder="Search tasks" data-i18n-placeholder="kanban_search_tasks" oninput="filterKanban()"></div>
+        <select id="kanbanAssigneeFilter" onchange="loadKanban(true)" aria-label="Assignee filter"></select>
+        <select id="kanbanTenantFilter" onchange="loadKanban(true)" aria-label="Tenant filter"></select>
+        <label class="kanban-check"><input id="kanbanIncludeArchived" type="checkbox" onchange="loadKanban(true)"> <span data-i18n="kanban_include_archived">Include archived</span></label>
+        <label class="kanban-check"><input id="kanbanOnlyMine" type="checkbox" onchange="loadKanban(true)"> <span data-i18n="kanban_only_mine">Only mine</span></label>
+        <div id="kanbanStats" class="kanban-stats" aria-live="polite"></div>
+        <div id="kanbanBulkBar" class="kanban-bulk-bar">
+          <select id="kanbanBulkStatus" aria-label="Bulk status"><option value="">Status</option><option value="ready">Ready</option><option value="blocked">Blocked</option><option value="done">Done</option><option value="archived">Archived</option></select>
+          <button class="btn secondary" onclick="bulkUpdateKanban()" data-i18n="kanban_bulk_action">Bulk action</button>
+          <button class="btn secondary kanban-nudge-dispatch-btn" onclick="nudgeKanbanDispatcher()" data-i18n="kanban_nudge_dispatcher" title="Dry-run: shows what would be claimed without spawning workers">Preview</button>
+          <button class="btn primary kanban-run-dispatch-btn" onclick="runKanbanDispatcher()" data-i18n="kanban_run_dispatcher" title="Claims Ready tasks and spawns worker subprocesses">Run dispatcher</button>
+        </div>
+        <div class="kanban-new-task-row">
+          <input id="kanbanNewTaskTitle" placeholder="New task" data-i18n-placeholder="kanban_new_task" onkeydown="if(event.key==='Enter')createKanbanTask()">
+          <button class="btn secondary" onclick="createKanbanTask()" data-i18n="kanban_new_task">New task</button>
+        </div>
+      </div>
+      <div class="kanban-summary" id="kanbanSummary"></div>
+      <div class="kanban-list" id="kanbanList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Skills panel -->
     <div class="panel-view" id="panelSkills">
       <div class="panel-head">
         <span data-i18n="tab_skills">Skills</span>
         <div class="panel-head-actions">
-          <button class="panel-head-btn" onclick="openSkillCreate()" title="New skill" data-i18n-title="new_skill" aria-label="New skill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openSkillCreate()" data-tooltip="New skill" data-i18n-title="new_skill" aria-label="New skill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
       <div class="skills-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="skillsSearch" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()"></div>
@@ -160,7 +270,7 @@
       <div class="panel-head">
         <span data-i18n="tab_insights">Insights</span>
         <div class="panel-head-actions">
-          <button class="panel-head-btn" id="insightsRefreshBtn" onclick="loadInsights(true)" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="insightsRefreshBtn" onclick="loadInsights(true)" data-tooltip="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
         </div>
       </div>
       <div class="panel-head-sub" style="padding:0 12px 8px">
@@ -177,7 +287,7 @@
       <div class="panel-head">
         <span data-i18n="tab_workspaces">Spaces</span>
         <div class="panel-head-actions">
-          <button class="panel-head-btn" onclick="openWorkspaceCreate()" title="Add space" data-i18n-title="workspace_add_title" aria-label="Add space"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openWorkspaceCreate()" data-tooltip="Add space" data-i18n-title="workspace_add_title" aria-label="Add space"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
       <div class="panel-head-sub" data-i18n="workspace_desc">Add and switch workspaces for your sessions.</div>
@@ -188,10 +298,43 @@
       <div class="panel-head">
         <span data-i18n="tab_profiles">Agent profiles</span>
         <div class="panel-head-actions">
-          <button class="panel-head-btn" onclick="openProfileCreate()" title="New profile" data-i18n-title="new_profile" aria-label="New profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openProfileCreate()" data-tooltip="New profile" data-i18n-title="new_profile" aria-label="New profile"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
       <div style="flex:1;overflow-y:auto;padding:8px" id="profilesPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+    </div>
+    <!-- Logs panel -->
+    <div class="panel-view" id="panelLogs">
+      <div class="panel-head">
+        <span data-i18n="tab_logs">Logs</span>
+        <div class="panel-head-actions">
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="logsRefreshBtn" onclick="loadLogs(true)" data-tooltip="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+        </div>
+      </div>
+      <div class="logs-control-panel">
+        <label class="logs-control-label" for="logsFile" data-i18n="logs_file">File</label>
+        <select id="logsFile" onchange="loadLogs(true)">
+          <option value="agent">agent</option>
+          <option value="errors">errors</option>
+          <option value="gateway">gateway</option>
+        </select>
+        <label class="logs-control-label" for="logsTail" data-i18n="logs_tail">Tail</label>
+        <select id="logsTail" onchange="loadLogs(true)">
+          <option value="100">100</option>
+          <option value="200" selected>200</option>
+          <option value="500">500</option>
+          <option value="1000">1000</option>
+        </select>
+        <label class="logs-control-label" for="logsSeverityFilter" data-i18n="logs_severity">Severity</label>
+        <select id="logsSeverityFilter" onchange="_applyLogsSeverityFilter()">
+          <option value="all" data-i18n="logs_severity_all">All</option>
+          <option value="errors" data-i18n="logs_severity_errors">Errors</option>
+          <option value="warnings" data-i18n="logs_severity_warnings">Warnings+</option>
+        </select>
+        <label class="logs-check-row"><input id="logsAutoRefresh" type="checkbox" checked onchange="_syncLogsAutoRefresh()"><span data-i18n="logs_auto_refresh">Auto-refresh (5s)</span></label>
+        <label class="logs-check-row"><input id="logsWrap" type="checkbox" onchange="_syncLogsWrap()"><span data-i18n="logs_wrap">Wrap lines</span></label>
+        <button type="button" class="logs-copy" id="logsCopyAll" onclick="copyLogsAll()" data-i18n="logs_copy_all">Copy all</button>
+      </div>
     </div>
     <!-- Settings panel (menu list; actual panes render in .main) -->
     <div class="panel-view" id="panelSettings">
@@ -201,23 +344,27 @@
       <div class="side-menu" id="settingsMenu">
         <button type="button" class="side-menu-item active" data-settings-section="conversation" onclick="switchSettingsSection('conversation')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-          <span>Conversation</span>
+          <span data-i18n="settings_tab_conversation">Conversation</span>
         </button>
         <button type="button" class="side-menu-item" data-settings-section="appearance" onclick="switchSettingsSection('appearance')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-          <span>Appearance</span>
+          <span data-i18n="settings_tab_appearance">Appearance</span>
         </button>
         <button type="button" class="side-menu-item" data-settings-section="preferences" onclick="switchSettingsSection('preferences')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-          <span>Preferences</span>
+          <span data-i18n="settings_tab_preferences">Preferences</span>
         </button>
         <button type="button" class="side-menu-item" data-settings-section="providers" onclick="switchSettingsSection('providers')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
           <span data-i18n="providers_tab_title">Providers</span>
         </button>
+        <button type="button" class="side-menu-item" data-settings-section="plugins" onclick="switchSettingsSection('plugins')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l3 7h7l-5.5 4.3 2.1 7L12 16.2 5.4 20.3l2.1-7L2 9h7z"/></svg>
+          <span data-i18n="settings_tab_plugins">Plugins</span>
+        </button>
         <button type="button" class="side-menu-item" data-settings-section="system" onclick="switchSettingsSection('system')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
-          <span>System</span>
+          <span data-i18n="settings_tab_system">System</span>
         </button>
       </div>
     </div>
@@ -225,8 +372,10 @@
   </aside>
   <main class="main">
     <div id="mainChat" class="main-view">
+    <div class="messages-shell">
+      <button id="jumpToSessionStartBtn" class="session-jump-btn session-jump-btn--start" aria-label="Jump to beginning of session" data-i18n-aria-label="session_jump_start_label" data-i18n-title="session_jump_start_label" onclick="jumpToSessionStart()" style="display:none"><span aria-hidden="true">↑</span><span data-i18n="session_jump_start">Start</span></button>
+      <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" style="display:none" onclick="scrollToBottom()" aria-label="Scroll to bottom" data-i18n-aria-label="session_jump_end_label" data-i18n-title="session_jump_end_label"><span aria-hidden="true">↓</span><span class="session-jump-btn__text" data-i18n="session_jump_end">End</span></button>
     <div class="messages" id="messages">
-      <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" aria-label="Scroll to bottom" onclick="scrollToBottom()" style="display:none">↓</button>
       <div class="empty-state" id="emptyState">
         <div class="empty-logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="80" height="80" aria-label="Hermes caduceus">
           <defs>
@@ -257,9 +406,15 @@
       <div id="liveCompressionCards" class="live-compression-cards"></div>
       <div id="liveToolCards" style="display:none;max-width:800px;margin:0 auto;width:100%;padding:0 24px;"></div>
     </div>
+    </div>
     <div class="update-banner" id="updateBanner">
       <div style="display:flex;flex-direction:column;flex:1;min-width:0">
         <span id="updateMsg"></span>
+        <div id="updateWhatsNewLinks" style="display:none;font-size:11px;margin-left:8px;white-space:nowrap"></div>
+        <div id="updateSummaryPanel" style="display:none;font-size:12px;line-height:1.45;margin-top:6px;padding:8px 10px;border:1px solid var(--border2);border-radius:8px;background:rgba(255,255,255,.04);max-width:720px;white-space:normal">
+          <div id="updateSummaryText"></div>
+          <div id="updateSummaryDiffLinks" style="display:none;font-size:11px;margin-top:8px"></div>
+        </div>
         <div id="updateError" style="display:none;font-size:12px;color:var(--error,#e05);margin-top:4px;word-break:break-word"></div>
       </div>
       <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
@@ -274,6 +429,21 @@
         <button class="reconnect-btn" onclick="dismissReconnect()">Dismiss</button>
         <button class="reconnect-btn" onclick="refreshSession()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-1px"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> Reload</button>
       </div>
+    </div>
+    <div class="offline-banner" id="offlineBanner" role="status" aria-live="assertive" hidden>
+      <div class="offline-copy">
+        <strong id="offlineTitle" data-i18n="offline_title">Connection lost</strong>
+        <span id="offlineDetails" data-i18n="offline_browser_detail">Your browser reports that this device is offline.</span>
+        <span id="offlineAutorefresh" data-i18n="offline_autorefresh">I will refresh this page automatically when Hermes is reachable again.</span>
+      </div>
+      <button class="offline-action" id="offlineCheckNow" type="button" onclick="checkOfflineRecoveryNow()" data-i18n="offline_check_now">Check now</button>
+    </div>
+    <div class="agent-health-banner" id="agentHealthBanner" role="alert" aria-live="assertive" hidden>
+      <div class="agent-health-copy">
+        <strong id="agentHealthTitle">Hermes agent is not responding</strong>
+        <span id="agentHealthDetails">The gateway heartbeat failed. Messages may not be delivered until it comes back.</span>
+      </div>
+      <button class="agent-health-dismiss" id="agentHealthDismiss" type="button" onclick="dismissAgentHealthAlert()" aria-label="Dismiss Hermes agent heartbeat alert">Dismiss</button>
     </div>
     <div class="composer-wrap" id="composerWrap">
       <div class="composer-flyout">
@@ -321,6 +491,7 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17h.01"/><path d="M9.09 9a3 3 0 1 1 5.82 1c0 2-3 2-3 4"/><circle cx="12" cy="12" r="10"/></svg>
             <span id="clarifyHeading" data-i18n="clarify_heading">Clarification needed</span>
             <span class="clarify-countdown" id="clarifyCountdown"></span>
+            <button type="button" class="clarify-collapse" id="clarifyCollapse" aria-expanded="true" aria-label="Collapse clarification" aria-controls="clarifyQuestion clarifyChoices clarifyInput clarifyHint" onclick="toggleClarifyCardCollapsed()" title="Collapse clarification"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg></button>
           </div>
           <div class="clarify-question" id="clarifyQuestion"></div>
           <div class="clarify-choices" id="clarifyChoices"></div>
@@ -365,10 +536,18 @@
           </div>
         </div>
       </div>
+      <div id="handoffHintContainer" class="handoff-hint-container" style="display:none;"></div>
       </div>
       <!-- Queue pill outer: same positioning wrapper as .queue-card (max-width + padding) -->
       <div class="queue-pill-outer">
         <button id="queuePill" class="queue-pill" aria-label="Show queued messages" type="button"></button>
+      </div>
+      <div class="composer-todo-strip" id="composerTodoStrip" hidden>
+        <button class="composer-todo-toggle" id="composerTodoToggle" type="button" aria-expanded="true" aria-controls="composerTodoList" onclick="toggleComposerTodosCollapsed()">
+          <span class="composer-todo-strip-header" data-i18n="current_task_list">Current task list</span>
+          <span class="composer-todo-toggle-icon" id="composerTodoToggleIcon" aria-hidden="true"></span>
+        </button>
+        <div class="composer-todo-list" id="composerTodoList"></div>
       </div>
       <div class="composer-box" id="composerBox">
         <div class="cmd-dropdown" id="cmdDropdown"></div>
@@ -385,11 +564,11 @@
         <textarea id="msg" rows="1" placeholder="Message Hermes…"></textarea>
         <div class="composer-footer">
           <div class="composer-left">
-            <input type="file" id="fileInput" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.env,.xls,.xlsx,.doc,.docx,.zip,.tar,.gz,.tgz,.bz2,.xz" style="display:none">
-            <button class="icon-btn" id="btnAttach" title="Attach files">
+            <input type="file" id="fileInput" class="file-input-visually-hidden" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.env,.xls,.xlsx,.doc,.docx,.zip,.tar,.gz,.tgz,.bz2,.xz">
+            <button type="button" class="icon-btn has-tooltip" id="btnAttach" data-tooltip="Attach files">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </button>
-            <button class="icon-btn mic-btn" id="btnMic" title="Dictate" data-i18n-title="voice_dictate" style="display:none">
+            <button class="icon-btn mic-btn has-tooltip" id="btnMic" data-tooltip="Dictate" data-i18n-title="voice_dictate" style="display:none">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <rect x="9" y="1" width="6" height="12" rx="3"/>
                 <path d="M5 10a7 7 0 0 0 14 0"/>
@@ -397,7 +576,7 @@
                 <line x1="8" y1="23" x2="16" y2="23"/>
               </svg>
             </button>
-            <button class="icon-btn voice-mode-btn" id="btnVoiceMode" title="Voice mode" data-i18n-title="voice_mode_toggle" style="display:none">
+            <button class="icon-btn voice-mode-btn has-tooltip" id="btnVoiceMode" data-tooltip="Voice mode" data-i18n-title="voice_mode_toggle" style="display:none">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <!-- Lucide audio-lines: signals two-way voice conversation, matches ChatGPT/Gemini convention. -->
                 <path d="M2 10v4"/>
@@ -463,6 +642,10 @@
               </optgroup>
             </select>
             </div>
+            <button class="provider-quota-chip" id="providerQuotaChip" type="button" title="Provider quota" onclick="switchPanel('settings');switchSettingsSection('providers')" hidden>
+              <span class="provider-quota-chip-dot" aria-hidden="true"></span>
+              <span class="provider-quota-chip-label" id="providerQuotaChipLabel"></span>
+            </button>
             <div class="composer-reasoning-wrap" id="composerReasoningWrap" style="display:none">
               <button class="composer-reasoning-chip" id="composerReasoningChip" type="button" onclick="toggleReasoningDropdown()" title="Reasoning effort level">
                 <span class="composer-reasoning-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.46 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2Z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.46 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2Z"/></svg></span>
@@ -502,7 +685,7 @@
               </div>
             </div>
             <span class="bg-badge" id="bgBadge" style="display:none" title="Background tasks running">0</span>
-            <button class="send-btn" id="btnSend" title="Send message" disabled>
+            <button class="send-btn has-tooltip has-tooltip--left" id="btnSend" data-tooltip="Send message" disabled>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
             </button>
           </div>
@@ -539,6 +722,7 @@
             <div class="reasoning-option" data-effort="medium">Medium</div>
             <div class="reasoning-option" data-effort="high">High</div>
             <div class="reasoning-option" data-effort="xhigh">Extra High</div>
+            <div class="reasoning-option" data-effort="max">Max</div>
           </div>
           <div class="composer-toolsets-dropdown" id="composerToolsetsDropdown">
             <div class="toolsets-dropdown-desc" id="toolsetsDropdownDesc"></div>
@@ -561,10 +745,10 @@
       <div class="main-view-header">
         <div class="main-view-title" id="skillDetailTitle"></div>
         <div class="main-view-actions">
-          <button id="btnEditSkillDetail" class="panel-head-btn" title="Edit" data-i18n-title="skills_edit" onclick="editCurrentSkill()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-          <button id="btnDeleteSkillDetail" class="panel-head-btn" title="Delete" data-i18n-title="skills_delete" onclick="deleteCurrentSkill()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-          <button id="btnCancelSkillDetail" class="panel-head-btn" title="Cancel" data-i18n-title="cancel" onclick="cancelSkillForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-          <button id="btnSaveSkillDetail" class="panel-head-btn primary" title="Save" data-i18n-title="save" onclick="saveSkillForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+          <button id="btnEditSkillDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Edit" data-i18n-title="skills_edit" onclick="editCurrentSkill()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+          <button id="btnDeleteSkillDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Delete" data-i18n-title="skills_delete" onclick="deleteCurrentSkill()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          <button id="btnCancelSkillDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Cancel" data-i18n-title="cancel" onclick="cancelSkillForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          <button id="btnSaveSkillDetail" class="panel-head-btn primary has-tooltip has-tooltip--bottom" data-tooltip="Save" data-i18n-title="save" onclick="saveSkillForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
         </div>
       </div>
       <div class="main-view-body" id="skillDetailBody" style="display:none"></div>
@@ -578,9 +762,9 @@
       <div class="main-view-header">
         <div class="main-view-title" id="memoryDetailTitle"></div>
         <div class="main-view-actions">
-          <button id="btnEditMemoryDetail" class="panel-head-btn" title="Edit" aria-label="Edit" data-i18n-title="edit" onclick="editCurrentMemory()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-          <button id="btnCancelMemoryDetail" class="panel-head-btn" title="Cancel" data-i18n-title="cancel" onclick="cancelMemoryEdit()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-          <button id="btnSaveMemoryDetail" class="panel-head-btn primary" title="Save" data-i18n-title="save" onclick="submitMemorySave()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+          <button id="btnEditMemoryDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Edit" aria-label="Edit" data-i18n-title="edit" onclick="editCurrentMemory()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+          <button id="btnCancelMemoryDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Cancel" data-i18n-title="cancel" onclick="cancelMemoryEdit()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          <button id="btnSaveMemoryDetail" class="panel-head-btn primary has-tooltip has-tooltip--bottom" data-tooltip="Save" data-i18n-title="save" onclick="submitMemorySave()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
         </div>
       </div>
       <div class="main-view-body" id="memoryDetailBody" style="display:none"></div>
@@ -594,14 +778,14 @@
       <div class="main-view-header">
         <div class="main-view-title" id="taskDetailTitle"></div>
         <div class="main-view-actions">
-          <button id="btnRunTaskDetail" class="panel-head-btn" title="Run now" data-i18n-title="cron_run_now" onclick="runCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
-          <button id="btnPauseTaskDetail" class="panel-head-btn" title="Pause" data-i18n-title="cron_pause" onclick="pauseCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg></button>
-          <button id="btnResumeTaskDetail" class="panel-head-btn" title="Resume" data-i18n-title="cron_resume" onclick="resumeCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/><line x1="22" y1="4" x2="22" y2="20"/></svg></button>
-          <button id="btnEditTaskDetail" class="panel-head-btn" title="Edit" data-i18n-title="edit" onclick="editCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-          <button id="btnDuplicateTaskDetail" class="panel-head-btn" title="Duplicate" data-i18n-title="cron_duplicate" onclick="duplicateCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
-          <button id="btnDeleteTaskDetail" class="panel-head-btn" title="Delete" data-i18n-title="delete_title" onclick="deleteCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-          <button id="btnCancelTaskDetail" class="panel-head-btn" title="Cancel" data-i18n-title="cancel" onclick="cancelCronForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-          <button id="btnSaveTaskDetail" class="panel-head-btn primary" title="Save" data-i18n-title="save" onclick="saveCronForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+          <button id="btnRunTaskDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Run now" data-i18n-title="cron_run_now" onclick="runCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
+          <button id="btnPauseTaskDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Pause" data-i18n-title="cron_pause" onclick="pauseCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg></button>
+          <button id="btnResumeTaskDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Resume" data-i18n-title="cron_resume" onclick="resumeCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/><line x1="22" y1="4" x2="22" y2="20"/></svg></button>
+          <button id="btnEditTaskDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Edit" data-i18n-title="edit" onclick="editCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+          <button id="btnDuplicateTaskDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Duplicate" data-i18n-title="cron_duplicate" onclick="duplicateCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+          <button id="btnDeleteTaskDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Delete" data-i18n-title="delete_title" onclick="deleteCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          <button id="btnCancelTaskDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Cancel" data-i18n-title="cancel" onclick="cancelCronForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          <button id="btnSaveTaskDetail" class="panel-head-btn primary has-tooltip has-tooltip--bottom" data-tooltip="Save" data-i18n-title="save" onclick="saveCronForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
         </div>
       </div>
       <div class="main-view-body" id="taskDetailBody" style="display:none"></div>
@@ -611,15 +795,42 @@
         <div class="main-view-empty-sub" data-i18n="tasks_empty_sub">Pick a job from the sidebar to view its details and runs, or create a new one.</div>
       </div>
     </div>
+    <div id="mainKanban" class="main-view">
+      <div class="main-view-header">
+        <div>
+          <div class="main-view-title-row">
+            <div class="main-view-title" data-i18n="kanban_board">Board</div>
+            <div class="kanban-board-switcher" id="kanbanBoardSwitcher" hidden>
+              <button type="button" class="kanban-board-switcher-toggle" id="kanbanBoardSwitcherToggle" onclick="toggleKanbanBoardMenu(event)" aria-haspopup="menu" aria-expanded="false">
+                <span class="kanban-board-switcher-icon" id="kanbanBoardSwitcherIcon" aria-hidden="true"></span>
+                <span class="kanban-board-switcher-name" id="kanbanBoardSwitcherName">Default</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="kanban-board-switcher-menu" id="kanbanBoardSwitcherMenu" role="menu" hidden></div>
+            </div>
+          </div>
+          <div class="kanban-readonly" data-i18n="kanban_read_only" style="display:none">Read-only view</div>
+        </div>
+        <div class="main-view-actions">
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="btnKanbanCreateBoard" onclick="openKanbanCreateBoard()" data-tooltip="New board" data-i18n-title="kanban_new_board" aria-label="New board"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><line x1="17.5" y1="14" x2="17.5" y2="21"/><line x1="14" y1="17.5" x2="21" y2="17.5"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom kanban-nudge-dispatch-btn" id="btnKanbanPreviewDispatcher" onclick="nudgeKanbanDispatcher()" data-tooltip="Preview dispatcher (dry-run)" data-i18n-title="kanban_nudge_dispatcher" aria-label="Preview dispatcher (dry-run)">▶</button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom kanban-run-dispatch-btn" id="btnKanbanRunDispatcher" onclick="runKanbanDispatcher()" data-tooltip="Run dispatcher — claim Ready tasks" data-i18n-title="kanban_run_dispatcher" aria-label="Run dispatcher"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg></button>
+        </div>
+      </div>
+      <div class="kanban-task-preview" id="kanbanTaskPreview" style="display:none"></div>
+      <div class="kanban-board-wrap">
+        <div class="kanban-board" id="kanbanBoard"><div style="padding:16px;color:var(--muted);font-size:13px" data-i18n="loading">Loading...</div></div>
+      </div>
+    </div>
     <div id="mainWorkspaces" class="main-view">
       <div class="main-view-header">
         <div class="main-view-title" id="workspaceDetailTitle"></div>
         <div class="main-view-actions">
-          <button id="btnActivateWorkspaceDetail" class="panel-head-btn" title="Use this space" data-i18n-title="workspace_use_title" onclick="activateCurrentWorkspace()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
-          <button id="btnEditWorkspaceDetail" class="panel-head-btn" title="Rename" data-i18n-title="edit" onclick="editCurrentWorkspace()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-          <button id="btnDeleteWorkspaceDetail" class="panel-head-btn" title="Remove" data-i18n-title="remove" onclick="deleteCurrentWorkspace()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-          <button id="btnCancelWorkspaceDetail" class="panel-head-btn" title="Cancel" data-i18n-title="cancel" onclick="cancelWorkspaceForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-          <button id="btnSaveWorkspaceDetail" class="panel-head-btn primary" title="Save" data-i18n-title="save" onclick="saveWorkspaceForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+          <button id="btnActivateWorkspaceDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Use this space" data-i18n-title="workspace_use_title" onclick="activateCurrentWorkspace()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+          <button id="btnEditWorkspaceDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Rename" data-i18n-title="edit" onclick="editCurrentWorkspace()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+          <button id="btnDeleteWorkspaceDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Remove" data-i18n-title="remove" onclick="deleteCurrentWorkspace()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          <button id="btnCancelWorkspaceDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Cancel" data-i18n-title="cancel" onclick="cancelWorkspaceForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          <button id="btnSaveWorkspaceDetail" class="panel-head-btn primary has-tooltip has-tooltip--bottom" data-tooltip="Save" data-i18n-title="save" onclick="saveWorkspaceForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
         </div>
       </div>
       <div class="main-view-body" id="workspaceDetailBody" style="display:none"></div>
@@ -633,10 +844,10 @@
       <div class="main-view-header">
         <div class="main-view-title" id="profileDetailTitle"></div>
         <div class="main-view-actions">
-          <button id="btnActivateProfileDetail" class="panel-head-btn" title="Activate" data-i18n-title="profile_switch_title" onclick="activateCurrentProfile()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
-          <button id="btnDeleteProfileDetail" class="panel-head-btn" title="Delete" data-i18n-title="profile_delete_title" onclick="deleteCurrentProfile()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-          <button id="btnCancelProfileDetail" class="panel-head-btn" title="Cancel" data-i18n-title="cancel" onclick="cancelProfileForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-          <button id="btnSaveProfileDetail" class="panel-head-btn primary" title="Save" data-i18n-title="save" onclick="saveProfileForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+          <button id="btnActivateProfileDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Activate" data-i18n-title="profile_switch_title" onclick="activateCurrentProfile()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+          <button id="btnDeleteProfileDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Delete" data-i18n-title="profile_delete_title" onclick="deleteCurrentProfile()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          <button id="btnCancelProfileDetail" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Cancel" data-i18n-title="cancel" onclick="cancelProfileForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          <button id="btnSaveProfileDetail" class="panel-head-btn primary has-tooltip has-tooltip--bottom" data-tooltip="Save" data-i18n-title="save" onclick="saveProfileForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
         </div>
       </div>
       <div class="main-view-body" id="profileDetailBody" style="display:none"></div>
@@ -651,7 +862,25 @@
         <div class="main-view-title" data-i18n="insights_title">Usage Analytics</div>
       </div>
       <div class="main-view-content" id="insightsContent" style="padding:16px;overflow-y:auto">
-        <div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div>
+        <div class="insights-card wiki-status-card" id="llmWikiStatusCard">
+          <div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div>
+        </div>
+      </div>
+    </div>
+    <div id="mainLogs" class="main-view">
+      <div class="main-view-header">
+        <div>
+          <div class="main-view-title" data-i18n="logs_title">Logs</div>
+          <div class="logs-status" id="logsStatus" data-i18n="logs_status_idle">Choose a log file to view recent lines.</div>
+        </div>
+        <div class="main-view-actions">
+          <button type="button" class="logs-copy compact" onclick="copyLogsAll()" data-i18n="logs_copy_all">Copy all</button>
+        </div>
+      </div>
+      <div class="main-view-body logs-main-body">
+        <div class="main-view-content logs-content">
+          <div class="logs-output" id="logsOutput"><div class="logs-empty" data-i18n="logs_empty">No log lines yet.</div></div>
+        </div>
       </div>
     </div>
     <div id="mainSettings" class="main-view">
@@ -665,9 +894,9 @@
             </div>
             <div class="hermes-action-grid">
               <button class="settings-action-btn" id="btnDownload" title="Download as Markdown" data-i18n-title="download_transcript"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> <span data-i18n="transcript">Transcript</span></button>
-              <button class="settings-action-btn" id="btnExportJSON" title="Export full session as JSON"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/><path d="M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1"/></svg> JSON</button>
-              <button class="settings-action-btn" id="btnImportJSON" title="Import session from JSON"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> <span data-i18n="import">Import</span></button>
-              <button class="settings-action-btn danger" id="btnClearConvModal" onclick="clearConversation()" title="Clear all messages in this conversation"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 1 2 2 2v2"/></svg> Clear</button>
+              <button class="settings-action-btn" id="btnExportJSON" title="Export full session as JSON" data-i18n-title="export_session_json_tooltip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/><path d="M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1"/></svg> <span data-i18n="export_session_json">JSON</span></button>
+              <button class="settings-action-btn" id="btnImportJSON" title="Import session from JSON" data-i18n-title="import_session_json_tooltip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> <span data-i18n="import">Import</span></button>
+              <button class="settings-action-btn danger" id="btnClearConvModal" onclick="clearConversation()" title="Clear all messages in this conversation" data-i18n-title="clear_conversation_btn_tooltip"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 1 2 2 2v2"/></svg> <span data-i18n="clear">Clear</span></button>
             </div>
             <input type="file" id="importFileInput" accept=".json" style="display:none">
           </div>
@@ -710,7 +939,7 @@
             </div>
                         <div class="settings-field">
               <label data-i18n="settings_label_font_size">Font size</label>
-              <div id="fontSizePickerGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px">
+              <div id="fontSizePickerGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin-top:4px">
                 <button type="button" data-font-size-val="small" onclick="_pickFontSize('small')" class="font-size-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
                   <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
                     <span style="font-size:10px;font-weight:600;color:var(--muted)">Aa</span>
@@ -729,6 +958,12 @@
                   </div>
                   <span style="font-size:12px;font-weight:500;color:var(--text)" data-i18n="font_size_large">Large</span>
                 </button>
+                <button type="button" data-font-size-val="xlarge" onclick="_pickFontSize('xlarge')" class="font-size-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                  <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
+                    <span style="font-size:20px;font-weight:600;color:var(--muted)">Aa</span>
+                  </div>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)" data-i18n="font_size_xlarge">Extra Large</span>
+                </button>
               </div>
               <input type="hidden" id="settingsFontSize" value="default">
             </div>
@@ -738,6 +973,25 @@
                 <span data-i18n="settings_label_workspace_panel_open">Keep workspace panel open by default</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_workspace_panel_open">When enabled, the workspace / file browser panel opens automatically with each new session. You can still close it manually at any time.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsSessionJumpButtons" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_session_jump_buttons">Show session jump buttons</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_session_jump_buttons">Show floating Start and End buttons while reading long session histories.</div>
+            </div>
+            <div class="settings-field" style="margin-top:8px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsSessionEndlessScroll" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_session_endless_scroll">Load older messages while scrolling up</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_session_endless_scroll">When enabled, older messages load automatically as you scroll upward. When disabled, use the older-messages button.</div>
+            </div>
+            <div class="settings-field">
+              <label id="tabVisibilityLabel" data-i18n="settings_label_tab_visibility">Sidebar tabs</label>
+              <div id="tabVisibilityChips" class="tab-visibility-chips" role="group" aria-labelledby="tabVisibilityLabel"></div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tab_visibility">Choose which tabs appear in the sidebar and rail. Chat and Settings are always visible.</div>
             </div>
             <div id="settingsAppearanceAutosaveStatus" class="settings-autosave-status" aria-live="polite"></div>
           </div>
@@ -754,6 +1008,22 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_model">Used for new conversations. Existing conversations keep their selected model.</div>
             </div>
             <div class="settings-field">
+              <label data-i18n="settings_label_auxiliary_models">Auxiliary Models</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:10px" data-i18n="settings_desc_auxiliary_models">Side-task routing for vision, compression, title generation, etc. "Auto" uses your main chat model.</div>
+              <div id="auxModelsContainer"></div>
+              <div style="margin-top:8px;display:flex;gap:8px">
+                <button type="button" id="btnResetAuxModels" class="settings-btn" style="font-size:12px;padding:4px 12px;border-radius:6px" data-i18n="settings_btn_reset_aux_models">Reset all to auto</button>
+                <button type="button" id="btnApplyAuxModels" class="settings-btn" style="font-size:12px;padding:4px 12px;border-radius:6px;display:none" data-i18n="settings_btn_apply_aux_models">Apply changes</button>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsHideSuggestions" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_hide_suggestions">Hide new-chat suggestions</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_hide_suggestions">Hide the three default suggestion buttons on the empty new-chat screen to avoid accidental taps.</div>
+            </div>
+            <div class="settings-field">
               <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
               <select id="settingsSendKey" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="enter">Enter (Shift+Enter for newline)</option>
@@ -763,6 +1033,13 @@
             <div class="settings-field">
               <label for="settingsLanguage" data-i18n="settings_label_language">Language</label>
               <select id="settingsLanguage" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsRtl" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_rtl">Right-to-left chat layout</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_rtl">Flips alignment of chat messages and the composer input for languages like Arabic or Hebrew. Affects only the chat area — sidebar and other panels stay left-to-right.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -829,10 +1106,31 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowQuotaChip" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_quota_chip">Show provider quota chip in composer</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_quota_chip">Displays an ambient remaining-quota indicator (e.g. OpenRouter credit balance) in the composer footer. Default off. Only visible on wide displays (≥1400px) when enabled, to keep the composer uncluttered on laptop and standard desktop widths.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowTps" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span>Show token speed (TPS)</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px">Displays tokens per second in assistant message headers while streaming and after a response completes. Off by default.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsFadeTextEffect" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_fade_text_effect">Fade text effect</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_fade_text_effect">Fade newly streamed words in while the assistant is responding. Similar to OpenWebUI; off by default for maximum performance.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsSimplifiedToolCalling" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span>Compact tool activity</span>
               </label>
-              <div style="font-size:11px;color:var(--muted);margin-top:4px">Group thinking and tool calls into one collapsed activity section per assistant turn.</div>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px">Show thinking and tool calls as compact inline activity while preserving the agent timeline.</div>
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
@@ -848,6 +1146,11 @@
                 <option value="detailed" data-i18n="settings_sidebar_density_detailed">Detailed</option>
               </select>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sidebar_density">Controls how much metadata the session list shows in the left sidebar.</div>
+            </div>
+            <div class="settings-field">
+              <label for="settingsPinnedSessionsLimit">Pinned conversations limit</label>
+              <input type="number" id="settingsPinnedSessionsLimit" min="1" max="99" step="1" inputmode="numeric" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              <div style="font-size:11px;color:var(--muted);margin-top:4px">Maximum number of active conversations that can be pinned in the sidebar. Default is 3.</div>
             </div>
             <div class="settings-field">
               <label for="settingsAutoTitleRefresh" data-i18n="settings_label_auto_title_refresh">Adaptive title refresh</label>
@@ -877,6 +1180,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowPreviousMessagingSessions" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_previous_messaging_sessions">Show previous messaging sessions</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_previous_messaging_sessions">Show older Discord, Telegram, Slack, and Weixin sessions that were replaced by reset or compression.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsSyncInsights" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_sync_insights">Sync usage to /insights</span>
               </label>
@@ -890,8 +1200,22 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_check_updates">Show a banner when newer versions of the WebUI or Agent are available. Runs a background git fetch periodically.</div>
             </div>
             <div class="settings-field">
-              <label for="settingsBotName" data-i18n="settings_label_bot_name">Assistant Name</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsIgnoreAgentUpdates" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_ignore_agent_updates">Ignore Agent updates</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_ignore_agent_updates">Keep WebUI update checks on, but hide Agent update notices and skip Agent update fetches.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsWhatsNewSummary" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_whats_new_summary">Summarize What's New with AI</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_whats_new_summary">Changes the What's New action from opening the raw diff first to generating a short, human-readable summary. The regular diff comparison stays available after the summary.</div>
+            </div>
+            <div class="settings-field">
+              <label for="settingsBotName" data-i18n="settings_label_bot_name">Default assistant name</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Used for the default profile only. Other profiles use their own profile names.</div>
               <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
@@ -911,6 +1235,20 @@
               No configurable providers found.
             </div>
           </div>
+          <div class="settings-pane" id="settingsPanePlugins">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title" data-i18n="settings_plugins_title">Plugins</div>
+                <div class="settings-section-meta" data-i18n="settings_plugins_meta">View installed Hermes plugins and the lifecycle hooks they register. This panel is read-only.</div>
+              </div>
+            </div>
+            <div id="pluginsList" style="display:flex;flex-direction:column;margin-top:4px">
+              <!-- Populated dynamically by loadPluginsPanel() -->
+            </div>
+            <div id="pluginsEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="settings_plugins_empty">
+              No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.
+            </div>
+          </div>
           <div class="settings-pane" id="settingsPaneSystem">
             <div class="settings-section-head">
               <div>
@@ -918,7 +1256,8 @@
                 <div class="settings-section-meta" data-i18n="settings_section_system_meta">Instance version and access controls.</div>
               </div>
               <div id="checkUpdatesBlock">
-                <span class="settings-version-badge">—</span>
+                <span class="settings-version-badge" id="settings-webui-version-badge">WebUI: —</span>
+                <span class="settings-version-badge" id="settings-agent-version-badge">Agent: not detected</span>
                 <button class="btn-tiny" id="btnCheckUpdatesNow" onclick="checkUpdatesNow()" title="Check for updates now" data-i18n-title="settings_check_now"><svg id="checkUpdatesSpinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="spinner-xs" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/><polyline points="21 3 21 9 15 9"/></svg><span id="checkUpdatesLabel" data-i18n="settings_check_now">Check now</span></button>
                 <span id="checkUpdatesStatus"></span>
               </div>
@@ -927,71 +1266,86 @@
               <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_password">Enter a new password to set or change it. Leave blank to keep current setting.</div>
               <input type="password" id="settingsPassword" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              <div id="settingsPasswordEnvLock" data-i18n="password_env_var_locked" style="display:none;margin-top:6px;padding:8px 10px;font-size:11px;color:var(--muted);background:var(--code-bg);border:1px solid var(--border2);border-radius:6px;line-height:1.45">The HERMES_WEBUI_PASSWORD environment variable is currently set and takes precedence. Unset it and restart the server to manage the password from here.</div>
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
+            <div class="settings-field" id="shutdownServerBlock" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label data-i18n="settings_label_shutdown">Stop the Hermes WebUI server</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="settings_desc_shutdown">Gracefully stops the local WebUI server. Useful if you launched via <code>./ctl.sh start</code> and want to stop without switching to a terminal. You'll need to relaunch the server (<code>./ctl.sh start</code> or the native app) before the WebUI is reachable again.</div>
+              <button class="sm-btn" id="btnShutdownServer" onclick="shutdownServer()" style="width:100%;padding:8px;font-weight:600;color:#e74c3c;border-color:rgba(231,76,60,.3)" data-i18n="settings_btn_shutdown">Stop server</button>
+            </div>
+            <div class="settings-field" id="passkeysSettingsBlock" style="display:none;margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label>Passkeys</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Register this browser or device for passwordless sign-in. Once at least one passkey exists, you can remove the password and sign in with passkeys only.</div>
+              <button class="sm-btn" id="btnRegisterPasskey" onclick="registerPasskey()" style="width:100%;padding:8px;font-weight:600">Add passkey</button>
+              <button class="sm-btn" id="btnGoPasswordless" onclick="goPasswordless()" style="display:none;margin-top:8px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3)">Go passwordless</button>
+              <div id="passkeyList" style="margin-top:8px;font-size:12px;color:var(--muted)">No passkeys registered.</div>
+            </div>
+            <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label for="settingsDashboardMode">Official Hermes Dashboard</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Show a nav-rail link when the official <code>hermes dashboard</code> is reachable. Public reverse-proxy URLs are stored as browser-only links and are never server-probed.</div>
+              <select id="settingsDashboardMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="auto">Auto-detect</option>
+                <option value="always">Always show</option>
+                <option value="never">Never show</option>
+              </select>
+              <input type="text" id="settingsDashboardUrl" placeholder="http://127.0.0.1:9119" style="margin-top:8px;width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              <button class="sm-btn" onclick="saveDashboardSettings()" style="margin-top:8px;width:100%;padding:7px;font-weight:600">Save dashboard link settings</button>
+              <div id="settingsDashboardStatus" class="settings-autosave-status" aria-live="polite"></div>
+            </div>
+            <!-- Gateway Status Section -->
+            <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label>Gateway Status</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Status of the Hermes gateway (Telegram, Discord, Slack, etc.)</div>
+              <div id="gatewayStatusCard"><span style="color:var(--muted);font-size:12px">Loading…</span></div>
+            </div>
             <!-- MCP Servers Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="mcp_servers_title">MCP Servers</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_servers_desc">Manage Model Context Protocol servers configured in config.yaml.</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_servers_desc">View Model Context Protocol servers configured in config.yaml.</div>
               <div id="mcpServerList"></div>
-              <button class="sm-btn" onclick="showMcpAddForm()" style="margin-top:8px;width:100%;padding:7px;font-weight:600" data-i18n="mcp_add_server">+ Add Server</button>
+              <div class="mcp-restart-hint" data-i18n="mcp_restart_hint">Server changes are read-only here for now. Edit config.yaml and restart Hermes for changes to take effect.</div>
             </div>
-            <div id="mcpAddFormWrap" style="display:none;margin-top:10px">
-              <div class="settings-field">
-                <label data-i18n="mcp_field_name">Server Name</label>
-                <input type="text" id="mcpName" placeholder="my-server" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              </div>
-              <div class="settings-field">
-                <label data-i18n="mcp_transport_label">Transport Type</label>
-                <select id="mcpTransport" onchange="mcpTransportChanged()" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-                  <option value="stdio">stdio (local command)</option>
-                  <option value="http">HTTP (remote URL)</option>
-                </select>
-              </div>
-              <div class="settings-field" id="mcpCommandField">
-                <label data-i18n="mcp_field_command">Command</label>
-                <input type="text" id="mcpCommand" placeholder="npx" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              </div>
-              <div class="settings-field" id="mcpArgsField">
-                <label data-i18n="mcp_field_args">Arguments (comma-separated)</label>
-                <input type="text" id="mcpArgs" placeholder="-y, @modelcontextprotocol/server-filesystem" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              </div>
-              <div class="settings-field" id="mcpUrlField" style="display:none">
-                <label data-i18n="mcp_field_url">URL</label>
-                <input type="text" id="mcpUrl" placeholder="https://my-mcp-server.example.com/mcp" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              </div>
-              <div class="settings-field" id="mcpTimeoutField">
-                <label data-i18n="mcp_field_timeout">Timeout (seconds)</label>
-                <input type="number" id="mcpTimeout" value="120" min="10" max="600" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              </div>
-              <div style="display:flex;gap:8px;margin-top:8px">
-                <button class="sm-btn" onclick="saveMcpServer()" style="flex:1;padding:7px;font-weight:600" data-i18n="mcp_save">Save</button>
-                <button class="sm-btn" onclick="hideMcpAddForm()" style="flex:1;padding:7px;color:var(--muted)" data-i18n="mcp_cancel">Cancel</button>
-              </div>
+            <!-- MCP Tools Section -->
+            <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label data-i18n="mcp_tools_title">MCP Tools</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_tools_desc">Search known tools across active MCP servers.</div>
+              <input type="search" id="mcpToolSearch" class="mcp-tool-search" data-i18n-placeholder="mcp_tools_search_placeholder" placeholder="Search tools by name, server, or description…" oninput="filterMcpTools()" autocomplete="off">
+              <div class="mcp-tool-toolbar" id="mcpToolToolbar" aria-live="polite"></div>
+              <div id="mcpToolList" class="mcp-tool-list"></div>
+              <div id="mcpToolPager" class="mcp-tool-pager" aria-label="MCP tools pagination" data-i18n-aria-label="mcp_tools_pagination_label"></div>
+              <div class="mcp-restart-hint" data-i18n="mcp_tools_runtime_note">Tool inventory only uses already-known active MCP runtime data; the WebUI does not start or probe servers.</div>
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
           </div>
       </div>
     </div>
   </main>
+  <button class="workspace-panel-edge-toggle has-tooltip has-tooltip--left" id="btnWorkspacePanelEdgeToggle" type="button" onclick="toggleWorkspacePanel(true)" data-tooltip="Show workspace panel" aria-label="Show workspace panel" aria-expanded="false">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+  </button>
   <aside class="rightpanel">
     <div class="resize-handle" id="rightpanelResize"></div>
     <div class="panel-header">
-      <span>Workspace</span>
+      <div class="workspace-panel-title-group"><span id="workspacePanelHeading" class="workspace-panel-heading" title="Workspace">Workspace</span><span id="workspaceHiddenIndicator" class="workspace-hidden-indicator" data-i18n-title="workspace_hidden_files_visible_title" title="Hidden files are visible — click for options" hidden onclick="toggleWorkspacePrefsMenu(event)"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span data-i18n="workspace_hidden_files_visible">hidden visible</span></span></div>
       <span class="git-badge" id="gitBadge" style="display:none"></span>
       <div class="panel-actions">
-        <button class="panel-icon-btn" id="btnCollapseWorkspacePanel" title="Hide workspace panel" onclick="toggleWorkspacePanel(false)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
-        <button class="panel-icon-btn" id="btnUpDir" title="Parent directory" onclick="navigateUp()" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
-        <button class="panel-icon-btn" id="btnNewFile" title="New file" onclick="promptNewFile()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
-        <button class="panel-icon-btn" id="btnNewFolder" title="New folder" onclick="promptNewFolder()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
-        <button class="panel-icon-btn" id="btnRefreshPanel" title="Refresh" onclick="if(S.session)loadDir(S.currentDir)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
-        <button class="panel-icon-btn close-preview" id="btnClearPreview" title="Close preview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-        <button class="panel-icon-btn mobile-close-btn" onclick="handleWorkspaceClose()" title="Close" aria-label="Close workspace panel">×</button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnUpDir" data-tooltip="Parent directory" onclick="navigateUp()" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFile" data-tooltip="New file" onclick="promptNewFile()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFolder" data-tooltip="New folder" onclick="promptNewFolder()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnRefreshPanel" data-tooltip="Refresh" onclick="if(S.session)loadDir(S.currentDir)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
+        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnWorkspacePrefs" data-tooltip="Workspace options" data-i18n-title="workspace_options" aria-haspopup="true" aria-expanded="false" onclick="toggleWorkspacePrefsMenu(event)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg><span class="workspace-prefs-dot" id="workspacePrefsDot" hidden></span></button>
+        <button class="panel-icon-btn close-preview has-tooltip has-tooltip--bottom" id="btnClearPreview" data-tooltip="Close preview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
       </div>
+    </div>
+    <div class="workspace-panel-tabs" role="tablist" aria-label="Workspace panel views">
+      <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button" onclick="switchWorkspacePanelTab('files')" role="tab" aria-selected="true">Files</button>
+      <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false">Artifacts <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree"></div>
+    <div class="workspace-artifacts" id="workspaceArtifacts" hidden></div>
     <div id="wsEmptyState" style="display:none;flex:1;align-items:center;justify-content:center;padding:24px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6"></div>
     <div class="preview-area" id="previewArea">
       <div class="preview-path" id="previewPath">
@@ -1009,7 +1363,7 @@
       </div>
       <div class="preview-md" id="previewMd" style="display:none"></div>
       <div class="preview-html-wrap" id="previewHtmlWrap" style="display:none;flex:1;border-radius:8px;overflow:hidden;border:1px solid var(--border2)">
-        <iframe id="previewHtmlIframe" style="width:100%;height:100%;border:none;background:#fff" sandbox="allow-scripts" title="HTML preview"></iframe>
+        <iframe id="previewHtmlIframe" style="width:100%;height:100%;border:none;background:#fff" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" title="HTML preview"></iframe>
       </div>
       <textarea id="previewEditArea" style="display:none;flex:1;width:100%;background:var(--code-bg);color:var(--pre-text);border:1px solid var(--border2);border-radius:8px;padding:12px;font-family:'SF Mono',ui-monospace,monospace;font-size:12px;line-height:1.6;resize:none;outline:none" oninput="_previewDirty=true;updateEditBtn()"></textarea>
     </div>
@@ -1065,5 +1419,87 @@
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
+
+<!-- Kanban: create/rename board modal — used for both flows. -->
+<div class="kanban-modal-overlay" id="kanbanBoardModal" hidden onclick="if(event.target===this)closeKanbanBoardModal()">
+  <div class="kanban-modal" role="dialog" aria-modal="true" aria-labelledby="kanbanBoardModalTitle">
+    <h3 id="kanbanBoardModalTitle" data-i18n="kanban_new_board">New board</h3>
+    <input type="hidden" id="kanbanBoardModalMode" value="create">
+    <input type="hidden" id="kanbanBoardModalSlug" value="">
+    <div class="kanban-modal-row">
+      <label for="kanbanBoardModalName" data-i18n="kanban_board_name">Name</label>
+      <input type="text" id="kanbanBoardModalName" maxlength="64" placeholder="e.g. Experiments" autocomplete="off">
+    </div>
+    <div class="kanban-modal-row" id="kanbanBoardModalSlugRow">
+      <label for="kanbanBoardModalSlugInput" data-i18n="kanban_board_slug">Slug (lowercase, hyphens)</label>
+      <input type="text" id="kanbanBoardModalSlugInput" maxlength="48" placeholder="experiments" autocomplete="off">
+    </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanBoardModalDesc" data-i18n="kanban_board_description">Description (optional)</label>
+      <textarea id="kanbanBoardModalDesc" maxlength="200"></textarea>
+    </div>
+    <div class="kanban-modal-row-inline">
+      <div class="kanban-modal-row">
+        <label for="kanbanBoardModalIcon" data-i18n="kanban_board_icon">Icon (emoji, optional)</label>
+        <input type="text" id="kanbanBoardModalIcon" maxlength="4" placeholder="📋" autocomplete="off">
+      </div>
+      <div class="kanban-modal-row">
+        <label for="kanbanBoardModalColor" data-i18n="kanban_board_color">Color (optional)</label>
+        <input type="color" id="kanbanBoardModalColor" value="#7aa2ff">
+      </div>
+    </div>
+    <div class="kanban-modal-error" id="kanbanBoardModalError" aria-live="polite"></div>
+    <div class="kanban-modal-actions">
+      <button type="button" class="btn secondary" onclick="closeKanbanBoardModal()" data-i18n="cancel">Cancel</button>
+      <button type="button" class="btn primary" id="kanbanBoardModalSubmit" onclick="submitKanbanBoardModal()" data-i18n="save">Save</button>
+    </div>
+  </div>
+</div>
+<!-- Kanban: create-task modal — same overlay pattern as the create-board modal above. -->
+<div class="kanban-modal-overlay" id="kanbanTaskModal" hidden onclick="if(event.target===this)closeKanbanTaskModal()">
+  <div class="kanban-modal" role="dialog" aria-modal="true" aria-labelledby="kanbanTaskModalTitle">
+    <h3 id="kanbanTaskModalTitle" data-i18n="kanban_new_task">New task</h3>
+    <div class="kanban-modal-row">
+      <label for="kanbanTaskModalTitleInput" data-i18n="kanban_title">Title</label>
+      <input type="text" id="kanbanTaskModalTitleInput" maxlength="500" autocomplete="off" required>
+    </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanTaskModalBody" data-i18n="kanban_description">Description</label>
+      <textarea id="kanbanTaskModalBody" rows="4" data-i18n-placeholder="kanban_description_placeholder" placeholder="Optional — what needs to happen, acceptance criteria, links"></textarea>
+    </div>
+    <div class="kanban-modal-row-inline">
+      <div class="kanban-modal-row">
+        <label for="kanbanTaskModalStatus" data-i18n="kanban_status">Status</label>
+        <span id="kanbanTaskModalStatusOriginalHint" class="kanban-status-original-hint" hidden></span>
+        <select id="kanbanTaskModalStatus">
+          <option value="triage" data-i18n="kanban_status_triage">Triage</option>
+          <option value="todo" data-i18n="kanban_status_todo">Todo</option>
+          <option value="ready" data-i18n="kanban_status_ready">Ready</option>
+        </select>
+      </div>
+      <div class="kanban-modal-row">
+        <label for="kanbanTaskModalPriority" data-i18n="kanban_priority">Priority</label>
+        <input type="number" id="kanbanTaskModalPriority" value="0" min="-100" max="100" step="1">
+      </div>
+    </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanTaskModalAssignee" data-i18n="kanban_assignee">Assignee</label>
+      <select id="kanbanTaskModalAssignee">
+        <!-- Options populated by _kanbanPopulateAssigneeSelect() at modal open time. -->
+      </select>
+      <div class="kanban-modal-hint" id="kanbanTaskModalAssigneeHint" data-i18n="kanban_assignee_hint">Pick a Hermes profile so the dispatcher can claim and run this task. Tasks left as <em>Unassigned</em> will sit in Ready forever.</div>
+    </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanTaskModalTenant" data-i18n="kanban_tenant">Tenant</label>
+      <input type="text" id="kanbanTaskModalTenant" list="kanbanTaskModalTenantList" maxlength="64" autocomplete="off" data-i18n-placeholder="kanban_tenant_placeholder" placeholder="Optional — project or team slug">
+      <datalist id="kanbanTaskModalTenantList"></datalist>
+    </div>
+    <div class="kanban-modal-error" id="kanbanTaskModalError" aria-live="polite"></div>
+    <div class="kanban-modal-actions">
+      <button type="button" class="btn secondary" onclick="closeKanbanTaskModal()" data-i18n="cancel">Cancel</button>
+      <button type="button" class="btn primary" id="kanbanTaskModalSubmit" onclick="submitKanbanTaskModal()" data-i18n="create">Create</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>

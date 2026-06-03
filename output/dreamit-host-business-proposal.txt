@@ -1,0 +1,356 @@
+Prepared
+Tuesday 2 June 2026
+
+Document
+Business Proposal and Capability Statement
+
+C L I E N T - FA C I N G P R O P O S A L
+
+Australian hosting, support
+and infrastructure for
+businesses that need speed,
+reliability and real people
+behind the service.
+DreamIT Host is positioned as a Melbourne-led hosting and
+managed services business serving Australian organisations
+with web hosting, email, reseller, VPS, CDN and support
+capabilities backed by local service and performance-focused
+infrastructure.
+
+100%
+
+2014
+
+24/7
+
+Australian owned and
+
+Origins in DreamIT Solutions,
+
+Australian ticket support, with
+
+operated, with local support
+
+with DreamIT Host launched
+
+ticket, live chat and phone
+
+publicly based in Melbourne.
+
+in 2016 after early web design
+
+support pathways published
+
+and hosting demand.
+
+on the business website.
+
+DreamIT Host business overview
+
+Client, partner and prospect use
+
+Executive summary
+What DreamIT Host is
+
+Where it differentiates
+
+DreamIT Host presents itself as an Australian
+hosting provider built for small to mid-sized
+businesses, agencies, eCommerce sites and
+higher-traffic websites that want performance,
+local support and a broader service stack than
+commodity budget hosting.
+
+The clearest positioning themes are Australian
+ownership, Melbourne-based support, free
+migrations, performance-oriented infrastructure,
+DirectAdmin and LiteSpeed based hosting, and a
+customer experience designed for businesses
+that do not want offshore-only support.
+
+The public offer spans web hosting, email
+hosting, reseller hosting, VPS and managed
+server options, domains, backups and a premium
+CDN layer.
+
+Web hosting
+CDN
+
+Email hosting
+
+Reseller
+
+VPS
+
+Managed support
+
+4
+
+45 days
+
+400+
+
+Hourly
+
+Public server locations
+listed - Melbourne,
+Sydney, Perth and
+Auckland
+
+Published satisfaction
+guarantee window
+
+One-click applications
+promoted on the public
+hosting offer
+
+Backup cadence
+highlighted in public
+hosting materials
+
+Proposal angle: DreamIT Host is a good fit for customers who want Australian hosting with accessible
+support, migration help, and a stronger service relationship than a generic low-touch provider.
+
+DreamIT Host | Business Proposal | Page 2 of 5
+
+Business overview
+Area
+
+Publicly stated position
+
+Why it matters to clients
+
+Ownership and
+team
+
+DreamIT Host states it is 100% Australian owned and
+operated, with customer support based in Melbourne.
+The About page also names CEO Jamie Le and COO
+Abs Bahloul.
+
+Clients looking for local accountability
+can see a named leadership team and a
+support location within Australia.
+
+Core services
+
+Web hosting, email hosting, reseller hosting, VPS,
+managed server pathways, domains, CDN and
+backups.
+
+This gives customers a single provider
+path from entry hosting to more serious
+infrastructure needs.
+
+Support model
+
+24/7 Australian ticket support, live chat, and published
+phone support windows.
+
+Support access is a major differentiator
+when businesses need fast answers
+during incidents or migrations.
+
+Infrastructure
+posture
+
+Public materials highlight NVMe storage, LiteSpeed,
+CloudLinux, KernelCare, DirectAdmin, backups and
+security tooling.
+
+These stack choices support speed,
+maintainability and a more
+performance-focused hosting story.
+
+What DreamIT Host offers
+Hosting and infrastructure
+
+Who it suits
+
+• Business web hosting for WordPress, Magento
+and general websites
+
+• Australian small businesses that want local
+support
+
+• Email hosting and premium SMTP capabilities
+through Dream Relay
+
+• Agencies and designers managing multiple
+customer websites
+
+• Reseller hosting for agencies and IT providers
+
+• eCommerce sites that need stronger
+performance headroom
+
+• VPS and managed server options for higherdemand workloads
+• CDN services to improve speed and content
+delivery reach
+
+• Organisations moving away from impersonal
+mass-market hosts
+
+Commercial story
+Operational features
+• Free migrations for websites, files and email
+• Hourly, daily, weekly and monthly backup
+retention referenced publicly
+• SSL, DNS and account management features
+for everyday business use
+
+DreamIT Host appears to sell on value rather than
+just on headline price. The stronger story is not
+"cheapest host". It is "Australian service, practical
+performance, and migration support without
+making customers do the hard part alone".
+
+• 400+ one-click apps and WordPress staging
+or cloning on hosting plans
+
+DreamIT Host | Business Proposal | Page 3 of 5
+
+Why clients choose DreamIT Host
+Local support with named accountability
+
+Migration and continuity focus
+
+Many hosting providers compete on price while
+pushing support offshore or making it hard to
+escalate. DreamIT Host publicly leans into
+Melbourne-based support, which is a meaningful
+commercial differentiator for customers that value
+responsiveness and clarity.
+
+Free migration support and visible backup
+positioning reduce the fear of switching
+providers. For many customers, the real blocker is
+not price. It is the perceived pain of moving.
+
+Broad enough to grow with the client
+Performance-oriented hosting stack
+Public materials highlight NVMe storage,
+LiteSpeed, CloudLinux, DirectAdmin, security
+tooling and AMD EPYC based server hardware.
+That gives the business a credible performance
+and reliability narrative for business websites.
+
+A customer can start with standard hosting, add
+email or reseller capabilities, move into VPS or
+managed services, and stay within one brand
+relationship instead of replatforming every time
+needs change.
+
+Key business strengths
+• Australian ownership and Melbourne support provide a simple trust signal.
+• Service breadth supports both direct customers and agency or reseller channels.
+• Migration, backup and security messaging address the main fears buyers have when changing hosts.
+• DirectAdmin, LiteSpeed and NVMe help position the service as practical and performance-focused rather
+than generic.
+
+Infrastructure and support footprint
+Capability
+
+Public detail
+
+Client-facing implication
+
+Server location
+options
+
+Melbourne, Sydney, Perth and Auckland are listed
+as available server locations.
+
+Clients can choose geography closer to
+their users or operational preference.
+
+Support
+channels
+
+Ticketing through My DreamIT, live chat, email
+and published phone support availability.
+
+There is a clearer escalation path than with
+low-touch providers that only expose a
+knowledge base.
+
+Security and
+platform tooling
+
+CloudLinux, KernelCare, security controls,
+malware scanning and backup tooling are all
+featured in hosting materials.
+
+Useful for clients who care about patching
+discipline, isolation and faster recovery
+from issues.
+
+CDN and content
+delivery
+
+The public site promotes a premium CDN offer
+and WordPress integration.
+
+Supports a stronger story for speedsensitive sites and distributed user bases.
+
+DreamIT Host | Business Proposal | Page 4 of 5
+
+Business growth timeline
+2014
+
+DreamIT Solutions begins
+Origins in WordPress and WooCommerce website work before the hosting business was formally launched.
+2016
+
+DreamIT Host launches
+The public history states the hosting brand launched to address a gap for reliable Australian web and email
+hosting for small businesses.
+2017 - 2021
+
+Platform expansion
+Reseller hosting, Dream Relay, infrastructure rebuilds, Auckland expansion, DNS upgrades and DirectAdmin
+platform growth all appear in the published business timeline.
+2025
+
+Regional Victoria expansion
+The About page says DreamIT Host expanded into Geelong to provide local hosting, managed services and IT
+support to regional Victorian businesses.
+
+Recommended use cases for this proposal
+Sales conversations
+
+Partnership and referral introductions
+
+Use this document as a concise business
+introduction for prospects comparing Australian
+providers or asking what makes DreamIT Host
+different from a mainstream budget host.
+
+It also works as a lightweight capability statement
+for agencies, IT consultants and referral partners
+who want to understand the service breadth
+quickly.
+
+Contact and next steps
+Email
+
+Phone
+
+Support path
+
+hello@dreamithost.com.au
+
+1300 434 151
+
+My DreamIT ticketing and live
+chat
+
+Next-step recommendation: if you want this turned from a general business proposal into a true sales
+document, the next version should be tailored to one audience - for example agencies, local SMBs,
+eCommerce merchants, or managed IT clients.
+This proposal is based on public DreamIT Host website content reviewed on 2 June 2026, including the home page, About page
+and web hosting pages.
+
+DreamIT Host | Business Proposal | Page 5 of 5
+
+

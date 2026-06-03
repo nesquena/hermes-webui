@@ -1,4 +1,5 @@
 import pathlib
+from unittest.mock import patch
 
 import bootstrap
 
@@ -61,3 +62,36 @@ def test_ensure_python_fails_loudly_when_no_interpreter_can_import_agent(monkeyp
         assert "cannot import both WebUI dependencies and Hermes Agent" in str(exc)
     else:
         raise AssertionError("expected RuntimeError")
+
+
+def test_local_venv_is_created_with_symlinks(monkeypatch, tmp_path):
+    """Regression: mise/asdf macOS Pythons need symlinks=True to avoid SIGABRT.
+
+    Their copy-mode venv produces a python binary referencing
+    @executable_path/../lib/libpython3.X.dylib that never gets copied into the
+    new .venv. Symlinking keeps @executable_path resolving back to the original
+    install. CPython's venv falls back to copy mode if symlink creation fails,
+    so this is safe to set unconditionally.
+    """
+    local_python = tmp_path / "webui" / ".venv" / "bin" / "python"
+    monkeypatch.setattr(bootstrap, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(bootstrap, "_python_can_run_webui_and_agent", lambda *a, **k: False)
+    monkeypatch.setattr(bootstrap.subprocess, "run", lambda *a, **k: None)
+
+    with patch.object(bootstrap.venv, "EnvBuilder") as mock_builder:
+        # Make EnvBuilder().create() materialize the venv python so the post-create
+        # `_python_can_run_webui_and_agent` retry path doesn't trip on a missing file.
+        venv_python = tmp_path / ".venv" / "bin" / "python"
+
+        def fake_create(target):
+            venv_python.parent.mkdir(parents=True, exist_ok=True)
+            venv_python.write_text("", encoding="utf-8")
+
+        mock_builder.return_value.create.side_effect = fake_create
+
+        try:
+            bootstrap.ensure_python_has_webui_deps(str(local_python), None)
+        except RuntimeError:
+            pass  # expected — fake _python_can_run_webui_and_agent always returns False
+
+        mock_builder.assert_called_once_with(with_pip=True, symlinks=True)

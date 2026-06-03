@@ -154,10 +154,56 @@ class TestIssue1499OnboardingProbe:
         assert r["ok"] is False
         assert r["error"] == "invalid_url"
 
-    def test_dns_resolution_failure(self):
-        """Unresolvable hostname → error='dns'."""
+    def test_dns_resolution_failure(self, monkeypatch):
+        """Unresolvable hostname → error='dns'.
+
+        Mocked at `socket.getaddrinfo` so this test is hermetic — no real DNS
+        lookup leaves the test process. The reserved `.invalid` TLD (RFC2606)
+        is still used as the hostname so anyone reading the test sees the
+        intent; the failure is forced via `socket.gaierror` from the mock.
+        """
+        import socket
         from api.onboarding import probe_provider_endpoint
+
+        def _raise_gaierror(*_args, **_kwargs):
+            raise socket.gaierror(-2, "Name or service not known")
+
+        monkeypatch.setattr(socket, "getaddrinfo", _raise_gaierror)
         r = probe_provider_endpoint(
+            "lmstudio",
+            "http://this-host-definitely-does-not-exist-zxq987.invalid:1234/v1",
+            timeout=2.0,
+        )
+        assert r["ok"] is False
+        assert r["error"] == "dns", f"Expected dns error, got {r}"
+
+    def test_dns_failure_wrapped_by_urlerror(self, monkeypatch):
+        """Proxy/network stacks can wrap DNS failures as generic URLError."""
+        from api import onboarding
+
+        class FakeOpener:
+            def open(self, *_args, **_kwargs):
+                raise urllib.error.URLError(OSError("getaddrinfo failed"))
+
+        monkeypatch.setattr(onboarding, "_PROBE_OPENER", FakeOpener())
+        r = onboarding.probe_provider_endpoint(
+            "lmstudio",
+            "http://model-server.example:1234/v1",
+            timeout=2.0,
+        )
+        assert r["ok"] is False
+        assert r["error"] == "dns", f"Expected dns error, got {r}"
+
+    def test_reserved_dns_tld_network_failure_classifies_as_dns(self, monkeypatch):
+        """Reserved non-resolvable TLDs stay dns even if the stack says generic."""
+        from api import onboarding
+
+        class FakeOpener:
+            def open(self, *_args, **_kwargs):
+                raise urllib.error.URLError(OSError("network is unreachable"))
+
+        monkeypatch.setattr(onboarding, "_PROBE_OPENER", FakeOpener())
+        r = onboarding.probe_provider_endpoint(
             "lmstudio",
             "http://this-host-definitely-does-not-exist-zxq987.invalid:1234/v1",
             timeout=2.0,

@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 
 import api.models as models
-from api.models import Session, _write_session_index
+from api.models import Session, _write_session_index, prune_session_from_index
 
 
 @pytest.fixture(autouse=True)
@@ -37,12 +37,16 @@ def _isolate_session_dir(tmp_path, monkeypatch):
     # Also patch the module-level references that Session uses
     monkeypatch.setattr(models.Session, "__module__", models.__name__)
 
-    # Clear the in-memory SESSIONS cache to avoid bleed
+    # Clear the in-memory SESSIONS and persisted-id caches to avoid bleed.
     models.SESSIONS.clear()
+    if hasattr(models, "_PERSISTED_SESSION_IDS_CACHE"):
+        models._PERSISTED_SESSION_IDS_CACHE = (None, None, frozenset())
 
     yield session_dir, index_file
 
     models.SESSIONS.clear()
+    if hasattr(models, "_PERSISTED_SESSION_IDS_CACHE"):
+        models._PERSISTED_SESSION_IDS_CACHE = (None, None, frozenset())
 
 
 def _make_session(session_id, title="Untitled", updated_at=None):
@@ -83,6 +87,70 @@ def test_compact_exposes_last_message_at_from_message_timestamp():
     assert compact["last_message_at"] == 200.0
 
 
+def test_compact_ignores_empty_partial_activity_for_last_message_at():
+    s = Session(
+        session_id="sess_partial_tail",
+        title="Partial tail",
+        updated_at=300.0,
+        messages=[
+            {"role": "user", "content": "today question", "timestamp": 200.0},
+            {"role": "assistant", "content": "today answer", "timestamp": 201.0},
+            {
+                "role": "assistant",
+                "content": "",
+                "_partial": True,
+                "timestamp": 100.0,
+                "reasoning": "old cancelled thinking",
+                "_partial_tool_calls": [{"name": "terminal", "done": True}],
+            },
+        ],
+    )
+
+    compact = s.compact()
+
+    assert compact["updated_at"] == 300.0
+    assert compact["last_message_at"] == 201.0
+
+
+def test_session_load_allows_hyphenated_safe_ids_but_rejects_traversal():
+    sid = "api-182894de593468b6"
+    s = _make_session(sid, "API session", updated_at=100)
+    s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    assert Session.load(sid) is not None
+    assert Session.load_metadata_only(sid) is not None
+    assert Session.load("bad/../id") is None
+    assert Session.load_metadata_only("bad.id") is None
+
+
+def test_full_index_rebuild_includes_hyphenated_sessions():
+    sid = "reachy-voice-20260513-1131-d5542adf"
+    s = _make_session(sid, "Reachy voice", updated_at=100)
+    s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _write_session_index(updates=None)
+
+    ids = [entry["session_id"] for entry in _read_index(models.SESSION_INDEX_FILE)]
+    assert sid in ids
+
+
+def test_prune_session_from_index_removes_requested_row_only():
+    index_file = models.SESSION_INDEX_FILE
+    s_a = _make_session("sess_a", "A", updated_at=100)
+    s_b = _make_session("sess_b", "B", updated_at=200)
+    s_a.save()
+    s_b.save()
+
+    prune_session_from_index("sess_a")
+
+    index = _read_index(index_file)
+    ids = [entry["session_id"] for entry in index]
+    assert ids == ["sess_b"]
+    assert index_file.exists()
+    assert s_a.path.exists()
+    assert s_b.path.exists()
+
+
 def test_all_sessions_backfills_last_message_at_for_legacy_index_rows():
     index_file = models.SESSION_INDEX_FILE
     s = Session(
@@ -121,6 +189,53 @@ def test_all_sessions_backfills_last_message_at_for_legacy_index_rows():
     persisted = _read_index(index_file)
     assert persisted[0]["session_id"] == s.session_id
     assert persisted[0].get("last_message_at") == 100.0
+
+
+def test_all_sessions_prune_batches_persisted_id_snapshot(monkeypatch):
+    """Index pruning should not probe each backing file through the helper."""
+    index_file = models.SESSION_INDEX_FILE
+    entries = [
+        {
+            "session_id": "sess_a",
+            "title": "Alpha",
+            "updated_at": 200.0,
+            "last_message_at": 200.0,
+            "workspace": "/tmp",
+            "model": "test",
+            "message_count": 1,
+            "created_at": 100.0,
+            "pinned": False,
+            "archived": False,
+        },
+        {
+            "session_id": "sess_b",
+            "title": "Bravo",
+            "updated_at": 150.0,
+            "last_message_at": 150.0,
+            "workspace": "/tmp",
+            "model": "test",
+            "message_count": 1,
+            "created_at": 90.0,
+            "pinned": False,
+            "archived": False,
+        },
+    ]
+    for entry in entries:
+        (models.SESSION_DIR / f"{entry['session_id']}.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+    _write_index_file(index_file, entries)
+
+    def _assert_not_called(session_id, in_memory_ids=None):
+        raise AssertionError("all_sessions should batch persisted ids before pruning")
+
+    monkeypatch.setattr(models, "_index_entry_exists", _assert_not_called)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["sess_a", "sess_b"]
 
 
 # ── 6. test_incremental_patch_correctness ─────────────────────────────────
@@ -278,6 +393,271 @@ def test_metadata_only_get_session_does_not_poison_full_session_cache():
     assert models.SESSIONS["sess_cache"] is full
 
 
+def test_pre_compression_snapshot_marker_is_persisted_and_compact():
+    """Pre-compression snapshots keep a distinct marker from manual archived state."""
+    s = Session(
+        session_id="sess_snapshot",
+        title="Before Compression",
+        messages=[{"role": "user", "content": "hi"}],
+        pre_compression_snapshot=True,
+    )
+
+    s.save()
+
+    payload = json.loads(s.path.read_text(encoding="utf-8"))
+    assert payload["pre_compression_snapshot"] is True
+    compact = s.compact()
+    assert compact["pre_compression_snapshot"] is True
+    assert compact["archived"] is False
+
+
+def test_pre_compression_snapshot_hidden_from_active_sidebar_but_file_remains(monkeypatch):
+    """Preserved compression snapshots should not appear as active sidebar rows."""
+    snapshot = Session(
+        session_id="old_sid",
+        title="Long Conversation",
+        messages=[{"role": "user", "content": "pre-compression history"}],
+        pre_compression_snapshot=True,
+        updated_at=100.0,
+    )
+    continuation = Session(
+        session_id="new_sid",
+        title="Long Conversation",
+        messages=[{"role": "user", "content": "compressed continuation"}],
+        parent_session_id="old_sid",
+        updated_at=200.0,
+    )
+    snapshot.save(touch_updated_at=False)
+    continuation.save(touch_updated_at=False)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert snapshot.path.exists(), "snapshot JSON must stay available for lineage traversal"
+    assert [row["session_id"] for row in rows] == ["new_sid"]
+
+
+def test_fuller_pre_compression_snapshot_replaces_shorter_visible_segment(monkeypatch):
+    """If the hidden snapshot has the fuller transcript, keep it reachable.
+
+    Auto-compression can leave a visible continuation segment in the sidebar
+    while the fuller transcript remains on disk marked as a pre-compression
+    snapshot. In that case the default session list should prefer the fuller
+    transcript so the conversation does not look like recent messages vanished.
+    """
+    snapshot = Session(
+        session_id="full_parent",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+            {"role": "user", "content": "latest user"},
+            {"role": "assistant", "content": "latest answer"},
+        ],
+        pre_compression_snapshot=True,
+        updated_at=300.0,
+        last_message_at=300.0,
+    )
+    continuation = Session(
+        session_id="short_child",
+        title="Long Conversation",
+        messages=[{"role": "user", "content": "first"}],
+        parent_session_id="full_parent",
+        updated_at=250.0,
+        last_message_at=250.0,
+    )
+    snapshot.save(touch_updated_at=False)
+    continuation.save(touch_updated_at=False)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["full_parent"]
+    assert rows[0]["message_count"] == 4
+    assert rows[0]["pre_compression_snapshot"] is True
+
+
+def test_newer_continuation_beats_older_fuller_snapshot(monkeypatch):
+    """Do not hide a newer continuation behind an older fuller snapshot.
+
+    Compression snapshots can have a higher message count while still being
+    older than the continuation that contains the latest user-visible turns.
+    The sidebar should keep the newer continuation visible in that case.
+    """
+    snapshot = Session(
+        session_id="older_full_parent",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+            {"role": "user", "content": "third"},
+            {"role": "assistant", "content": "fourth"},
+        ],
+        pre_compression_snapshot=True,
+        updated_at=300.0,
+        last_message_at=300.0,
+    )
+    continuation = Session(
+        session_id="newer_short_child",
+        title="Long Conversation",
+        messages=[
+            {"role": "user", "content": "latest task"},
+            {"role": "assistant", "content": "latest result"},
+        ],
+        parent_session_id="older_full_parent",
+        updated_at=450.0,
+        last_message_at=450.0,
+    )
+    snapshot.save(touch_updated_at=False)
+    continuation.save(touch_updated_at=False)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["newer_short_child"]
+    assert rows[0]["pre_compression_snapshot"] is False
+    assert rows[0]["message_count"] == 2
+
+
+def test_all_sessions_uses_sidecar_metadata_for_runtime_rows_when_index_message_count_is_stale(monkeypatch):
+    """Runtime-shaped rows may refresh from fuller sidecar metadata."""
+    session = Session(
+        session_id="stale_index_sid",
+        title="Reachy Mini Integration",
+        messages=[
+            {"role": "user", "content": "one", "timestamp": 100.0},
+            {"role": "assistant", "content": "two", "timestamp": 101.0},
+            {"role": "user", "content": "three", "timestamp": 102.0},
+        ],
+        updated_at=102.0,
+    )
+    session.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "stale_index_sid",
+                "title": "Reachy Mini Integration",
+                "message_count": 1,
+                "created_at": 100.0,
+                "updated_at": 100.0,
+                "last_message_at": 100.0,
+                "pinned": False,
+                "archived": False,
+                "active_stream_id": "stream-stale-index",
+            }
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert rows[0]["session_id"] == "stale_index_sid"
+    assert rows[0]["message_count"] == 3
+    assert rows[0]["last_message_at"] == 102.0
+
+
+def test_all_sessions_sidecar_refresh_stays_metadata_only(monkeypatch):
+    """Refreshing runtime sidebar rows must not hydrate large sidecar messages."""
+    session = Session(
+        session_id="metadata_refresh_sid",
+        title="Metadata Refresh",
+        messages=[
+            {"role": "user", "content": "one", "timestamp": 100.0},
+            {"role": "assistant", "content": "x" * 200_000, "timestamp": 101.0},
+            {"role": "user", "content": "three", "timestamp": 102.0},
+        ],
+        parent_session_id="parent_sid",
+        updated_at=102.0,
+    )
+    session.save(touch_updated_at=False)
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "metadata_refresh_sid",
+                "title": "Metadata Refresh",
+                "message_count": 1,
+                "created_at": 100.0,
+                "updated_at": 100.0,
+                "last_message_at": 100.0,
+                "pinned": False,
+                "archived": False,
+                "active_stream_id": "stream-metadata-refresh",
+            }
+        ],
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    with patch.object(Session, "load", side_effect=AssertionError("full sidecar load should not run")):
+        rows = models.all_sessions()
+
+    assert rows[0]["session_id"] == "metadata_refresh_sid"
+    assert rows[0]["message_count"] == 3
+    assert rows[0]["last_message_at"] == 102.0
+
+
+def test_all_sessions_does_not_refresh_lineage_rows_from_sidecars(monkeypatch):
+    """Lineage rows are enriched from state.db; do not read every sidecar per poll."""
+    _write_index_file(
+        models.SESSION_INDEX_FILE,
+        [
+            {
+                "session_id": "lineage_sid",
+                "title": "Lineage Row",
+                "message_count": 7,
+                "created_at": 100.0,
+                "updated_at": 101.0,
+                "last_message_at": 101.0,
+                "pinned": False,
+                "archived": False,
+                "parent_session_id": "parent_sid",
+                "_lineage_root_id": "root_sid",
+                "_compression_segment_count": 2,
+            }
+        ],
+    )
+    (models.SESSION_DIR / "lineage_sid.json").write_text(
+        json.dumps(
+            {
+                "session_id": "lineage_sid",
+                "title": "Lineage Row",
+                "messages": [{"role": "user", "content": "sidecar"}],
+                "message_count": 99,
+                "updated_at": 200.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    with patch.object(Session, "load_metadata_only", side_effect=AssertionError("lineage rows must not refresh sidecars")):
+        rows = models.all_sessions()
+
+    assert rows[0]["session_id"] == "lineage_sid"
+    assert rows[0]["message_count"] == 7
+
+
+def test_load_metadata_only_skips_index_read_when_sidecar_has_message_count(monkeypatch):
+    """Modern sidecars already carry message_count; avoid an _index.json read per row."""
+    session = Session(
+        session_id="metadata_count_sid",
+        title="Metadata Count",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    session.save(touch_updated_at=False)
+
+    def _fail_index_lookup(_sid):
+        raise AssertionError("message_count sidecar should not need index lookup")
+
+    monkeypatch.setattr(models, "_lookup_index_message_count", _fail_index_lookup)
+
+    meta = Session.load_metadata_only("metadata_count_sid")
+
+    assert meta is not None
+    assert meta.compact()["message_count"] == 1
+
+
 def test_session_save_does_not_persist_metadata_message_count_hint():
     s = Session(
         session_id="sess_private_hint",
@@ -343,6 +723,66 @@ def test_corrupt_index_fallback():
 
     ids = {e["session_id"] for e in index}
     assert "sess_a" in ids, "Session A should appear after fallback rebuild"
+
+
+def test_full_rebuild_normalizes_legacy_string_updated_at():
+    """Full index rebuild must survive sidecars with string timestamps."""
+    index_file = models.SESSION_INDEX_FILE
+
+    legacy = _make_session("legacy_a", "Legacy A", updated_at=100.0)
+    legacy.path.write_text(json.dumps({
+        **legacy.__dict__,
+        "created_at": "2026-05-02T17:31:45.925125",
+        "updated_at": "2026-05-02T18:36:25.175590",
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    fresh = _make_session("fresh_b", "Fresh B", updated_at=200.0)
+    fresh.path.write_text(json.dumps(fresh.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _write_session_index(updates=None)
+
+    index = _read_index(index_file)
+    by_id = {e["session_id"]: e for e in index}
+    assert isinstance(by_id["legacy_a"]["updated_at"], (int, float))
+    assert isinstance(by_id["legacy_a"]["created_at"], (int, float))
+    assert by_id["fresh_b"]["updated_at"] == 200.0
+
+
+def test_incremental_index_sort_survives_existing_legacy_string_updated_at():
+    """Incremental index patching must not crash on legacy string timestamps."""
+    index_file = models.SESSION_INDEX_FILE
+
+    legacy = _make_session("legacy_a", "Legacy A", updated_at=100.0)
+    legacy.path.write_text(json.dumps({
+        **legacy.__dict__,
+        "created_at": "2026-05-02T17:31:45.925125",
+        "updated_at": "2026-05-02T18:36:25.175590",
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _write_index_file(index_file, [
+        {
+            "session_id": "legacy_a",
+            "title": "Legacy A",
+            "workspace": legacy.workspace,
+            "model": legacy.model,
+            "message_count": 1,
+            "created_at": "2026-05-02T17:31:45.925125",
+            "updated_at": "2026-05-02T18:36:25.175590",
+            "last_message_at": "2026-05-02T18:36:25.175590",
+            "pinned": False,
+            "archived": False,
+        }
+    ])
+
+    fresh = _make_session("fresh_b", "Fresh B", updated_at=200.0)
+    fresh.path.write_text(json.dumps(fresh.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _write_session_index(updates=[fresh])
+
+    index = _read_index(index_file)
+    by_id = {e["session_id"]: e for e in index}
+    assert by_id["fresh_b"]["updated_at"] == 200.0
+    assert by_id["legacy_a"]["updated_at"] == "2026-05-02T18:36:25.175590"
 
 
 # ── 10. test_concurrent_saves_dont_lose_data ────────────────────────────

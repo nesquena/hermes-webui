@@ -54,6 +54,8 @@ function extractFunc(name) {
   }
   return src.slice(start, i);
 }
+eval(extractFunc('_matchBacktickFenceLine'));
+eval(extractFunc('_isBacktickFenceClose'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
@@ -82,6 +84,17 @@ def _render(driver_path, markdown: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")
     return result.stdout
+
+
+def test_inline_backticked_media_pdf_not_wrapped_in_code(driver_path):
+    md = "- `MEDIA:/root/.hermes/webui/attachments/37023dbd9641/pdf_exports/SOW_DreamIT_redline_jamie_tracked.pdf`"
+    out = _render(driver_path, md)
+    assert '<code><div class="pdf-preview-load"' not in out, (
+        'MEDIA PDF previews must not be restored inside <code> when users wrap the MEDIA token in backticks'
+    )
+    assert '<li><div class="pdf-preview-load"' in out or '<li class="list-block-embed">' in out, (
+        'Backticked MEDIA PDF inside a list item should restore as the preview block itself, not a code span'
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,6 +198,37 @@ class TestRendererSanitization:
 
 class TestCommonLLMShapes:
 
+    def test_commonmark_table_is_not_wrapped_in_paragraph(self, driver_path):
+        src = (
+            "| 升级时段 | 人数 |\n"
+            "|---------|------|\n"
+            "| 5/15（发布当天） | ~30 人 |\n"
+            "| 5/16（今天） | ~10 人 |"
+        )
+        out = _render(driver_path, src)
+        assert "<table><thead>" in out
+        assert "<th>升级时段</th>" in out
+        assert "<td>5/15（发布当天）</td>" in out
+        assert "<td>~10 人</td>" in out
+        assert "<p><table" not in out, (
+            f"Markdown tables are block elements and must not be paragraph-wrapped: {out!r}"
+        )
+
+    def test_table_between_paragraphs_stays_block_level(self, driver_path):
+        src = (
+            "Before the table.\n\n"
+            "| Key | Value |\n"
+            "| --- | --- |\n"
+            "| A | B |\n\n"
+            "After the table."
+        )
+        out = _render(driver_path, src)
+        assert "<p>Before the table.</p>" in out
+        assert "<table><thead>" in out
+        assert "<p>After the table.</p>" in out
+        assert "<p><table" not in out
+        assert "</table></p>" not in out
+
     def test_strikethrough_outside_quote(self, driver_path):
         out = _render(driver_path, "This was ~~outdated~~ but is now fine.")
         assert "<del>outdated</del>" in out
@@ -283,6 +327,49 @@ class TestBugFencedCodeInBlockquote:
         out = _render(driver_path, src)
         assert 'class="language-python"' in out
         assert "x = 1" in out
+
+
+class TestFencedCodeFenceLength:
+    """CommonMark §4.5 requires the closer to be at least as long as the opener."""
+
+    def test_five_backtick_outer_fence_preserves_inner_triple_fence(self, driver_path):
+        src = (
+            "- optionally also support fenced code blocks\n\n"
+            "`````md\n"
+            "`md\n"
+            "```novelcrafter\n"
+            "{#if novel.hasSeries}\n"
+            "...\n"
+            "{#endif}\n"
+            "```\n"
+            "`````\n\n"
+            "That is much more correct than pretending"
+        )
+        out = _render(driver_path, src)
+        assert out.count("<pre>") == 1
+        assert out.count("</pre>") == 1
+        assert '<div class="pre-header">md</div>' in out
+        assert "```novelcrafter" in out
+        assert "{#if novel.hasSeries}" in out
+        assert "That is much more correct than pretending" in out
+        assert "<p>`````" not in out
+        assert "<br>`````" not in out
+
+    def test_four_backtick_outer_fence_preserves_inner_triple_fence(self, driver_path):
+        out = _render(driver_path, "````md\n```inner\nfoo\n```\n````\n")
+        assert out.count("<pre>") == 1
+        assert out.count("</pre>") == 1
+        assert '<div class="pre-header">md</div>' in out
+        assert "```inner" in out
+        assert "foo" in out
+        assert "<p>````" not in out
+
+    def test_three_backtick_fence_still_renders_language_class(self, driver_path):
+        out = _render(driver_path, "```js\nconsole.log('ok')\n```")
+        assert out.count("<pre>") == 1
+        assert '<div class="pre-header">js</div>' in out
+        assert 'class="language-js"' in out
+        assert "console.log(&#39;ok&#39;)" in out
 
 
 class TestBugBlankContinuationInBlockquote:

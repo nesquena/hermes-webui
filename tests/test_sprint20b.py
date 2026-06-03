@@ -13,6 +13,32 @@ def get_text(path):
         return r.read().decode(), r.status
 
 
+def _find_global_selector(css, selector):
+    """Find the GLOBAL (unscoped) occurrence of a selector in style.css.
+
+    Skin-scoped rules of the form ``:root[data-skin="..."] .selector{...}``
+    can appear earlier in the file than the global ``.selector{...}`` rule,
+    so a naive ``css.find(".selector{")`` would match the wrong block.
+    This walks every occurrence and returns the first one whose preceding
+    context on the same line does NOT include ``:root[data-skin=``.
+
+    See references/skin-scoped-css-test-trap.md.
+    """
+    pos = 0
+    while True:
+        idx = css.find(selector, pos)
+        if idx == -1:
+            return -1
+        line_start = css.rfind('\n', 0, idx) + 1
+        line_prefix = css[line_start:idx]
+        # Skip skin-scoped rules. Skins use both `:root[data-skin="x"]` and the
+        # dark-variant `:root.dark[data-skin="x"]` (#3164 Neon), so match the
+        # `[data-skin=` marker generically rather than the bare `:root[` form.
+        if '[data-skin=' not in line_prefix:
+            return idx
+        pos = idx + 1
+
+
 # ── index.html ────────────────────────────────────────────────────────────
 
 
@@ -54,11 +80,17 @@ def test_send_button_has_svg_icon():
 
 
 def test_send_button_has_title_attribute():
-    """btnSend must have a title attribute for accessibility (replaces text label)."""
+    """btnSend must have a tooltip for accessibility (replaces text label).
+
+    Accepts either the legacy `title=` attribute or the custom-tooltip
+    `data-tooltip=` attribute introduced in #1775 (faster ~150ms display
+    vs the native ~1.5s delay)."""
     html, _ = get_text("/")
     btn_match = re.search(r'id="btnSend"[^>]*>', html)
     assert btn_match
-    assert 'title=' in btn_match.group(0)
+    tag = btn_match.group(0)
+    assert 'title=' in tag or 'data-tooltip=' in tag, \
+        "btnSend must have a tooltip (native title= or custom data-tooltip= per #1775)"
 
 
 def test_send_button_svg_arrow_up():
@@ -80,7 +112,7 @@ def test_send_btn_is_circle():
     """send-btn must use border-radius:50% for the circle shape."""
     css, status = get_text("/static/style.css")
     assert status == 200
-    send_idx = css.find('.send-btn{')
+    send_idx = _find_global_selector(css, '.send-btn{')
     brace_open = css.find('{', send_idx)
     brace_close = css.find('}', brace_open)
     rule = css[brace_open:brace_close]
@@ -90,7 +122,7 @@ def test_send_btn_is_circle():
 def test_send_btn_fixed_dimensions():
     """send-btn must have explicit width and height (icon-circle, not text-padded)."""
     css, _ = get_text("/static/style.css")
-    send_idx = css.find('.send-btn{')
+    send_idx = _find_global_selector(css, '.send-btn{')
     brace_open = css.find('{', send_idx)
     brace_close = css.find('}', brace_open)
     rule = css[brace_open:brace_close]
@@ -101,7 +133,7 @@ def test_send_btn_fixed_dimensions():
 def test_send_btn_no_old_padding():
     """send-btn must not use text padding layout (old pill style removed)."""
     css, _ = get_text("/static/style.css")
-    send_idx = css.find('.send-btn{')
+    send_idx = _find_global_selector(css, '.send-btn{')
     brace_open = css.find('{', send_idx)
     brace_close = css.find('}', brace_open)
     rule = css[brace_open:brace_close]
@@ -112,7 +144,7 @@ def test_send_btn_no_old_padding():
 def test_send_btn_accent_background():
     """send-btn background must use the accent color variable."""
     css, _ = get_text("/static/style.css")
-    send_idx = css.find('.send-btn{')
+    send_idx = _find_global_selector(css, '.send-btn{')
     brace_open = css.find('{', send_idx)
     brace_close = css.find('}', brace_open)
     rule = css[brace_open:brace_close]
@@ -122,7 +154,7 @@ def test_send_btn_accent_background():
 def test_send_btn_has_transition():
     """send-btn must have transition for smooth hover/active states."""
     css, _ = get_text("/static/style.css")
-    send_idx = css.find('.send-btn{')
+    send_idx = _find_global_selector(css, '.send-btn{')
     brace_open = css.find('{', send_idx)
     brace_close = css.find('}', brace_open)
     rule = css[brace_open:brace_close]
@@ -132,7 +164,7 @@ def test_send_btn_has_transition():
 def test_send_btn_has_box_shadow():
     """send-btn must have a box-shadow glow effect."""
     css, _ = get_text("/static/style.css")
-    send_idx = css.find('.send-btn{')
+    send_idx = _find_global_selector(css, '.send-btn{')
     brace_open = css.find('{', send_idx)
     brace_close = css.find('}', brace_open)
     rule = css[brace_open:brace_close]
@@ -142,7 +174,7 @@ def test_send_btn_has_box_shadow():
 def test_send_btn_hover_has_scale():
     """send-btn:hover must use transform:scale for a satisfying hover effect."""
     css, _ = get_text("/static/style.css")
-    hover_idx = css.find('.send-btn:hover{')
+    hover_idx = _find_global_selector(css, '.send-btn:hover{')
     brace_open = css.find('{', hover_idx)
     brace_close = css.find('}', brace_open)
     rule = css[brace_open:brace_close]
@@ -152,7 +184,7 @@ def test_send_btn_hover_has_scale():
 def test_send_btn_active_shrinks():
     """send-btn:active must scale down slightly for tactile press feedback."""
     css, _ = get_text("/static/style.css")
-    active_idx = css.find('.send-btn:active{')
+    active_idx = _find_global_selector(css, '.send-btn:active{')
     brace_open = css.find('{', active_idx)
     brace_close = css.find('}', brace_open)
     rule = css[brace_open:brace_close]
@@ -317,7 +349,10 @@ def test_auto_resize_calls_update_send_btn():
 def test_send_button_still_has_send_btn_class():
     """btnSend must still carry class='send-btn' for CSS targeting."""
     html, _ = get_text("/")
-    assert 'class="send-btn"' in html
+    # Tolerate additional utility classes (e.g. has-tooltip from #1775).
+    import re
+    assert re.search(r'class="[^"]*\bsend-btn\b[^"]*"', html), \
+        "btnSend must still carry the 'send-btn' class for CSS targeting"
 
 
 def test_ui_js_set_busy_calls_update_send_btn():

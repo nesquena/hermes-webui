@@ -1,0 +1,208 @@
+name: Docker smoke
+
+# Runtime smoke gate for Docker init logic.
+#
+# Background: v0.51.84 (PR #2470) shipped a startup-killing :ro mount + chown
+# interaction (EROFS under `set -e`) that 9 source-level pytest invariants +
+# 5800+ existing tests all passed. The independent reviewer caught it by eye.
+# This workflow closes that class of gap by actually `docker compose up`-ing
+# each variant against a real Docker daemon on the GHA runner.
+#
+# Scope (intentionally small for v1):
+#   - 3 compose variants (single, two-container, three-container)
+#   - For multi-container variants, rebuild the local Dockerfile and re-tag
+#     it as ghcr.io/nesquena/hermes-webui:latest BEFORE `up` so the PR's
+#     changes to docker_init.bash / Dockerfile actually execute. Without this
+#     the multi-container variants would pull the previous release from GHCR
+#     and silently miss every PR-level regression.
+#   - Pre-flight `docker compose config` job to catch schema/interpolation drift.
+#   - Reaper before each smoke run + trap on EXIT for orphan defence.
+#
+# Out of scope for v1 (per design review):
+#   - HERMES_WEBUI_SMOKE_TEST env flag in docker_init.bash (production-code footgun)
+#   - --user 60000:60000 (skips the chown branch we're protecting against)
+#   - Hadolint / yamllint (separate lint workflow, follow-up PR)
+#   - Local-runnable scripts/docker-smoke-test.sh (ship CI first, then iterate)
+#   - Podman runtime smoke (defer until a podman-specific bug ships)
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - 'Dockerfile'
+      - 'docker_init.bash'
+      - 'docker-compose*.yml'
+      - '.dockerignore'
+      - '.env.docker.example'
+      - '.github/workflows/docker-smoke.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'Dockerfile'
+      - 'docker_init.bash'
+      - 'docker-compose*.yml'
+      - '.dockerignore'
+      - '.env.docker.example'
+      - '.github/workflows/docker-smoke.yml'
+  workflow_dispatch:
+
+# Fork PRs run with no secrets — that's the right model. Pin to least privilege.
+permissions:
+  contents: read
+
+jobs:
+  compose-config:
+    name: Compose config validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate every compose file parses
+        run: |
+          set -euo pipefail
+          for f in docker-compose.yml docker-compose.two-container.yml docker-compose.three-container.yml; do
+            echo "::group::compose config: $f"
+            docker compose -f "$f" config > /dev/null
+            echo "::endgroup::"
+          done
+
+  smoke:
+    name: Smoke ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    needs: compose-config
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - single
+          - two-container
+          - three-container
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve compose file + project name
+        id: vars
+        run: |
+          set -euo pipefail
+          case "${{ matrix.variant }}" in
+            single)
+              echo "compose_file=docker-compose.yml" >> "$GITHUB_OUTPUT"
+              ;;
+            two-container)
+              echo "compose_file=docker-compose.two-container.yml" >> "$GITHUB_OUTPUT"
+              ;;
+            three-container)
+              echo "compose_file=docker-compose.three-container.yml" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+          # Per-run project name so concurrent jobs / reruns can't clobber each other.
+          echo "project=hermes-smoke-${{ matrix.variant }}-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
+      - name: Reap any prior hermes-smoke resources on this runner
+        run: |
+          set -euo pipefail
+          # Hosted GHA runners are fresh, so this is mostly defence-in-depth for
+          # self-hosted runner re-use. We rely primarily on the unique per-run
+          # project name + `compose down -v --remove-orphans` in the EXIT trap
+          # to clean up the resources THIS run creates; this step only sweeps
+          # leftovers from prior runs that crashed before their trap fired.
+          # Match by project-name prefix instead of labels (the compose files
+          # don't carry hermes-smoke labels on their resources).
+          for c in $(docker ps -aq --filter "name=hermes-smoke-"); do
+            docker rm -f "$c" || true
+          done
+          for v in $(docker volume ls -q | grep "^hermes-smoke-" || true); do
+            docker volume rm -f "$v" || true
+          done
+          for n in $(docker network ls --format '{{.Name}}' | grep "^hermes-smoke-" || true); do
+            docker network rm "$n" || true
+          done
+
+      - name: Build local Dockerfile
+        # We always build the local Dockerfile so the PR's changes are tested,
+        # even on the multi-container variants whose compose files reference
+        # ghcr.io/nesquena/hermes-webui:latest. Without this retag, multi-container
+        # smoke runs would test the previous release, not the PR.
+        run: |
+          set -euo pipefail
+          docker build -t ghcr.io/nesquena/hermes-webui:latest .
+
+      - name: Prepare ephemeral host paths
+        id: paths
+        run: |
+          set -euo pipefail
+          STATE_DIR="$(mktemp -d -t hermes-smoke-state-XXXXXX)"
+          WORK_DIR="$(mktemp -d -t hermes-smoke-work-XXXXXX)"
+          echo "state_dir=$STATE_DIR" >> "$GITHUB_OUTPUT"
+          echo "work_dir=$WORK_DIR" >> "$GITHUB_OUTPUT"
+          echo "Allocated:"
+          echo "  HERMES_HOME      = $STATE_DIR"
+          echo "  HERMES_WORKSPACE = $WORK_DIR"
+
+      - name: Smoke (up + health + log scan + down)
+        env:
+          COMPOSE_FILE: ${{ steps.vars.outputs.compose_file }}
+          PROJECT: ${{ steps.vars.outputs.project }}
+          HERMES_HOME: ${{ steps.paths.outputs.state_dir }}
+          HERMES_WORKSPACE: ${{ steps.paths.outputs.work_dir }}
+        run: |
+          set -euo pipefail
+
+          # ----- Trap-guaranteed cleanup, regardless of exit reason -----
+          cleanup() {
+            local rc=$?
+            echo "::group::Cleanup (rc=$rc)"
+            docker compose -p "$PROJECT" -f "$COMPOSE_FILE" logs --no-color --tail=200 || true
+            docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v --remove-orphans || true
+            rm -rf "$HERMES_HOME" "$HERMES_WORKSPACE" || true
+            echo "::endgroup::"
+            return $rc
+          }
+          trap cleanup EXIT
+
+          echo "::group::docker compose up"
+          # --wait blocks until all services report healthy OR --wait-timeout fires.
+          # Compose v2 returns nonzero on either failure mode.
+          docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d --wait --wait-timeout 120
+          echo "::endgroup::"
+
+          echo "::group::container roster"
+          docker compose -p "$PROJECT" -f "$COMPOSE_FILE" ps
+          echo "::endgroup::"
+
+          # ----- WebUI /health probe -----
+          # Single-container: WebUI is on the host on 127.0.0.1:8787.
+          # Two/three-container: same — both compose files publish 127.0.0.1:8787.
+          echo "::group::Probe /health"
+          attempts=0
+          max_attempts=30
+          until curl --fail --silent --max-time 5 http://127.0.0.1:8787/health > /dev/null; do
+            attempts=$((attempts + 1))
+            if [ "$attempts" -ge "$max_attempts" ]; then
+              echo "❌ WebUI /health never returned 200 after $max_attempts attempts (~60s)"
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "✅ /health = 200 after $attempts attempts"
+          echo "::endgroup::"
+
+          # ----- Startup log scan: must not contain any known-bad signatures -----
+          # These are the exact patterns that would have flagged #2470 in real time.
+          # The grep -i is anchored to actual error tokens; benign log lines that
+          # contain the substring 'error' in a stack-friendly context (e.g.
+          # "errorless", URL paths) are improbable for these specific tokens.
+          echo "::group::Startup log scan"
+          LOGS="$(docker compose -p "$PROJECT" -f "$COMPOSE_FILE" logs --no-color)"
+          # `!! ERROR` + `!! Exiting script` are the actual strings emitted by
+          # docker_init.bash's error_exit() helper — the function name itself
+          # never appears in output. The literal token `error_exit` is kept as
+          # a belt-and-suspenders catch for any stray debug/echo of the name.
+          BAD_PATTERNS='EROFS|Read-only file system|Traceback|PermissionError|!! ERROR|!! Exiting script|error_exit|groupmod: cannot|usermod: cannot|Failed to set (UID|GID|owner|permissions|ownership)'
+          if echo "$LOGS" | grep -E -i "$BAD_PATTERNS"; then
+            echo "❌ Startup logs contain known-bad pattern (see above)"
+            exit 1
+          fi
+          echo "✅ No known-bad patterns in startup logs"
+          echo "::endgroup::"

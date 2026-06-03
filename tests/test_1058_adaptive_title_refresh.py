@@ -287,6 +287,40 @@ class TestRunBackgroundTitleRefresh:
         assert len(title_events) == 1
         assert title_events[0][1]['title'] == 'New Refreshed Title'
 
+    def test_saves_refreshed_title_outside_global_lock(self):
+        """Refreshing an existing title must not call Session.save() while holding LOCK."""
+        class TrackingLock:
+            def __init__(self):
+                self.held = False
+
+            def __enter__(self):
+                assert not self.held
+                self.held = True
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                self.held = False
+
+        put, events = self._make_put_event()
+        lock = TrackingLock()
+        s = self._make_session_obj(title='Old Title')
+
+        def save(*args, **kwargs):
+            assert not lock.held, "Session.save() must run outside api.models.LOCK"
+
+        s.save = save
+        fake_sessions = {'sid': s}
+        with patch('api.streaming.get_session', return_value=s), \
+             patch('api.streaming._aux_title_configured', return_value=True), \
+             patch('api.streaming._generate_llm_session_title_via_aux',
+                   return_value=('New Refreshed Title', 'llm_ok', 'raw')), \
+             patch('api.streaming.SESSIONS', fake_sessions), \
+             patch('api.streaming.LOCK', lock):
+            _run_background_title_refresh('sid', 'u', 'a', 'Old Title', put)
+        title_events = [(n, d) for n, d in events if n == 'title']
+        assert len(title_events) == 1
+        assert title_events[0][1]['title'] == 'New Refreshed Title'
+
     def test_exceptions_are_silently_swallowed(self):
         """Any unexpected error inside must not propagate — it's a background daemon."""
         put, events = self._make_put_event()

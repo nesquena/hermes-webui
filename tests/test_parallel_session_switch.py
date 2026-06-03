@@ -9,6 +9,7 @@ Four optimizations to reduce session-switch latency:
 """
 
 import pathlib
+import re
 import threading
 import time
 from unittest.mock import patch, MagicMock
@@ -59,15 +60,14 @@ class TestLoadDirParallelPrefetch:
         )
 
 
-# ── 2. sessions.js: loadSession idle path overlaps loadDir and highlightCode ─
+# ── 2. sessions.js: loadSession idle path avoids duplicate highlighting ─
 
 
 class TestLoadSessionIdleOverlap:
-    """The idle path in loadSession() must start loadDir() before running
-    highlightCode() so the network request is in-flight during the CPU-bound
-    Prism.js pass."""
+    """The idle path in loadSession() should rely on renderMessages() for the
+    post-render transcript pass instead of running another Prism.js pass."""
 
-    def test_idle_path_starts_loaddir_before_highlightcode(self):
+    def test_idle_path_does_not_repeat_highlight_after_render_messages(self):
         idle_marker = "S.busy=false"
         positions = []
         start = 0
@@ -81,25 +81,24 @@ class TestLoadSessionIdleOverlap:
         found = False
         for pos in positions:
             block = SESSIONS_JS[pos : pos + 600]
-            has_highlight = "highlightCode()" in block
             has_loaddir = "loadDir('.')" in block
-            if has_highlight and has_loaddir:
+            has_render = "renderMessages()" in block
+            if has_loaddir and has_render:
                 found = True
-                loaddir_idx = block.find("loadDir(")
-                highlight_idx = block.find("highlightCode()")
-                assert loaddir_idx < highlight_idx, (
-                    "In the idle path, loadDir() should be started before "
-                    "highlightCode() so the network request is dispatched first."
+                assert "highlightCode()" not in block, (
+                    "The idle path should rely on renderMessages()'s consolidated "
+                    "post-render pass instead of running a second highlight pass."
                 )
-                assert "await" in block and "_dirP" in block, (
-                    "loadDir() result should be stored and awaited after "
-                    "highlightCode() completes."
+                assert "_dirP" in block and "await _dirP" not in block, (
+                    "loadDir() should refresh the workspace without blocking "
+                    "session-load completion."
                 )
+                assert "_dirP.catch" in block
                 break
 
         assert found, (
             "Could not find the idle path in loadSession that calls both "
-            "loadDir and highlightCode."
+            "renderMessages and loadDir."
         )
 
 
@@ -412,25 +411,34 @@ class TestMessagePaginationFrontend:
         """_loadOlderMessages must be defined for scroll-to-top loading."""
         assert "async function _loadOlderMessages" in SESSIONS_JS
 
-    def test_load_older_uses_index_cursor(self):
-        """_loadOlderMessages must pass msg_before as integer index, not timestamp."""
+    def test_load_older_uses_cumulative_tail_limit(self):
+        """_loadOlderMessages requests a larger authoritative tail window via msg_limit.
+
+        The cumulative tail path is the default. msg_before remains in the
+        body as the race-fallback request when the suffix-continuity check
+        fails.
+        """
         fn_start = SESSIONS_JS.find("async function _loadOlderMessages")
         fn_end = SESSIONS_JS.find("\n}", fn_start) + 2
         fn_body = SESSIONS_JS[fn_start:fn_end]
 
-        assert "msg_before=${_oldestIdx}" in fn_body, (
-            "_loadOlderMessages should use _oldestIdx (integer) as msg_before cursor"
-        )
+        assert "requestedLimit" in fn_body
+        assert "S.messages || []" in fn_body
+        assert "msg_limit=${requestedLimit}" in fn_body
+        assert "tailMatches" in fn_body
+        # Race fallback still issues the legacy msg_before page request.
+        assert "msg_before=${_oldestIdx}" in fn_body
 
     def test_ensure_all_messages_function_exists(self):
         """_ensureAllMessagesLoaded must exist for operations needing full history."""
         assert "async function _ensureAllMessagesLoaded" in SESSIONS_JS
 
     def test_scroll_to_top_triggers_loading(self):
-        """Scroll event handler must trigger _loadOlderMessages near top."""
+        """Scroll event handler must trigger _loadOlderMessages near top when opt-in is enabled."""
         UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 
-        assert "el.scrollTop<80" in UI_JS
+        assert "const olderPrefetchPx=Math.max(600,el.clientHeight*1.5)" in UI_JS
+        assert "_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx" in UI_JS
         assert "_loadOlderMessages" in UI_JS
 
     def test_load_older_indicator_in_render(self):
@@ -480,10 +488,20 @@ class TestSessionSwitchCancellation:
 
     def test_loading_older_reset_on_session_switch(self):
         """loadSession must reset _loadingOlder when switching sessions."""
-        # Find the reset block in loadSession
-        marker = "_messagesTruncated = false;\n    _oldestIdx = 0;\n    _loadingOlder = false;"
-        idx = SESSIONS_JS.find(marker)
-        assert idx >= 0, (
+        # Locate the on-switch reset block — it lives in the `if (currentSid !== sid || forceReload)`
+        # arm of loadSession. Match by the surrounding state-resets rather than by a fragile
+        # multi-line substring, so unrelated code (like the closeOtherLiveStreams teardown
+        # that was inserted between _oldestIdx and _loadingOlder) doesn't break the test.
+        switch_arm = re.search(
+            r"if \(currentSid !== sid \|\| forceReload\) \{(.*?)\n  \}",
+            SESSIONS_JS,
+            re.DOTALL,
+        )
+        assert switch_arm, "loadSession's session-switch reset arm not found"
+        block = switch_arm.group(1)
+        assert "_messagesTruncated = false;" in block
+        assert "_oldestIdx = 0;" in block
+        assert "_loadingOlder = false;" in block, (
             "loadSession must reset _loadingOlder=false on session switch "
             "to prevent a stale _loadOlderMessages lock from blocking the "
             "new session's scroll-to-top loading."
@@ -493,7 +511,7 @@ class TestSessionSwitchCancellation:
         """Verify the guard prevents S.messages mutation.
 
         The guard `if (_loadingSessionId !== null && _loadingSessionId !== sid) return`
-        runs BEFORE `S.messages = [...olderMsgs, ...S.messages]`.
+        runs BEFORE `S.messages = nextMessages`.
         If the session changed, we return early — no mutation.
         """
         fn_start = SESSIONS_JS.find("async function _loadOlderMessages")
@@ -502,7 +520,7 @@ class TestSessionSwitchCancellation:
 
         # Guard must appear before S.messages mutation
         guard_idx = fn_body.find("_loadingSessionId")
-        mutation_idx = fn_body.find("S.messages = [...olderMsgs")
+        mutation_idx = fn_body.find("S.messages = nextMessages")
         assert guard_idx >= 0 and mutation_idx >= 0 and guard_idx < mutation_idx, (
             "The _loadingSessionId guard must appear BEFORE the S.messages "
             "mutation to prevent stale data from landing on the wrong session."
@@ -510,13 +528,20 @@ class TestSessionSwitchCancellation:
 
     def test_messages_truncated_reset_on_switch(self):
         """loadSession must reset _messagesTruncated on session switch."""
-        marker = "_messagesTruncated = false;\n    _oldestIdx = 0;\n    _loadingOlder = false;"
-        idx = SESSIONS_JS.find(marker)
-        assert idx >= 0, (
+        switch_arm = re.search(
+            r"if \(currentSid !== sid \|\| forceReload\) \{(.*?)\n  \}",
+            SESSIONS_JS,
+            re.DOTALL,
+        )
+        assert switch_arm, "loadSession's session-switch reset arm not found"
+        block = switch_arm.group(1)
+        assert "_messagesTruncated = false;" in block, (
             "_messagesTruncated must be reset to false on session switch "
             "to prevent the scroll-to-top handler from trying to load "
             "older messages from the previous session."
         )
+        assert "_oldestIdx = 0;" in block
+        assert "_loadingOlder = false;" in block
 
     def test_oldest_idx_reset_prevents_wrong_cursor(self):
         """_oldestIdx=0 after switch prevents passing stale cursor to API."""
@@ -553,7 +578,7 @@ class TestSessionSwitchCancellation:
         )
         # The S.session check must appear BEFORE the S.messages mutation.
         active_check_idx = fn_body.find("S.session.session_id !== sid")
-        mutation_idx = fn_body.find("S.messages = [...olderMsgs")
+        mutation_idx = fn_body.find("S.messages = nextMessages")
         assert active_check_idx >= 0 and mutation_idx >= 0 and active_check_idx < mutation_idx, (
             "Active-session guard must run before S.messages mutation."
         )
@@ -589,7 +614,7 @@ class TestScrollPositionPreservation:
         )
 
     def test_resets_scroll_pinned_after_restore(self):
-        """_scrollPinned must be set to false after restoring scroll position."""
+        """_scrollPinned must be false after older-history scroll anchoring."""
         SESSIONS_JS = pathlib.Path(__file__).parent.parent / "static" / "sessions.js"
         src = SESSIONS_JS.read_text(encoding="utf-8")
 
@@ -598,13 +623,12 @@ class TestScrollPositionPreservation:
         fn_body = src[fn_start:fn_end]
 
         assert "_scrollPinned = false" in fn_body, (
-            "renderMessages() calls scrollToBottom() which sets _scrollPinned=true. "
-            "After restoring the user's scroll position we must set _scrollPinned=false "
-            "to prevent the next render from snapping back to the bottom."
+            "Older-history paging must leave the transcript unpinned so the next "
+            "render does not snap back to the newest output."
         )
-        # _scrollPinned must appear after the scrollTop restore
-        restore_idx = fn_body.find("container.scrollTop = newScrollH - prevScrollH")
-        pinned_idx = fn_body.find("_scrollPinned = false")
-        assert restore_idx >= 0 and pinned_idx >= 0 and restore_idx < pinned_idx, (
-            "_scrollPinned = false must appear AFTER the scrollTop restore."
+        target_idx = fn_body.find("container.scrollTop = oldTop + addedHeight")
+        scroll_idx = fn_body.find("requestAnimationFrame(()=>{ _programmaticScroll = false; })")
+        pinned_idx = fn_body.rfind("_scrollPinned = false")
+        assert target_idx >= 0 and scroll_idx >= 0 and pinned_idx >= 0 and target_idx < scroll_idx < pinned_idx, (
+            "_scrollPinned = false must appear AFTER the older-history viewport-preserve scroll."
         )

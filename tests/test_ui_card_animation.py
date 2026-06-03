@@ -27,7 +27,8 @@ def test_tool_card_detail_uses_transitionable_collapsed_state():
 
 
 def test_thinking_card_toggle_and_body_use_animation_friendly_state():
-    assert ".thinking-card-toggle{margin-left:auto;font-size:10px;display:inline-flex;" in COMPACT_CSS
+    assert ".thinking-card-btn-row{margin-left:auto;display:inline-flex;align-items:center;gap:6px;" in COMPACT_CSS
+    assert ".thinking-card-toggle{font-size:10px;display:inline-flex;" in COMPACT_CSS
     assert ".thinking-card-header{display:flex;align-items:center;gap:8px;" in COMPACT_CSS
     # Body uses div default (display:block); canonical rule lives in the
     # consolidated block. Open state caps at 260px (intentional "quieter" sizing).
@@ -41,8 +42,32 @@ def test_thinking_card_toggle_and_body_use_animation_friendly_state():
 def test_tool_card_toggle_uses_same_chevron_icon_markup_as_thinking_card():
     assert "<span class=\"thinking-card-toggle\">${li('chevron-right',12)}</span>" in UI_JS
     assert "<span class=\"tool-card-toggle\">${li('chevron-right',12)}</span>" in UI_JS
-    assert "<div class=\"thinking-card\"><div class=\"thinking-card-header\" onclick=\"this.parentElement.classList.toggle('open')\"><span class=\"thinking-card-icon\">" in UI_JS
+    assert "<div class=\"${classes}\"><div class=\"thinking-card-header\" onclick=\"this.parentElement.classList.toggle('open')\"><span class=\"thinking-card-icon\">" in UI_JS
 
+
+def test_thinking_card_header_includes_copy_button_that_does_not_toggle_card():
+    assert "function _copyThinkingText(btn){" in UI_JS
+    assert "const copyBtn=`<button class=\"thinking-copy-btn\"" in UI_JS
+    assert "event.stopPropagation();_copyThinkingText(this)" in UI_JS
+    assert "card.querySelector('.thinking-card-body pre')" in UI_JS
+    assert "_copyText(text).then(()=>{" in UI_JS
+    assert "btn.innerHTML=li('check',12);" in UI_JS
+    assert ".thinking-copy-btn{" in COMPACT_CSS
+    assert ".thinking-copy-btn:hover,.thinking-copy-btn:focus-visible{" in COMPACT_CSS
+
+
+def test_live_thinking_updates_existing_card_body_in_place():
+    assert "function _renderThinkingInto(row,text='')" in UI_JS
+    assert "row.querySelector('.thinking-card-body pre')" in UI_JS
+    assert "pre.innerHTML=_renderThinkingDisplayHtml(clean)" in UI_JS
+    assert "_renderThinkingInto(row,text);" in UI_JS
+
+
+def test_thinking_card_body_matches_assistant_output_typography():
+    assert ".thinking-card-body pre { font-family: var(--font-ui); font-size: 14px; line-height: 1.75;" in STYLE_CSS
+    # Keep thinking visually secondary even though it now shares the output font.
+    assert ".thinking-card-body pre {" in STYLE_CSS
+    assert "color: var(--muted);" in STYLE_CSS
 
 def test_thinking_card_uses_panel_chrome_with_gold_palette():
     # Canonical thinking-card rule lives in the consolidated block (border-radius

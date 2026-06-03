@@ -7,9 +7,11 @@ profile has its own workspace configuration.  State files live at
 ``{profile_home}/webui_state/last_workspace.txt``.  The global STATE_DIR
 paths are used as fallback when no profile module is available.
 """
+import hashlib
 import json
 import logging
 import os
+import stat
 import subprocess
 import concurrent.futures
 from pathlib import Path
@@ -63,7 +65,7 @@ def _profile_default_workspace() -> str:
       2. 'default_workspace' — alternate explicit key
       3. 'terminal.cwd'      — hermes-agent terminal working dir (most common)
 
-    Falls back to the boot-time DEFAULT_WORKSPACE constant.
+    Falls back to the live DEFAULT_WORKSPACE from api.config.
     """
     try:
         from api.config import get_config
@@ -85,14 +87,20 @@ def _profile_default_workspace() -> str:
                     return str(p)
     except (ImportError, Exception):
         logger.debug("Failed to load profile default workspace config")
-    return str(_BOOT_DEFAULT_WORKSPACE)
+    try:
+        from api.config import DEFAULT_WORKSPACE as _LIVE_DEFAULT_WORKSPACE
+
+        return str(Path(_LIVE_DEFAULT_WORKSPACE).expanduser().resolve())
+    except Exception:
+        return str(Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve())
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
 def _clean_workspace_list(workspaces: list) -> list:
     """Sanitize a workspace list:
-    - Remove entries whose paths no longer exist on disk.
+    - Preserve saved paths even when they are currently missing or inaccessible;
+      picker state must not be destroyed by a transient stat/permission failure.
     - Remove entries whose paths live inside another profile's directory
       (e.g. ~/.hermes/profiles/X/... should not appear on a different profile).
     - Rename any entry whose name is literally 'default' to 'Home' (avoids
@@ -104,10 +112,9 @@ def _clean_workspace_list(workspaces: list) -> list:
     for w in workspaces:
         path = w.get('path', '')
         name = w.get('name', '')
-        p = Path(path).resolve() if path else Path('/')
-        # Skip paths that no longer exist
-        if not p.is_dir():
+        if not path:
             continue
+        p = _safe_resolve(Path(path).expanduser())
         # Skip paths inside a DIFFERENT profile's directory (cross-profile leak).
         # Allow paths inside the CURRENT profile's own directory (e.g. test workspaces
         # created under ~/.hermes/profiles/webui/webui-mvp-test/).
@@ -128,6 +135,32 @@ def _clean_workspace_list(workspaces: list) -> list:
             name = 'Home'
         result.append({'path': str(p), 'name': name})
     return result
+
+
+def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does not exist") -> str | None:
+    """Return a user-facing validation error for an unusable workspace path.
+
+    ``Path.exists()`` can collapse permission/stat failures into a generic falsey
+    result on some Python/OS combinations, which produced misleading "does not
+    exist" messages for macOS/TCC-denied directories.  Probe with ``stat()`` so
+    missing paths, non-directories, and permission-denied paths can be reported
+    separately.
+    """
+    try:
+        st = candidate.stat()
+    except FileNotFoundError:
+        return f"{missing_label}: {candidate}"
+    except PermissionError as exc:
+        return (
+            f"Cannot access path: {candidate}. The server process could not inspect "
+            f"this directory ({exc}). On macOS, grant Full Disk Access or Files and "
+            f"Folders permission to the Hermes/WebUI app or server process, then try again."
+        )
+    except OSError as exc:
+        return f"Cannot access path: {candidate}. The server process could not inspect this path ({exc})."
+    if not stat.S_ISDIR(st.st_mode):
+        return f"Path is not a directory: {candidate}"
+    return None
 
 
 def _migrate_global_workspaces() -> list:
@@ -517,10 +550,9 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
     candidate = Path(path).expanduser().resolve()
 
-    if not candidate.exists():
-        raise ValueError(f"Path does not exist: {candidate}")
-    if not candidate.is_dir():
-        raise ValueError(f"Path is not a directory: {candidate}")
+    access_error = _workspace_access_error(candidate)
+    if access_error:
+        raise ValueError(access_error)
 
     # (A) Trusted if under the user's home directory — cross-platform via Path.home()
     # Must be checked before system roots to allow symlinks like /var/home.
@@ -566,6 +598,25 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
 
 
+def _strip_surrounding_quotes(path: str) -> str:
+    """Strip a single pair of surrounding single or double quotes from a path string.
+
+    macOS Finder's "Copy as Pathname" (Cmd+Option+C) returns paths wrapped in
+    single quotes, e.g. ``'/Users/x/Documents/foo'``. Other shells and OS file
+    managers do similar things with double quotes. Users routinely paste these
+    quoted strings into the Add Space input expecting them to "just work" —
+    the only reason they didn't was a missing strip.
+
+    Only paired quotes are stripped (matching opener and closer). One-sided quotes
+    are preserved on the slim chance a path legitimately contains a literal quote
+    character.
+    """
+    s = path.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    return s
+
+
 def validate_workspace_to_add(path: str) -> Path:
     """Validate a path for *adding* to the workspace list (less restrictive than resolve_trusted_workspace).
 
@@ -575,13 +626,17 @@ def validate_workspace_to_add(path: str) -> Path:
 
     The stricter ``resolve_trusted_workspace`` is used when *using* an existing workspace
     (file reads/writes) to prevent path traversal after the list is built.
+
+    Surrounding quotes (single or double) are stripped before validation —
+    macOS Finder's "Copy as Pathname" wraps paths in single quotes by default,
+    and users routinely paste those into the Add Space input.
     """
+    path = _strip_surrounding_quotes(path)
     candidate = Path(path).expanduser().resolve()
 
-    if not candidate.exists():
-        raise ValueError(f"Path does not exist: {candidate}")
-    if not candidate.is_dir():
-        raise ValueError(f"Path is not a directory: {candidate}")
+    access_error = _workspace_access_error(candidate)
+    if access_error:
+        raise ValueError(access_error)
 
     # Home directory is always trusted regardless of where it lives on disk
     # (e.g. /var/home/... on systemd-homed Fedora/RHEL).
@@ -660,12 +715,18 @@ def list_dir(workspace: Path, rel: str='.'):
             display_path = str(Path(item.name))
             if rel and rel != '.':
                 display_path = rel + '/' + display_path
+            try:
+                item_stat = item.lstat()
+                mtime_ns = item_stat.st_mtime_ns
+            except OSError:
+                mtime_ns = None
             entry = {
                 'name': item.name,
                 'path': display_path,
                 'type': 'symlink',
                 'target': str(link_target),
                 'is_dir': is_dir,
+                'mtime_ns': mtime_ns,
             }
             if not is_dir:
                 try:
@@ -679,15 +740,47 @@ def list_dir(workspace: Path, rel: str='.'):
             entry_path = item.name
             if rel and rel != '.':
                 entry_path = rel + '/' + item.name
+            try:
+                item_stat = item.stat()
+                size = item_stat.st_size if item.is_file() else None
+                mtime_ns = item_stat.st_mtime_ns
+            except OSError:
+                size = None
+                mtime_ns = None
             entries.append({
                 'name': item.name,
                 'path': entry_path,
                 'type': 'dir' if item.is_dir() else 'file',
-                'size': item.stat().st_size if item.is_file() else None,
+                'size': size,
+                'mtime_ns': mtime_ns,
             })
         if len(entries) >= 200:
             break
     return entries
+
+
+def dir_signature(workspace: Path, rel: str = '.', entries: list[dict] | None = None) -> str:
+    """Return a cheap, stable signature for a listed workspace directory.
+
+    The signature is based only on bounded directory-entry metadata already used
+    by the workspace tree: names, displayed paths, entry type, file sizes,
+    mtimes, and symlink targets. It intentionally does not read file contents.
+    """
+    if entries is None:
+        entries = list_dir(workspace, rel)
+    payload = []
+    for entry in entries:
+        payload.append({
+            'name': entry.get('name'),
+            'path': entry.get('path'),
+            'type': entry.get('type'),
+            'is_dir': entry.get('is_dir'),
+            'size': entry.get('size'),
+            'mtime_ns': entry.get('mtime_ns'),
+            'target': entry.get('target'),
+        })
+    raw = json.dumps(payload, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
 def read_file_content(workspace: Path, rel: str) -> dict:

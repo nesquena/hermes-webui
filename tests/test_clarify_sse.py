@@ -79,7 +79,8 @@ class TestClarifySSEFrontendCode:
 
     def test_uses_event_source(self):
         assert "new EventSource" in self.js
-        assert "/api/clarify/stream" in self.js
+        assert "api/clarify/stream" in self.js
+        assert "EventSource('/api/clarify/stream" not in self.js
 
     def test_frontend_listens_initial_event(self):
         assert "'initial'" in self.js or '"initial"' in self.js

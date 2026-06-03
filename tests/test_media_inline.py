@@ -16,6 +16,8 @@ import os
 import pathlib
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 import urllib.error
 import urllib.request
 
@@ -39,6 +41,10 @@ class TestMediaRenderMdStash(unittest.TestCase):
         self.assertIn("MEDIA:", UI_JS,
                       "MEDIA: token regex must be present in renderMd()")
 
+    def test_media_token_regex_excludes_trailing_backticks(self):
+        self.assertIn("MEDIA:([^\\s`\\)\\]]+)", UI_JS,
+                      "MEDIA: token regex must stop before closing backticks so code-formatted MEDIA links do not include a stray ` in the path")
+
     def test_media_restore_produces_img_tag(self):
         self.assertIn("msg-media-img", UI_JS,
                       "restore pass must produce <img class='msg-media-img'>")
@@ -48,8 +54,18 @@ class TestMediaRenderMdStash(unittest.TestCase):
                       "restore pass must produce download link for non-image files")
 
     def test_media_api_url_pattern(self):
-        self.assertIn("api/media?path=", UI_JS,
-                      "renderMd must build api/media?path=... URL for local files")
+        self.assertIn("_mediaApiHref(", UI_JS,
+                      "renderMd must build local media URLs through the shared media URL helper")
+
+    def test_local_media_urls_are_resolved_against_document_baseuri(self):
+        self.assertIn("function _appHref", UI_JS,
+                      "renderMd must define a base-aware app URL helper for local media")
+        self.assertIn("new URL(rel,document.baseURI||location.href)", UI_JS,
+                      "local media URLs must resolve against document.baseURI so /session/<id> deep links do not turn api/media into /session/api/media")
+
+    def test_local_media_api_url_carries_session_id_when_available(self):
+        self.assertIn("_mediaApiHref(ref,{sessionId:mediaSessionId})", UI_JS,
+                      "local MEDIA: image URLs must include session_id so the server can authorize session-referenced artifacts")
 
     def test_local_audio_video_media_tokens_request_inline_streaming(self):
         self.assertIn("apiUrl+'&inline=1'", UI_JS,
@@ -235,11 +251,67 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn("_INLINE_IMAGE_TYPES", routes_src,
                       "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media")
 
+    def test_media_allowed_roots_env_var_referenced(self):
+        """Handler must reference MEDIA_ALLOWED_ROOTS for configurable roots."""
+        routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+        self.assertIn("MEDIA_ALLOWED_ROOTS", routes_src,
+                      "MEDIA_ALLOWED_ROOTS env var must be parsed in _handle_media")
+
+    def test_media_allowed_roots_uses_os_pathsep(self):
+        """MEDIA_ALLOWED_ROOTS must use the platform path separator."""
+        routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+        start = routes_src.index("extra_roots =")
+        block = routes_src[start:start + 900]
+        self.assertIn(".split(_os.pathsep)", block)
+        self.assertNotIn('.split(":")', block)
+
     def test_media_endpoints_advertise_byte_range_support(self):
         routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
         self.assertIn("Accept-Ranges", routes_src)
         self.assertIn("Content-Range", routes_src)
         self.assertIn("206", routes_src)
+
+    def test_session_media_token_allows_exact_image_path(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            image = pathlib.Path(tmpd) / "card.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{image}"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertTrue(
+                    routes._session_media_token_allows_image_path(
+                        "s-media", image, {"image/png"}
+                    )
+                )
+
+    def test_session_media_token_rejects_unmentioned_image_path(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            image = pathlib.Path(tmpd) / "card.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\n")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": "MEDIA:/tmp/other.png"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertFalse(
+                    routes._session_media_token_allows_image_path(
+                        "s-media", image, {"image/png"}
+                    )
+                )
+
+    def test_session_media_token_rejects_non_image_path(self):
+        from api import routes
+
+        with tempfile.TemporaryDirectory() as tmpd:
+            text_file = pathlib.Path(tmpd) / "notes.txt"
+            text_file.write_text("secret", encoding="utf-8")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"MEDIA:{text_file}"}])
+            with mock.patch.object(routes, "get_session", return_value=session):
+                self.assertFalse(
+                    routes._session_media_token_allows_image_path(
+                        "s-media", text_file, {"image/png"}
+                    )
+                )
 
 
 # ── Integration tests: live server on TEST_PORT ───────────────────────────────
@@ -326,6 +398,39 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             self.assertEqual(status, 206)
             self.assertEqual(body, b"RIFF")
             self.assertEqual(headers.get("Content-Range"), f"bytes 0-3/{len(audio_bytes)}")
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_html_media_endpoint_inline_requires_csp_sandbox(self):
+        """HTML opens inline only when requested and always carries CSP sandbox."""
+        html_bytes = b"<!doctype html><title>Hermes</title><script>window.ok=1</script>"
+        with tempfile.NamedTemporaryFile(
+            suffix=".html", prefix="hermes_test_", dir="/tmp", delete=False
+        ) as f:
+            f.write(html_bytes)
+            tmp_path = f.name
+        try:
+            encoded = urllib.request.quote(tmp_path)
+
+            body, status, headers = self._get(f"/api/media?path={encoded}")
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", headers.get("Content-Type", ""))
+            self.assertIn("attachment", headers.get("Content-Disposition", ""))
+            self.assertIn("DENY", headers.get_all("X-Frame-Options", []))
+            self.assertFalse(
+                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
+            )
+            self.assertEqual(body, html_bytes)
+
+            body, status, headers = self._get(f"/api/media?path={encoded}&inline=1")
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", headers.get("Content-Type", ""))
+            self.assertIn("inline", headers.get("Content-Disposition", ""))
+            self.assertEqual(headers.get_all("X-Frame-Options", []), [])
+            self.assertTrue(
+                any("sandbox allow-scripts" == h for h in headers.get_all("Content-Security-Policy", []))
+            )
+            self.assertEqual(body, html_bytes)
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 

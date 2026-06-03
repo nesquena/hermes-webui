@@ -13,6 +13,24 @@ This is the comprehensive Docker reference. For a 5-minute quickstart, see the [
 
 If something stops working, **start with the single-container setup** — it's the simplest path and fixes most permission/UID/path-mismatch issues by construction.
 
+## Production image security model
+
+The production Docker image is hardened for the normal single-tenant container threat model:
+Hermes WebUI assumes one operator controls the container, mounted Hermes home, and workspace.
+The image does **not** install `sudo`, does not add runtime users to a sudo group, and does not
+grant `NOPASSWD` escalation. If an agent/tool process gains a shell as `hermeswebui`, it should
+not be able to become root with a passwordless sudo command.
+
+The entrypoint still starts as `root` for a narrow init phase because Docker bind mounts often need
+UID/GID alignment and ownership preparation before the app can read `~/.hermes`, `/workspace`,
+`/app`, and `/uv_cache`. After that setup, `docker_init.bash` re-execs itself as the unprivileged
+`hermeswebui` user and starts the server there. Init scratch files under `/tmp/hermeswebui_init`
+are owner-only (`0700` directory, `0600` files), not world-writable.
+
+For multi-tenant or hostile-container environments, rebuild with your own runtime user, mount policy,
+and supervisor assumptions. Development images that need package-manager convenience should add
+those tools in a dev-only Dockerfile instead of reintroducing passwordless sudo to production.
+
 ## 5-minute quickstart (single container)
 
 ```bash
@@ -24,7 +42,54 @@ docker compose up -d
 open http://localhost:8787
 ```
 
-That's it. Your existing `~/.hermes` directory is mounted, your `~/workspace` is browsable, and the WebUI auto-detects your UID/GID from the mounted volume.
+That's it for a real personal Docker install. Your existing `~/.hermes`
+directory is mounted, your `~/workspace` is browsable, and the WebUI
+auto-detects your UID/GID from the mounted volume.
+
+The single-container setup runs the WebUI only. It can create cron jobs and run
+them manually from the Tasks panel. In Docker, scheduled jobs require the Hermes gateway daemon
+to tick while you are away. If System Settings shows `Gateway not configured`,
+use `docker-compose.two-container.yml`,
+`docker-compose.three-container.yml`, or run `hermes gateway` separately before
+relying on offline scheduled runs. See [Scheduled jobs and the gateway daemon](#scheduled-jobs-and-the-gateway-daemon) below for the full background and verification steps.
+
+For troubleshooting, reinstall, or onboarding reproduction trials, do not mount
+your real `~/.hermes` unless you intentionally want to test real state. Use an
+isolated Hermes home and follow
+[`docs/onboarding-agent-checklist.md`](onboarding-agent-checklist.md) instead.
+
+> **Linux note**: run Compose as the user who owns the Hermes home. The command
+> `sudo docker compose up -d` can make Compose expand `${HOME}` as `/root`, so
+> the default `${HOME}/.hermes` bind mount becomes `/root/.hermes` instead of
+> your user's real Hermes directory. Prefer adding your user to the `docker group`
+> and running `docker compose up -d`; if you must preserve the caller environment
+> for a one-off root run, use `sudo -E docker compose up -d` and verify the
+> rendered mount with `docker compose config` first.
+
+## Scheduled jobs and the gateway daemon
+
+**Symptom**: Cron jobs created in the Tasks panel never fire. System Settings shows the orange "Gateway not configured" pill, and the Tasks panel shows the same banner above the job list.
+
+**Cause**: Scheduled cron ticks are not driven by the WebUI itself. The gateway daemon ticks the scheduler every 60 seconds; without one running, scheduled jobs sit idle. "Run now" / "Trigger" buttons still work because the WebUI handles those in-process.
+
+**Fix**: Run a gateway container alongside the WebUI. The two-container compose file is the recommended path:
+
+```bash
+cp .env.docker.example .env
+docker compose -f docker-compose.two-container.yml up -d
+```
+
+The three-container layout adds the dashboard but is otherwise the same shape. If you must stay single-container, you can run `hermes gateway` inside the container as a long-lived background process, but the compose split is sturdier.
+
+**Verify**: Once the gateway is up, the System Settings pill should turn green and the Tasks banner disappear. From the host:
+
+```bash
+docker compose -f docker-compose.two-container.yml exec hermes-agent hermes gateway status
+```
+
+If the service name differs in your compose file, `docker compose -f docker-compose.two-container.yml ps` lists the running services.
+
+Refs #2785.
 
 ## What goes wrong (and how to fix it)
 
@@ -123,6 +188,27 @@ If you must use a bind mount: pick a host path, then mount it to `/opt/hermes` i
 
 **Fix**: Either upgrade to Podman 4+ (which fixes this), or use the [single-container setup](#5-minute-quickstart-single-container), or use the [community all-in-one image](https://github.com/sunnysktsang/hermes-suite).
 
+### 8. "API base URL set to localhost fails from Docker" (#3012)
+
+**Symptom**: A provider, local model server, webhook, or custom API works on the host at `http://localhost:<port>`, but fails when the same URL is configured in Hermes WebUI running in Docker.
+
+**Cause**: Inside a container, `localhost` means *that container*, not your laptop/host. The WebUI process cannot reach host services through `127.0.0.1` unless the service is running inside the same container.
+
+**Fix**: Point Docker-hosted WebUI at the host gateway name instead:
+
+- Docker Desktop on macOS/Windows: `http://host.docker.internal:<port>`
+- Podman: `http://host.containers.internal:<port>`
+- Linux Docker Engine: either publish the host service on the Docker bridge address, or add a host-gateway alias to your compose service:
+
+```yaml
+services:
+  hermes-webui:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+Then configure the URL as `http://host.docker.internal:<port>`. Also ensure the host service binds to an address reachable from containers (not only a loopback interface the Docker bridge cannot reach) and that your host firewall allows the connection.
+
 ## Multi-container architecture
 
 The two- and three-container setups use **named Docker volumes** (not bind mounts) by default for a reason: named volumes solve the UID/GID problem by construction. Docker creates the volume's root directory with the correct ownership, all containers reading/writing to it see the same files, no host-side permission setup required.
@@ -148,7 +234,52 @@ The two- and three-container setups use **named Docker volumes** (not bind mount
       └─────────────────────────┘
 ```
 
-The WebUI container doesn't ship with the agent's Python deps — at startup it runs `uv pip install /home/hermeswebui/.hermes/hermes-agent` to install them from the shared volume.
+The WebUI container doesn't ship with the agent's Python deps — at startup it runs `uv pip install /home/hermeswebui/.hermes/hermes-agent` to install them from the shared volume. The WebUI mount is read-only; the agent container is the only writer.
+
+## Upgrading the agent container
+
+The `hermes-agent-src` named volume is initialised from the agent image's `/opt/hermes` on first `up`. Docker reuses the volume verbatim on every subsequent `up` — **even after `docker pull` of a newer agent image**. The cached volume content masks the new image's source tree, so a fresh `docker pull` of `nousresearch/hermes-agent:latest` does not by itself give you the new agent code, dependencies, or entrypoint.
+
+This is the root cause of [#1416](https://github.com/nesquena/hermes-webui/issues/1416): the symptom looked like a missing entrypoint, but the entrypoint was actually present in the new image and hidden behind the stale named volume.
+
+To upgrade the agent image cleanly, drop the source volume before recreating:
+
+```bash
+# Two-container setup
+docker compose -f docker-compose.two-container.yml down
+docker volume rm <project>_hermes-agent-src
+docker compose -f docker-compose.two-container.yml pull
+docker compose -f docker-compose.two-container.yml up -d
+
+# Three-container setup
+docker compose -f docker-compose.three-container.yml down
+docker volume rm <project>_hermes-agent-src
+docker compose -f docker-compose.three-container.yml pull
+docker compose -f docker-compose.three-container.yml up -d
+```
+
+Replace `<project>` with your Compose project name (the parent directory by default; check with `docker volume ls`). The `hermes-home` volume (config, sessions, state) is left untouched — only `hermes-agent-src` (the agent's installed Python source) is recreated.
+
+> The single-container setup (`docker-compose.yml`) does not use `hermes-agent-src` and is not affected by this upgrade pattern — pulling a newer WebUI image and `docker compose up -d --force-recreate` is sufficient.
+
+## What the multi-container setup isolates (and what it doesn't)
+
+The two- and three-container setups give you **process, network, and resource isolation** between the gateway and the chat UI:
+
+- Each service has its own PID namespace and lifecycle — the agent process can crash without taking down the chat UI and vice versa.
+- The gateway API (port 8642) is bound by the agent service only; the WebUI cannot bind it. Other containers reach the gateway via the `hermes-net` Docker network.
+- Resource limits (`deploy.resources.limits` in `docker-compose.three-container.yml`) apply per service, so you can cap the agent independently of the dashboard.
+- Restart policies, log streams, and container health checks are scoped per service.
+
+What multi-container does **not** isolate:
+
+- **Filesystem boundary.** Both services share `hermes-home` (config, sessions, state), and the WebUI mounts the agent's installed source from `hermes-agent-src`. The WebUI mount is read-only (since v0.51.84), but the agent service still has write access, and both services share the home volume.
+- **UID/GID boundary.** Both services default to `${UID:-1000}` so files written by one are readable by the other. If you align them to different UIDs you'll get permission errors on the shared volume.
+- **Trust boundary on the agent source.** The WebUI installs Python dependencies from the shared `hermes-agent-src` volume at startup. The read-only mount means a compromised WebUI cannot rewrite the agent source, but it does run code from that volume.
+
+If you need **filesystem isolation** between the chat UI and the agent (e.g. you don't trust the WebUI to read agent state), the multi-container setup is not enough — run the agent on a separate host and connect the WebUI to it via the gateway HTTP API. If you don't need any boundary, the single-container setup is simpler.
+
+The direct source mount is a compatibility bridge, not the long-term API contract. The current source/API boundary inventory and decoupling task list live in [`docs/rfcs/agent-source-boundary.md`](rfcs/agent-source-boundary.md) for [#2453](https://github.com/nesquena/hermes-webui/issues/2453). If you customize the compose files with bind mounts, keep the WebUI-side agent source mount read-only unless you are intentionally doing local development; `docker_init.bash` warns at startup when that path is writable.
 
 ## Bind-mount migration (advanced)
 
@@ -174,7 +305,8 @@ volumes:
 
 1. The host directory MUST be readable by your container UID. Run `id -u` on the host and ensure `~/.hermes` is owned by that UID (or readable via group bits).
 2. ALL containers sharing the volume must run as the SAME UID/GID. Set `UID=$(id -u)` and `GID=$(id -g)` in `.env`.
-3. If your host `.env` is mode 0640, set `HERMES_SKIP_CHMOD=1` or `HERMES_HOME_MODE=0640` so the startup hook doesn't try to enforce 0600.
+3. If you run Compose with sudo, do not rely on `${HOME}` defaults: `sudo` often changes `$HOME` to `/root`, so `${HERMES_HOME:-${HOME}/.hermes}` becomes `/root/.hermes`. Prefer running Docker as your user; otherwise pass absolute paths with `sudo -E`, for example `HERMES_HOME=/home/youruser/.hermes HERMES_WORKSPACE=/home/youruser/workspace sudo -E docker compose up -d`, and confirm the rendered bind mount with `docker compose config`.
+4. If your host `.env` is mode 0640, set `HERMES_SKIP_CHMOD=1` or `HERMES_HOME_MODE=0640` so the startup hook doesn't try to enforce 0600.
 
 ## Reference
 
@@ -187,8 +319,11 @@ volumes:
 
 ## Related issues
 
+- #1416 — agent-image upgrade requires removing `hermes-agent-src` named volume (see [Upgrading the agent container](#upgrading-the-agent-container))
 - #1389 — `HERMES_HOME_MODE` override (fixed in v0.50.254 — agent honors `HERMES_SKIP_CHMOD` and `HERMES_HOME_MODE`)
 - #1399 — UID alignment in compose files (fixed in v0.50.260 via PR #1428 + this guide)
+- #3012 — host `localhost` API URLs fail from Docker containers (use `host.docker.internal` / `host.containers.internal`)
+- #3006 — `sudo docker compose` can mount `/root/.hermes` instead of the user's Hermes home
 - #858 — two-container `/opt/hermes` path confusion
 - #681 — tools running in WebUI container, not agent container (architectural)
 - #668 — auto-detect UID/GID from mounted volume

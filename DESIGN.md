@@ -140,7 +140,7 @@ Use almost no shadows in the transcript. Shadows are reserved for popovers, drop
 
 ### Tool/thinking activity group
 
-Collapsed by default in settled history and during live runs. Summary line uses one disclosure for internals, e.g. `Activity: thinking + 4 tools · read_file, patch, terminal`. Expanding reveals thinking and individual tool cards together. Thinking and tools should not create separate transcript rows unless there is an error or approval state that needs attention.
+Collapsed by default in settled history and during live runs unless the user has explicitly opened that Activity row before. Persist open/closed disclosure state per chat and per turn, so switching away from a chat and coming back preserves the mode the user left it in. Summary line uses one disclosure for internals and stays intentionally terse, e.g. `Activity: 4 tools`. It should not repeat the always-present thinking area, list individual tool names, or add a second trailing count badge. Expanding reveals thinking and individual tool cards together. Thinking and tools should not create separate transcript rows unless there is an error or approval state that needs attention.
 
 ### Tool card
 

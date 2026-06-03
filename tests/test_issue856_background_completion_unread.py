@@ -74,17 +74,19 @@ def test_done_event_updates_sidebar_cache_immediately_after_completion_marker():
     done_block = _done_block()
 
     marker_idx = done_block.find("_markSessionCompletionUnread(completedSid")
-    delete_idx = done_block.find("delete INFLIGHT[activeSid];")
+    cleanup_idx = done_block.find("_clearOwnerInflightState();")
+    if cleanup_idx == -1:
+        cleanup_idx = done_block.find("delete INFLIGHT[activeSid];")
     cache_idx = done_block.find("_markSessionCompletedInList(completedSession, activeSid);")
     refresh_idx = done_block.find("renderSessionList();", cache_idx)
     sound_idx = done_block.find("playNotificationSound();", cache_idx)
 
     assert "function _markSessionCompletedInList(" in SESSIONS_JS
     assert marker_idx != -1, "done handler must write the completion-unread marker first"
-    assert delete_idx != -1, "done handler must clear local INFLIGHT before rendering idle state"
+    assert cleanup_idx != -1, "done handler must clear local INFLIGHT before rendering idle state"
     assert cache_idx != -1, "done handler must update the sidebar cache immediately"
     assert refresh_idx != -1 and sound_idx != -1
-    assert marker_idx < delete_idx < cache_idx < refresh_idx < sound_idx, (
+    assert marker_idx < cleanup_idx < cache_idx < refresh_idx < sound_idx, (
         "the sidebar should flip from spinner to dot from the done payload before "
         "waiting for /api/sessions or playing the completion cue"
     )
@@ -117,9 +119,15 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
         "_isSessionEffectivelyStreaming",
         "_markPollingCompletionUnreadTransitions",
     )
-    render_idx = SESSIONS_JS.find("async function renderSessionList()")
+    render_idx = SESSIONS_JS.find("async function renderSessionList")
     assert render_idx != -1, "renderSessionList not found"
-    render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("// ── Gateway session SSE", render_idx)]
+    refresh_idx = SESSIONS_JS.find("async function _runRenderSessionListRefresh")
+    assert refresh_idx != -1, "_runRenderSessionListRefresh not found"
+    refresh_block = SESSIONS_JS[refresh_idx:SESSIONS_JS.find("async function _drainRenderSessionListQueue", refresh_idx)]
+
+    apply_idx = SESSIONS_JS.find("function _applySessionListPayload(")
+    assert apply_idx != -1, "_applySessionListPayload not found"
+    apply_block = SESSIONS_JS[apply_idx:render_idx]
 
     assert "const _sessionStreamingById = new Map();" in SESSIONS_JS
     assert "const wasStreaming = _sessionStreamingById.get(sid);" in transition_block
@@ -130,7 +138,8 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
     )
     assert "_markSessionCompletionUnread(sid, s.message_count);" in transition_block
     assert "_sessionStreamingById.set(sid, isStreaming);" in transition_block
-    assert "_markPollingCompletionUnreadTransitions(_allSessions);" in render_block
+    assert "_applySessionListPayload(sessData,projData);" in refresh_block
+    assert "_markPollingCompletionUnreadTransitions(_allSessions);" in apply_block
 
 
 def test_polling_transition_does_not_mark_historical_first_render():
@@ -184,8 +193,8 @@ def test_polling_transition_tracks_the_same_effective_streaming_state_as_sidebar
     assert render_idx != -1, "_renderOneSession not found"
     render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("const hasUnread=", render_idx)]
 
-    assert "(isActive && S.busy)" in local_block
-    assert "INFLIGHT && INFLIGHT[s.session_id]" in local_block
+    assert "isActive && Boolean(S.busy)" in local_block
+    assert "INFLIGHT && INFLIGHT[s.session_id]" not in local_block
     assert "s.is_streaming || _isSessionLocallyStreaming(s)" in effective_block
     assert "const isStreaming=_isSessionEffectivelyStreaming(s);" in render_block, (
         "the row spinner and polling completion transition must use the same "
@@ -302,7 +311,7 @@ def test_hidden_active_done_still_updates_current_pane_but_not_read_state():
     viewed_const_idx = done_block.find("const isSessionViewed=_isSessionActivelyViewed(activeSid);")
     active_guard_idx = done_block.find("if(isActiveSession){", viewed_const_idx)
     session_update_idx = done_block.find("S.session=d.session", active_guard_idx)
-    render_idx = done_block.find("renderMessages()", active_guard_idx)
+    render_idx = done_block.find("renderMessages(", active_guard_idx)
     load_dir_idx = done_block.find("loadDir('.')", active_guard_idx)
     mark_viewed_idx = done_block.find("if(isSessionViewed) _markSessionViewed(completedSid", active_guard_idx)
 
@@ -352,8 +361,8 @@ def test_switching_away_counts_as_background_completion():
 
 
 def test_restore_settled_background_stream_marks_completion_unread():
-    restore_idx = MESSAGES_JS.find("async function _restoreSettledSession()")
-    assert restore_idx != -1, "_restoreSettledSession not found"
+    restore_idx = MESSAGES_JS.find("async function _restoreSettledSession(source)")
+    assert restore_idx != -1, "_restoreSettledSession(source) not found"
     restore_block = MESSAGES_JS[restore_idx:MESSAGES_JS.find("function _handleStreamError", restore_idx)]
 
     assert "const isSessionViewed=_isSessionActivelyViewed(activeSid);" in restore_block
@@ -382,7 +391,7 @@ def test_focus_visibility_return_marks_active_session_viewed_and_clears_marker()
 
 
 def test_completion_unread_clears_only_when_session_is_opened():
-    load_idx = SESSIONS_JS.find("async function loadSession(sid)")
+    load_idx = SESSIONS_JS.find("async function loadSession(sid")
     assert load_idx != -1, "loadSession not found"
     load_block = SESSIONS_JS[load_idx:SESSIONS_JS.find("function _resolveSessionModelForDisplaySoon", load_idx)]
 

@@ -26,13 +26,17 @@ def test_loadsession_preserves_tool_rows():
     )
 
 
-def test_loadsession_uses_session_toolcalls_only_as_fallback():
-    """Session summaries are the fallback, not the primary reload source."""
-    assert ("if(!hasMessageToolMetadata&&data.session.tool_calls&&data.session.tool_calls.length)" in SESSIONS_JS or
-            "if (!hasMessageToolMetadata && data.session.tool_calls && data.session.tool_calls.length)" in SESSIONS_JS)
-    assert ("S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));" in SESSIONS_JS or
-            "S.toolCalls = data.session.tool_calls.map(tc => ({...tc, done: true}));" in SESSIONS_JS)
-    assert "S.toolCalls=[];" in SESSIONS_JS
+def test_loadsession_uses_session_toolcalls_as_fallback_but_keeps_recovered_journal_cards():
+    """Session summaries are the fallback, but journal-recovered cards must survive mixed histories.
+
+    If a long session already has earlier assistant/tool metadata, reload still needs
+    the session-level `_recovered_from_run_journal` tool summaries for a later
+    interrupted turn whose recovered assistant anchor has no inline tool_calls.
+    """
+    assert "_recovered_from_run_journal" in SESSIONS_JS
+    assert "data.session.tool_calls" in SESSIONS_JS
+    assert "recoveredSessionToolCalls" in SESSIONS_JS
+    assert "const toolCalls = (!hasMessageToolMetadata && normalized.length) ? normalized : recoveredSessionToolCalls;" in SESSIONS_JS or "const toolCalls=(!hasMessageToolMetadata&&normalized.length)?normalized:recoveredSessionToolCalls;" in SESSIONS_JS
 
 
 def test_rendermessages_treats_openai_toolcall_assistants_as_visible():
@@ -48,13 +52,16 @@ def _run_js(script_body: str) -> dict:
             const hasMessageToolMetadata = filtered.some(m => {{
                 if (!m || m.role !== 'assistant') return false;
                 const hasTc = Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
+                const hasPartialTc = Array.isArray(m._partial_tool_calls) && m._partial_tool_calls.length > 0;
                 const hasTu = Array.isArray(m.content) && m.content.some(p => p && p.type === 'tool_use');
-                return hasTc || hasTu;
+                return hasTc || hasPartialTc || hasTu;
             }});
-            const toolCalls = (!hasMessageToolMetadata && sessionToolCalls && sessionToolCalls.length)
-                ? sessionToolCalls.map(tc => ({{ ...tc, done: true }}))
-                : [];
-            return {{ filtered, hasMessageToolMetadata, toolCalls }};
+            const normalized = (sessionToolCalls || []).map(tc => ({{ ...tc, done: true }}));
+            const recoveredSessionToolCalls = normalized.filter(tc => tc && tc._recovered_from_run_journal);
+            const toolCalls = (!hasMessageToolMetadata && normalized.length)
+                ? normalized
+                : recoveredSessionToolCalls;
+            return {{ filtered, hasMessageToolMetadata, recoveredSessionToolCalls, toolCalls }};
         }}
 
         {script_body}
@@ -114,3 +121,44 @@ def test_reload_uses_session_summary_when_messages_have_no_tool_metadata():
     assert result["has_metadata"] is False
     assert result["fallback_len"] == 1
     assert result["done_flag"] is True
+
+
+def test_reload_keeps_recovered_journal_toolcalls_even_when_older_messages_have_tool_metadata():
+    """Mixed sessions must not drop recovered journal cards for the interrupted tail turn."""
+    result = _run_js("""
+        const messages = [
+            { role: 'user', content: 'old request' },
+            { role: 'assistant', content: '', tool_calls: [{ id: 'call-1', function: { name: 'terminal', arguments: '{}' } }] },
+            { role: 'tool', tool_call_id: 'call-1', content: '{"output":"ok"}' },
+            { role: 'assistant', content: 'old complete answer' },
+            { role: 'user', content: 'new request after restart' },
+            { role: 'assistant', content: 'Recovered partial text only', _recovered_from_run_journal: true }
+        ];
+        const sessionToolCalls = [
+            {
+                name: 'terminal',
+                assistant_msg_idx: 5,
+                snippet: 'git status --short',
+                tid: 'journal-72',
+                _recovered_from_run_journal: true,
+            }
+        ];
+        const loaded = loadSessionShape(messages, sessionToolCalls);
+        process.stdout.write(JSON.stringify({
+            has_metadata: loaded.hasMessageToolMetadata,
+            tool_len: loaded.toolCalls.length,
+            recovered_only: loaded.toolCalls.length === 1 && loaded.toolCalls[0]._recovered_from_run_journal === true,
+            recovered_anchor: loaded.toolCalls[0] && loaded.toolCalls[0].assistant_msg_idx
+        }));
+    """)
+    assert result["has_metadata"] is True
+    assert result["tool_len"] == 1
+    assert result["recovered_only"] is True
+    assert result["recovered_anchor"] == 5
+
+
+def test_rendermessages_fallback_derives_cards_from_partial_tool_calls():
+    """Cancelled/recovered turns with only _partial_tool_calls still need settled tool cards."""
+    assert "const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;" in UI_JS
+    assert "if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls)" in UI_JS
+    assert "(m._partial_tool_calls||[]).forEach(tc=>{" in UI_JS

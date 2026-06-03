@@ -389,3 +389,226 @@ def test_regression_switch_profile_returns_target_model():
             profiles._DEFAULT_HERMES_HOME = orig
             profiles._active_profile = orig_act
             profiles._tls.profile = None
+
+
+def test_get_config_reloads_when_request_profile_changes(tmp_path, monkeypatch):
+    """get_config() must follow the per-request profile, not stale global cache."""
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    import api.config as config
+    import api.profiles as profiles
+
+    default_home = tmp_path / ".hermes"
+    work_home = default_home / "profiles" / "work"
+    work_home.mkdir(parents=True)
+    default_home.mkdir(exist_ok=True)
+    (default_home / "config.yaml").write_text(
+        "model:\n  provider: openai-codex\n  default: gpt-5.5\n",
+        encoding="utf-8",
+    )
+    (work_home / "config.yaml").write_text(
+        "model:\n  provider: openrouter\n  default: google/gemini-3-flash-preview\n",
+        encoding="utf-8",
+    )
+    same_mtime = 1_700_000_000
+    os.utime(default_home / "config.yaml", (same_mtime, same_mtime))
+    os.utime(work_home / "config.yaml", (same_mtime, same_mtime))
+
+    monkeypatch.setattr(
+        config,
+        "_get_config_path",
+        lambda: profiles.get_active_hermes_home() / "config.yaml",
+    )
+
+    orig_default_home = profiles._DEFAULT_HERMES_HOME
+    orig_active = profiles._active_profile
+    orig_cache = dict(config._cfg_cache)
+    orig_mtime = config._cfg_mtime
+    orig_path = getattr(config, "_cfg_path", None)
+    orig_fingerprint = getattr(config, "_cfg_fingerprint", None)
+    profiles._tls.profile = None
+    try:
+        profiles._DEFAULT_HERMES_HOME = default_home
+        profiles._active_profile = "default"
+        config._cfg_cache.clear()
+        config._cfg_mtime = 0.0
+        if hasattr(config, "_cfg_path"):
+            config._cfg_path = None
+        if hasattr(config, "_cfg_fingerprint"):
+            config._cfg_fingerprint = None
+
+        assert config.get_config()["model"]["provider"] == "openai-codex"
+        profiles.set_request_profile("work")
+        assert config._get_config_path() == work_home / "config.yaml"
+        assert config.get_config()["model"]["provider"] == "openrouter"
+    finally:
+        profiles.clear_request_profile()
+        profiles._DEFAULT_HERMES_HOME = orig_default_home
+        profiles._active_profile = orig_active
+        config._cfg_cache.clear()
+        config._cfg_cache.update(orig_cache)
+        config._cfg_mtime = orig_mtime
+        if hasattr(config, "_cfg_path"):
+            config._cfg_path = orig_path
+        if hasattr(config, "_cfg_fingerprint"):
+            config._cfg_fingerprint = orig_fingerprint
+
+
+def test_chat_start_retags_empty_session_to_request_profile(monkeypatch, tmp_path):
+    """An empty session created under profile A can be sent under profile B after a switch."""
+    import api.routes as routes
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "sid-profile-switch"
+            self.profile = "default"
+            self.workspace = str(tmp_path)
+            self.model = "google/gemini-3-flash-preview"
+            self.model_provider = "openrouter"
+            self.messages = []
+            self.context_messages = []
+            self.tool_calls = []
+            self.active_stream_id = None
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.saved = False
+
+        def save(self):
+            self.saved = True
+
+    fake = FakeSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: fake)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: tmp_path)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
+
+    started_threads = []
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            started_threads.append((args, kwargs))
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+
+    payloads = []
+
+    class Handler:
+        pass
+
+    def fake_j(handler, payload, status=200, **kwargs):
+        payloads.append((status, payload))
+        return payload
+
+    monkeypatch.setattr(routes, "j", fake_j)
+
+    body = {
+        "session_id": fake.session_id,
+        "message": "hello",
+        "workspace": str(tmp_path),
+        "model": fake.model,
+        "model_provider": fake.model_provider,
+        "profile": "work",
+    }
+    routes._handle_chat_start(Handler(), body)
+
+    assert fake.profile == "work"
+    assert fake.saved is True
+    assert started_threads, "chat_start should launch the stream after retagging"
+    assert payloads and payloads[-1][0] == 200
+
+
+def test_chat_start_does_not_retag_non_empty_session(monkeypatch, tmp_path):
+    """Profile retagging is limited to empty placeholder sessions."""
+    import api.routes as routes
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "sid-profile-switch-non-empty"
+            self.profile = "default"
+            self.workspace = str(tmp_path)
+            self.model = "google/gemini-3-flash-preview"
+            self.model_provider = "openrouter"
+            self.messages = [{"role": "user", "content": "previous turn"}]
+            self.context_messages = []
+            self.tool_calls = []
+            self.active_stream_id = None
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.saved = False
+
+        def save(self):
+            self.saved = True
+
+    fake = FakeSession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: fake)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda path: tmp_path)
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda model, provider: (model, provider, False),
+    )
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+    monkeypatch.setattr(routes, "j", lambda handler, payload, status=200, **kwargs: payload)
+
+    routes._handle_chat_start(
+        object(),
+        {
+            "session_id": fake.session_id,
+            "message": "hello",
+            "workspace": str(tmp_path),
+            "model": fake.model,
+            "model_provider": fake.model_provider,
+            "profile": "work",
+        },
+    )
+
+    assert fake.profile == "default"
+    assert fake.saved is True
+
+
+def test_chat_start_rejects_invalid_request_profile(monkeypatch):
+    """chat_start validates the optional profile payload before retagging."""
+    import api.routes as routes
+
+    class FakeSession:
+        profile = "default"
+
+    monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
+    errors = []
+
+    def fake_bad(handler, message, status=400):
+        errors.append((message, status))
+        return {"error": message}
+
+    monkeypatch.setattr(routes, "bad", fake_bad)
+
+    result = routes._handle_chat_start(
+        object(),
+        {
+            "session_id": "sid-invalid-profile",
+            "message": "hello",
+            "profile": "../etc",
+        },
+    )
+
+    assert result == {"error": "invalid profile"}
+    assert errors == [("invalid profile", 400)]

@@ -106,6 +106,7 @@ def _run_time_case(script_body: str, tz: str = "UTC") -> dict:
           session_time_hours_ago: (n) => `${{n}}h`,
           session_time_days_ago: (n) => `${{n}}d`,
           session_time_last_week: '1w',
+          session_time_bucket_recent: 'Recent',
           session_time_bucket_today: 'Today',
           session_time_bucket_yesterday: 'Yesterday',
           session_time_bucket_this_week: 'This week',
@@ -116,6 +117,7 @@ def _run_time_case(script_body: str, tz: str = "UTC") -> dict:
           const val = translations[key];
           return typeof val === 'function' ? val(...args) : val;
         }}
+        const SESSION_RECENT_WINDOW_MS = 3 * 60 * 60 * 1000;
         {functions}
         {script_body}
         """
@@ -202,7 +204,15 @@ def test_relative_time_uses_server_clock():
     """_formatRelativeSessionTime uses _serverNowMs() when nowMs is not passed."""
     result = _run_time_case(
         """
-        // Simulate server 8 hours behind client (common WSL scenario)
+        // Simulate server 8 hours behind client (common WSL scenario).
+        // Pin Date.now() to a clock-stable instant well away from any UTC
+        // calendar boundary so the test does not depend on what time CI
+        // happens to run. With _serverTimeDelta = +8h, _serverNowMs() returns
+        // (Date.now() - 8h). If Date.now() were unpinned and CI ran near
+        // 08:00 UTC, the projected server time would be ~midnight and the
+        // "5 minutes ago" subtraction would silently cross into yesterday.
+        const _origNow = Date.now;
+        Date.now = () => new Date('2026-05-06T20:00:00Z').getTime();
         _serverTimeDelta = 8 * 3600 * 1000;
         // Session created 5 minutes ago in server time
         const serverNow = _serverNowMs();
@@ -211,12 +221,13 @@ def test_relative_time_uses_server_clock():
           relative: _formatRelativeSessionTime(fiveMinAgo),
           bucket: _sessionTimeBucketLabel(fiveMinAgo),
         }));
+        Date.now = _origNow;
         """
     )
     # Without compensation, client thinks this session is 8h5m ago.
     # With compensation, it correctly shows "5m".
     assert result["relative"] == "5m"
-    assert result["bucket"] == "Today"
+    assert result["bucket"] == "Recent"
 
 
 def test_session_bucket_uses_server_clock():
@@ -232,7 +243,7 @@ def test_session_bucket_uses_server_clock():
         // Simulate server 8 hours ahead of client
         _serverTimeDelta = -8 * 3600 * 1000;
         const serverNow = _serverNowMs();
-        // Session created 2 hours ago in server time → should be Today
+        // Session created 2 hours ago in server time → should be Recent
         const twoHoursAgo = serverNow - 2 * 3600 * 1000;
         // Session created 26 hours ago → should be Yesterday
         const yesterday = serverNow - 26 * 3600 * 1000;
@@ -243,7 +254,7 @@ def test_session_bucket_uses_server_clock():
         }));
         """
     )
-    assert result["todayBucket"] == "Today"
+    assert result["todayBucket"] == "Recent"
     assert result["yesterdayBucket"] == "Yesterday"
     assert result["todayRelative"] == "2h"
 
@@ -263,7 +274,7 @@ def test_explicit_now_param_overrides_server_clock():
     )
     # Explicit now should be used, not server clock
     assert result["relative"] == "2h"
-    assert result["bucket"] == "Today"
+    assert result["bucket"] == "Recent"
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,9 @@
 from pathlib import Path
 
+from api.compression_anchor import visible_messages_for_anchor
+from api.models import Session
+from api.streaming import _is_fallback_lifecycle_message
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,6 +21,185 @@ def _compressed_listener_block() -> str:
     return src[start:end]
 
 
+def _compressing_listener_block() -> str:
+    src = _read("static/messages.js")
+    start = src.find("source.addEventListener('compressing'")
+    assert start != -1, "compressing SSE listener not found"
+    end = src.find("source.addEventListener('compressed'", start)
+    assert end != -1, "compressed listener after compressing SSE listener not found"
+    return src[start:end]
+
+
+def test_auto_compression_running_sse_uses_active_session_running_card():
+    block = _compressing_listener_block()
+
+    assert "if(!S.session||S.session.session_id!==activeSid) return;" in block
+    assert "if(d.session_id&&d.session_id!==activeSid) return;" in block
+    assert "try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }" in block
+    assert "setCompressionUi" in block
+    assert "phase:'running'" in block
+    assert "automatic:true" in block
+    assert "message:d.message||'Auto-compressing context...'" in block
+
+
+def test_agent_status_callback_emits_compressing_and_warning_events():
+    src = _read("api/streaming.py")
+    start = src.find("def _agent_status_callback")
+    assert start != -1, "agent status callback bridge not found"
+    end = src.find("# Initialised here", start)
+    assert end != -1, "status callback block end marker not found"
+    block = src[start:end]
+
+    # compressing events for compression lifecycle notices
+    assert "put('compressing'" in block
+    assert "'session_id': session_id" in block
+    assert "'message': 'Auto-compressing context to continue...'" in block
+    assert "'preflight compression'" in block
+    assert "'compressing'" in block
+    assert "'compacting context'" in block
+    assert "'context too large'" in block
+
+    # warning events with type:fallback for rate-limit/fallback lifecycle notices
+    assert "put('warning'" in block
+    assert "'type': 'fallback'" in block
+    assert "'rate limited'" in src
+    assert "'switching to fallback'" in src
+    assert "'falling back'" in src
+    assert "'fallback activated'" in src
+    assert "'trying fallback'" in src
+
+    # Verify callback is wired to agent
+    assert "'status_callback' in _agent_params" in src
+    assert "_agent_kwargs['status_callback'] = _agent_status_callback" in src
+    assert "agent.status_callback = _agent_kwargs.get('status_callback')" in src
+
+
+def test_agent_status_callback_wiring():
+    src = _read("api/streaming.py")
+    assert "_agent_status_callback" in src
+    assert "_agent_kwargs['status_callback'] = _agent_status_callback" in src
+
+
+def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
+    assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "Rate limited — switching to fallback provider...",
+    )
+    assert _is_fallback_lifecycle_message(
+        "lifecycle",
+        "Non-retryable error (HTTP 500) — trying fallback...",
+    )
+    assert not _is_fallback_lifecycle_message(
+        "tool",
+        "Rate limited — switching to fallback provider...",
+    )
+    assert not _is_fallback_lifecycle_message(
+        "lifecycle",
+        "Auto-compressing context to continue...",
+    )
+
+
+def test_auto_compression_completion_transition_is_preserved_after_running_listener():
+    src = _read("static/messages.js")
+    compressing_idx = src.find("source.addEventListener('compressing'")
+    compressed_idx = src.find("source.addEventListener('compressed'")
+    assert compressing_idx != -1 and compressed_idx != -1
+    assert compressing_idx < compressed_idx
+    assert "phase:'done'" in _compressed_listener_block()
+
+
+def test_auto_compression_running_sse_stamps_elapsed_timer_start():
+    block = _compressing_listener_block()
+
+    assert "startedAt:Date.now()/1000" in block
+    assert block.index("startedAt:Date.now()/1000") < block.index("setCompressionUi(state)")
+
+
+def test_auto_compression_running_card_renders_elapsed_timer_and_caps_updates():
+    src = _read("static/ui.js")
+    start = src.find("function _autoCompressionPreviewText")
+    assert start != -1, "auto compression preview helper not found"
+    end = src.find("function _compressionCardsNode", start)
+    assert end != -1, "compression cards node helper not found after auto helper"
+    helper = src[start:end]
+
+    assert "const _COMPRESSION_ELAPSED_MAX_SECONDS=5*60;" in src
+    assert "function _compressionElapsedLabel(state)" in src
+    assert "_formatActiveElapsedTimer" in src
+    assert "_compressionElapsedLabel(state)" in helper
+    assert "elapsedLabel" in helper
+    assert "_autoCompressionPreviewText(state)" in helper
+    assert "_autoCompressionDetailText(state)" in helper
+    assert "function _startCompressionElapsedTimer()" in src
+    assert "function _clearCompressionElapsedTimer()" in src
+    assert "function _updateCompressionElapsedCards(state)" in src
+    assert "_startCompressionElapsedTimer();" in src
+    assert "_clearCompressionElapsedTimer();" in src
+
+
+def test_auto_compression_elapsed_cap_uses_non_frozen_label():
+    src = _read("static/ui.js")
+    start = src.find("function _compressionElapsedLabel")
+    assert start != -1, "elapsed label helper not found"
+    end = src.find("function _compressionElapsedExpired", start)
+    assert end != -1, "elapsed expiry helper not found after label helper"
+    helper = src[start:end]
+
+    assert "'5+ min'" in helper
+    assert "elapsed>=_COMPRESSION_ELAPSED_MAX_SECONDS" in helper
+    assert "return '05:00'" not in helper
+
+
+def test_auto_compression_running_detail_avoids_duplicate_message_text():
+    src = _read("static/ui.js")
+    start = src.find("function _autoCompressionDetailText")
+    assert start != -1, "auto compression detail helper not found"
+    end = src.find("function _autoCompressionCardsHtml", start)
+    assert end != -1, "auto compression card helper not found after detail helper"
+    helper = src[start:end]
+
+    assert "return elapsedLabel?`Elapsed: ${elapsedLabel}`:base;" in helper
+    assert "${base}\\nElapsed:" not in helper
+
+
+def test_auto_compression_done_detail_surfaces_continuation_handoff():
+    src = _read("static/ui.js")
+    start = src.find("function _autoCompressionDetailText")
+    assert start != -1, "auto compression detail helper not found"
+    end = src.find("function _autoCompressionCardsHtml", start)
+    assert end != -1, "auto compression card helper not found after detail helper"
+    helper = src[start:end]
+
+    assert "continuationSessionId" in helper
+    assert "Continued in compressed session" in helper
+    assert "return [base,handoff].filter(Boolean).join('\\n');" in helper
+
+
+def test_auto_compression_live_card_keeps_elapsed_state_for_timer_refresh():
+    src = _read("static/ui.js")
+    start = src.find("function appendLiveCompressionCard")
+    assert start != -1, "live compression card append helper not found"
+    end = src.find("function _isHandoffSummaryToolPayload", start)
+    assert end != -1, "handoff helper not found after live compression helper"
+    helper = src[start:end]
+
+    assert "data-compression-started-at" in helper
+    assert "data-compression-message" in helper
+    assert "_compressionLiveCardState" in src
+
+
+def test_auto_compression_does_not_rerender_over_live_answer_text():
+    block = _compressing_listener_block()
+    src = _read("static/ui.js")
+
+    assert "const liveAnswerStarted=" in block
+    assert "appendLiveCompressionCard(state)" in block
+    assert block.index("appendLiveCompressionCard(state)") < block.index("renderMessages({preserveScroll:true})")
+    assert "window._compressionUi=null;" in block
+    assert "function appendLiveCompressionCard(state)" in src
+    assert 'data-live-compression-card' in src
+
+
 def test_auto_compression_sse_uses_transient_card_not_fake_message():
     """Auto compression must not inject display-only text into S.messages."""
     src = _read("static/messages.js")
@@ -28,15 +211,94 @@ def test_auto_compression_sse_uses_transient_card_not_fake_message():
     assert "phase:'done'" in block
     assert "automatic:true" in block
     assert "_setCompressionSessionLock" in block
+    assert "const appended=typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state);" in block
+    assert "window._compressionUi=null;" in block
+    assert block.index("appendLiveCompressionCard(state)") < block.index("window._compressionUi=null;")
 
 
 def test_auto_compression_sse_keeps_inactive_and_malformed_paths_safe():
     block = _compressed_listener_block()
 
-    guard = "if(!S.session||S.session.session_id!==activeSid) return;"
+    guard = "if(!S.session) return;"
     assert guard in block
     assert block.index(guard) < block.index("setCompressionUi")
     assert "try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }" in block
+    assert "const eventSid=d.old_session_id||d.session_id||activeSid;" in block
+    assert "const eventMatchesCurrent=" in block
+    event_guard = "if(!eventMatchesCurrent) return;"
+    assert event_guard in block
+    assert block.index("const eventMatchesCurrent=") < block.index(event_guard)
+
+
+def test_auto_compression_done_accepts_rotated_continuation_session_event():
+    block = _compressed_listener_block()
+
+    # Auto-compression can rotate the backend session id before the 'compressed'
+    # event is emitted. The browser stream still belongs to the pre-compression
+    # activeSid, so the listener must correlate on old_session_id and keep the
+    # continuation id as display metadata instead of dropping the event.
+    assert "const eventSid=d.old_session_id||d.session_id||activeSid;" in block
+    assert "const continuationSid=d.new_session_id||d.continuation_session_id||'';" in block
+    event_guard = "if(!eventMatchesCurrent) return;"
+    assert event_guard in block
+    assert block.index("const eventSid=") < block.index("const eventMatchesCurrent=")
+    assert "continuationSessionId:continuationSid" in block
+
+
+def test_auto_compression_done_accepts_event_after_current_session_rotates():
+    block = _compressed_listener_block()
+
+    # The final compressed event can arrive/replay after another event has already
+    # updated S.session to the continuation session id. Do not drop it just
+    # because the active browser session no longer equals the original activeSid.
+    strict_active_guard = "if(!S.session||S.session.session_id!==activeSid) return;"
+    assert strict_active_guard not in block
+    assert "if(!S.session) return;" in block
+    assert "const currentSid=S.session.session_id;" in block
+    assert "const eventMatchesCurrent=" in block
+    assert "const displaySid=currentSid;" in block
+    assert "sessionId:displaySid" in block
+    assert block.index("const eventSid=") < block.index("const eventMatchesCurrent=")
+    assert block.index("const displaySid=") < block.index("setCompressionUi(state)")
+
+
+def test_auto_compression_done_sse_refreshes_context_indicator_usage():
+    block = _compressed_listener_block()
+
+    assert "if(d.usage&&typeof _syncCtxIndicator==='function')" in block
+    assert "S.lastUsage={...(S.lastUsage||{}),...d.usage};" in block
+    assert "_syncCtxIndicator(S.lastUsage);" in block
+    assert block.index("_syncCtxIndicator(S.lastUsage);") < block.index("setCompressionUi")
+
+
+def test_auto_compression_done_payload_includes_live_usage_snapshot():
+    src = _read("api/streaming.py")
+    start = src.find("put('compressed'")
+    assert start != -1, "compressed SSE payload not found"
+    end = src.find("})", start)
+    assert end != -1, "compressed SSE payload end not found"
+    block = src[start:end]
+
+    assert "'session_id': _compression_origin_session_id" in block
+    assert "'old_session_id': _compression_origin_session_id" in block
+    assert "'new_session_id': _compression_continuation_session_id" in block
+    assert "'continuation_session_id': _compression_continuation_session_id" in block
+    assert "'usage': _live_usage_snapshot()" in block
+
+
+def test_auto_compression_rotation_tracks_origin_and_continuation_ids_for_sse():
+    src = _read("api/streaming.py")
+    rotate_start = src.find("# ── Handle context compression side effects ──")
+    assert rotate_start != -1, "compression side-effect block not found"
+    rotate_end = src.find("# Stamp 'timestamp'", rotate_start)
+    assert rotate_end != -1, "compression side-effect block end not found"
+    block = src[rotate_start:rotate_end]
+
+    assert "_compression_origin_session_id = session_id" in block
+    assert "_compression_continuation_session_id = None" in block
+    assert "_compression_origin_session_id = old_sid" in block
+    assert "_compression_continuation_session_id = new_sid" in block
+    assert "'new_session_id': _compression_continuation_session_id" in block
 
 
 def test_auto_compression_card_reuses_compression_card_renderer():
@@ -51,6 +313,21 @@ def test_auto_compression_card_reuses_compression_card_renderer():
     assert "tool-card-row compression-card-row" in helper
     assert "tool-card-compress-complete tool-card-compress-auto" in helper
     assert "auto_compress_label" in helper
+
+
+def test_auto_compression_compressed_sse_showtoast_has_explicit_longer_duration():
+    block = _compressed_listener_block()
+
+    assert 'showToast' in block
+    # Must call showToast with an explicit duration that is meaningfully longer
+    # than the default (3000 ms) so the compressed event toast is harder to miss.
+    import re
+    m = re.search(r'showToast\(.*?,\s*(\d+)\s*\)', block)
+    assert m is not None, 'showToast call in compressed SSE handler has no explicit duration'
+    duration = int(m.group(1))
+    assert duration >= 8000, (
+        f'compressed SSE showToast duration ({duration} ms) must be >= 8000 ms'
+    )
 
 
 def test_auto_compression_card_survives_compression_session_rotation():
@@ -142,6 +419,159 @@ def test_preserved_task_list_renders_through_compression_card_path():
     assert "_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard)" in src
 
 
+def test_context_anchor_reference_uses_session_summary_fallback():
+    src = _read("static/ui.js")
+
+    assert "sessionCompressionSummary" in src
+    assert "const sessionCompressionSummary" in src
+    assert "referenceText=referenceMessage" in src
+    assert ": sessionCompressionSummary" in src
+    assert "!!referenceText && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary)" in src
+
+
+def test_compression_anchor_matching_tolerates_legacy_missing_timestamp():
+    src = _read("static/ui.js")
+    start = src.find("function _compressionAnchorIndex")
+    assert start != -1, "compression anchor matcher not found"
+    end = src.find("function _compressionReferenceCardHtml", start)
+    assert end != -1, "compression reference renderer not found after anchor matcher"
+    helper = src[start:end]
+
+    assert "const anchorTs=String(anchorKey.ts??'');" in helper
+    assert "const candidateTs=String(candidate.ts??'');" in helper
+    assert "(!anchorTs||!candidateTs||candidateTs===anchorTs)" in helper
+
+
+def test_compression_anchor_index_is_translated_into_render_window():
+    src = _read("static/ui.js")
+    start = src.find("const insertionAnchorFull=_compressionAnchorIndex")
+    assert start != -1, "full compression anchor lookup not found"
+    end = src.find("let _prevSepKey=null", start)
+    assert end != -1, "message render loop marker not found after anchor lookup"
+    block = src[start:end]
+
+    assert "_compressionAnchorIndex(\n    visWithIdx," in block
+    assert "insertionAnchorFull<windowStart" in block
+    assert "insertionAnchorFull-windowStart" in block
+    assert "windowStart+renderVisWithIdx.length" in block
+
+
+def test_reference_message_uses_raw_transcript_position_before_anchor_fallback():
+    src = _read("static/ui.js")
+
+    assert "const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(" in src
+    assert "if(referenceNode&&referenceMessageRawIdx>=0) _insertCompressionLikeNodeByRawIdx(referenceNode, referenceMessageRawIdx);" in src
+    assert "else _insertCompressionLikeNode(referenceNode);" in src
+
+
+def test_reference_message_inserted_before_future_assistant_anchor():
+    src = _read("static/ui.js")
+    start = src.find("function _insertCompressionLikeNodeByRawIdx")
+    assert start != -1, "raw-index insertion helper not found"
+    end = src.find("const preservedOnlyNode", start)
+    assert end != -1, "raw-index insertion helper end marker not found"
+    helper = src[start:end]
+
+    assert "const anchorSeg=assistantSegments.get(anchorRawIdx);" in helper
+    assert "blocks.insertBefore(node, anchorSeg);" in helper
+    assert helper.index("blocks.insertBefore(node, anchorSeg);") < helper.index("const userRow=userRows.get(anchorRawIdx);")
+
+
+def test_frontend_uses_context_engine_metadata_for_indexed_context_copy():
+    src = _read("static/ui.js")
+    i18n = _read("static/i18n.js")
+
+    assert "function _compressionEngineForSession" in src
+    assert "S.session.compression_anchor_engine" in src
+    assert "S.session.context_engine" in src
+    assert "function _compressionModeForSession" in src
+    assert "S.session.compression_anchor_mode" in src
+    assert "function _engineAwareCompressionCopy" in src
+    assert "mode==='lossless_retrieval'" in src
+    assert "t('retrieval_context_label')" in src
+    assert "t('retrieval_context_preview')" in src
+    assert "retrieval_context_label" in i18n
+    assert "retrieval_context_preview" in i18n
+
+
+def test_session_model_round_trips_context_engine_metadata(tmp_path, monkeypatch):
+    import api.models as models
+
+    state_dir = tmp_path / "state"
+    session_dir = state_dir / "sessions"
+    session_dir.mkdir(parents=True)
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", state_dir / "session_index.json")
+
+    session = Session(
+        session_id="lcm_metadata",
+        workspace=str(tmp_path),
+        context_engine="lcm",
+        compression_anchor_engine="lcm",
+        compression_anchor_mode="lossless_retrieval",
+        compression_anchor_details={"retrieval_tools": ["lcm_grep"]},
+        context_engine_state={"status": "indexed"},
+    )
+    session.save(touch_updated_at=False)
+
+    loaded = Session.load("lcm_metadata")
+    assert loaded.context_engine == "lcm"
+    assert loaded.compression_anchor_engine == "lcm"
+    assert loaded.compression_anchor_mode == "lossless_retrieval"
+    assert loaded.compression_anchor_details == {"retrieval_tools": ["lcm_grep"]}
+    assert loaded.context_engine_state == {"status": "indexed"}
+
+
+def test_backend_auto_anchor_count_excludes_compaction_marker_cards():
+    messages = [
+        {"role": "user", "content": "before compression"},
+        {"role": "assistant", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] summary"},
+        {"role": "assistant", "content": "after compression"},
+        {"role": "tool", "content": "hidden tool output"},
+        {"role": "user", "content": "[Your active task list was preserved across context compression]"},
+    ]
+
+    visible = visible_messages_for_anchor(messages, auto_compression=True)
+
+    assert [m["content"] for m in visible] == ["before compression", "after compression"]
+
+
+def test_frontend_reference_insertion_skips_when_reference_is_before_render_window():
+    src = _read("static/ui.js")
+    start = src.find("function _insertCompressionLikeNodeByRawIdx")
+    assert start != -1, "raw-index insertion helper not found"
+    end = src.find("const preservedOnlyNode=", start)
+    assert end != -1, "raw-index insertion helper end not found"
+    helper = src[start:end]
+
+    assert "if(rawIdx<firstRenderedRawIdx) return;" in helper
+
+
+def test_reference_message_selection_prefers_latest_matching_marker():
+    src = _read("static/ui.js")
+    start = src.find("function _latestCompressionReferenceMessage")
+    assert start != -1, "compression reference selection helper not found"
+    end = src.find("function _compressionReferenceCardHtml", start)
+    assert end != -1, "compression reference renderer not found after selection helper"
+    helper = src[start:end]
+
+    assert "for(let i=messages.length-1;i>=0;i--)" in helper
+    assert "if(!summaryNorm) return {message:m, rawIdx:i};" in helper
+    assert "if(contentNorm.includes(summaryNorm)) return {message:m, rawIdx:i};" in helper
+
+
+def test_reference_message_falls_back_to_current_summary_when_only_stale_markers_exist():
+    src = _read("static/ui.js")
+    start = src.find("function _latestCompressionReferenceMessage")
+    assert start != -1, "compression reference selection helper not found"
+    end = src.find("function _compressionReferenceCardHtml", start)
+    assert end != -1, "compression reference renderer not found after selection helper"
+    helper = src[start:end]
+
+    assert "const summaryNorm=String(summaryText||'').replace(/\\s+/g,' ').trim();" in helper
+    assert "return {message:null, rawIdx:-1};" in helper
+
+
 def test_preserved_task_list_attaches_once_per_render():
     src = _read("static/ui.js")
 
@@ -153,6 +583,20 @@ def test_preserved_task_list_attaches_once_per_render():
     assert "const preservedForThisCard=preservedCompressionTaskCardsAttached?[]:preservedCompressionTaskMessages;" in src
     assert "if(preservedForThisCard.length) preservedCompressionTaskCardsAttached=true;" in src
     assert "(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)" in src
+
+
+def test_preserved_task_list_is_suppressed_when_latest_todo_state_has_no_active_items():
+    src = _read("static/ui.js")
+    start = src.find("function _latestTodoToolItems")
+    assert start != -1, "latest todo state helper not found"
+    end = src.find("function _isSameLocalDay", start)
+    assert end != -1, "preserved-task-list helper block end not found"
+    helpers = src[start:end]
+
+    assert "if(payload&&Array.isArray(payload.todos)) return payload.todos;" in helpers
+    assert "function _hasActiveTodoItems" in helpers
+    assert "status==='pending'||status==='in_progress'" in helpers
+    assert "if(Array.isArray(latestTodos) && !_hasActiveTodoItems(latestTodos)) return [];" in helpers
 
 
 def test_preserved_task_list_rendering_does_not_mutate_history():

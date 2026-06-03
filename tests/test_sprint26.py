@@ -92,6 +92,16 @@ def test_settings_set_skin_poseidon():
         post("/api/settings", {"skin": "default"})
 
 
+def test_settings_set_skin_poseidon_green():
+    """Setting skin to 'poseidon-green' should persist."""
+    try:
+        post("/api/settings", {"skin": "poseidon-green"})
+        d, _ = get("/api/settings")
+        assert d.get("skin") == "poseidon-green"
+    finally:
+        post("/api/settings", {"skin": "default"})
+
+
 def test_settings_legacy_theme_maps_to_dark_skin_pair():
     """Legacy theme names should map to the closest supported theme + skin."""
     try:

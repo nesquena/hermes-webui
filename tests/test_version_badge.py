@@ -3,11 +3,12 @@ Tests for the dynamic version badge (issue: stale hardcoded version strings).
 
 Covers:
   1. api/updates.py: _detect_webui_version() resolution chain
-  2. api/updates.py: WEBUI_VERSION module constant is set and non-empty
-  3. api/routes.py: GET /api/settings includes webui_version key
-  4. static/index.html: hardcoded stale badge is gone
-  5. static/panels.js: loadSettingsPanel() populates badge from settings
-  6. server.py: server_version is not the old hardcoded string
+  2. api/updates.py: _detect_agent_version() detection fallback
+  3. api/updates.py: WEBUI_VERSION module constant is set and non-empty
+  4. api/routes.py: GET /api/settings includes webui_version and agent_version keys
+  5. static/index.html: two version badges are present
+  6. static/panels.js: loadSettingsPanel() populates both version badges from settings
+  7. server.py: server_version is not the old hardcoded string
 """
 import importlib
 import sys
@@ -86,8 +87,8 @@ class TestDetectWebUIVersion:
         )
         assert result == 'unknown'
 
-    def test_git_uses_correct_describe_flags(self, tmp_path):
-        """git describe is called with --tags --always --dirty."""
+    def test_git_uses_fast_describe_flags(self, tmp_path):
+        """git describe avoids --dirty so WSL /mnt checkouts do not stall."""
         called_args = []
 
         def capture(args, cwd, timeout=10):
@@ -98,11 +99,97 @@ class TestDetectWebUIVersion:
         assert called_args, 'git was never called'
         assert '--tags' in called_args[0]
         assert '--always' in called_args[0]
-        assert '--dirty' in called_args[0]
+        assert '--dirty' not in called_args[0]
+
+    def test_dirty_check_appends_suffix_when_fast(self, tmp_path):
+        """A dirty worktree still gets a suffix when the cheap probe returns quickly."""
+        calls = []
+
+        def fake_run_git(args, cwd, timeout=10):
+            calls.append((args, timeout))
+            if args[:3] == ['describe', '--tags', '--always']:
+                return ('v0.50.123', True)
+            if args[:2] == ['diff-index', '--quiet']:
+                return ('', False)
+            return ('unexpected', False)
+
+        result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)
+        assert result == 'v0.50.123-dirty'
+        assert calls[1][0][:2] == ['diff-index', '--quiet']
+
+    def test_dirty_check_timeout_does_not_hide_base_version(self, tmp_path):
+        """If dirty detection times out, keep the base version instead of unknown."""
+        def fake_run_git(args, cwd, timeout=10):
+            if args[:3] == ['describe', '--tags', '--always']:
+                return ('v0.50.123', True)
+            if args[:2] == ['diff-index', '--quiet']:
+                return ('git diff-index --quiet HEAD -- timed out after 1s', False)
+            return ('unexpected', False)
+
+        result = self._fresh_detect(mock_run_git=fake_run_git, tmp_path=tmp_path)
+        assert result == 'v0.50.123'
 
 
 # ---------------------------------------------------------------------------
-# 2. WEBUI_VERSION module constant
+# 2. _detect_agent_version — resolution chain
+# ---------------------------------------------------------------------------
+
+class TestDetectAgentVersion:
+
+    def _fresh_detect(self, mock_run_git=None, version_file_content=None, tmp_path=None):
+        """Call _detect_agent_version() with controlled dependencies."""
+        import api.updates as upd
+
+        fake_root = tmp_path or Path('/nonexistent-agent-path')
+
+        if version_file_content is not None:
+            vf = fake_root / 'VERSION'
+            vf.write_text(version_file_content, encoding='utf-8')
+
+        def _run_git_side_effect(args, cwd, timeout=10):
+            if mock_run_git is not None:
+                return mock_run_git(args, cwd, timeout)
+            return ('', False)
+
+        with patch.object(upd, '_run_git', side_effect=_run_git_side_effect), \
+             patch.object(upd, '_AGENT_DIR', fake_root):
+            return upd._detect_agent_version()
+
+    def test_version_file_is_preferred(self, tmp_path):
+        """Agent VERSION file should be read before git fallback."""
+        result = self._fresh_detect(
+            mock_run_git=lambda args, cwd, timeout: ('v0.50.999', True),
+            version_file_content='v0.60.1\n',
+            tmp_path=tmp_path,
+        )
+        assert result == 'v0.60.1'
+
+    def test_git_fallback_used_when_version_file_missing(self, tmp_path):
+        """When VERSION file is absent, we fall back to git describe in agent path."""
+        (tmp_path / '.git').mkdir()
+        result = self._fresh_detect(
+            mock_run_git=lambda args, cwd, timeout: ('v0.60.2', True),
+            tmp_path=tmp_path,
+        )
+        assert result == 'v0.60.2'
+
+    def test_missing_agent_returns_not_detected(self):
+        """When no agent checkout is available, detect function returns 'not detected'."""
+        import api.updates as upd
+        with patch.object(upd, '_AGENT_DIR', None):
+            assert upd._detect_agent_version() == 'not detected'
+
+    def test_agent_detect_returns_not_detected_on_fail(self, tmp_path):
+        """Git fallback failure should remain user-friendly and not raise."""
+        result = self._fresh_detect(
+            mock_run_git=lambda args, cwd, timeout: ('', False),
+            tmp_path=tmp_path,
+        )
+        assert result == 'not detected'
+
+
+# ---------------------------------------------------------------------------
+# 3. WEBUI_VERSION module constant
 # ---------------------------------------------------------------------------
 
 class TestWebUIVersionConstant:
@@ -124,7 +211,7 @@ class TestWebUIVersionConstant:
 
 
 # ---------------------------------------------------------------------------
-# 3. GET /api/settings includes webui_version
+# 4. GET /api/settings includes webui_version and agent_version
 # ---------------------------------------------------------------------------
 
 class TestSettingsEndpointVersion:
@@ -154,9 +241,13 @@ class TestSettingsEndpointVersion:
             '/api/settings response must contain webui_version key'
         )
         assert captured['data']['webui_version'] == upd.WEBUI_VERSION
+        assert 'agent_version' in captured.get('data', {}), (
+            '/api/settings response must contain agent_version key'
+        )
+        assert captured['data']['agent_version'] == upd.AGENT_VERSION
 
     def test_api_settings_webui_version_not_empty(self):
-        """webui_version in /api/settings must be a non-empty string."""
+        """webui_version and agent_version in /api/settings must be non-empty strings."""
         import api.routes as routes
 
         handler = MagicMock()
@@ -174,6 +265,8 @@ class TestSettingsEndpointVersion:
 
         version = captured.get('data', {}).get('webui_version', '')
         assert version, 'webui_version in /api/settings must not be empty'
+        agent_version = captured.get('data', {}).get('agent_version', '')
+        assert agent_version, 'agent_version in /api/settings must not be empty'
 
     def test_api_settings_no_password_hash(self):
         """password_hash must still be stripped even with version injection."""
@@ -198,7 +291,7 @@ class TestSettingsEndpointVersion:
 
 
 # ---------------------------------------------------------------------------
-# 4. static/index.html — no stale hardcoded badge
+# 5. static/index.html — version badges
 # ---------------------------------------------------------------------------
 
 class TestIndexHTMLBadge:
@@ -215,15 +308,18 @@ class TestIndexHTMLBadge:
         )
 
     def test_badge_element_still_present(self):
-        """settings-version-badge span must still be in the DOM (JS needs the target)."""
+        """System version badge spans must still be in the DOM for both WebUI and Agent pills."""
         html = self._read_html()
-        assert 'settings-version-badge' in html, (
-            'settings-version-badge span missing from index.html — JS cannot populate it'
+        assert 'settings-webui-version-badge' in html, (
+            'WebUI badge element missing from index.html'
+        )
+        assert 'settings-agent-version-badge' in html, (
+            'Agent badge element missing from index.html'
         )
 
 
 # ---------------------------------------------------------------------------
-# 5. static/panels.js — badge population from settings
+# 6. static/panels.js — badge population from settings
 # ---------------------------------------------------------------------------
 
 class TestPanelsJSVersionBadge:
@@ -239,16 +335,22 @@ class TestPanelsJSVersionBadge:
             'to populate the badge dynamically'
         )
 
-    def test_panels_js_targets_version_badge(self):
-        """panels.js must target the .settings-version-badge element."""
+    def test_panels_js_targets_version_badges(self):
+        """loadSettingsPanel must target the two version badge elements."""
         src = self._read_js()
-        assert 'settings-version-badge' in src, (
-            'panels.js must query .settings-version-badge to update the badge text'
+        assert 'settings-webui-version-badge' in src, (
+            'panels.js must query #settings-webui-version-badge to update the WebUI text'
+        )
+        assert 'settings-agent-version-badge' in src, (
+            'panels.js must query #settings-agent-version-badge to update the Agent text'
+        )
+        assert 'agent_version' in src, (
+            'loadSettingsPanel must read settings.agent_version to populate the agent badge'
         )
 
 
 # ---------------------------------------------------------------------------
-# 6. server.py — server_version not the old hardcoded string
+# 7. server.py — server_version not the old hardcoded string
 # ---------------------------------------------------------------------------
 
 class TestServerVersionHeader:

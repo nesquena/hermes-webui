@@ -85,7 +85,7 @@ def _setup_clean_config(monkeypatch, tmp_path):
         "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY",
         "GOOGLE_API_KEY", "GEMINI_API_KEY", "GLM_API_KEY",
         "KIMI_API_KEY", "DEEPSEEK_API_KEY", "MINIMAX_API_KEY",
-        "MISTRAL_API_KEY", "XAI_API_KEY", "OLLAMA_API_KEY",
+        "XIAOMI_API_KEY", "MISTRAL_API_KEY", "XAI_API_KEY", "OLLAMA_API_KEY",
         "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY",
     ]
     for var in _provider_env_vars:

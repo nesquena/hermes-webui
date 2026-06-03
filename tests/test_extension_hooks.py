@@ -119,7 +119,7 @@ def test_extension_route_remains_behind_webui_auth(monkeypatch):
     # when constructing the redirect Location header.
     assert check_auth(extension, SimpleNamespace(path="/extensions/app.js", query="")) is False
     assert extension.status == 302
-    assert extension.header("Location") == "/login?next=/extensions/app.js"
+    assert extension.header("Location") == "login?next=/extensions/app.js"
 
     # Existing core static assets remain public; extension assets intentionally
     # do not share that exemption because they are administrator-supplied code.

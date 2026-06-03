@@ -50,12 +50,14 @@ class TestApiRetryOnNetworkError:
             "api() must limit to 3 attempts max (attempt < 2)"
 
     def test_api_preserves_401_redirect(self):
-        """api() must still redirect to /login on 401 (auth expired)."""
+        """api() must still redirect to login on 401 without escaping subpath mounts."""
         src = _src()
         assert "res.status===401" in src, \
             "api() must still check for 401 status"
-        assert "/login?next=" in src, \
-            "api() must still redirect to /login on 401"
+        assert "login?next=" in src, \
+            "api() must still redirect to login on 401"
+        assert "/login?next=" not in src, \
+            "api() must not escape subpath mounts by redirecting to root /login"
 
     def test_api_preserves_error_parsing(self):
         """api() must still parse JSON error bodies for non-200 responses."""

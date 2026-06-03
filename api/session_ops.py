@@ -27,6 +27,16 @@ def _truncate_at_last_user(messages):
     return history[:last_user_idx]
 
 
+def _truncation_watermark_for(messages):
+    history = list(messages or [])
+    if not history:
+        return 0.0
+    try:
+        return float(history[-1].get('timestamp') or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
 def retry_last(session_id: str) -> dict[str, Any]:
     """Truncate the session to before the last user message, return its text.
 
@@ -75,6 +85,7 @@ def retry_last(session_id: str) -> dict[str, Any]:
             last_user_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
             s.messages = history[:last_user_idx]
+            s.truncation_watermark = _truncation_watermark_for(s.messages)
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:
@@ -114,6 +125,7 @@ def undo_last(session_id: str) -> dict[str, Any]:
             removed_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
             s.messages = history[:last_user_idx]
+            s.truncation_watermark = _truncation_watermark_for(s.messages)
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
                 truncated_context = _truncate_at_last_user(s.context_messages)
                 if truncated_context is not None:

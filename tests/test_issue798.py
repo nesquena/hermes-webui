@@ -9,7 +9,9 @@ get_hermes_home_for_profile() resolves a HERMES_HOME path from a name without
 touching os.environ or module-level state.
 """
 
+import json
 import os
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -69,6 +71,96 @@ def test_get_hermes_home_for_profile_does_not_mutate_globals():
     assert os.environ.get('HERMES_HOME') == before_hermes_home, (
         "get_hermes_home_for_profile() must not mutate os.environ['HERMES_HOME']"
     )
+
+
+def _run_profile_resolution_probe(env):
+    script = r'''
+import json
+from pathlib import Path
+import api.profiles as p
+import api.models as m
+
+p.set_request_profile('foo')
+foo_home = p.get_active_hermes_home()
+explicit_foo_home = p.get_hermes_home_for_profile('foo')
+foo_runtime = p.get_profile_runtime_env(explicit_foo_home)
+model_home = m._get_profile_home('foo')
+explicit_bar_home = p.get_hermes_home_for_profile('bar')
+p.set_request_profile('bar')
+active_bar_home = p.get_active_hermes_home()
+print(json.dumps({
+    'default_home': str(p._DEFAULT_HERMES_HOME),
+    'foo_home': str(foo_home),
+    'explicit_foo_home': str(explicit_foo_home),
+    'foo_terminal_cwd': foo_runtime.get('TERMINAL_CWD'),
+    'model_home': str(model_home),
+    'explicit_bar_home': str(explicit_bar_home),
+    'active_bar_home': str(active_bar_home),
+}))
+'''
+    result = subprocess.run(
+        [sys.executable, '-c', script],
+        cwd=Path(__file__).parent.parent,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return json.loads(result.stdout)
+
+
+def test_hermes_base_home_named_profile_matches_cookie_without_doubling(tmp_path):
+    """R19k / #749: HERMES_BASE_HOME may point directly at a named profile home.
+
+    A single-profile WebUI deployment can start with both HERMES_BASE_HOME and
+    HERMES_HOME set to /base/profiles/foo while the browser still sends the
+    logical cookie hermes_profile=foo.  Both active-profile and explicit
+    per-request helpers must use /base/profiles/foo, not the doubled
+    /base/profiles/foo/profiles/foo path — even if that nested path already
+    exists from a prior bad write.
+    """
+    profile_home = tmp_path / 'profiles' / 'foo'
+    doubled_home = profile_home / 'profiles' / 'foo'
+    doubled_home.mkdir(parents=True)
+    profile_home.joinpath('config.yaml').write_text(
+        'terminal:\n  cwd: /expected/profile-home\n', encoding='utf-8'
+    )
+    doubled_home.joinpath('config.yaml').write_text(
+        'terminal:\n  cwd: /wrong/doubled-home\n', encoding='utf-8'
+    )
+
+    env = os.environ.copy()
+    env.update({
+        'HERMES_BASE_HOME': str(profile_home),
+        'HERMES_HOME': str(profile_home),
+    })
+    data = _run_profile_resolution_probe(env)
+
+    assert data['default_home'] == str(tmp_path)
+    assert data['foo_home'] == str(profile_home)
+    assert data['explicit_foo_home'] == str(profile_home)
+    assert data['foo_terminal_cwd'] == '/expected/profile-home'
+    assert data['model_home'] == str(profile_home)
+
+
+def test_hermes_base_home_named_profile_nonmatching_cookie_uses_sibling_profile_path(tmp_path):
+    """R19l / #749: non-matching cookies must not silently route to the pinned home.
+
+    When HERMES_BASE_HOME is supplied as /base/profiles/foo but the request asks
+    for logical profile bar, preserving base semantics means bar resolves to the
+    sibling /base/profiles/bar.  It must not fall back to foo, and it must not
+    append bar under foo/profiles/bar.
+    """
+    profile_home = tmp_path / 'profiles' / 'foo'
+    profile_home.mkdir(parents=True)
+
+    env = os.environ.copy()
+    env.update({'HERMES_BASE_HOME': str(profile_home)})
+    data = _run_profile_resolution_probe(env)
+
+    expected_bar_home = tmp_path / 'profiles' / 'bar'
+    assert data['explicit_bar_home'] == str(expected_bar_home)
+    assert data['active_bar_home'] == str(expected_bar_home)
 
 
 # ── R19e-h: new_session() profile isolation ───────────────────────────────────
@@ -172,6 +264,48 @@ def test_sessions_js_sends_profile_in_new_session_post():
         "sessions.js newSession() must send profile: S.activeProfile in the POST body "
         "so the server uses the tab's active profile, not the process global."
     )
+
+
+def test_new_session_uses_explicit_profile_default_model_and_provider(tmp_path, monkeypatch):
+    """New chats must inherit the selected profile's config default."""
+    import api.profiles as p
+    import api.models as m
+
+    monkeypatch.setattr(p, "_DEFAULT_HERMES_HOME", tmp_path)
+    profile_home = tmp_path / "profiles" / "pepper"
+    profile_home.mkdir(parents=True)
+    (profile_home / "config.yaml").write_text(
+        "model:\n  default: pepper-profile-model\n  provider: pepper-provider\n",
+        encoding="utf-8",
+    )
+
+    with patch.object(m.Session, 'save', return_value=None):
+        s = m.new_session(workspace=str(tmp_path), profile="pepper")
+    try:
+        assert s.model == "pepper-profile-model"
+        assert s.model_provider == "pepper-provider"
+        assert s.profile == "pepper"
+    finally:
+        with m.LOCK:
+            m.SESSIONS.pop(s.session_id, None)
+
+
+def test_new_session_does_not_persist_display_personality(monkeypatch, tmp_path):
+    """display.personality is a UI/default hint, not durable per-session state."""
+    import api.config as c
+    import api.models as m
+
+    monkeypatch.setattr(c, "get_config", lambda: {"display": {"personality": "kawaii"}})
+    with patch.object(m.Session, 'save', return_value=None):
+        s = m.new_session(workspace=str(tmp_path), profile="default")
+    try:
+        assert s.personality is None, (
+            "new_session() must not stamp display.personality into the persistent "
+            "Session.personality field; only explicit /api/personality/set should."
+        )
+    finally:
+        with m.LOCK:
+            m.SESSIONS.pop(s.session_id, None)
 
 
 def test_get_hermes_home_for_profile_rejects_path_traversal():

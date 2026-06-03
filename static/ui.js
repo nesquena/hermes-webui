@@ -1,6 +1,13 @@
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default'};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
+
+function assistantDisplayName(){
+  if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
+  return window._botName||'Hermes';
+}
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
+const MAX_UPLOAD_BYTES=(window.__HERMES_CONFIG__&&window.__HERMES_CONFIG__.maxUploadBytes)||20*1024*1024;
+const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // Tracks which session's queue to drain in setBusy(false).
 // Set to activeSid just before setBusy(false) in done/error handlers so the
 // queue drains the session that *finished*, not the one currently viewed.
@@ -9,10 +16,109 @@ const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
-// Redirect to /login when the server responds with 401 (auth session expired).
-// Handles iOS PWA standalone mode where a server-side 302→/login would break
-// out of the PWA shell into Safari instead of navigating within it.
-function _redirectIfUnauth(res){if(res&&res.status===401){window.location.href='/login?next='+encodeURIComponent(window.location.pathname+window.location.search);return true;}return false;}
+const OFFLINE_RECHECK_MS=2500;
+let _offlineVisible=false;
+let _offlineReason='browser';
+let _offlineProbeTimer=null;
+let _offlineChecking=false;
+let _offlineProbePromise=null;
+let _offlineHealthProbePromise=null;
+let _offlineRawFetch=null;
+let _offlineFetchPatched=false;
+function _browserReportsOnline(){return !('onLine' in navigator)||navigator.onLine!==false;}
+function _offlineHealthUrl(){const url=new URL('health',document.baseURI||location.href);url.searchParams.set('offline_probe',String(Date.now()));return url.href;}
+function _setOfflineChecking(checking){
+  _offlineChecking=!!checking;
+  const btn=$('offlineCheckNow');
+  if(btn){btn.disabled=_offlineChecking;btn.textContent=_offlineChecking?t('offline_checking'):t('offline_check_now');}
+}
+function _renderOfflineBanner(){
+  const banner=$('offlineBanner');
+  if(!banner)return;
+  const detail=$('offlineDetails');
+  if(detail)detail.textContent=t(_offlineReason==='browser'?'offline_browser_detail':'offline_network_detail');
+  const title=$('offlineTitle');
+  if(title)title.textContent=t('offline_title');
+  const auto=$('offlineAutorefresh');
+  if(auto)auto.textContent=t('offline_autorefresh');
+  _setOfflineChecking(_offlineChecking);
+  banner.hidden=false;
+  banner.classList.add('visible');
+}
+function _startOfflineProbeTimer(){
+  if(_offlineProbeTimer)return;
+  _offlineProbeTimer=setInterval(()=>{checkOfflineRecoveryNow();},OFFLINE_RECHECK_MS);
+}
+function _stopOfflineProbeTimer(){
+  if(_offlineProbeTimer){clearInterval(_offlineProbeTimer);_offlineProbeTimer=null;}
+}
+function showOfflineBanner(reason){
+  _offlineVisible=true;
+  _offlineReason=reason||(_browserReportsOnline()?'network':'browser');
+  _renderOfflineBanner();
+  _startOfflineProbeTimer();
+}
+function isOfflineBannerVisible(){return _offlineVisible;}
+function _hideOfflineBanner(){
+  _offlineVisible=false;
+  _stopOfflineProbeTimer();
+  _setOfflineChecking(false);
+  const banner=$('offlineBanner');
+  if(banner){banner.classList.remove('visible');banner.hidden=true;}
+}
+async function _probeOfflineRecovery(){
+  if(_offlineHealthProbePromise)return _offlineHealthProbePromise;
+  _offlineHealthProbePromise=(async()=>{
+    const fetcher=_offlineRawFetch||window.fetch.bind(window);
+    try{
+      const res=await fetcher(_offlineHealthUrl(),{cache:'no-store',credentials:'include'});
+      return !!(res&&res.ok);
+    }catch(_){return false;}
+  })();
+  try{return await _offlineHealthProbePromise;}
+  finally{_offlineHealthProbePromise=null;}
+}
+async function checkOfflineRecoveryNow(){
+  if(_offlineProbePromise)return _offlineProbePromise;
+  _offlineProbePromise=(async()=>{
+    if(!_offlineVisible)return false;
+    if(!_browserReportsOnline()){showOfflineBanner('browser');return false;}
+    _setOfflineChecking(true);
+    const ok=await _probeOfflineRecovery();
+    _setOfflineChecking(false);
+    if(ok){_stopOfflineProbeTimer();window.location.reload();return true;}
+    showOfflineBanner('network');
+    return false;
+  })();
+  try{return await _offlineProbePromise;}
+  finally{_offlineProbePromise=null;}
+}
+function _isAbortError(e){return !!(e&&(e.name==='AbortError'||e.code===20));}
+function _patchOfflineFetch(){
+  if(_offlineFetchPatched||typeof window.fetch!=='function')return;
+  _offlineFetchPatched=true;
+  _offlineRawFetch=window.fetch.bind(window);
+  window.fetch=async function(...args){
+    try{return await _offlineRawFetch(...args);}
+    catch(e){
+      if(!_browserReportsOnline())showOfflineBanner('browser');
+      else if(e instanceof TypeError&&!_isAbortError(e))void _probeOfflineRecovery().then(ok=>{if(!ok)showOfflineBanner('network');});
+      throw e;
+    }
+  };
+}
+function initOfflineMonitor(){
+  _patchOfflineFetch();
+  window.addEventListener('offline',()=>showOfflineBanner('browser'));
+  window.addEventListener('online',()=>{if(_offlineVisible)checkOfflineRecoveryNow();});
+  if(!_browserReportsOnline())showOfflineBanner('browser');
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initOfflineMonitor,{once:true});
+else initOfflineMonitor();
+// Redirect to login when the server responds with 401 (auth session expired).
+// Handles iOS PWA standalone mode and keeps subpath mounts like /hermes/ from
+// escaping to the personal site root /login.
+function _redirectIfUnauth(res){if(res&&res.status===401){window.location.href='login?next='+encodeURIComponent(window.location.pathname+window.location.search);return true;}return false;}
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
@@ -50,7 +156,34 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-
+function _appHref(path){
+  const raw=String(path||'');
+  if(!raw) return raw;
+  try{
+    const rel=raw.startsWith('/')?raw.slice(1):raw;
+    const url=new URL(rel,document.baseURI||location.href);
+    return `${url.pathname}${url.search}${url.hash}`;
+  }catch(_){
+    return raw;
+  }
+}
+function _mediaApiHref(path,opts){
+  const o=opts||{};
+  const query=['path='+encodeURIComponent(path)];
+  if(o.sessionId) query.push('session_id='+encodeURIComponent(o.sessionId));
+  if(o.inline) query.push('inline=1');
+  if(o.download) query.push('download=1');
+  return _appHref('api/media?'+query.join('&'));
+}
+function _matchBacktickFenceLine(line){
+  const m=String(line||'').match(/^[ ]{0,3}(`{3,})([^`]*)$/);
+  if(!m) return null;
+  return {fence:m[1],len:m[1].length,info:(m[2]||'').trim()};
+}
+function _isBacktickFenceClose(line,minLen){
+  const m=String(line||'').match(/^[ ]{0,3}(`{3,})[ \t]*$/);
+  return !!(m&&m[1].length>=minLen);
+}
 /**
  * Render fenced code blocks inside user messages.
  * Extracts ```…``` fences, replaces them with placeholders,
@@ -58,13 +191,39 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
  * with the same <pre><code> pipeline used by renderMd().
  * All non-fenced text stays escaped (no bold/italic/link interpretation).
  */
+
+function _stripWorkspaceDisplayPrefix(text){
+  // v1 sentinel format `[Workspace::v1: <escaped path>]\n` injected since #1918.
+  // Legacy format `[Workspace: <path>]\n` may still be present in transcripts
+  // saved before the v1 migration; fall through to the legacy regex when the
+  // v1 strip didn't match. Mirrors the Python `include_legacy=True` branch in
+  // api/streaming.py:_strip_workspace_prefix(). Per Opus advisor on stage-322.
+  const value = String(text||'');
+  const stripped = value.replace(/^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*/,'');
+  if(stripped !== value) return stripped.trim();
+  return value.replace(/^\s*\[Workspace:[^\]]+\]\s*/,'').trim();
+}
 function _renderUserFencedBlocks(text){
   const stash=[];
+  const mathStash=[];
+  const stashMath=(type,src)=>{mathStash.push({type,src});return '\x00UM'+(mathStash.length-1)+'\x00';};
+  const restoreMath=html=>String(html||'').replace(/\x00UM(\d+)\x00/g,(_,i)=>{
+    const item=mathStash[+i];
+    if(!item) return '';
+    if(item.type==='display') return `<div class="katex-block" data-katex="display">${esc(item.src)}</div>`;
+    return `<span class="katex-inline" data-katex="inline">${esc(item.src)}</span>`;
+  });
   let s=String(text||'');
-  // Extract fenced code blocks → stash, replace with null-token placeholder
-  // CommonMark line-anchored fence (fixes #1438): inner ``` inside content no longer truncates the block.
-  s=s.replace(/(^|\n)[ ]{0,3}```([a-zA-Z0-9_+-]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}```(?=\n|$)/g,(_,lead,lang,code)=>{
-    lang=(lang||'').trim().toLowerCase();
+  // Extract fenced code blocks FIRST so math regexes never run inside fenced
+  // content. If math were stashed first, a user-typed code block containing
+  // \[..\] / \(..\) / $$..$$ would be rendered as a KaTeX block inside
+  // <pre><code> instead of as literal source. Mirrors renderMd()'s ordering.
+  // CommonMark §4.5 line-anchored fence: the closing run must use at least
+  // as many backticks as the opener, so inner triple-backtick fences remain content.
+  s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)/g,(_,lead,_fence,info,code)=>{
+    const langInfo=(info||'').trim();
+    const langMatch=langInfo.match(/^(\w[\w+-]*)$/);
+    let lang=langMatch?(langMatch[1]||'').trim().toLowerCase():'';
     code=code||'';
     // Remove one trailing newline if present (the fence consumes its own)
     if(code.endsWith('\n')) code=code.slice(0,-1);
@@ -83,15 +242,338 @@ function _renderUserFencedBlocks(text){
     }
     return lead+'\x00UF'+(stash.length-1)+'\x00';
   });
+  // Now stash math from the OUTSIDE-of-fence text. Display delimiters must
+  // run before inline so $$..$$ isn't mis-parsed as $..$..$..$.
+  s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>stashMath('display',m));
+  s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>stashMath('display',m));
+  s=s.replace(/(^|[^\w])\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$(?!\w)/g,(_,lead,m)=>lead+stashMath('inline',m));
+  s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>stashMath('inline',m));
   // Escape remaining plain text and convert newlines to <br>
   s=esc(s).replace(/\n/g,'<br>');
-  // Restore stashed code blocks
+  // Restore stashed code blocks, then math placeholders as KaTeX targets.
   s=s.replace(/\x00UF(\d+)\x00/g,(_,i)=>stash[+i]);
+  s=restoreMath(s);
   return s;
+}
+function _statusCardHtml(card){
+  card=card||{};
+  const rows=Array.isArray(card.rows)?card.rows:[];
+  const sessionId=String(card.sessionId||'');
+  const shortSessionId=sessionId.length>22?`${sessionId.slice(0,10)}…${sessionId.slice(-8)}`:sessionId;
+  const copyIcon=(typeof li==='function')?li('copy',13):'Copy';
+  const copyBtn=sessionId
+    ? `<button class="status-card-session-copy" type="button" data-copy-status-session="${esc(card.sessionId||'')}" title="${esc(t('copy'))}" onclick="copyStatusSessionId(this);event.stopPropagation()"><span>${esc(shortSessionId)}</span>${copyIcon}</button>`
+    : '';
+  const rowHtml=rows.map(row=>`
+    <div class="status-card-row">
+      <span class="status-card-label">${esc(row.label||'')}</span>
+      <span class="status-card-value">${esc(row.value||'')}</span>
+    </div>`).join('');
+  return `<div class="status-card" data-status-card="1">
+    <div class="status-card-head">
+      <div class="status-card-title-wrap">
+        <div class="status-card-title">${esc(card.title||t('status_heading'))}</div>
+        <div class="status-card-subtitle">${esc(card.subtitle||'')}</div>
+      </div>
+      ${copyBtn}
+    </div>
+    <div class="status-card-grid">${rowHtml}</div>
+  </div>`;
+}
+
+const MESSAGE_RENDER_WINDOW_DEFAULT=50;
+let _messageRenderWindowSid=null;
+let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+// Cached visWithIdx array — invalidated when S.messages.length changes.
+let _visWithIdxCache=null;
+let _visWithIdxCacheLen=0;
+function _resetMessageRenderWindow(sid){
+  _messageRenderWindowSid=sid||null;
+  _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+  _clearRenderCache();
+  _visWithIdxCache=null;
+  _visWithIdxCacheLen=0;
+}
+
+// ── renderMd / _renderUserFencedBlocks cache ──────────────────────────────
+// Long sessions re-render the same messages on every renderMessages() call.
+// Cache the rendered HTML so unchanged messages skip the expensive regex
+// pipeline entirely.  ~95% of messages are identical between renders.
+const _renderCache = new Map();
+const _renderCacheMax = 300;
+function _clearRenderCache(){ _renderCache.clear(); }
+function _renderCacheKey(text, isUser){
+  const p = isUser ? 'u' : 'a';
+  // Short content: use the full string as key (cheap Map lookup).
+  // Long content: length + prefix + suffix is good enough — collisions on
+  // 20-char prefix+suffix are vanishingly rare for chat messages.
+  if(text.length <= 500) return p + ':' + text;
+  return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
+}
+function _getCachedRender(text, isUser){
+  const key = _renderCacheKey(text, isUser);
+  const hit = _renderCache.get(key);
+  if(hit !== undefined) return hit;
+  const rendered = isUser
+    ? _renderUserFencedBlocks(text)
+    : renderMd(_stripXmlToolCallsDisplay(String(text)));
+  if(_renderCache.size > _renderCacheMax) _renderCache.clear();
+  _renderCache.set(key, rendered);
+  return rendered;
+}
+function _currentMessageRenderWindowSize(){
+  return Math.max(
+    MESSAGE_RENDER_WINDOW_DEFAULT,
+    Number(_messageRenderWindowSize)||MESSAGE_RENDER_WINDOW_DEFAULT
+  );
+}
+function _messageRenderableMessageCount(){
+  let count=0;
+  for(const m of (S.messages||[])){
+    if(!m||!m.role||m.role==='tool') continue;
+    if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) continue;
+    const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+    const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+    if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) count++;
+  }
+  return count;
+}
+function _messageHiddenBeforeCount(){
+  return Math.max(0,_messageRenderableMessageCount()-_currentMessageRenderWindowSize());
+}
+function _isSessionEndlessScrollEnabled(){
+  return window._sessionEndlessScrollEnabled===true;
+}
+function _wireMessageWindowLoadEarlierButton(){
+  const indicator=$('loadOlderIndicator');
+  if(!indicator) return;
+  indicator.onclick=()=>{
+    if(_messageHiddenBeforeCount()>0) _showEarlierRenderedMessages();
+    else if(typeof _loadOlderMessages==='function') _loadOlderMessages();
+  };
+}
+function _showEarlierRenderedMessages(){
+  const container=$('messages');
+  const prevScrollH=container?container.scrollHeight:0;
+  const prevScrollTop=container?container.scrollTop:0;
+  _messageRenderWindowSize=_currentMessageRenderWindowSize()+MESSAGE_RENDER_WINDOW_DEFAULT;
+  renderMessages();
+  if(container){
+    const newScrollH=container.scrollHeight;
+    container.scrollTop=prevScrollTop+(newScrollH-prevScrollH);
+  }
+  _scrollPinned=false;
+}
+function _isSessionJumpButtonsEnabled(){
+  return window._sessionJumpButtonsEnabled===true;
+}
+function _applySessionNavigationPrefs(){
+  const container=$('messages');
+  if(container) container.classList.toggle('session-nav-enabled',_isSessionJumpButtonsEnabled());
+  _updateSessionStartJumpButton();
+}
+function _updateSessionStartJumpButton(){
+  const btn=$('jumpToSessionStartBtn');
+  const container=$('messages');
+  if(!btn||!container) return;
+  if(!_isSessionJumpButtonsEnabled()){
+    btn.style.display='none';
+    return;
+  }
+  const hasSession=!!(S&&S.session&&S.messages&&S.messages.length);
+  const awayFromStart=container.scrollTop>Math.max(240,container.clientHeight*0.35);
+  const hasScrollableHistory=container.scrollHeight>container.clientHeight+Math.max(240,container.clientHeight*0.35);
+  const canRevealStart=hasScrollableHistory||_messageHiddenBeforeCount()>0||!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated);
+  btn.style.display=(hasSession&&canRevealStart&&awayFromStart)?'flex':'none';
+}
+async function jumpToSessionStart(){
+  const container=$('messages');
+  if(!container||!S.session) return;
+  _scrollPinned=false;
+  _messageUserUnpinned=true;
+  _programmaticScroll=true;
+  try{
+    if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+    renderMessages({ preserveScroll:true });
+    requestAnimationFrame(()=>{
+      container.scrollTop=0;
+      _updateSessionStartJumpButton();
+      requestAnimationFrame(()=>{ _programmaticScroll=false; });
+    });
+  }catch(e){
+    console.warn('jumpToSessionStart failed:',e);
+    _programmaticScroll=false;
+  }
+}
+
+function _userMessageDomId(rawIdx){
+  return `msg-user-${rawIdx}`;
+}
+
+function _questionJumpButtonHtml(questionRawIdx){
+  if(typeof questionRawIdx!=='number'||questionRawIdx<0) return '';
+  const label=t('jump_to_question')||'Question';
+  const title=t('jump_to_question_label')||'Jump to the question for this response';
+  return `<button class="msg-question-jump-btn" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
+}
+
+function _highlightQuestionRow(row){
+  if(!row) return;
+  row.classList.remove('msg-question-highlight');
+  void row.offsetWidth;
+  row.classList.add('msg-question-highlight');
+  window.setTimeout(()=>row.classList.remove('msg-question-highlight'),1800);
+}
+
+async function jumpToTurnQuestion(questionRawIdx){
+  const container=$('messages');
+  if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
+  const scrollToTarget=()=>{
+    const row=document.getElementById(_userMessageDomId(questionRawIdx));
+    if(!row) return false;
+    row.scrollIntoView({block:'center',behavior:'smooth'});
+    _highlightQuestionRow(row);
+    return true;
+  };
+  if(scrollToTarget()) return;
+  if(_messageHiddenBeforeCount()>0){
+    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+    renderMessages({ preserveScroll:true });
+    requestAnimationFrame(scrollToTarget);
+  }
+}
+
+const DASHBOARD_STATUS_TTL_MS=60000;
+let _dashboardStatusCache=null;
+let _dashboardStatusFetchedAt=0;
+
+function _dashboardIsBrowserLoopback(){
+  const host=(window.location.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
+  return host==='127.0.0.1'||host==='localhost'||host==='::1';
+}
+function _dashboardBrowserUrl(status){
+  if(!status||!status.running) return '';
+  if(status.browser_url||status.url){
+    try{return new URL(status.browser_url||status.url).toString().replace(/\/$/,'');}
+    catch(_){}
+  }
+  if(!status.port) return '';
+  let source;
+  try{source=new URL('http://127.0.0.1:'+status.port);}
+  catch(_){return '';}
+  const browserHost=window.location.hostname||source.hostname;
+  const displayHost=browserHost.includes(':')&&!browserHost.startsWith('[')?'['+browserHost+']':browserHost;
+  return source.protocol+'//'+displayHost+':'+status.port;
+}
+function _applyDashboardStatus(status){
+  const running=!!(status&&status.running);
+  const url=running?_dashboardBrowserUrl(status):'';
+  const warning=running&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
+  document.querySelectorAll('[data-dashboard-link]').forEach(btn=>{
+    btn.classList.toggle('dashboard-link-visible',running);
+    btn.style.display=running?'':'none';
+    btn.dataset.dashboardUrl=url;
+    const tipText=warning||t('tab_dashboard');
+    if(btn.hasAttribute('data-tooltip')){
+      // Sync the custom CSS tooltip and explicitly clear the native title so
+      // the slow ~1.5s native browser tooltip does not co-fire alongside the
+      // fast custom tooltip (#1775).
+      btn.setAttribute('data-tooltip',tipText);
+      if(btn.hasAttribute('title')) btn.removeAttribute('title');
+    } else {
+      btn.title=tipText;
+    }
+    btn.setAttribute('aria-label',tipText);
+  });
+}
+async function refreshDashboardStatus(force=false){
+  const now=Date.now();
+  if(!force&&_dashboardStatusCache&&(now-_dashboardStatusFetchedAt)<DASHBOARD_STATUS_TTL_MS){
+    _applyDashboardStatus(_dashboardStatusCache);
+    return _dashboardStatusCache;
+  }
+  try{
+    const status=await api('/api/dashboard/status',{timeoutToast:false});
+    _dashboardStatusCache=status||{running:false};
+  }catch(_){
+    _dashboardStatusCache={running:false};
+  }
+  _dashboardStatusFetchedAt=Date.now();
+  _applyDashboardStatus(_dashboardStatusCache);
+  return _dashboardStatusCache;
+}
+async function loadDashboardSettings(){
+  const modeEl=$('settingsDashboardMode');
+  const urlEl=$('settingsDashboardUrl');
+  if(!modeEl&&!urlEl) return;
+  try{
+    const cfg=await api('/api/dashboard/config');
+    if(modeEl) modeEl.value=cfg.enabled||'auto';
+    if(urlEl) urlEl.value=cfg.url||'';
+  }catch(_){/* leave defaults visible */}
+}
+async function saveDashboardSettings(){
+  const modeEl=$('settingsDashboardMode');
+  const urlEl=$('settingsDashboardUrl');
+  const statusEl=$('settingsDashboardStatus');
+  const payload={enabled:(modeEl&&modeEl.value)||'auto',url:(urlEl&&urlEl.value||'').trim()};
+  try{
+    const saved=await api('/api/dashboard/config',{method:'POST',body:JSON.stringify(payload)});
+    if(modeEl) modeEl.value=saved.enabled||'auto';
+    if(urlEl) urlEl.value=saved.url||'';
+    if(statusEl) statusEl.textContent='Dashboard link settings saved.';
+    await refreshDashboardStatus(true);
+  }catch(err){
+    if(statusEl) statusEl.textContent='Dashboard link settings failed to save.';
+    else if(typeof showToast==='function') showToast('Dashboard link settings failed to save.');
+  }
+}
+function openHermesDashboard(event){
+  if(event){event.preventDefault();event.stopPropagation();}
+  const btn=event&&event.currentTarget?event.currentTarget:document.querySelector('[data-dashboard-link]');
+  const url=(btn&&btn.dataset&&btn.dataset.dashboardUrl)||_dashboardBrowserUrl(_dashboardStatusCache);
+  if(!url) return false;
+  window.open(url,'_blank','noopener,noreferrer');
+  return false;
+}
+function _initDashboardLinkProbe(){
+  loadDashboardSettings();
+  refreshDashboardStatus(true);
+  setInterval(refreshDashboardStatus,DASHBOARD_STATUS_TTL_MS);
+}
+if(document.readyState==='complete'){
+  _initDashboardLinkProbe();
+}else{
+  document.addEventListener('DOMContentLoaded',_initDashboardLinkProbe,{once:true});
 }
 
 /* ── Image lightbox — click any .msg-media-img to enlarge ─────────────────── */
-function _openImgLightbox(src, alt) {
+function _openImgLightbox(imgEl) {
+  if(!imgEl || !imgEl.src) return;
+  const src=imgEl.src, alt=imgEl.alt||'';
+  // Find sibling images in the same message for prev/next navigation.
+  // Walk up from the clicked image to find the message container, then
+  // collect all .msg-media-img within it.
+  // Composer attach-tray chips bypass sibling detection — each chip click
+  // opens a single-image lightbox (no navigation between staged uploads).
+  let allImages = [];
+  let startIndex = 0;
+  if(!imgEl.closest('.attach-tray')){
+    let container = imgEl.closest('.msg-row, .assistant-turn-blocks, .assistant-turn, .user-turn');
+    if(!container) container = imgEl.parentElement;
+    if(container){
+      const siblings = container.querySelectorAll('.msg-media-img');
+      if(siblings.length>1){
+        allImages = Array.from(siblings);
+        startIndex = allImages.indexOf(imgEl);
+        if(startIndex===-1) startIndex=0;
+      }
+    }
+  }
+  _openImgLightboxWithNav(src, alt, allImages, startIndex);
+}
+function _openImgLightboxWithNav(src, alt, images, index) {
   const lb = document.createElement('div');
   lb.className = 'img-lightbox';
   lb.setAttribute('role', 'dialog');
@@ -107,23 +589,281 @@ function _openImgLightbox(src, alt) {
   cls.onclick = () => _closeImgLightbox(lb);
   lb.appendChild(img);
   lb.appendChild(cls);
+  // Prev/Next navigation — store index and images on lb so a single set of
+  // handlers reads live values without closure churn on every nav.
+  lb._navIndex = index;
+  lb._navImages = (images && images.length>1) ? images : null;
+  if(lb._navImages){
+    const prevBtn = document.createElement('button');
+    prevBtn.className = 'img-lightbox-nav img-lightbox-nav-prev';
+    prevBtn.setAttribute('aria-label', 'Previous image');
+    prevBtn.innerHTML = '‹';
+    prevBtn.onclick = e => { e.stopPropagation(); _navigateLightbox(lb, -1); };
+    lb.appendChild(prevBtn);
+    const nextBtn = document.createElement('button');
+    nextBtn.className = 'img-lightbox-nav img-lightbox-nav-next';
+    nextBtn.setAttribute('aria-label', 'Next image');
+    nextBtn.innerHTML = '›';
+    nextBtn.onclick = e => { e.stopPropagation(); _navigateLightbox(lb, 1); };
+    lb.appendChild(nextBtn);
+    lb._counterEl = document.createElement('div');
+    lb._counterEl.className = 'img-lightbox-counter';
+    lb.appendChild(lb._counterEl);
+    lb._counterEl.textContent = (index+1) + ' / ' + images.length;
+  }
   lb.onclick = () => _closeImgLightbox(lb);
   document.body.appendChild(lb);
-  // Close on Escape
-  lb._escHandler = e => { if(e.key==='Escape') _closeImgLightbox(lb); };
-  document.addEventListener('keydown', lb._escHandler);
+  // Single keyboard handler — reads lb._navX live, no remove/add churn.
+  lb._keyHandler = e => {
+    if(e.key==='Escape'){ _closeImgLightbox(lb); return; }
+    if(lb._navImages){
+      if(e.key==='ArrowLeft'){ e.preventDefault(); _navigateLightbox(lb, -1); }
+      if(e.key==='ArrowRight'){ e.preventDefault(); _navigateLightbox(lb, 1); }
+    }
+  };
+  document.addEventListener('keydown', lb._keyHandler);
+}
+function _navigateLightbox(lb, direction) {
+  const images = lb._navImages;
+  if(!images) return;
+  const newIndex = lb._navIndex + direction;
+  if(newIndex<0 || newIndex>=images.length) return;
+  lb._navIndex = newIndex;
+  const nextImg = images[newIndex];
+  const lbImg = lb.querySelector('img');
+  if(!lbImg) return;
+  lbImg.src = nextImg.src;
+  lbImg.alt = nextImg.alt || '';
+  lb.setAttribute('aria-label', nextImg.alt || 'Image');
+  // Update counter via stored reference — no DOM query.
+  if(lb._counterEl) lb._counterEl.textContent = (newIndex+1) + ' / ' + images.length;
 }
 function _closeImgLightbox(lb) {
   if(!lb || !lb.parentNode) return;
-  document.removeEventListener('keydown', lb._escHandler);
+  document.removeEventListener('keydown', lb._keyHandler);
   lb.style.animation = 'lb-in .12s ease reverse';
+  setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
+}
+function _openPdfPreviewFromWrap(wrap){
+  if(!wrap) return false;
+  const url=wrap.dataset.openUrl||'';
+  if(!url) return false;
+  _openPdfLightbox(url, wrap.dataset.title||'PDF preview', wrap.dataset.downloadUrl||'');
+  return true;
+}
+function _pdfLightboxSetStatus(lb, current, total){
+  if(!lb) return;
+  lb._pdfCurrentPage=Math.max(1, Number(current)||1);
+  lb._pdfTotalPages=Math.max(0, Number(total)||0);
+  const status=lb.querySelector('.pdf-lightbox-page-status');
+  if(status){
+    status.textContent=lb._pdfTotalPages?`${lb._pdfCurrentPage} / ${lb._pdfTotalPages}`:`${lb._pdfCurrentPage}`;
+  }
+  const input=lb.querySelector('.pdf-lightbox-page-input');
+  if(input && document.activeElement!==input){
+    input.value=String(lb._pdfCurrentPage);
+  }
+}
+function _pdfLightboxScrollToPage(lb, pageNum, behavior='smooth'){
+  if(!lb) return;
+  const pages=[...(lb.querySelectorAll('.pdf-lightbox-page[data-page]')||[])];
+  if(!pages.length) return;
+  const total=pages.length;
+  const targetPage=Math.min(total, Math.max(1, Number(pageNum)||1));
+  const target=pages[targetPage-1];
+  const body=lb.querySelector('.pdf-lightbox-body');
+  if(!target || !body) return;
+  body.scrollTo({top:Math.max(0,target.offsetTop-12),behavior});
+  _pdfLightboxSetStatus(lb,targetPage,total);
+}
+function _pdfLightboxSyncCurrentPage(lb){
+  if(!lb) return;
+  const body=lb.querySelector('.pdf-lightbox-body');
+  const pages=[...(lb.querySelectorAll('.pdf-lightbox-page[data-page]')||[])];
+  if(!body || !pages.length) return;
+  const probe=body.scrollTop + body.clientHeight*0.35;
+  let current=1;
+  for(const page of pages){
+    const pageNum=Number(page.dataset.page)||1;
+    if(page.offsetTop<=probe) current=pageNum;
+    else break;
+  }
+  _pdfLightboxSetStatus(lb,current,pages.length);
+}
+async function _renderPdfLightbox(lb, url){
+  if(!lb || !url) return;
+  const body=lb.querySelector('.pdf-lightbox-body');
+  const pagesWrap=lb.querySelector('.pdf-lightbox-pages');
+  const loading=lb.querySelector('.pdf-lightbox-loading');
+  if(!body || !pagesWrap) return;
+  if(loading) loading.textContent=t('pdf_loading','document');
+  pagesWrap.innerHTML='';
+  try{
+    const pdfjsLib=await _ensurePdfJsLoaded();
+    const res=await fetch(url);
+    if(!res.ok) throw new Error(String(res.status||'fetch'));
+    const buf=await res.arrayBuffer();
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    if(lb._pdfClosed) return;
+    lb._pdfDoc=pdf;
+    _pdfLightboxSetStatus(lb,1,pdf.numPages||0);
+    const maxWidth=Math.min(Math.max((body.clientWidth||window.innerWidth)-48,320),1100);
+    for(let i=1;i<=pdf.numPages;i++){
+      if(lb._pdfClosed) return;
+      const page=await pdf.getPage(i);
+      const baseViewport=page.getViewport({scale:1});
+      const scale=maxWidth/baseViewport.width;
+      const viewport=page.getViewport({scale});
+      const canvas=document.createElement('canvas');
+      canvas.className='pdf-lightbox-page-canvas';
+      canvas.width=Math.ceil(viewport.width);
+      canvas.height=Math.ceil(viewport.height);
+      const pageWrap=document.createElement('div');
+      pageWrap.className='pdf-lightbox-page';
+      pageWrap.dataset.page=String(i);
+      const label=document.createElement('div');
+      label.className='pdf-lightbox-page-label';
+      label.textContent=`Page ${i}`;
+      pageWrap.appendChild(label);
+      pageWrap.appendChild(canvas);
+      pagesWrap.appendChild(pageWrap);
+      await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
+      if(i===1 && loading) loading.hidden=true;
+    }
+    if(loading) loading.hidden=true;
+    _pdfLightboxSyncCurrentPage(lb);
+  }catch(_){
+    if(loading){
+      loading.hidden=false;
+      loading.textContent=t('pdf_error');
+    }
+  }
+}
+function _openPdfLightbox(url, title, downloadUrl){
+  if(!url) return;
+  const lb=document.createElement('div');
+  lb.className='pdf-lightbox';
+  lb.setAttribute('role','dialog');
+  lb.setAttribute('aria-modal','true');
+  lb.setAttribute('aria-label', title||'PDF preview');
+  lb._pdfClosed=false;
+  const dialog=document.createElement('div');
+  dialog.className='pdf-lightbox-dialog';
+  dialog.onclick=e=>e.stopPropagation();
+  const bar=document.createElement('div');
+  bar.className='pdf-lightbox-bar';
+  const titleEl=document.createElement('div');
+  titleEl.className='pdf-lightbox-title';
+  titleEl.textContent=title||'PDF preview';
+  const actions=document.createElement('div');
+  actions.className='pdf-lightbox-actions';
+  const pageStatus=document.createElement('span');
+  pageStatus.className='pdf-lightbox-page-status';
+  pageStatus.textContent='1 / ?';
+  actions.appendChild(pageStatus);
+  const pageInput=document.createElement('input');
+  pageInput.className='pdf-lightbox-page-input';
+  pageInput.type='number';
+  pageInput.min='1';
+  pageInput.inputMode='numeric';
+  pageInput.value='1';
+  pageInput.setAttribute('aria-label','Page number');
+  actions.appendChild(pageInput);
+  const goBtn=document.createElement('button');
+  goBtn.className='pdf-lightbox-go';
+  goBtn.type='button';
+  goBtn.textContent='Go';
+  goBtn.onclick=()=>_pdfLightboxScrollToPage(lb,pageInput.value,'smooth');
+  actions.appendChild(goBtn);
+  pageInput.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){
+      e.preventDefault();
+      _pdfLightboxScrollToPage(lb,pageInput.value,'smooth');
+    }
+  });
+  if(downloadUrl){
+    const dl=document.createElement('a');
+    dl.className='pdf-lightbox-download';
+    dl.href=downloadUrl;
+    dl.download=title||'document.pdf';
+    dl.textContent=t('pdf_download')+' ↓';
+    actions.appendChild(dl);
+  }
+  const close=document.createElement('button');
+  close.className='pdf-lightbox-close';
+  close.type='button';
+  close.setAttribute('aria-label','Close');
+  close.textContent='×';
+  close.onclick=()=>_closePdfLightbox(lb);
+  actions.appendChild(close);
+  bar.appendChild(titleEl);
+  bar.appendChild(actions);
+  const body=document.createElement('div');
+  body.className='pdf-lightbox-body';
+  body.addEventListener('scroll',()=>_pdfLightboxSyncCurrentPage(lb),{passive:true});
+  const loading=document.createElement('div');
+  loading.className='pdf-lightbox-loading';
+  loading.textContent=t('pdf_loading','document');
+  const pagesWrap=document.createElement('div');
+  pagesWrap.className='pdf-lightbox-pages';
+  body.appendChild(loading);
+  body.appendChild(pagesWrap);
+  dialog.appendChild(bar);
+  dialog.appendChild(body);
+  lb.appendChild(dialog);
+  lb.onclick=()=>_closePdfLightbox(lb);
+  document.body.appendChild(lb);
+  lb._keyHandler=e=>{
+    if(e.key==='Escape') _closePdfLightbox(lb);
+  };
+  document.addEventListener('keydown', lb._keyHandler);
+  void _renderPdfLightbox(lb, url);
+}
+function _closePdfLightbox(lb){
+  if(!lb || !lb.parentNode) return;
+  lb._pdfClosed=true;
+  document.removeEventListener('keydown', lb._keyHandler);
+  lb.style.animation='lb-in .12s ease reverse';
   setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
 }
 
 document.addEventListener('click', e => {
-  const img = e.target && e.target.closest ? e.target.closest('.msg-media-img') : null;
-  if(!img) return;
-  _openImgLightbox(img.src, img.alt);
+  if(!e.target || !e.target.closest) return;
+  const pdfWrap=e.target.closest('.pdf-preview-wrap--interactive');
+  if(pdfWrap && !e.target.closest('a,button')){
+    _openPdfPreviewFromWrap(pdfWrap);
+    return;
+  }
+  const workspaceLink=e.target.closest('a[href^="#workspace="]');
+  if(workspaceLink){
+    e.preventDefault();
+    const href=workspaceLink.getAttribute('href')||'';
+    try{
+      const rel=decodeURIComponent(href.slice('#workspace='.length));
+      if(rel && typeof openArtifactPath==='function') openArtifactPath(rel);
+    }catch(_){}
+    return;
+  }
+  // Message-attached images (already wired since v0.50.x).
+  let img = e.target.closest('.msg-media-img');
+  if(img){ _openImgLightbox(img); return; }
+  // Composer attach-tray image thumbnails — click any pasted/dropped image
+  // chip to lightbox-zoom it before sending. Excludes audio/video chips,
+  // which keep their inline media controls. SVG thumbnails (.attach-thumb--svg)
+  // are still images visually, so they qualify.
+  img = e.target.closest('.attach-thumb');
+  if(img && img.tagName === 'IMG'){
+    _openImgLightbox(img);
+    return;
+  }
+});
+document.addEventListener('keydown', e => {
+  if(!e.target || !e.target.closest) return;
+  if(e.key!=='Enter' && e.key!==' ') return;
+  const pdfWrap=e.target.closest('.pdf-preview-wrap--interactive');
+  if(!pdfWrap) return;
+  e.preventDefault();
+  _openPdfPreviewFromWrap(pdfWrap);
 });
 
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
@@ -186,6 +926,10 @@ function _renderAttachmentHtml(fname, url){
   const kind=_mediaKindForName(fname);
   if(kind==='image') return `<img class="msg-media-img" src="${esc(url)}" alt="${esc(fname)}" loading="lazy">`;
   if(kind==='audio'||kind==='video') return _mediaPlayerHtml(kind,url,fname);
+  if(_HTML_EXTS.test(fname)){
+    const inlineUrl=url+(String(url).includes('?')?'&':'?')+'inline=1';
+    return `<a class="msg-file-badge msg-file-badge--html" href="${esc(inlineUrl)}" target="_blank" rel="noopener">${li('file-code',12)} ${esc(fname)}</a>`;
+  }
   return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
 }
 document.addEventListener('click', e => {
@@ -224,10 +968,97 @@ if(document.readyState==='loading') document.addEventListener('DOMContentLoaded'
 else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
+// ── Ambient provider quota indicator (#1766) ────────────────────────────────
+let _providerQuotaRefreshInFlight=false;
+
+function _formatQuotaMoneyShort(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '';
+  if(Math.abs(n)>=100) return '$'+n.toFixed(0);
+  if(Math.abs(n)>=10) return '$'+n.toFixed(1);
+  return '$'+n.toFixed(2);
+}
+function _formatQuotaPercentShort(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '';
+  return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
+}
+function _providerQuotaIndicatorText(status){
+  if(!status||status.status!=='available') return null;
+  const provider=status.display_name||status.provider||'Provider';
+  const accountLimits=status.account_limits||null;
+  if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
+    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
+    const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
+    if(remaining) return {label:provider+' '+remaining, title:(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+  }
+  const quota=status.quota||null;
+  if(quota){
+    const remaining=_formatQuotaMoneyShort(quota.limit_remaining);
+    const used=_formatQuotaMoneyShort(quota.usage);
+    const limit=_formatQuotaMoneyShort(quota.limit);
+    if(remaining){
+      const parts=[];
+      if(used) parts.push('used '+used);
+      if(limit) parts.push('limit '+limit);
+      return {label:provider+' '+remaining, title:(status.message||'Provider quota loaded')+(parts.length?' — '+parts.join(' · '):'')};
+    }
+  }
+  return null;
+}
+function renderProviderQuotaIndicator(status){
+  const chip=$('providerQuotaChip');
+  const label=$('providerQuotaChipLabel');
+  if(!chip||!label) return;
+  // Hide entirely when the user has disabled the ambient quota chip in Settings.
+  // Default is off (window._showQuotaChip defaults to false in boot.js) so users
+  // never see the chip unless they opt in.
+  if(window._showQuotaChip!==true){
+    chip.hidden=true;
+    label.textContent='';
+    chip.removeAttribute('title');
+    return;
+  }
+  const text=_providerQuotaIndicatorText(status);
+  if(!text||status.status!=='available'||(!status.quota&&!status.account_limits)){
+    chip.hidden=true;
+    label.textContent='';
+    chip.removeAttribute('title');
+    return;
+  }
+  label.textContent=text.label;
+  chip.title=text.title;
+  chip.hidden=false;
+}
+async function refreshProviderQuotaIndicator(){
+  // Short-circuit before the fetch when the chip is disabled — no point asking
+  // the server for quota data the UI will throw away.
+  if(window._showQuotaChip!==true){
+    const chip=$('providerQuotaChip');
+    if(chip){chip.hidden=true;chip.removeAttribute('title');}
+    return;
+  }
+  if(_providerQuotaRefreshInFlight) return;
+  _providerQuotaRefreshInFlight=true;
+  try{
+    const status=await api('/api/provider/quota');
+    renderProviderQuotaIndicator(status);
+  }catch(_e){
+    renderProviderQuotaIndicator(null);
+  }finally{
+    _providerQuotaRefreshInFlight=false;
+  }
+}
+window.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+});
+
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
 const MODEL_STATE_KEY='hermes-webui-model-state';
+const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
+const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
 
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
@@ -237,6 +1068,7 @@ const MODEL_STATE_KEY='hermes-webui-model-state';
 // first colliding entry.
 function _getOptionProviderId(opt){
   if(!opt) return '';
+  if(opt.dataset && opt.dataset.provider) return opt.dataset.provider;
   const group=opt.parentElement;
   if(group && group.tagName==='OPTGROUP' && group.dataset && group.dataset.provider){
     return group.dataset.provider;
@@ -250,6 +1082,18 @@ function _providerFromModelValue(modelId){
   if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
   return '';
 }
+function _providerSkipsModelMismatchWarning(providerId){
+  const p=String(providerId||'').toLowerCase();
+  return !p||p==='custom'||p.startsWith('custom:')||p==='openrouter';
+}
+function _providerDefersMissingModelFallback(providerId){
+  const p=String(providerId||'').toLowerCase();
+  // Named custom providers and OpenRouter can legitimately route vendor-prefixed
+  // model IDs that are not present in the current static catalog. Do not
+  // silently rewrite those sessions to the default just because the option has
+  // not been hydrated yet (#2405).
+  return p.startsWith('custom:')||p==='openrouter';
+}
 function _modelStateForSelect(sel, modelId){
   const value=String(modelId||'').trim();
   if(!value) return {model:'',model_provider:null};
@@ -258,6 +1102,61 @@ function _modelStateForSelect(sel, modelId){
   const opt=sel&&sel.selectedOptions&&sel.selectedOptions[0];
   const provider=String(_getOptionProviderId(opt)||'').trim();
   return {model:value,model_provider:(provider&&provider!=='default')?provider:null};
+}
+function _captureModelDropdownSelection(sel){
+  if(!sel||!sel.value) return null;
+  try{
+    const state=_modelStateForSelect(sel,sel.value);
+    if(state&&state.model) return state;
+  }catch(_){}
+  return {model:String(sel.value||''),model_provider:null};
+}
+function _modelProviderForSend(modelId){
+  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
+  if(sessionProvider) return sessionProvider;
+  const model=String(modelId||'').trim();
+  if(!model) return null;
+  const explicitProvider=typeof _providerFromModelValue==='function'
+    ? _providerFromModelValue(model)
+    : '';
+  if(explicitProvider) return explicitProvider;
+  const sel=typeof $==='function' ? $('modelSelect') : null;
+  if(sel&&String(sel.value||'').trim()===model&&typeof _modelStateForSelect==='function'){
+    try{
+      const dropdownState=_modelStateForSelect(sel,sel.value);
+      if(dropdownState&&String(dropdownState.model||'').trim()===model){
+        return dropdownState.model_provider||null;
+      }
+    }catch(_){}
+  }
+  if(typeof _readPersistedModelState==='function'){
+    try{
+      const persisted=_readPersistedModelState();
+      if(persisted&&String(persisted.model||'').trim()===model){
+        return persisted.model_provider||null;
+      }
+    }catch(_){}
+  }
+  return null;
+}
+function _reconcileModelDropdownSelection(sel,data,previousState,opts){
+  if(!sel) return null;
+  const activeSession=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
+  // Fresh boot is the only path where the profile/server default intentionally
+  // beats a browser-persisted or static fallback value. Every other model-list
+  // rebuild should preserve the loaded session model or the user's current
+  // in-page selection when it still exists in the refreshed catalog.
+  const shouldApplyBootDefault=!!(opts&&opts.preferProfileDefaultOnFreshBoot);
+  if(shouldApplyBootDefault && data&&data.default_model && !(activeSession&&activeSession.model)){
+    return _applyModelToDropdown(data.default_model,sel,data.active_provider||null);
+  }
+  if(activeSession&&activeSession.model){
+    return _applyModelToDropdown(activeSession.model,sel,activeSession.model_provider||null);
+  }
+  if(previousState&&previousState.model){
+    return _applyModelToDropdown(previousState.model,sel,previousState.model_provider||null);
+  }
+  return null;
 }
 function _providerQualifiedModelValueForSelect(sel, modelId){
   return _modelStateForSelect(sel,modelId).model;
@@ -296,6 +1195,71 @@ function _clearPersistedModelState(){
   localStorage.removeItem('hermes-webui-model');
   localStorage.removeItem(MODEL_STATE_KEY);
 }
+function _pendingSessionModelKey(sessionId){
+  return PENDING_SESSION_MODEL_PREFIX+String(sessionId||'');
+}
+function _rememberPendingSessionModel(sessionId, model, modelProvider){
+  const sid=String(sessionId||'').trim();
+  const value=String(model||'').trim();
+  if(!sid||!value) return;
+  const provider=modelProvider?String(modelProvider).trim():(_providerFromModelValue(value)||null);
+  try{
+    sessionStorage.setItem(_pendingSessionModelKey(sid), JSON.stringify({
+      model:value,
+      model_provider:provider||null,
+      saved_at:Date.now(),
+    }));
+  }catch(_){}
+}
+function _readPendingSessionModel(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return null;
+  try{
+    const raw=sessionStorage.getItem(_pendingSessionModelKey(sid));
+    if(!raw) return null;
+    const parsed=JSON.parse(raw);
+    const model=String(parsed&&parsed.model||'').trim();
+    if(!model){
+      sessionStorage.removeItem(_pendingSessionModelKey(sid));
+      return null;
+    }
+    const savedAt=Number(parsed.saved_at||0);
+    if(savedAt&&Date.now()-savedAt>PENDING_SESSION_MODEL_MAX_AGE_MS){
+      sessionStorage.removeItem(_pendingSessionModelKey(sid));
+      return null;
+    }
+    return {
+      model,
+      model_provider:parsed&&parsed.model_provider?String(parsed.model_provider):(_providerFromModelValue(model)||null),
+    };
+  }catch(_){
+    try{sessionStorage.removeItem(_pendingSessionModelKey(sid));}catch(__){}
+    return null;
+  }
+}
+function _clearPendingSessionModel(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return;
+  try{sessionStorage.removeItem(_pendingSessionModelKey(sid));}catch(_){}
+}
+function _applyPendingSessionModelForSession(sessionId){
+  if(!S.session||S.session.session_id!==sessionId) return false;
+  const pending=_readPendingSessionModel(sessionId);
+  if(!pending) return false;
+  const sameModel=String(S.session.model||'')===pending.model;
+  const sameProvider=String(S.session.model_provider||'')===String(pending.model_provider||'');
+  if(sameModel&&sameProvider){
+    _clearPendingSessionModel(sessionId);
+    return false;
+  }
+  S.session.model=pending.model;
+  S.session.model_provider=pending.model_provider||null;
+  const retry=_persistSessionModelCorrection(pending.model,pending.model_provider||null,{propagateErrors:true});
+  if(retry&&typeof retry.then==='function'){
+    retry.then(()=>_clearPendingSessionModel(sessionId)).catch(()=>{});
+  }
+  return true;
+}
 function _findModelInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   const options=Array.from(sel.options);
@@ -318,6 +1282,13 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
   if(opts.includes(modelId)) return modelId;
   const exact=opts.find(o=>norm(o)===target);
   if(exact) return exact;
+  // If the request is provider-qualified (either explicit @provider:model or
+  // a slash-qualified vendor/model id), do NOT fuzzy-match a sibling model
+  // once exact/provider-aware lookup failed. Returning null lets the caller
+  // preserve the raw typed value instead of snapping to the closest catalog
+  // entry. This keeps uncatalogued models routable instead of silently turning
+  // them into a nearby curated sibling.
+  if(rawModel.startsWith('@')||rawModel.includes('/')) return null;
   // 3. Prefix/substring: require the candidate to start with the FULL normalized target
   // (not a truncated base). This avoids false matches like gpt.5.5 → gpt.5.4.mini (#1188).
   // Only fall back to the shorter base form if target itself is very short (a bare root
@@ -331,52 +1302,179 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
 
 // Set the model picker to the best match for modelId.
 // Returns the resolved value that was actually set, or null if nothing matched.
+function _refreshOpenModelDropdown(){
+  const dd=$('composerModelDropdown');
+  if(dd&&dd.classList&&dd.classList.contains('open')&&typeof renderModelDropdown==='function'){
+    renderModelDropdown();
+    if(typeof _positionModelDropdown==='function') _positionModelDropdown();
+  }
+}
 function _applyModelToDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   const resolved=_findModelInDropdown(modelId,sel,preferredProviderId);
   if(resolved){
     sel.value=resolved;
-    if(sel.id==='modelSelect' && typeof syncModelChip==='function') syncModelChip();
+    if(sel.id==='modelSelect'){
+      if(typeof syncModelChip==='function') syncModelChip();
+      _refreshOpenModelDropdown();
+    }
     return resolved;
   }
   return null;
 }
+function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
+  if(!modelId||!sel) return null;
+  const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
+  if(applied) return applied;
+  const value=modelId;
+  const opt=document.createElement('option');
+  opt.value=modelId;
+  opt.textContent=typeof getModelLabel==='function'?getModelLabel(modelId):modelId;
+  opt.dataset.custom='1';
+  const badge=(window._configuredModelBadges||{})[value];
+  if(badge&&badge.provider) opt.dataset.provider=badge.provider;
+  const provider=preferredProviderId||(badge&&badge.provider)||_providerFromModelValue(modelId)||'';
+  if(provider) opt.dataset.provider=provider;
+  sel.appendChild(opt);
+  sel.value=modelId;
+  if(sel.id==='modelSelect'){
+    if(typeof syncModelChip==='function') syncModelChip();
+    _refreshOpenModelDropdown();
+  }
+  return modelId;
+}
+function _modelStateFromAppliedDropdown(sel, modelValue){
+  const state=(typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel,modelValue)
+    : {model:modelValue,model_provider:null};
+  return {model:state.model||modelValue,model_provider:state.model_provider||null};
+}
+function _persistSessionModelCorrection(model, provider, opts){
+  if(!S.session) return;
+  const request=fetch(new URL('api/session/update',document.baseURI||location.href).href,{
+    method:'POST',credentials:'include',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:model,model_provider:provider||null})
+  });
+  return opts&&opts.propagateErrors ? request : request.catch(()=>{});
+}
+function _applySessionModelFallback(sel){
+  if(!sel) return null;
+  const configuredDefault=String(window._defaultModel||'').trim();
+  if(configuredDefault){
+    const appliedDefault=_applyModelToDropdown(configuredDefault,sel,window._activeProvider||null);
+    if(appliedDefault) return _modelStateFromAppliedDropdown(sel,appliedDefault);
+  }
+  const first=sel.querySelector('optgroup > option, option');
+  if(first){
+    sel.value=first.value;
+    if(sel.id==='modelSelect'){
+      if(typeof syncModelChip==='function') syncModelChip();
+      _refreshOpenModelDropdown();
+    }
+    return _modelStateFromAppliedDropdown(sel,first.value);
+  }
+  return null;
+}
 
-async function populateModelDropdown(){
+async function populateModelDropdown(opts={}){
   const sel=$('modelSelect');
   if(!sel) return;
   try{
     const _modelsRes=await fetch(new URL('api/models',document.baseURI||location.href).href,{credentials:'include'});
     if(_redirectIfUnauth(_modelsRes)) return;
     const data=await _modelsRes.json();
-    if(!data.groups||!data.groups.length) return; // keep HTML defaults
     // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
     // Store default model so newSession() can apply it (#872).
     // Per-page-load — not synced across browser tabs.
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
+    // Keep the g.extra_models label hydration path below in this function; tests
+    // assert populateModelDropdown preserves that full-catalog label contract.
+    window._modelEndpointErrors={};
+
+    const _synthGroupsFromConfigured=()=>{
+      const badgeMap=window._configuredModelBadges||{};
+      const grouped=new Map();
+      const addModel=(providerId,modelId)=>{
+        const pid=String(providerId||'configured').trim()||'configured';
+        const mid=String(modelId||'').trim();
+        if(!mid) return;
+        if(!grouped.has(pid)) grouped.set(pid,[]);
+        const arr=grouped.get(pid);
+        if(arr.some(m=>m.id===mid)) return;
+        arr.push({id:mid,label:getModelLabel(mid)});
+      };
+
+      for(const [modelId,badge] of Object.entries(badgeMap)){
+        const mid=String(modelId||'').trim();
+        // Prefer canonical IDs only; skip derived aliases such as
+        // @provider:model and provider/model to avoid noisy duplicates.
+        if(!mid||mid.startsWith('@')||mid.includes('/')) continue;
+        const provider=(badge&&badge.provider)||'configured';
+        addModel(provider,mid);
+      }
+
+      if(grouped.size===0&&data&&data.default_model){
+        addModel(data.active_provider||'configured',data.default_model);
+      }
+
+      const groups=[];
+      for(const [providerId,models] of grouped.entries()){
+        const display=(String(providerId).startsWith('custom:')
+          ? String(providerId).slice('custom:'.length)
+          : String(providerId))||'Configured';
+        groups.push({provider:display,provider_id:providerId,models});
+      }
+      return groups;
+    };
+
+    const groups=(Array.isArray(data.groups)&&data.groups.length)
+      ? data.groups
+      : _synthGroupsFromConfigured();
+
+    if(!groups.length) return; // no server groups and no configured fallback
+    const previousSelection=_captureModelDropdownSelection(sel);
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
-    for(const g of data.groups){
+    for(const g of groups){
       const og=document.createElement('optgroup');
       og.label=g.provider;
       if(g.provider_id) og.dataset.provider=g.provider_id;
-      for(const m of g.models){
+      if(g.models_endpoint_error){
+        const errorKey=g.provider_id||g.provider||'';
+        og.dataset.modelsEndpointError=JSON.stringify(g.models_endpoint_error);
+        if(errorKey) window._modelEndpointErrors[errorKey]=g.models_endpoint_error;
+      }
+      for(const m of (Array.isArray(g.models)?g.models:[])){
         const opt=document.createElement('option');
         opt.value=m.id;
         opt.textContent=m.label;
         og.appendChild(opt);
-        _dynamicModelLabels[m.id]=m.label;
+        _dynamicModelLabels[m.id]=m.id;
+      }
+      // Hydrate the label map from extra_models too (the catalog tail that
+      // doesn't render as <option> entries when the picker is capped — see
+      // _build_nous_featured_set in api/config.py for the rationale). This
+      // keeps a model selected from the slash-command autocomplete or a
+      // persisted-localStorage value renderable with its proper label
+      // instead of falling back to the bare ID. #1567.
+      if(Array.isArray(g.extra_models)){
+        for(const m of g.extra_models){
+          if(m && m.id) _dynamicModelLabels[m.id]=m.id;
+        }
       }
       sel.appendChild(og);
     }
-    // Set default model from server if no localStorage preference
-    if(data.default_model && !(typeof _readPersistedModelState==='function'&&_readPersistedModelState()) && !localStorage.getItem('hermes-webui-model')){
-      _applyModelToDropdown(data.default_model, sel, data.active_provider||null);
-    }
+    _reconcileModelDropdownSelection(sel,data,previousSelection,opts);
     if(typeof syncModelChip==='function') syncModelChip();
+    const dd=$('composerModelDropdown');
+    if(dd&&dd.classList.contains('open')&&typeof renderModelDropdown==='function'){
+      renderModelDropdown();
+      _positionModelDropdown();
+    }
     // Kick off a background live-model fetch for the active provider.
     // This runs after the static list is already shown (no blocking flicker).
     if(data.active_provider) _fetchLiveModels(data.active_provider, sel);
@@ -412,21 +1510,20 @@ function _addLiveModelsToSelect(provider, models, sel){
     sel.appendChild(providerGroup);
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
-  // Normalized dedup: strip @provider: prefix and unify separators so
+  // Normalized dedup: strip one @provider: prefix and namespace so
   // 'minimax/minimax-m2.7' matches '@nous:minimax/minimax-m2.7' (#907).
-  // Strip ONLY the first colon — Ollama tag IDs are multi-colon
-  // (e.g. '@ollama-cloud:qwen3-vl:235b-instruct') and split(':',2) would
-  // truncate the tag suffix in JS (the limit arg discards extras, unlike Python).
   const _normId=id=>{
     let s=String(id||'');
-    if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1); // strip only @provider:
-    s=s.split('/').pop();                                                    // strip namespace prefix
+    if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1);
+    s=s.split('/').pop();
     return s.replace(/-/g,'.').toLowerCase();
   };
   const existingNorm=new Set([...sel.options].map(o=>_normId(o.value)));
   let added=0;
   const _ap=(window._activeProvider||'').toLowerCase();
-  const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && provider===_ap;
+  const _providerLower=String(provider||'').toLowerCase();
+  const _isNamedCustomActiveProvider=_ap.startsWith('custom:');
+  const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && (_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap);
   for(const m of models){
     let mid=m.id;
     if(_isPortalFetch && !mid.startsWith('@')){
@@ -475,7 +1572,7 @@ async function _fetchLiveModels(provider, sel){
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
       if(typeof syncModelChip==='function') syncModelChip();
-      console.log('[hermes] Live models loaded for',provider+':',added,'new models added');
+      console.debug('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
@@ -491,12 +1588,13 @@ async function _fetchLiveModels(provider, sel){
  *
  * Provider detection is intentionally loose — we compare the model's slash
  * prefix (e.g. "openai/" from "openai/gpt-4o") against the active provider
- * name. Custom/local endpoints report active_provider='custom' or the
- * base_url hostname and we skip the check to avoid false positives.
+ * name. Custom/local endpoints report active_provider='custom', a named
+ * custom provider such as 'custom:zenmux', or the base_url hostname; skip the
+ * check for those values to avoid false positives.
  */
 function _checkProviderMismatch(modelId){
   const ap=(window._activeProvider||'').toLowerCase();
-  if(!ap||ap==='custom'||ap==='openrouter') return null; // can't reliably check
+  if(_providerSkipsModelMismatchWarning(ap)) return null; // can't reliably check
   // @provider: prefixed IDs came from that provider's live model list — no mismatch possible
   if(modelId.startsWith('@')) return null;
   const slash=modelId.indexOf('/');
@@ -565,9 +1663,11 @@ function syncModelChip(){
   }
   const opt=_selectedModelOption();
   const text=opt?opt.textContent:getModelLabel(sel.value||'');
-  label.textContent=text;
-  if(mobileLabel) mobileLabel.textContent=text;
-  chip.title=sel.value||'Conversation model';
+  const gatewayRouting=_latestGatewayRoutingForSession(S.session);
+  const displayText=_formatGatewayModelLabel(sel.value||'',text,gatewayRouting)||text;
+  label.textContent=displayText;
+  if(mobileLabel) mobileLabel.textContent=displayText;
+  chip.title=gatewayRouting?`${sel.value||'Conversation model'} ${_gatewayRoutingLabel(gatewayRouting)}`:(sel.value||'Conversation model');
   chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
   if(mobileAction) mobileAction.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
 }
@@ -599,12 +1699,27 @@ function renderModelDropdown(){
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
       const providerId=child.dataset&&child.dataset.provider?child.dataset.provider:'';
+      let modelsEndpointError=null;
+      if(child.dataset&&child.dataset.modelsEndpointError){
+        try{ modelsEndpointError=JSON.parse(child.dataset.modelsEndpointError); }catch(_e){ modelsEndpointError=null; }
+      }
       for(const opt of Array.from(child.children)){
-        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||'',badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
+        const rawValue=String(opt.value||'');
+        const displayName=rawValue.startsWith('@custom:')
+          ? getModelLabel(rawValue)
+          : (opt.textContent||getModelLabel(rawValue));
+        _modelData.push({value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
+      }
+      if(modelsEndpointError && !child.children.length){
+        _modelData.push({value:`__models_endpoint_error__:${providerId||child.label||''}`,name:'',id:'',group:child.label||'',providerId,modelsEndpointError,endpointErrorOnly:true});
       }
     }
     if(child.tagName==='OPTION'){
-      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
+      const rawValue=String(child.value||'');
+      const displayName=rawValue.startsWith('@custom:')
+        ? getModelLabel(rawValue)
+        : (child.textContent||getModelLabel(rawValue));
+      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
     }
   }
   const _existingConfiguredKeys=new Set(_modelData.map(existing=>_normalizeConfiguredModelKey(existing.value)));
@@ -658,8 +1773,32 @@ function renderModelDropdown(){
       }
     }
     const matches=(m)=>!term||found.has(m.value);
-    const configuredModels=_modelData
-      .filter(m=>m.badge&&matches(m))
+    const configuredCandidates=_modelData
+      .filter(m=>m.badge&&matches(m));
+    const configuredBySemanticKey=new Map();
+    const _configuredProviderKey=(m)=>String((m&&m.badge&&m.badge.provider)||_providerFromModelValue(m&&m.value)||'').toLowerCase();
+    const _configuredModelKey=(m)=>_normalizeConfiguredModelKey(m&&m.value||'');
+    const _configuredDisplayPriority=(m)=>{
+      // Prefer plain IDs over provider-qualified aliases for readability.
+      const v=String((m&&m.value)||'');
+      if(v.startsWith('@')) return 0;
+      if(v.includes('/')) return 1;
+      return 2;
+    };
+    for(const candidate of configuredCandidates){
+      const semanticKey=`${_configuredProviderKey(candidate)}::${_configuredModelKey(candidate)}`;
+      const existing=configuredBySemanticKey.get(semanticKey);
+      if(!existing){
+        configuredBySemanticKey.set(semanticKey,candidate);
+        continue;
+      }
+      const candidatePriority=_configuredDisplayPriority(candidate);
+      const existingPriority=_configuredDisplayPriority(existing);
+      if(candidatePriority>existingPriority){
+        configuredBySemanticKey.set(semanticKey,candidate);
+      }
+    }
+    const configuredModels=[...configuredBySemanticKey.values()]
       .sort((a,b)=>{
         const configuredRankA=_configuredRank(a.badge);
         const configuredRankB=_configuredRank(b.badge);
@@ -679,37 +1818,68 @@ function renderModelDropdown(){
       configuredHeading.className='model-group';
       configuredHeading.textContent=t('model_group_configured')||'Configured';
       dd.appendChild(configuredHeading);
+      // 为了显示原始ID，建立 badgeKeyMap: badge对象->原始key
+      const badgeKeyMap = new Map();
+      for(const [k, v] of Object.entries(_badgeMap)){
+        badgeKeyMap.set(v, k);
+      }
       for(const m of configuredModels){
         const row=document.createElement('div');
         row.className='model-opt'+(m.value===sel.value?' active':'');
-        // Add provider info to badge label (e.g., "Primary (jingdong)")
-        let badgeLabel=m.badge?(m.badge.label||'Configured'):'';
-        if(m.badge&&m.badge.provider){
-          const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
-          badgeLabel+=` (${providerName})`;
+        let badgeLabel = '';
+        let modelName = m.name;
+        if (m.badge) {
+          // 直接用badge的原始key（即config.yaml里的ID）
+          const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
+          badgeLabel = rawId;
+          modelName = rawId; // model-opt-name直接用原始ID
+          if(m.badge.provider){
+            const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
+            badgeLabel += ` (${providerName})`;
+          }
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
-        row.onclick=()=>selectModelFromDropdown(m.value);
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        row.onclick=()=>selectModelFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
     }
     // Add remaining models matching filter
     let _lastGroup=null;
+    // Count models per group for heading labels (#1425)
+    const _groupCounts={};
+    for(const m of _modelData){
+      if(configuredIds.has(m.value)) continue;
+      if(m.group&&!m.endpointErrorOnly) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
+    }
+    const _renderProviderEndpointHint=(groupName)=>{
+      if(!groupName) return;
+      const entry=_modelData.find(m=>m.group===groupName&&m.modelsEndpointError);
+      if(!entry||!entry.modelsEndpointError) return;
+      const hint=document.createElement('div');
+      hint.className='model-provider-hint';
+      hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
+      dd.appendChild(hint);
+    };
     for(const m of _modelData){
       if(configuredIds.has(m.value)||!matches(m)) continue;
       if(m.group&&m.group!==_lastGroup){
         const heading=document.createElement('div');
         heading.className='model-group';
-        heading.textContent=m.group;
+        const count=_groupCounts[m.group]||0;
+        heading.textContent=count>1?`${m.group} (${count})`:m.group;
         dd.appendChild(heading);
+        _renderProviderEndpointHint(m.group);
         _lastGroup=m.group;
       }
+      if(m.endpointErrorOnly) continue;
       const row=document.createElement('div');
       row.className='model-opt'+(m.value===sel.value?' active':'');
       const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
-      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
-      row.onclick=()=>selectModelFromDropdown(m.value);
+      // Inline provider chip on every row that has a group (#1425)
+      const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
+      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+      row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
       dd.appendChild(row);
     }
     // Show "No results" if filtered and nothing matched
@@ -747,26 +1917,29 @@ function renderModelDropdown(){
 }
 
 async function selectModelFromDropdown(value){
+  const preferredProviderId=arguments[1];
   const sel=$('modelSelect');
-  if(!sel||sel.value===value) { closeModelDropdown(); return; }
-  // If the value isn't in the option list (custom model ID), add a temporary option
-  // so sel.value assignment succeeds and the model chip shows the custom ID.
-  if(!Array.from(sel.options).some(o=>o.value===value)){
-    const opt=document.createElement('option');
-    opt.value=value;
-    opt.textContent=getModelLabel(value);
-    opt.dataset.custom='1';
-    // Remove any previous custom option before adding new one
-    sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
-    sel.appendChild(opt);
+  if(!sel) { closeModelDropdown(); return; }
+  const provider=String(preferredProviderId||'').trim()||null;
+  const currentState=(typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel, sel.value)
+    : {model:sel.value,model_provider:null};
+  const sameModel=String(currentState.model||'')===String(value||'');
+  const sameProvider=String(currentState.model_provider||'')===String(provider||'');
+  if(sameModel&&sameProvider){ closeModelDropdown(); return; }
+  // Resolve the provider-specific option so duplicate bare IDs (e.g. gpt-5.5
+  // under OpenAI Codex vs OpenRouter) update session model_provider correctly.
+  if(typeof _ensureModelOptionInDropdown==='function'){
+    _ensureModelOptionInDropdown(value, sel, provider);
+  }else{
+    sel.value=value;
   }
-  sel.value=value;
   syncModelChip();
   closeModelDropdown();
   if(typeof sel.onchange==='function') await sel.onchange();
 }
 
-function toggleModelDropdown(){
+async function toggleModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
   const sel=$('modelSelect');
@@ -777,6 +1950,11 @@ function toggleModelDropdown(){
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
+  if(typeof window._ensureModelDropdownReady==='function'){
+    const ready=window._ensureModelDropdownReady();
+    if(ready&&typeof ready.catch==='function') ready.catch(()=>{});
+  }
+  if(dd.classList.contains('open')) return;
   renderModelDropdown();
   dd.classList.add('open');
   _positionModelDropdown();
@@ -814,6 +1992,7 @@ window.addEventListener('resize',()=>{
 
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
+let _currentReasoningEffortsSupported=null;
 
 function _normalizeReasoningEffort(eff){
   return String(eff||'').trim().toLowerCase();
@@ -825,17 +2004,65 @@ function _formatReasoningEffortLabel(effort){
   return effort;
 }
 
+function _reasoningEffortQuery(){
+  const sel=$('modelSelect');
+  const model=(S&&S.session&&S.session.model)||(sel&&sel.value)||'';
+  let provider=(S&&S.session&&S.session.model_provider)||'';
+  if(!provider&&sel&&model&&typeof _modelStateForSelect==='function'){
+    provider=_modelStateForSelect(sel, model).model_provider||'';
+  }
+  const params=new URLSearchParams();
+  if(model) params.set('model', model);
+  if(provider) params.set('provider', provider);
+  const qs=params.toString();
+  return qs?('?'+qs):'';
+}
+
+function _applyReasoningOptions(supportedEfforts){
+  const dd=$('composerReasoningDropdown');
+  if(!dd) return;
+  const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
+  dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+    const effort=opt.dataset.effort;
+    if(effort==='none'){
+      opt.style.display='';
+      return;
+    }
+    if(!supported.size){
+      opt.style.display='none';
+      return;
+    }
+    opt.style.display=supported.has(effort)?'':'none';
+  });
+}
+
 function _applyReasoningChip(eff){
+  const meta=arguments[1]||null;
   const effort=_normalizeReasoningEffort(eff);
   _currentReasoningEffort=effort;
+  if(meta&&Array.isArray(meta.supported_efforts)){
+    _currentReasoningEffortsSupported=meta.supported_efforts;
+  }
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
   const chip=$('composerReasoningChip');
   const mobileLabel=$('composerMobileReasoningLabel');
   const mobileAction=$('composerMobileReasoningAction');
   if(!wrap||!label) return;
+  const supportedEfforts=(typeof _currentReasoningEffortsSupported==='undefined')
+    ?null
+    :_currentReasoningEffortsSupported;
+  const supports=Array.isArray(supportedEfforts)
+    ?supportedEfforts.length>0
+    :true;
+  if(!supports){
+    wrap.style.display='none';
+    if(mobileAction) mobileAction.style.display='none';
+    return;
+  }
   wrap.style.display='';
   if(mobileAction) mobileAction.style.display='';
+  if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
   const text=_formatReasoningEffortLabel(effort);
   label.textContent=text;
   if(mobileLabel) mobileLabel.textContent=text;
@@ -849,14 +2076,13 @@ function _applyReasoningChip(eff){
 }
 
 function fetchReasoningChip(){
-  api('/api/reasoning').then(function(st){
-    _applyReasoningChip((st&&st.reasoning_effort)||'');
-  }).catch(function(){_applyReasoningChip('');});
+  api('/api/reasoning'+_reasoningEffortQuery()).then(function(st){
+    _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
+  }).catch(function(){_applyReasoningChip('', {supported_efforts:[]});});
 }
 
 function syncReasoningChip(){
-  if(_currentReasoningEffort===null){fetchReasoningChip();return;}
-  _applyReasoningChip(_currentReasoningEffort);
+  fetchReasoningChip();
 }
 
 function _highlightReasoningOption(effort){
@@ -922,7 +2148,7 @@ document.addEventListener('click',function(e){
     if(effort){
       api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
         .then(function(st){
-          _applyReasoningChip((st&&st.reasoning_effort)||effort);
+          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
@@ -1180,24 +2406,346 @@ window.addEventListener('resize',function(){
 // Uses a guard flag to avoid the race where programmatic scrolls (from
 // scrollIfPinned / scrollToBottom) re-set _scrollPinned=true, overriding
 // the user's explicit scroll-up.  Fixes #1469 / #1360.
+// Direction-aware unpin (issue #1731): the hysteresis below is correct
+// for re-pinning (entering the near-bottom zone), but applying it to
+// unpinning stranded users who scrolled up by a small amount inside the
+// 250px zone — every upward sample still landed in the near-bottom
+// region, so the counter kept incrementing and _scrollPinned stayed
+// true. The next streaming token snapped them back. We now track
+// scrollTop direction: an explicit upward movement (scrollTop decreased
+// by more than 2px between samples) unpins immediately and resets the
+// counter, while downward / stationary movement falls through the
+// original hysteresis path so the macOS momentum re-pin protection from
+// #1360 is preserved.
+// rAF-debounced scroll listener (issue #1360): on macOS WKWebView, trackpad
+// momentum scrolling fires scroll events that interleave with the
+// _programmaticScroll setTimeout(0) guard. A mid-momentum scroll event can
+// either get swallowed (_programmaticScroll still true) or falsely report
+// the user is at the bottom (momentum hasn't settled). rAF defers the
+// distance check to the next paint frame when the browser's scroll
+// position has settled. A hysteresis counter requires two consecutive
+// near-bottom samples before re-pinning, preventing accidental re-pin
+// during initial deceleration.
 let _scrollPinned=true;
 let _programmaticScroll=false;
+let _nearBottomCount=0;
+let _lastScrollTop=null;
+let _lastNonMessageScrollIntentMs=0;
+let _lastMessageUpwardIntentMs=0;
+let _messageUserUnpinned=false;
+let _bottomSettleToken=0;
+const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
+const MESSAGE_UPWARD_INTENT_MS=450;
+function _cancelBottomSettle(){ _bottomSettleToken++; }
+function _recordNonMessageScrollIntent(e){
+  const el=document.getElementById('messages');
+  const target=e&&e.target;
+  if(!el||!target) return;
+  // Streaming token renders should keep pinning the chat only while the user is
+  // actually interacting with the chat pane. A wheel/touch gesture over the
+  // session sidebar (or another independent pane) must not be immediately fought
+  // by scrollIfPinned() writing #messages.scrollTop on the next token (#1784).
+  if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
+  else if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY<0)){
+    // User is intentionally moving upward in the transcript. Record the real
+    // input event so later scrollTop decreases caused by layout/windowing do
+    // not masquerade as user intent and strand live streaming away from bottom.
+    _lastMessageUpwardIntentMs=performance.now();
+    // User is intentionally moving in the transcript. Cancel any delayed
+    // scrollToBottom settling that was scheduled by session-load/layout growth.
+    _cancelBottomSettle();
+    if(typeof e.deltaY==='number'&&e.deltaY<0){
+      _messageUserUnpinned=true;
+      _nearBottomCount=0;
+      _scrollPinned=false;
+    }
+  }
+}
+function _recentMessageUpwardIntent(){
+  return performance.now()-_lastMessageUpwardIntentMs<MESSAGE_UPWARD_INTENT_MS;
+}
+function _recentNonMessageScrollIntent(){
+  return performance.now()-_lastNonMessageScrollIntentMs<NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS;
+}
+if(typeof document!=='undefined'){
+  document.addEventListener('wheel',_recordNonMessageScrollIntent,{capture:true,passive:true});
+  document.addEventListener('touchmove',_recordNonMessageScrollIntent,{capture:true,passive:true});
+}
+// Reset hook for session-switch — called from sessions.js loadSession() to
+// prevent the new chat's first scroll comparing against the previous chat's
+// scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
+function _resetScrollDirectionTracker(){ _lastScrollTop=null; }
+if(typeof window!=='undefined') window._resetScrollDirectionTracker=_resetScrollDirectionTracker;
+/* ── Pull-to-refresh for PWA standalone (Android) ── */
+(function(){
+  if(typeof document==='undefined') return;
+  const isStandalone=window.navigator?.standalone||matchMedia('(display-mode:standalone),(display-mode:fullscreen)').matches;
+  if(!isStandalone) return;
+  const el=document.getElementById('messages');
+  if(!el) return;
+  let _ptrState=0; // 0=idle, 1=pulling, 2=ready
+  let _ptrStartY=0;
+  let _ptrCurrentY=0;
+  const THRESHOLD=80;
+  let _indicator=null;
+  function _ptrCreateIndicator(){
+    if(_indicator) return;
+    _indicator=document.createElement('div');
+    _indicator.className='pull-to-refresh-indicator';
+    _indicator.innerHTML='<span class="ptr-icon">↓</span> <span class="ptr-text">Pull to refresh</span>';
+    el.parentNode.insertBefore(_indicator,el);
+  }
+  function _ptrUpdate(progress){
+    _ptrCreateIndicator();
+    const pulling=progress<1;
+    _indicator.classList.toggle('active',progress>0);
+    const icon=_indicator.querySelector('.ptr-icon');
+    const text=_indicator.querySelector('.ptr-text');
+    if(icon) icon.classList.toggle('ready',!pulling);
+    if(text) text.textContent=pulling?'Pull to refresh':'Release to refresh';
+  }
+  function _ptrReset(){
+    _ptrState=0;
+    _ptrStartY=0;
+    _ptrCurrentY=0;
+    if(_indicator) _indicator.classList.remove('active');
+  }
+  el.addEventListener('touchstart',function(e){
+    if(el.scrollTop>0||_ptrState!==0) return;
+    _ptrStartY=e.touches[0].clientY;
+    _ptrState=1;
+  },{passive:true});
+  el.addEventListener('touchmove',function(e){
+    if(_ptrState!==1) return;
+    _ptrCurrentY=e.touches[0].clientY;
+    const pull=_ptrCurrentY-_ptrStartY;
+    if(pull<0){ _ptrReset(); return; }
+    /* If not at the top, smooth-scroll to top first.
+       Next pull gesture will trigger the refresh. */
+    if(el.scrollTop>0){
+      el.scrollTo({top:0,behavior:'smooth'});
+      _ptrReset();
+      return;
+    }
+    const progress=Math.min(pull/THRESHOLD,1);
+    _ptrUpdate(progress);
+    _ptrState=progress>=1?2:1;
+    if(progress>0.3) e.preventDefault();
+  },{passive:false});
+  el.addEventListener('touchend',function(){
+    if(_ptrState===2){
+      if(typeof window.refreshSessionList==='function'){
+        Promise.resolve(window.refreshSessionList('pull', {force:true, refreshActive:true})).catch(()=>{}).finally(_ptrReset);
+      }else{
+        window.location.reload();
+      }
+      return;
+    }
+    _ptrReset();
+  },{passive:true});
+  el.addEventListener('touchcancel',_ptrReset,{passive:true});
+})();
 (function(){
   const el=document.getElementById('messages');
   if(!el) return;
+  let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     if(_programmaticScroll) return; // ignore scrolls we triggered ourselves
-    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<250;
-    _scrollPinned=nearBottom;
-    const btn=$('scrollToBottomBtn');
-    if(btn) btn.style.display=_scrollPinned?'none':'flex';
-    // Load older messages when scrolled near the top
-    if(el.scrollTop<80 && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
-      _loadOlderMessages();
-    }
+    cancelAnimationFrame(_scrollRaf);
+    _scrollRaf=requestAnimationFrame(()=>{
+      const top=el.scrollTop;
+      const nearBottom=el.scrollHeight-top-el.clientHeight<250;
+      // scrollToBottomBtn visibility is updated below after pin state settles.
+      const movedUp=_lastScrollTop!==null && top<_lastScrollTop-2 && _recentMessageUpwardIntent();
+      _lastScrollTop=top;
+      if(movedUp){ _cancelBottomSettle(); _nearBottomCount=0; _scrollPinned=false; _messageUserUnpinned=true; } // #1731
+      else {
+        if(nearBottom){
+          _nearBottomCount=_nearBottomCount+1;
+          if(_nearBottomCount>=2) _scrollPinned=true;
+        } else { _nearBottomCount=0; _scrollPinned=false; }
+        if(_scrollPinned) _messageUserUnpinned=false;
+      } // #1360
+      const btn=$('scrollToBottomBtn');
+      const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
+      if(btn) btn.style.display=showBottomButton?'flex':'none';
+      if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+      // Prefetch older messages before the reader hits the hard top. Prepending
+      // then preserving scrollTop is seamless only if there is runway left for
+      // the user's continued upward wheel/touch movement.
+      const olderPrefetchPx=Math.max(600,el.clientHeight*1.5);
+      if(_isSessionEndlessScrollEnabled()&&el.scrollTop<olderPrefetchPx && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
+        _loadOlderMessages();
+      }
+    });
   });
 })();
 function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n);}
+function _formatTurnDuration(seconds){
+  const n=Number(seconds);
+  if(!Number.isFinite(n)||n<0)return'';
+  const total=Math.max(0,Math.round(n));
+  if(total<60)return`${total}s`;
+  const h=Math.floor(total/3600);
+  const m=Math.floor((total%3600)/60);
+  const s=total%60;
+  if(h)return`${h}h ${m}m`;
+  return`${m}m ${s}s`;
+}
+function _formatActiveElapsedTimer(seconds){
+  const n=Number(seconds);
+  if(!Number.isFinite(n)||n<0)return'';
+  const total=Math.max(0,Math.floor(n));
+  const m=Math.floor(total/60);
+  const s=total%60;
+  return`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+const _COMPRESSION_ELAPSED_MAX_SECONDS=5*60;
+let _compressionElapsedTimer=null;
+function _compressionElapsedStartedAt(state){const n=Number(state&&state.startedAt);return Number.isFinite(n)&&n>0?n:null;}
+function _compressionElapsedLabel(state){
+  const started=_compressionElapsedStartedAt(state);
+  if(!started)return'';
+  const elapsed=Math.max(0,(Date.now()/1000)-started);
+  if(elapsed>=_COMPRESSION_ELAPSED_MAX_SECONDS)return '5+ min';
+  return _formatActiveElapsedTimer(elapsed);
+}
+function _compressionElapsedExpired(state){const started=_compressionElapsedStartedAt(state);return !!(started&&((Date.now()/1000)-started)>=_COMPRESSION_ELAPSED_MAX_SECONDS);}
+function _compressionLiveCardNode(){return document.querySelector('[data-live-compression-card="1"][data-compression-started-at]');}
+function _compressionLiveCardState(){
+  const node=_compressionLiveCardNode();
+  const started=Number(node&&node.getAttribute('data-compression-started-at'));
+  if(!node||!S.session||!Number.isFinite(started)||started<=0)return null;
+  return {sessionId:S.session.session_id,phase:'running',automatic:true,message:node.getAttribute('data-compression-message')||'Auto-compressing context...',startedAt:started};
+}
+function _updateCompressionElapsedCards(state){
+  if(!state)return false;
+  const preview=_autoCompressionPreviewText(state), detail=_autoCompressionDetailText(state);
+  let updated=false;
+  document.querySelectorAll('.tool-card-compress-auto.tool-card-compress-running').forEach(card=>{
+    const previewEl=card.querySelector('.tool-card-preview');
+    const detailEl=card.querySelector('.tool-card-result pre');
+    if(previewEl) previewEl.textContent=preview;
+    if(detailEl) detailEl.textContent=detail;
+    updated=true;
+  });
+  return updated;
+}
+function _updateCompressionElapsedTimer(){
+  const state=_compressionStateForCurrentSession()||_compressionLiveCardState();
+  if(state&&state.automatic&&state.phase==='running'){
+    _updateCompressionElapsedCards(state);
+    if(_compressionElapsedExpired(state)) _clearCompressionElapsedTimer();
+  }else _clearCompressionElapsedTimer();
+}
+function _startCompressionElapsedTimer(){if(!_compressionElapsedTimer)_compressionElapsedTimer=setInterval(_updateCompressionElapsedTimer,1000);}
+function _clearCompressionElapsedTimer(){if(_compressionElapsedTimer){clearInterval(_compressionElapsedTimer);_compressionElapsedTimer=null;}}
+let _activityElapsedTimer=null;
+let _activityElapsedTimerGroup=null;
+function _activityNowSeconds(){return Date.now()/1000;}
+function _activityElapsedStartedAt(group){
+  if(!group)return null;
+  const raw=(group.dataset&&group.dataset.turnStartedAt!==undefined&&group.dataset.turnStartedAt!=='')
+    ?group.dataset.turnStartedAt
+    :(S.session&&S.session.pending_started_at);
+  const started=Number(raw);
+  return Number.isFinite(started)&&started>0?started:null;
+}
+function _activityElapsedLabel(group){
+  const started=_activityElapsedStartedAt(group);
+  if(!started)return'';
+  return _formatActiveElapsedTimer(_activityNowSeconds()-started);
+}
+function _activityMarkObserved(group, ts){
+  if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
+  const stamp=Number(ts||_activityNowSeconds());
+  if(Number.isFinite(stamp)&&stamp>0) group.setAttribute('data-last-activity-at',String(stamp));
+}
+function _activityLastObservedAge(group){
+  const stamp=Number(group&&group.getAttribute('data-last-activity-at'));
+  if(!Number.isFinite(stamp)||stamp<=0)return null;
+  return Math.max(0,_activityNowSeconds()-stamp);
+}
+function _activityClockLabel(ts){
+  const stamp=Number(ts||_activityNowSeconds());
+  if(!Number.isFinite(stamp)||stamp<=0)return'';
+  try{return new Date(stamp*1000).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});}catch(_){return'';}
+}
+function _activityStatusNode({kind='info',label='',detail='',status='done',ts=null,id=''}){
+  const row=document.createElement('div');
+  row.className=`agent-activity-status agent-activity-status-${kind} agent-activity-status-${status}`;
+  if(id) row.setAttribute('data-activity-event-id',id);
+  if(ts) row.setAttribute('data-activity-at',String(ts));
+  const iconMap={run:li('play',13),model:li('bot',13),waiting:'<span class="tool-card-running-dot"></span>',thinking:li('lightbulb',13),tool:li('wrench',13),done:li('check',13),warning:li('alert-triangle',13)};
+  row.innerHTML=`<span class="agent-activity-status-icon">${iconMap[kind]||li('clock',13)}</span><span class="agent-activity-status-copy"><span class="agent-activity-status-label">${esc(label)}</span>${detail?`<span class="agent-activity-status-detail">${esc(detail)}</span>`:''}</span><span class="agent-activity-status-time">${esc(_activityClockLabel(ts))}</span>`;
+  return row;
+}
+function _appendActivityEvent(group, event){
+  if(!group)return null;
+  const body=group.querySelector('.tool-call-group-body');
+  if(!body)return null;
+  const eventId=event&&event.id;
+  let row=eventId?body.querySelector(`.agent-activity-status[data-activity-event-id="${CSS.escape(eventId)}"]`):null;
+  const next=_activityStatusNode(event||{});
+  if(row){row.replaceWith(next);row=next;}
+  else{body.appendChild(next);row=next;}
+  _activityMarkObserved(group,event&&event.ts);
+  return row;
+}
+function _ensureLiveActivityBaseline(group){
+  if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
+  const started=_activityElapsedStartedAt(group)||_activityNowSeconds();
+  if(!group.getAttribute('data-turn-started-at')) group.setAttribute('data-turn-started-at',String(started));
+  if(!group.getAttribute('data-last-activity-at')) group.setAttribute('data-last-activity-at',String(started));
+  _appendActivityEvent(group,{id:'run-started',kind:'run',label:'Run started',detail:'Observable activity will appear here as the agent works.',status:'done',ts:started});
+  const modelLabel=(S.session&&S.session.model)?getModelLabel(S.session.model):'';
+  if(modelLabel)_appendActivityEvent(group,{id:'run-model',kind:'model',label:`Model: ${modelLabel}`,detail:S.activeProfile&&S.activeProfile!=='default'?`Profile: ${S.activeProfile}`:'',status:'done',ts:started});
+}
+function _setActivityElapsedStartedAt(group){
+  if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
+  const started=_activityElapsedStartedAt(group);
+  if(started)group.setAttribute('data-turn-started-at',String(started));
+}
+function _updateActiveActivityElapsedTimer(){
+  const group=_activityElapsedTimerGroup;
+  if(!group||!group.isConnected||group.getAttribute('data-live-tool-call-group')!=='1'||group.getAttribute('data-live-activity-current')!=='1'){
+    _clearActivityElapsedTimer();
+    return;
+  }
+  const durationEl=group.querySelector('.tool-call-group-duration');
+  const label=_activityElapsedLabel(group);
+  if(label){
+    group.setAttribute('data-active-turn-elapsed',label);
+  }else{
+    group.removeAttribute('data-active-turn-elapsed');
+  }
+  if(durationEl){
+    const activeText=label?`Working for ${label}`:'';
+    const progressText=_activityLiveProgressLabel(group);
+    durationEl.textContent=[progressText, activeText].filter(Boolean).join(' · ');
+    durationEl.style.display=durationEl.textContent?'':'none';
+  }
+}
+function _startActivityElapsedTimer(group){
+  if(!group||group.getAttribute('data-live-tool-call-group')!=='1')return;
+  _setActivityElapsedStartedAt(group);
+  if(_activityElapsedTimerGroup&&_activityElapsedTimerGroup!==group)_clearActivityElapsedTimer();
+  _activityElapsedTimerGroup=group;
+  _updateActiveActivityElapsedTimer();
+  if(!_activityElapsedTimer)_activityElapsedTimer=setInterval(_updateActiveActivityElapsedTimer,1000);
+}
+function _clearActivityElapsedTimer(){
+  if(_activityElapsedTimer){
+    clearInterval(_activityElapsedTimer);
+    _activityElapsedTimer=null;
+  }
+  if(_activityElapsedTimerGroup&&_activityElapsedTimerGroup.isConnected){
+    _activityElapsedTimerGroup.removeAttribute('data-active-turn-elapsed');
+    const durationEl=_activityElapsedTimerGroup.querySelector('.tool-call-group-duration');
+    if(durationEl){durationEl.textContent='';durationEl.style.display='none';}
+  }
+  _activityElapsedTimerGroup=null;
+}
 
 const _MOBILE_CONFIG_BASE_LABEL='Workspace, model, reasoning, and context settings';
 
@@ -1290,12 +2838,14 @@ function _syncCtxIndicator(usage){
   // branch below — honest "no data" instead of misleading "890% used".
   const promptTok=usage.last_prompt_tokens||0;
   const totalTok=(usage.input_tokens||0)+(usage.output_tokens||0);
+  const cacheReadTok=usage.cache_read_tokens||0;
+  const cacheWriteTok=usage.cache_write_tokens||0;
   // Default context window to 128K when not provided by backend
   const DEFAULT_CTX=128*1024;
   const ctxWindow=usage.context_length||DEFAULT_CTX;
   const cost=usage.estimated_cost;
   // Show indicator whenever we have any usage data (tokens or cost)
-  if(!promptTok&&!totalTok&&!cost){
+  if(!promptTok&&!totalTok&&!cost&&!cacheReadTok&&!cacheWriteTok){
     if(wrap) wrap.style.display='none';
     _syncMobileCtxDisplay({visible:false});
     return;
@@ -1328,9 +2878,12 @@ function _syncCtxIndicator(usage){
   const compressText=pct>=75?t('ctx_compress_action'):(pct>=50?t('ctx_compress_hint'):'');
   if(compressWrap) compressWrap.style.display=compressText?'':'none';
   _setCtxCompressButton(compressBtn,compressText);
+  const cacheHitPct=usage.cache_hit_percent;
+  const cacheText=cacheHitPct!=null?t('usage_cache_hit_detail',cacheHitPct,_fmtTokens(cacheReadTok),_fmtTokens(cacheWriteTok)):'';
   let label=hasPromptTok?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
   if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+  if(cacheText) label+=` \u00b7 ${cacheText}`;
   el.setAttribute('aria-label',label);
   const usageText=hasPromptTok?(overflowed?`${rawPct}% used (context exceeded)`:`${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
   const tokensText=hasPromptTok?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
@@ -1352,6 +2905,11 @@ function _syncCtxIndicator(usage){
   if(costLine){
     if(cost){
       costText=`Estimated cost: $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+      if(cacheText) costText+=` \u00b7 ${cacheText}`;
+      costLine.style.display='';
+      costLine.textContent=costText;
+    }else if(cacheText){
+      costText=cacheText;
       costLine.style.display='';
       costLine.textContent=costText;
     }else{
@@ -1396,17 +2954,63 @@ document.addEventListener('DOMContentLoaded',function(){
   tooltip.addEventListener('click',function(e){e.stopPropagation();});
 });
 
+function _setMessageScrollToBottom(){
+  const el=$('messages');
+  if(!el) return;
+  _programmaticScroll=true;
+  el.scrollTop=el.scrollHeight;
+  _lastScrollTop=el.scrollTop;
+  _nearBottomCount=2;
+  _scrollPinned=true;
+  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+}
+function _isMessagePaneNearBottom(threshold=250){
+  const el=$('messages');
+  if(!el) return false;
+  return el.scrollHeight-el.scrollTop-el.clientHeight<=threshold;
+}
+function _shouldFollowMessagesOnDomReplace(){
+  return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(1200));
+}
+function _settleMessageScrollToBottom(force){
+  // Markdown post-processing (Prism, tables, Mermaid/KaTeX/PDF placeholders)
+  // can grow the transcript after the first scroll write. Re-apply the bottom
+  // position across a few frames while pinned so late layout does not leave the
+  // viewport a few lines above the real end. User scroll increments
+  // _bottomSettleToken and cancels the delayed passes.
+  const token=++_bottomSettleToken;
+  const passes=[0,16,80,180];
+  passes.forEach(delay=>setTimeout(()=>{
+    if(token!==_bottomSettleToken) return;
+    if(!force && (!_scrollPinned||_recentNonMessageScrollIntent())) return;
+    _setMessageScrollToBottom();
+  },delay));
+  requestAnimationFrame(()=>{
+    if(token!==_bottomSettleToken) return;
+    if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+    requestAnimationFrame(()=>{
+      if(token!==_bottomSettleToken) return;
+      if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+    });
+  });
+}
 function scrollIfPinned(){
   if(!_scrollPinned) return;
-  const el=$('messages');
-  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
+  if(_recentNonMessageScrollIntent()) return;
+  _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
   _scrollPinned=true;
-  const el=$('messages');
-  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
+  _messageUserUnpinned=false;
+  // Write the first bottom position synchronously. A final renderMessages()
+  // rebuild can queue a native scroll event from the temporary scrollTop=0
+  // layout state; if we only schedule delayed settles, that event can cancel
+  // them before the viewport ever reaches the bottom.
+  _setMessageScrollToBottom();
+  _settleMessageScrollToBottom(true);
   const btn=$('scrollToBottomBtn');
   if(btn) btn.style.display='none';
+  if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
 }
 
 function _fmtOllamaLabel(mid){
@@ -1428,6 +3032,17 @@ function _fmtOllamaLabel(mid){
 
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
+  const rawId=String(modelId||'');
+  // Preserve custom gateway model IDs exactly as configured.
+  // Examples:
+  //   @custom:ai_gateway:Qwen3.6-35B-A3B -> Qwen3.6-35B-A3B
+  //   @custom:qwen397b-64k               -> qwen397b-64k
+  if(rawId.startsWith('@custom:')){
+    const rest=rawId.slice('@custom:'.length);
+    if(rest.includes(':')) return rest.slice(rest.lastIndexOf(':')+1)||rawId;
+    if(rest.includes('/')) return rest.split('/').pop()||rawId;
+    return rest||rawId;
+  }
   // Check dynamic labels first, then fall back to splitting the ID
   if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
   // Static fallback for common models
@@ -1438,14 +3053,59 @@ function getModelLabel(modelId){
   // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
   if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
   const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
+  const atProvider=(rawId.startsWith('@')&&rawId.includes(':'))
+    ? rawId.slice(1,rawId.indexOf(':')).toLowerCase()
+    : '';
+  const allowOllamaFormat=!atProvider||atProvider.startsWith('ollama');
   // Narrow: only apply Ollama formatter to IDs with explicit @ollama prefix or colon-tag format.
   // Avoids reformatting bare provider model IDs like claude-sonnet-4-6 or gpt-4o.
   const looksLikeBareOllamaId = modelId.startsWith('@ollama') || looksLikeOllamaTag;
   const ollamaLabel = _fmtOllamaLabel(_last);
-  if ((modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {
+  if (allowOllamaFormat && (modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {
     return ollamaLabel;
   }
   return _last || 'Unknown';
+}
+
+function _gatewayProviderName(provider){
+  const text=String(provider||'').trim();
+  if(!text)return'';
+  return text.replace(/^custom:/,'').replace(/[-_]/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+}
+function _gatewayRoutingLabel(routing){
+  if(!routing)return'';
+  const provider=_gatewayProviderName(routing.used_provider||routing.provider);
+  return provider?`via ${provider}`:'';
+}
+function _formatGatewayModelLabel(modelId,labelText,routing){
+  if(!routing)return'';
+  const usedModel=String(routing.used_model||'').trim();
+  const base=usedModel?getModelLabel(usedModel):(labelText||getModelLabel(modelId));
+  const via=_gatewayRoutingLabel(routing);
+  return via?`${base} ${via}`:base;
+}
+function _gatewayRoutingFailoverText(routing){
+  if(!routing||!routing.has_failover)return'';
+  const attempts=Array.isArray(routing.routing)?routing.routing:[];
+  const providers=attempts.map(a=>_gatewayProviderName(a&&a.provider)).filter(Boolean);
+  const unique=[];providers.forEach(p=>{if(!unique.includes(p))unique.push(p);});
+  if(unique.length>=2)return`Failover: ${unique[0]} → ${unique[unique.length-1]}`;
+  const from=_gatewayProviderName(routing.requested_provider);
+  const to=_gatewayProviderName(routing.used_provider);
+  if(from&&to&&from!==to)return`Failover: ${from} → ${to}`;
+  return'Gateway failover detected';
+}
+function _gatewayModelWarningText(routing){
+  if(!routing||!routing.model_changed)return'';
+  const requested=getModelLabel(routing.requested_model||'requested model');
+  const used=getModelLabel(routing.used_model||'served model');
+  return`Model switched: ${requested} → ${used}`;
+}
+function _latestGatewayRoutingForSession(session){
+  if(!session)return null;
+  if(session.gateway_routing)return session.gateway_routing;
+  const history=Array.isArray(session.gateway_routing_history)?session.gateway_routing_history:[];
+  return history.length?history[history.length-1]:null;
 }
 
 function _stripXmlToolCallsDisplay(s){
@@ -1472,6 +3132,27 @@ function _sanitizeThinkingDisplayText(text){
   return stripped.trim();
 }
 
+function _renderThinkingDisplayHtml(text){
+  const clean=_sanitizeThinkingDisplayText(text);
+  // Thinking content is intentionally not run through the full markdown renderer:
+  // reasoning streams can be long, partial, and contain arbitrary model text.
+  // Escape everything first, then restore only the narrow heading-like shape the
+  // models commonly emit inside thinking cards: a whole line wrapped in **...**.
+  return esc(clean).replace(/(^|\n)\*\*([^*\n]{1,120})\*\*(?=\n|$)/g,(_,lead,heading)=>{
+    return lead+'<strong class="thinking-heading">'+heading+'</strong>';
+  });
+}
+
+function _stripVisibleAssistantEchoFromThinking(thinkingText, visibleText){
+  let out=String(thinkingText||'');
+  const visible=String(visibleText||'');
+  if(!out||!visible) return out.trim();
+  visible.split(/\n{2,}/).map(s=>s.trim()).filter(s=>s.length>=20).forEach(snippet=>{
+    out=out.split(snippet).join('');
+  });
+  return out.trim();
+}
+
 function renderMd(raw){
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
@@ -1494,7 +3175,8 @@ function renderMd(raw){
   s=(function _applyBlockquotes(input){
     const lines=input.split('\n');
     const out=[];
-    let inFence=false;     // inside a non-blockquote ```...``` fence
+    let inFence=false;     // inside a non-blockquote backtick fence
+    let fenceLen=0;
     let bqStart=-1;
     const flush=(end)=>{
       if(bqStart<0) return;
@@ -1517,13 +3199,15 @@ function renderMd(raw){
       const line=lines[i];
       if(inFence){
         out.push(line);
-        if(/^```/.test(line)) inFence=false;
+        if(_isBacktickFenceClose(line,fenceLen)){inFence=false;fenceLen=0;}
         continue;
       }
-      if(/^```/.test(line)){
+      const fenceOpen=_matchBacktickFenceLine(line);
+      if(fenceOpen){
         flush(i);
         out.push(line);
         inFence=true;
+        fenceLen=fenceOpen.len;
         continue;
       }
       if(/^>/.test(line)){
@@ -1541,7 +3225,7 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
+  s=s.replace(/MEDIA:([^\s`\)\]]+)/g,(_,raw_ref)=>{
     media_stash.push(raw_ref);
     return '\x00D'+(media_stash.length-1)+'\x00';
   });
@@ -1567,14 +3251,16 @@ function renderMd(raw){
   const _preBlock_stash=[];
   const fence_stash=[];
   // CommonMark §4.5: opening fence must start a line (with up to 3 spaces of indent)
-  // and closing fence must also start a line. Without line anchoring, a literal ``` inside
-  // a code block (e.g. a regex pattern with ``` in a lookbehind, a script that documents
-  // fences) terminates the outer block at the wrong place, leaking content into the
-  // markdown stream where bold/italic/inline-code passes corrupt it. Fixes #1438.
-  s=s.replace(/(^|\n)[ ]{0,3}```(?:([\s\S]*?)\n)?[ ]{0,3}```(?=\n|$)/g,(_,lead,raw)=>{
-    const m=raw.match(/^(\w[\w+-]*)\n?([\s\S]*)$/);
-    const lang=m?(m[1]||'').trim().toLowerCase():'';
-    const code=m?m[2]:raw.replace(/^\n?/,'');
+  // and closing fence must start a line with the same backtick char and at least
+  // as many backticks as the opener. Without line/fence-length anchoring, a literal
+  // ``` inside a code block (e.g. a nested markdown example) terminates the outer
+  // block at the wrong place, leaking content into the markdown stream where
+  // bold/italic/inline-code passes corrupt it. Fixes #1438 and #1696.
+  s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)/g,(_,lead,_fence,info,code)=>{
+    const langInfo=(info||'').trim();
+    const langMatch=langInfo.match(/^(\w[\w+-]*)$/);
+    const lang=langMatch?(langMatch[1]||'').trim().toLowerCase():'';
+    code=code||'';
     const codeLines=code.split('\n');
     const firstCodeLine=codeLines.find(line=>line.trim())||'';
     const firstMermaidLine=codeLines.map(line=>line.trim()).find(line=>line&&!line.startsWith('%%'))||'';
@@ -1623,14 +3309,17 @@ function renderMd(raw){
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
-  // Display math: $$...$$  (must come before inline to avoid mis-parsing)
+  // Display math: $$...$$ and \[...\] (must come before inline to avoid mis-parsing)
   s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
-  // Inline math: $...$ — require non-space at boundaries to avoid false positives
-  // e.g. "costs $5 and $10" should not trigger (space after opening $)
-  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
-  // Also stash \(...\) and \[...\] LaTeX delimiters
-  s=s.replace(/\\\\\((.+?)\\\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
-  s=s.replace(/\\\\\[(.+?)\\\\\]/gs,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  // Match a single literal backslash before the display delimiter (the common LLM form).
+  s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  // Inline math: $...$ — require non-space at boundaries and avoid currency / glued
+  // alnum text false positives such as A$3 ... A$30,000 or foo$x$bar.
+  // Also keep the table-pipe guard so `$5 | $10` cannot straddle columns.
+  s=s.replace(/(^|[^\w])\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$(?!\w)/g,(_,lead,m)=>{if(m.includes(' | ')) return lead+'\$'+m+'\$'; math_stash.push({type:'inline',src:m}); return lead+'\x00M'+(math_stash.length-1)+'\x00';});
+  // Also stash \(...\) LaTeX delimiters.
+  // Match a single literal backslash before the delimiter (the common LLM form).
+  s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Safe tag → markdown equivalent (these produce the same output as **text** etc.)
   // Stash raw <pre> blocks so the inline <code> rewrite below does not run
   // inside them. Running that rewrite in <pre> content can introduce stray
@@ -1643,7 +3332,6 @@ function renderMd(raw){
   s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>'*'+t+'*');
   s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
   s=s.replace(/<br\s*\/?>/gi,'\n');
-  s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);
   // ── Glued-bold-heading lift (issue #1446) ────────────────────────────────
   // LLMs in thinking/reasoning mode frequently emit a "section header" glued
   // to the end of the previous paragraph with no whitespace, like:
@@ -1695,7 +3383,7 @@ function renderMd(raw){
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
-    t=t.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${u.replace(/"/g,'%22')}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
+    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|mailto:|tel:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${_markdownHref(u)}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
     t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
@@ -1729,8 +3417,9 @@ function renderMd(raw){
       if(/^\[x\] /i.test(text)) _ih='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
       else if(/^\[ \] /.test(text)) _ih='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
       else _ih=inlineMd(text);
-      if(indent) html+=`<li style="margin-left:16px">${_ih}</li>`;
-      else html+=`<li>${_ih}</li>`;
+      const _liCls=/^\x00D\d+\x00$/.test(_ih)?' class="list-block-embed"':'';
+      if(indent) html+=`<li${_liCls} style="margin-left:16px">${_ih}</li>`;
+      else html+=`<li${_liCls}>${_ih}</li>`;
     }
     return html+'</ul>';
   });
@@ -1746,7 +3435,9 @@ function renderMd(raw){
       const num=numMatch?parseInt(numMatch[1],10):null;
       const text=l.replace(/^ {0,4}\d+\. /,'');
       const valAttr=num!==null?` value="${num}"`:'';
-      html+=`<li${valAttr}>${inlineMd(text)}</li>`;
+      const itemHtml=inlineMd(text);
+      const clsAttr=/^\x00D\d+\x00$/.test(itemHtml)?' class="list-block-embed"':'';
+      html+=`<li${clsAttr}${valAttr}>${itemHtml}</li>`;
     }
     return html+'</ol>';
   });
@@ -1758,11 +3449,26 @@ function renderMd(raw){
     if(rows.length<2)return block;
     const isSep=r=>/^\|[\s|:-]+\|$/.test(r.trim());
     if(!isSep(rows[1]))return block;
-    const parseRow=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${inlineMd(c.trim())}</td>`).join('');
-    const parseHeader=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${inlineMd(c.trim())}</th>`).join('');
+    // _protectPipes: temporarily swap pipes inside matching bracket pairs for a
+    // sentinel before split('|'), then restore. Iterates until no more matches
+    // so all pipes inside one pair are caught.
+    // Note: both opening and closing brace literals in the character classes
+    // are written as hex escapes (\x7b and \x7d) so the JS source contains no
+    // bare brace glyphs that would confuse the brace-counting extractFunc in
+    // tests/test_renderer_js_behaviour.py. Regex semantics are identical.
+    // Bracket set is paren / square / curly only -- NOT angle brackets, since
+    // angle brackets are overwhelmingly comparison operators in real LLM table
+    // output (`| x < 5 | y > 10 |`) and treating them as a pair collapses cells.
+    const _protectPipes=r=>{let prev;do{prev=r;r=r.replace(/([([\x7b][^)\]\x7d]*)[|]([^)\]\x7d]*[)\]\x7d])/g,(_,a,b)=>a+'\x00PIPE\x00'+b);}while(r!==prev);return r;};
+    const _restorePipes=s=>s.replace(/\x00PIPE\x00/g,'|');
+    const parseRow=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${inlineMd(_restorePipes(c.trim()))}</td>`).join('');};
+    const parseHeader=r=>{r=_protectPipes(r);return r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${inlineMd(_restorePipes(c.trim()))}</th>`).join('');};
     const header=`<tr>${parseHeader(rows[0])}</tr>`;
     const body=rows.slice(2).map(r=>`<tr>${parseRow(r)}</tr>`).join('');
-    return `<table><thead>${header}</thead><tbody>${body}</tbody></table>`;
+    // Surround with blank lines so the final paragraph splitter treats the
+    // generated table as its own block even when the regex consumes one of the
+    // markdown block's trailing newlines.
+    return `\n\n<div class="md-table-wrap"><table class="md-table"><thead>${header}</thead><tbody>${body}</tbody></table></div>\n\n`;
   });
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
@@ -1773,8 +3479,11 @@ function renderMd(raw){
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${url.replace(/"/g,'%22')}" target="_blank" rel="noopener">${esc(label)}</a>`);
+  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|mailto:|tel:)[^\s\)]+)\)/g,(_,label,url)=>`<a href="${_markdownHref(url)}" target="_blank" rel="noopener">${esc(label)}</a>`);
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
+  // Restore raw <pre> only after markdown rewrites so literal preformatted
+  // content stays placeholder-protected, then let the sanitizer normalize tags.
+  s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);
   // Sanitize any remaining HTML tags.  The renderer intentionally returns
   // HTML and inserts it with innerHTML later, so tag names alone are not enough:
   // raw/model-provided HTML like <img onerror=...> or <a href="javascript:...">
@@ -1786,14 +3495,35 @@ function renderMd(raw){
   function _safeAttrValue(v){
     return String(v||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
   }
+  function _markdownHref(raw){
+    const href=String(raw||'').replace(/"/g,'%22');
+    if(/^workspace:\/\//i.test(href)){
+      try{
+        const rel=decodeURIComponent(href.replace(/^workspace:\/\//i,'')).replace(/^~\//,'').replace(/^\.\//,'');
+        return '#workspace='+encodeURIComponent(rel);
+      }catch(_){
+        return '#';
+      }
+    }
+    if(/^file:\/\//i.test(href)){
+      try{
+        const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
+        return _mediaApiHref(path,{inline:true});
+      }catch(_){
+        return _mediaApiHref(href.replace(/^file:\/\//i,''),{inline:true});
+      }
+    }
+    return href;
+  }
   function _isSafeUrl(v, img){
     const raw=_safeAttrValue(v);
     const compact=raw.replace(/[\u0000-\u001f\u007f\s]+/g,'').toLowerCase();
     if(!compact) return false;
     if(/^(javascript|data|vbscript):/i.test(compact)) return false;
     if(/^https?:\/\//i.test(raw)) return true;
-    if(img && /^api\//i.test(raw)) return true;
-    if(!img && (/^api\//i.test(raw) || /^#/.test(raw))) return true;
+    if(/^(mailto:|tel:)/i.test(raw)) return true;
+    if(img && (/^api\//i.test(raw) || /^\//.test(raw))) return true;
+    if(!img && (/^api\//i.test(raw) || /^\//.test(raw) || /^#/.test(raw))) return true;
     return false;
   }
   function _attrs(raw){
@@ -1814,15 +3544,18 @@ function renderMd(raw){
     const closing=!!m[1];
     const name=m[2].toLowerCase();
     const rawAttrs=m[3]||'';
-    const plain=['strong','em','del','pre','h1','h2','h3','h4','h5','h6','ul','ol','table','thead','tbody','tr','th','td','blockquote','p','br','hr'];
-    if(closing) return plain.includes(name)||['a','div','span','li','code'].includes(name)?`</${name}>`:'';
+    const plain=['strong','em','del','pre','h1','h2','h3','h4','h5','h6','ul','ol','thead','tbody','tr','th','td','blockquote','p','br','hr'];
+    if(closing) return plain.includes(name)||['a','div','span','li','code','table'].includes(name)?`</${name}>`:'';
     if(name==='code'){
       const a=_attrs(rawAttrs);
       const cls=/^language-[a-z0-9_+-]+$/i.test(a.class||'')?` class="${esc(a.class)}"`:'';
       return `<code${cls}>`;
     }
-    if(plain.includes(name)) return `<${name}>`;
     const a=_attrs(rawAttrs);
+    if(name==='table'){
+      return `<table${_cls(a.class,['md-table'])}>`;
+    }
+    if(plain.includes(name)) return `<${name}>`;
     if(name==='li'){
       const value=/^\d+$/.test(a.value||'')?` value="${esc(a.value)}"`:'';
       const style=(a.style||'').replace(/\s+/g,'').toLowerCase()==='margin-left:16px'?` style="margin-left:16px"`:'';
@@ -1832,7 +3565,7 @@ function renderMd(raw){
       return `<span${_cls(a.class,['task-done','task-todo','katex-inline'])}${a['data-katex']==='inline'?' data-katex="inline"':''}>`;
     }
     if(name==='div'){
-      const cls=_cls(a.class,['pre-header','mermaid-block','katex-block']);
+      const cls=_cls(a.class,['pre-header','mermaid-block','katex-block','md-table-wrap']);
       const mermaid=a['data-mermaid-id']?` data-mermaid-id="${esc(a['data-mermaid-id'])}"`:'';
       const katex=a['data-katex']==='display'?' data-katex="display"':'';
       return `<div${cls}${mermaid}${katex}>`;
@@ -1889,13 +3622,27 @@ function renderMd(raw){
   // with <br>. Token \x00E (next free after B D F G L M C O A).
   // Fixes #745: code blocks collapse to single line when not preceded by blank line.
   const _pre_stash=[];
-  s=s.replace(/(<div class="pre-header">[\s\S]*?<\/div>)?<pre>[\s\S]*?<\/pre>|<div class="(mermaid-block|katex-block)"[\s\S]*?<\/div>/g,m=>{
+  // #1463 / #1618: regex must match <pre> with ANY attributes — PR #484 added
+  // <pre class="tree-raw-view"> for JSON/YAML and <pre class="diff-block"> for
+  // diff/patch which the literal-<pre> shape missed. Newlines inside those
+  // blocks were falling through to the paragraph wrap below and getting
+  // converted to <br>, causing the YAML/JSON/diff collapse. PR #1516's CSS
+  // fix targeted the wrong layer (Prism token white-space) — by the time it
+  // ran, the \n had already been replaced. The CSS rule is kept as defense
+  // in depth.
+  s=s.replace(/(<div class="pre-header">[\s\S]*?<\/div>)?<pre[^>]*>[\s\S]*?<\/pre>|<div class="(mermaid-block|katex-block)"[\s\S]*?<\/div>/g,m=>{
     _pre_stash.push(m);
     return '\x00E'+(_pre_stash.length-1)+'\x00';
   });
   const parts=s.split(/\n{2,}/);
-  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
+  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|table|div|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
+  // MEDIA placeholders can appear inside backticks in user/assistant markdown
+  // (for example: `MEDIA:/path/file.pdf`). The code-span pass wraps the stash
+  // token in <code>…</code>, but the restore step below wants to emit block/media
+  // HTML. Unwrap those exact code wrappers first so inline PDF/file previews are
+  // not forced inside a <code> element, which breaks list-item/block layout.
+  s=s.replace(/<code>\s*\x00D(\d+)\x00\s*<\/code>/g,(_,i)=>`\x00D${i}\x00`);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
     const ref=media_stash[+i];
@@ -1945,7 +3692,9 @@ function renderMd(raw){
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
-    const apiUrl='api/media?path='+encodeURIComponent(ref);
+    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const apiUrl=_mediaApiHref(ref,{sessionId:mediaSessionId});
+    const sessionAttr=mediaSessionId?` data-session-id="${esc(mediaSessionId)}"`:'';
     const localKind=mediaKindForName(ref);
     if(localKind==='image'){
       return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
@@ -1962,24 +3711,24 @@ function renderMd(raw){
     // PDF files → render first page preview with lazy-load
     if(_PDF_EXTS.test(ref)){
       const fname=esc(ref.split('/').pop()||ref);
-      return `<div class="pdf-preview-load" data-path="${esc(ref)}"><span class="pdf-preview-spinner">⏳</span> ${t('pdf_loading')} ${fname}...</div>`;
+      return `<div class="pdf-preview-load" data-path="${esc(ref)}"${sessionAttr}><span class="pdf-preview-spinner">⏳</span> ${t('pdf_loading')} ${fname}...</div>`;
     }
     // HTML files → render inline in sandboxed iframe with lazy-load
     if(_HTML_EXTS.test(ref)){
-      return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${t('html_loading')}</div>`;
+      return `<div class="html-preview-load" data-path="${esc(ref)}"${sessionAttr}><span class="html-preview-spinner">⏳</span> ${t('html_loading')}</div>`;
     }
     // .patch/.diff files → render inline as colored diff instead of download
     const fname=esc(ref.split('/').pop()||ref);
     if(/\.(patch|diff)$/i.test(ref)){
-      return `<div class="diff-inline-load" data-path="${esc(ref)}">${t('diff_loading')} ${fname}...</div>`;
+      return `<div class="diff-inline-load" data-path="${esc(ref)}"${sessionAttr}>${t('diff_loading')} ${fname}...</div>`;
     }
     // CSV files → lazy-load and render as table
     if(_CSV_EXTS.test(ref)){
-      return `<div class="csv-inline-load" data-path="${esc(ref)}">${t('csv_loading')} ${fname}...</div>`;
+      return `<div class="csv-inline-load" data-path="${esc(ref)}"${sessionAttr}>${t('csv_loading')} ${fname}...</div>`;
     }
     // Excalidraw files → lazy-load inline embed
     if(_EXCALIDRAW_EXTS.test(ref)){
-      return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${t('excalidraw_loading')} ${fname}...</div>`;
+      return `<div class="excalidraw-inline-load" data-path="${esc(ref)}"${sessionAttr}>${t('excalidraw_loading')} ${fname}...</div>`;
     }
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
@@ -2014,6 +3763,13 @@ let _composerLockState=null;
 function lockComposerForClarify(placeholderText){
   const input=$('msg');
   if(!input) return;
+  // Save the current composer text as a server-side draft before locking,
+  // so the user's draft is preserved if they switch sessions while a clarify
+  // card is active (and survives page refresh / syncs across clients).
+  const sid = S && S.session && S.session.session_id;
+  if (sid && typeof _saveComposerDraftNow === 'function') {
+    _saveComposerDraftNow(sid, input.value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+  }
   if(!_composerLockState){
     _composerLockState={
       disabled: input.disabled,
@@ -2160,6 +3916,7 @@ function setBusy(v){
   S.busy=v;
   updateSendBtn();
   if(!v){
+    if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
     setStatus('');
     setComposerStatus('');
     const sid=_queueDrainSid||(S.session&&S.session.session_id);
@@ -2171,6 +3928,16 @@ function setBusy(v){
     if(next){
       updateQueueBadge(sid);
       setTimeout(()=>{
+        // Guard: if the user switched away from the drain session during
+        // the 120ms settle window, the queued message must NOT go to the
+        // wrong chat.  Put it back into the original session's queue and
+        // skip sending — it will drain when the user returns to that session
+        // or when its next stream completes while it is the active view.
+        if(S.session&&S.session.session_id!==sid){
+          queueSessionMessage(sid,next);
+          updateQueueBadge(sid);
+          return;
+        }
         $('msg').value=next.text||'';
         S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
         // Restore model from queued item (sent in /api/chat/start payload)
@@ -2457,7 +4224,31 @@ function updateQueueBadge(sessionId){
     }
   }
 }
-function showToast(msg,ms,type){const el=$('toast');if(!el)return;const s=String(msg==null?'':msg);let t=type;if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}el.textContent=s;el.className='toast show '+t;clearTimeout(el._t);el._t=setTimeout(()=>{el.classList.remove('show');},ms||2800);}
+const TOAST_DEFAULT_MS=2800;
+const TOAST_ERROR_DEFAULT_MS=20000;
+function clearToastDismissTimer(el){if(!el)return;clearTimeout(el._t);el._t=null;}
+function setToastDismissTimer(el,duration){if(!el)return;clearToastDismissTimer(el);el._t=setTimeout(()=>{el.classList.remove('show');},duration);}
+function copyToastText(btn){
+  const el=btn&&btn.closest?btn.closest('#toast'):null;
+  const text=el?(el.dataset.toastMessage||el.textContent||''):'';
+  const done=()=>{const old=btn.textContent;btn.textContent='Copied';setTimeout(()=>{btn.textContent=old;},1200);};
+  _copyText(text).then(done).catch(()=>{});
+}
+function showToast(msg,ms,type){
+  const el=$('toast');if(!el)return;
+  const s=String(msg==null?'':msg);let t=type;
+  if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}
+  const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
+  el.className='toast show '+t;
+  el.dataset.toastMessage=s;
+  if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button>`;
+  else el.textContent=s;
+  el.onmouseenter=()=>clearToastDismissTimer(el);
+  el.onmouseleave=()=>setToastDismissTimer(el,duration);
+  el.onfocusin=()=>clearToastDismissTimer(el);
+  el.onfocusout=()=>setToastDismissTimer(el,duration);
+  setToastDismissTimer(el,duration);
+}
 
 // ── Shared app dialogs ───────────────────────────────────────────────────────
 // showConfirmDialog(opts) and showPromptDialog(opts) replace browser-native dialog calls
@@ -2588,7 +4379,11 @@ function showPromptDialog(opts={}){
   if(desc) desc.textContent=opts.message||'';
   if(input){
     input.type=opts.inputType||'text';input.style.display='';
-    input.value=opts.value||'';input.placeholder=opts.placeholder||'';
+    // Pre-fill: prefer `value`, accept `defaultValue` as alias for callers that
+    // mirror the standard HTMLInputElement.defaultValue naming. Both empty →
+    // blank field (the default rename-from-scratch flow stays unchanged).
+    const prefill=(opts.value!=null?opts.value:(opts.defaultValue!=null?opts.defaultValue:''));
+    input.value=prefill;input.placeholder=opts.placeholder||'';
     input.autocomplete='off';input.spellcheck=false;
   }
   if(cancelBtn) cancelBtn.textContent=opts.cancelLabel||t('cancel');
@@ -2597,7 +4392,27 @@ function showPromptDialog(opts={}){
   if(overlay){overlay.style.display='flex';overlay.setAttribute('aria-hidden','false');}
   return new Promise(resolve=>{
     APP_DIALOG.resolve=resolve;
-    setTimeout(()=>{if(input&&input.style.display!=='none')input.focus();else if(confirmBtn)confirmBtn.focus();},0);
+    setTimeout(()=>{
+      if(input&&input.style.display!=='none'){
+        input.focus();
+        // Selection behavior on focus:
+        //   selectStem:true → select everything before the LAST '.' (e.g. for
+        //     'report.txt' selects 'report' so a user can retype the basename
+        //     without losing the extension; matches macOS Finder rename UX).
+        //     Falls back to selecting the full value when there's no '.' or
+        //     the dot is at index 0 ('.gitignore' → full select).
+        //   selectAll:true → select the entire prefilled value.
+        //   default       → caret at end (current behavior).
+        const v=input.value||'';
+        if(opts.selectStem && v){
+          const dot=v.lastIndexOf('.');
+          if(dot>0) input.setSelectionRange(0,dot);
+          else input.select();
+        } else if(opts.selectAll && v){
+          input.select();
+        }
+      } else if(confirmBtn) confirmBtn.focus();
+    },0);
   });
 }
 
@@ -2622,12 +4437,35 @@ function _fallbackCopy(text){
     finally{document.body.removeChild(ta);}
   });
 }
+function copyStatusSessionId(btn){
+  const text=btn&&btn.getAttribute('data-copy-status-session');
+  if(!text)return;
+  _copyText(text).then(()=>{
+    const orig=btn.innerHTML;
+    btn.innerHTML=(typeof li==='function')?li('check',13):t('copied');
+    btn.classList.add('copied');
+    setTimeout(()=>{btn.innerHTML=orig;btn.classList.remove('copied');},1500);
+  }).catch(()=>showToast(t('copy_failed')));
+}
 function copyMsg(btn){
   const row=btn.closest('[data-raw-text]');
   const text=row?row.dataset.rawText:'';
   if(!text)return;
   _copyText(text).then(()=>{
     const orig=btn.innerHTML;btn.innerHTML=li('check',13);btn.style.color='var(--blue)';
+    setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
+  }).catch(()=>showToast(t('copy_failed')));
+}
+function _copyThinkingText(btn){
+  const card=btn&&btn.closest?btn.closest('.thinking-card'):null;
+  if(!card)return;
+  const pre=card.querySelector('.thinking-card-body pre');
+  const text=pre?pre.textContent:'';
+  if(!text)return;
+  _copyText(text).then(()=>{
+    const orig=btn.innerHTML;
+    btn.innerHTML=li('check',12);
+    btn.style.color='var(--accent)';
     setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
   }).catch(()=>showToast(t('copy_failed')));
 }
@@ -2747,6 +4585,29 @@ function autoReadLastAssistant(){
 // ── Reconnect banner (B4/B5: reload resilience) ──
 const INFLIGHT_KEY = 'hermes-webui-inflight'; // localStorage key for in-flight session tracking
 const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state'; // localStorage snapshots for mid-stream reload recovery
+const INFLIGHT_STATE_DEFAULT_LIMITS = {
+  maxSessions:8,
+  messages:24,
+  toolCalls:48,
+  stringChars:60000,
+  jsonChars:1500000,
+};
+
+function _boundedInflightInt(value, fallback, min, max){
+  const n=parseInt(value,10);
+  if(!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+function _getInflightStateLimits(){
+  const configured=(typeof window!=='undefined'&&window._inflightStateLimits&&typeof window._inflightStateLimits==='object')?window._inflightStateLimits:{};
+  return {
+    maxSessions:_boundedInflightInt(configured.maxSessions, INFLIGHT_STATE_DEFAULT_LIMITS.maxSessions, 1, 25),
+    messages:_boundedInflightInt(configured.messages, INFLIGHT_STATE_DEFAULT_LIMITS.messages, 1, 100),
+    toolCalls:_boundedInflightInt(configured.toolCalls, INFLIGHT_STATE_DEFAULT_LIMITS.toolCalls, 1, 200),
+    stringChars:_boundedInflightInt(configured.stringChars, INFLIGHT_STATE_DEFAULT_LIMITS.stringChars, 1000, 500000),
+    jsonChars:_boundedInflightInt(configured.jsonChars, INFLIGHT_STATE_DEFAULT_LIMITS.jsonChars, 100000, 4000000),
+  };
+}
 
 function _readInflightStateMap(){
   try{
@@ -2757,13 +4618,75 @@ function _readInflightStateMap(){
     return {};
   }
 }
+function _isStorageQuotaError(err){
+  return !!err && (
+    err.name==='QuotaExceededError' ||
+    err.name==='NS_ERROR_DOM_QUOTA_REACHED' ||
+    err.code===22 ||
+    err.code===1014
+  );
+}
+function _truncateInflightValue(value, maxChars){
+  const limits=_getInflightStateLimits();
+  const stringLimit=_boundedInflightInt(maxChars, limits.stringChars, 1000, 500000);
+  if(typeof value==='string'){
+    if(value.length<=stringLimit) return value;
+    return value.slice(0,stringLimit)+'\n\n[truncated for browser recovery storage]';
+  }
+  if(Array.isArray(value)) return value.map(v=>_truncateInflightValue(v, Math.max(2000, Math.floor(stringLimit/2))));
+  if(value&&typeof value==='object'){
+    const out={};
+    for(const [k,v] of Object.entries(value)) out[k]=_truncateInflightValue(v, stringLimit);
+    return out;
+  }
+  return value;
+}
+function _compactInflightState(state){
+  const limits=_getInflightStateLimits();
+  const messages=Array.isArray(state.messages)?state.messages.slice(-limits.messages):[];
+  const toolCalls=Array.isArray(state.toolCalls)?state.toolCalls.slice(-limits.toolCalls):[];
+  return _truncateInflightValue({
+    streamId:state.streamId||null,
+    messages,
+    uploaded:Array.isArray(state.uploaded)?state.uploaded.slice(-20):[],
+    toolCalls,
+  }, limits.stringChars);
+}
+function _writeInflightStateMap(all){
+  const limits=_getInflightStateLimits();
+  const entries=Object.entries(all||{})
+    .sort((a,b)=>Number(b[1]&&b[1].updated_at||0)-Number(a[1]&&a[1].updated_at||0))
+    .slice(0,limits.maxSessions);
+  const compact={};
+  for(const [sid,entry] of entries) compact[sid]=entry;
+  let json=JSON.stringify(compact);
+  if(json.length>limits.jsonChars){
+    const current=entries[0];
+    json=JSON.stringify(current?{[current[0]]:current[1]}:{});
+  }
+  if(json.length>limits.jsonChars){
+    localStorage.removeItem(INFLIGHT_STATE_KEY);
+    return false;
+  }
+  localStorage.setItem(INFLIGHT_STATE_KEY,json);
+  return true;
+}
 function saveInflightState(sid, state){
   if(!sid||!state) return;
+  const entry={..._compactInflightState(state),updated_at:Date.now()};
   try{
     const all=_readInflightStateMap();
-    all[sid]={...state,updated_at:Date.now()};
-    localStorage.setItem(INFLIGHT_STATE_KEY, JSON.stringify(all));
-  }catch(_){ }
+    all[sid]=entry;
+    _writeInflightStateMap(all);
+  }catch(err){
+    if(!_isStorageQuotaError(err)) return;
+    try{
+      localStorage.removeItem(INFLIGHT_STATE_KEY);
+      _writeInflightStateMap({[sid]:entry});
+    }catch(_){
+      try{localStorage.removeItem(INFLIGHT_STATE_KEY);}catch(__){}
+    }
+  }
 }
 function loadInflightState(sid, streamId){
   if(!sid) return null;
@@ -2788,8 +4711,78 @@ function clearInflightState(sid){
   }catch(_){ }
 }
 
+function snapshotLiveTurnHtmlForSession(sid){
+  // Keep the DOM snapshot memory-only. Persisted INFLIGHT state intentionally
+  // stores structured stream state, not outerHTML, so a hard reload still uses
+  // the safer flat replay path instead of reviving stale nodes/listeners.
+  if(!sid||!INFLIGHT[sid]) return;
+  const turn=$('liveAssistantTurn');
+  if(!turn) return;
+  if(turn.dataset&&turn.dataset.sessionId&&turn.dataset.sessionId!==sid) return;
+  INFLIGHT[sid].liveTurnHtml=turn.outerHTML;
+}
+
+function _liveAssistantSegmentTextLength(seg){
+  if(!seg) return 0;
+  const body=seg.querySelector('.msg-body')||seg;
+  return String(body.textContent||'').trim().length;
+}
+
+function _mergeRestoredLiveAssistantSegment(restored, existing){
+  if(!restored||!existing) return;
+  const existingLive=existing.querySelector('[data-live-assistant="1"]');
+  if(!existingLive) return;
+  const restoredLive=restored.querySelector('[data-live-assistant="1"]');
+  const existingLen=_liveAssistantSegmentTextLength(existingLive);
+  const restoredLen=_liveAssistantSegmentTextLength(restoredLive);
+  if(existingLen<=restoredLen) return;
+  const replacement=existingLive.cloneNode(true);
+  if(restoredLive){
+    restoredLive.replaceWith(replacement);
+    return;
+  }
+  const blocks=_assistantTurnBlocks(restored);
+  if(!blocks) return;
+  const anchor=Array.from(blocks.children).filter(el=>
+    el.matches('.tool-call-group,.tool-card-row,.agent-activity-thinking,.thinking-card-row,[data-live-assistant="1"]')
+  ).pop();
+  if(anchor) anchor.insertAdjacentElement('afterend', replacement);
+  else blocks.appendChild(replacement);
+}
+
+function restoreLiveTurnHtmlForSession(sid){
+  const inflight=INFLIGHT[sid];
+  if(!sid||!inflight||!inflight.liveTurnHtml) return false;
+  const inner=$('msgInner');
+  if(!inner) return false;
+  const template=document.createElement('template');
+  template.innerHTML=String(inflight.liveTurnHtml||'').trim();
+  const restored=template.content.firstElementChild;
+  if(!restored) return false;
+  restored.id='liveAssistantTurn';
+  if(S.session) restored.dataset.sessionId=S.session.session_id;
+  const existing=$('liveAssistantTurn');
+  _mergeRestoredLiveAssistantSegment(restored, existing);
+  if(existing) existing.replaceWith(restored);
+  else inner.appendChild(restored);
+  const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
+  if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
+  if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+  requestAnimationFrame(()=>postProcessRenderedMessages(restored));
+  return true;
+}
+
 function markInflight(sid, streamId) {
-  localStorage.setItem(INFLIGHT_KEY, JSON.stringify({sid, streamId, ts: Date.now()}));
+  const payload=JSON.stringify({sid, streamId, ts: Date.now()});
+  try{
+    localStorage.setItem(INFLIGHT_KEY, payload);
+  }catch(err){
+    if(!_isStorageQuotaError(err)) return;
+    try{
+      localStorage.removeItem(INFLIGHT_STATE_KEY);
+      localStorage.setItem(INFLIGHT_KEY, payload);
+    }catch(_){}
+  }
 }
 function clearInflight() {
   localStorage.removeItem(INFLIGHT_KEY);
@@ -2802,6 +4795,176 @@ function dismissReconnect() {
   $('reconnectBanner').classList.remove('visible');
   clearInflight();
 }
+
+// ── Live host resource health panel (#693) ──
+const SYSTEM_HEALTH_INTERVAL_MS=5000;
+let _systemHealthTimer=null;
+function _systemHealthPercent(metric){
+  const percent=Number(metric&&metric.percent);
+  if(!Number.isFinite(percent)) return null;
+  return Math.max(0,Math.min(100,Math.round(percent*10)/10));
+}
+function _formatSystemHealthPercent(percent){
+  if(percent == null) return '—';
+  return `${percent.toFixed(percent%1?1:0)}%`;
+}
+function _formatSystemHealthBytes(metric){
+  if(!metric||!metric.used_bytes||!metric.total_bytes) return '';
+  const units=['B','KB','MB','GB','TB'];
+  const fmt=(bytes)=>{
+    let value=Number(bytes)||0, idx=0;
+    while(value>=1024&&idx<units.length-1){value/=1024;idx++;}
+    return `${value.toFixed(value>=10||idx===0?0:1)} ${units[idx]}`;
+  };
+  return `${fmt(metric.used_bytes)} / ${fmt(metric.total_bytes)}`;
+}
+function _updateSystemHealthMetric(name,metric){
+  const row=document.querySelector(`[data-system-health-metric="${name}"]`);
+  if(!row) return;
+  const rawPercent=_systemHealthPercent(metric);
+  const percent=rawPercent == null ? 0 : rawPercent;
+  const label=row.querySelector('[data-system-health-value]');
+  const bar=row.querySelector('.system-health-bar');
+  const fill=row.querySelector('.system-health-bar-fill');
+  const text=_formatSystemHealthPercent(rawPercent);
+  if(label){
+    label.textContent=text;
+    const bytes=(name==='memory'||name==='disk')?_formatSystemHealthBytes(metric):'';
+    label.title=bytes||text;
+  }
+  if(bar) bar.setAttribute('aria-valuenow',String(percent));
+  if(fill) fill.style.width=`${percent}%`;
+}
+function setSystemHealthUnavailable(message){
+  const panel=$('systemHealthPanel');
+  const status=$('systemHealthStatus');
+  if(!panel) return;
+  panel.classList.remove('loading');
+  panel.classList.add('unavailable');
+  if(status) status.textContent=message||'Unavailable';
+  ['cpu','memory','disk'].forEach(name=>_updateSystemHealthMetric(name,null));
+}
+function renderSystemHealth(payload){
+  const panel=$('systemHealthPanel');
+  const status=$('systemHealthStatus');
+  if(!panel) return;
+  if(!payload||payload.available===false){
+    setSystemHealthUnavailable('Unavailable');
+    return;
+  }
+  panel.classList.remove('loading','unavailable');
+  if(status) status.textContent=payload.status==='partial'?'Partial':'Live';
+  _updateSystemHealthMetric('cpu',payload.cpu);
+  _updateSystemHealthMetric('memory',payload.memory);
+  _updateSystemHealthMetric('disk',payload.disk);
+}
+async function pollSystemHealth(){
+  if(document.visibilityState !== 'visible') return;
+  if(!_systemHealthPanelIsVisible()) return;
+  try{
+    const payload=await api('/api/system/health',{timeoutToast:false});
+    renderSystemHealth(payload);
+  }catch(_){
+    setSystemHealthUnavailable('Unavailable');
+  }
+}
+function _systemHealthPanelIsVisible(){
+  return document.visibilityState === 'visible' &&
+    !!document.querySelector('main.main.showing-insights') &&
+    !!$('systemHealthPanel');
+}
+function startSystemHealthMonitor(){
+  if(!_systemHealthPanelIsVisible()) return;
+  if(_systemHealthTimer) return;
+  void pollSystemHealth();
+  _systemHealthTimer=setInterval(pollSystemHealth,SYSTEM_HEALTH_INTERVAL_MS);
+}
+function stopSystemHealthMonitor(){
+  if(_systemHealthTimer){clearInterval(_systemHealthTimer);_systemHealthTimer=null;}
+}
+function _syncSystemHealthMonitorVisibility(){
+  if(_systemHealthPanelIsVisible()) startSystemHealthMonitor();
+  else stopSystemHealthMonitor();
+}
+document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility);
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSystemHealthMonitor);
+else startSystemHealthMonitor();
+
+// ── Hermes agent/gateway heartbeat alert (#716) ──
+const AGENT_HEALTH_INTERVAL_MS=30000;
+const AGENT_HEALTH_DISMISSED_KEY='agent-health-dismissed';
+let _agentHealthTimer=null;
+let _agentHealthLastState='unknown';
+function _agentHealthDismissed(){
+  try{return localStorage.getItem(AGENT_HEALTH_DISMISSED_KEY)==='1';}
+  catch(_){return false;}
+}
+function _setAgentHealthDismissed(value){
+  try{
+    if(value)localStorage.setItem(AGENT_HEALTH_DISMISSED_KEY,'1');
+    else localStorage.removeItem(AGENT_HEALTH_DISMISSED_KEY);
+  }catch(_){ }
+}
+function _hideAgentHealthAlert(){
+  const banner=$('agentHealthBanner');
+  if(banner){banner.classList.remove('visible');banner.hidden=true;}
+}
+function _showAgentHealthAlert(payload){
+  if(_agentHealthDismissed()) return;
+  const banner=$('agentHealthBanner');
+  const title=$('agentHealthTitle');
+  const details=$('agentHealthDetails');
+  if(!banner) return;
+  if(title) title.textContent='Hermes agent is not responding';
+  const state=payload&&payload.details&&payload.details.gateway_state?` State: ${payload.details.gateway_state}.`:'';
+  if(details) details.textContent=`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`;
+  banner.hidden=false;
+  banner.classList.add('visible');
+}
+function dismissAgentHealthAlert(){
+  _setAgentHealthDismissed(true);
+  _hideAgentHealthAlert();
+}
+async function pollAgentHealth(){
+  if(document.visibilityState !== 'visible') return;
+  try{
+    const payload=await api('/api/health/agent',{timeoutToast:false});
+    if(payload.alive === true){
+      _agentHealthLastState='alive';
+      _setAgentHealthDismissed(false);
+      _hideAgentHealthAlert();
+      return;
+    }
+    if(payload.alive === false){
+      _agentHealthLastState='down';
+      _showAgentHealthAlert(payload);
+      return;
+    }
+    if(payload.alive == null){
+      _agentHealthLastState='unknown';
+      _hideAgentHealthAlert();
+    }
+  }catch(_){
+    _agentHealthLastState='unknown';
+    _hideAgentHealthAlert();
+  }
+}
+function startAgentHealthMonitor(){
+  if(document.visibilityState !== 'visible') return;
+  if(_agentHealthTimer) return;
+  void pollAgentHealth();
+  _agentHealthTimer=setInterval(pollAgentHealth, AGENT_HEALTH_INTERVAL_MS);
+}
+function stopAgentHealthMonitor(){
+  if(_agentHealthTimer){clearInterval(_agentHealthTimer);_agentHealthTimer=null;}
+}
+function _syncAgentHealthMonitorVisibility(){
+  if(document.visibilityState === 'visible') startAgentHealthMonitor();
+  else stopAgentHealthMonitor();
+}
+document.addEventListener('visibilitychange',_syncAgentHealthMonitorVisibility);
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startAgentHealthMonitor);
+else startAgentHealthMonitor();
 async function refreshSession() {
   // When the banner is in post-update restart mode, the "Reload" button
   // should do a full page reload — a session refresh would just 502 while
@@ -2813,8 +4976,12 @@ async function refreshSession() {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
     S.session = data.session;
     S.messages = data.session.messages || [];
-    const pendingMsg=getPendingSessionMessage(data.session);
+    const pendingMsg=getPendingSessionMessage(data.session,S.messages);
     if(pendingMsg) S.messages.push(pendingMsg);
+    const resolvedToolCalls=(typeof window._resolveSessionToolCalls==='function')
+      ? window._resolveSessionToolCalls(S.messages, data.session.tool_calls || [])
+      : {toolCalls:(data.session.tool_calls||[]).map(tc=>({...tc,done:true}))};
+    S.toolCalls=resolvedToolCalls.toolCalls||[];
     S.activeStreamId=data.session.active_stream_id||null;
 
     syncTopbar(); renderMessages();
@@ -2822,23 +4989,294 @@ async function refreshSession() {
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }
 // ── Update banner ──
+function _formatUpdateTargetStatus(label,info){
+  if(!info||!(info.behind>0)) return null;
+  const release=(info.release_based&&info.latest_version)
+    ?` (${info.current_version||'unknown'} -> ${info.latest_version})`
+    :(info.branch?` (${info.branch})`:'');
+  const noun=info.release_based?'release':'update';
+  return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
+}
+function _formatUpdateCheckError(label,info){
+  if(!info||!info.error) return null;
+  const detail=String(info.error).replace(/^fetch failed:?\s*/i,'').trim();
+  return detail ? `${label}: ${detail}` : label;
+}
+function _isSafeUpdateCompareUrl(url){
+  if(!url||!/^https?:\/\//i.test(url)) return false;
+  try{
+    const parsed=new URL(url);
+    return parsed.protocol==='https:'||parsed.protocol==='http:';
+  }catch(e){
+    return false;
+  }
+}
+function _updateCompareUrl(info){
+  if(!info) return null;
+  const compareUrl=info.compare_url||null;
+  if(compareUrl) return _isSafeUpdateCompareUrl(compareUrl)?compareUrl:null;
+  const repo_url=info.repo_url;
+  const currentSha=info.current_sha;
+  const latestSha=info.latest_sha;
+  if(!(repo_url&&currentSha&&latestSha)) return null;
+  const fallbackUrl=repo_url+'/compare/'+currentSha+'...'+latestSha;
+  return _isSafeUpdateCompareUrl(fallbackUrl)?fallbackUrl:null;
+}
+function _updateWhatsNewTargets(data){
+  const targets=[
+    {key:'webui',label:'WebUI',info:data&&data.webui},
+    {key:'agent',label:'Agent',info:data&&data.agent},
+  ];
+  return targets.map((target)=>({
+    key:target.key,
+    label:target.label,
+    info:target.info,
+    url:_updateCompareUrl(target.info),
+  })).filter((target)=>target.info&&target.info.behind>0&&target.url);
+}
+function _appendUpdateDiffLinks(container,targets,prefix){
+  if(!container) return;
+  if(prefix) container.appendChild(document.createTextNode(prefix));
+  targets.forEach((target,idx)=>{
+    if(idx>0) container.appendChild(document.createTextNode(' \u00b7 '));
+    const link=document.createElement('a');
+    link.href=target.url;
+    link.target='_blank';
+    link.rel='noopener';
+    link.style.color='var(--accent)';
+    link.style.textDecoration='underline';
+    link.textContent=target.label;
+    container.appendChild(link);
+  });
+}
+function _hideUpdateSummaryPanel(){
+  const panel=$('updateSummaryPanel');
+  const text=$('updateSummaryText');
+  const links=$('updateSummaryDiffLinks');
+  if(panel) panel.style.display='none';
+  if(text) text.textContent='';
+  if(links){links.replaceChildren();links.style.display='none';}
+}
+const WHATS_NEW_SUMMARY_STORAGE_KEY='hermes-whats-new-generated-summaries';
+function _loadStoredUpdateSummaries(){
+  window._whatsNewGeneratedSummaries=window._whatsNewGeneratedSummaries||{};
+  try{
+    const raw=sessionStorage.getItem(WHATS_NEW_SUMMARY_STORAGE_KEY);
+    if(!raw) return window._whatsNewGeneratedSummaries;
+    const stored=JSON.parse(raw);
+    if(stored&&typeof stored==='object') window._whatsNewGeneratedSummaries=stored;
+  }catch(_e){
+    try{sessionStorage.removeItem(WHATS_NEW_SUMMARY_STORAGE_KEY);}catch(_ignore){}
+  }
+  return window._whatsNewGeneratedSummaries;
+}
+function _persistGeneratedSummaries(){
+  try{sessionStorage.setItem(WHATS_NEW_SUMMARY_STORAGE_KEY,JSON.stringify(window._whatsNewGeneratedSummaries||{}));}catch(_e){}
+}
+function _pruneGeneratedSummaries(data){
+  const cache=_loadStoredUpdateSummaries();
+  const valid=new Set(_updateWhatsNewTargets(data||{}).map((target)=>target.key));
+  let changed=false;
+  Object.keys(cache).forEach((key)=>{
+    if(!valid.has(key)){delete cache[key];changed=true;}
+  });
+  if(changed) _persistGeneratedSummaries();
+}
+function _updateSummarySignature(info){
+  if(!info) return '';
+  return [info.current_sha||'',info.latest_sha||'',info.behind||0,info.compare_url||''].join('|');
+}
+function _updateSummaryButtonLabel(target,data){
+  const labels=target.key==='webui'
+    ? {generate:'Generate WebUI update summary',view:'View generated WebUI update summary',regenerate:'Re-generate WebUI update summary'}
+    : {generate:'Generate Agent update summary',view:'View generated Agent update summary',regenerate:'Re-generate Agent update summary'};
+  const cache=_loadStoredUpdateSummaries()[target.key];
+  const signature=_updateSummarySignature(data&&data[target.key]);
+  if(cache&&cache.signature===signature&&cache.payload) return labels.view;
+  if(cache&&cache.signature!==signature) return labels.regenerate;
+  return labels.generate;
+}
+function _rememberGeneratedSummary(target,payload,data){
+  if(!target) return;
+  window._whatsNewGeneratedSummaries=window._whatsNewGeneratedSummaries||{};
+  window._whatsNewGeneratedSummaries[target]={
+    signature:_updateSummarySignature(data&&data[target]),
+    payload:payload,
+  };
+  _persistGeneratedSummaries();
+}
+function _renderUpdateSummaryPanel(payload,data,targetKey){
+  const panel=$('updateSummaryPanel');
+  const text=$('updateSummaryText');
+  const links=$('updateSummaryDiffLinks');
+  if(!panel||!text) return;
+  panel.style.display='block';
+  const sections=Array.isArray(payload&&payload.summary_sections)?payload.summary_sections:null;
+  text.replaceChildren();
+  if(sections&&sections.length){
+    const wrap=document.createElement('div');
+    wrap.id='updateSummarySections';
+    wrap.style.display='grid';
+    wrap.style.gap='8px';
+    sections.forEach((section)=>{
+      const block=document.createElement('section');
+      const title=document.createElement('div');
+      title.style.fontWeight='650';
+      title.style.marginBottom='3px';
+      title.textContent=section.title||'Summary';
+      block.appendChild(title);
+      const ul=document.createElement('ul');
+      ul.style.margin='0';
+      ul.style.paddingLeft='18px';
+      (Array.isArray(section.items)?section.items:[]).forEach((item)=>{
+        const li=document.createElement('li');
+        li.textContent=String(item||'').trim();
+        if(li.textContent) ul.appendChild(li);
+      });
+      if(!ul.children.length){
+        const li=document.createElement('li');
+        li.textContent='No summary details available.';
+        ul.appendChild(li);
+      }
+      block.appendChild(ul);
+      wrap.appendChild(block);
+    });
+    text.appendChild(wrap);
+  }else{
+    text.textContent=(payload&&payload.summary)||payload||'No summary available.';
+  }
+  const targets=_updateWhatsNewTargets(data||window._updateData||{}).filter((target)=>!targetKey||target.key===targetKey);
+  if(links){
+    links.replaceChildren();
+    if(targets.length){
+      links.style.display='block';
+      _appendUpdateDiffLinks(links,targets,'Regular diff comparison: ');
+    }else{
+      links.style.display='none';
+    }
+  }
+}
+async function showWhatsNewSummary(target){
+  const data=window._updateData||{};
+  const scopedUpdates=target?{[target]:data[target]}:data;
+  const cache=target?_loadStoredUpdateSummaries()[target]:null;
+  const signature=target?_updateSummarySignature(data[target]):'';
+  if(cache&&cache.signature===signature&&cache.payload){
+    _renderUpdateSummaryPanel(cache.payload,data,target);
+    _renderUpdateWhatsNewLinks(data,{mode:'summary'});
+    return;
+  }
+  _renderUpdateSummaryPanel({summary:'Writing a simple summary…'},data,target);
+  try{
+    const res=await api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null}),timeoutMs:60000});
+    _rememberGeneratedSummary(target,res,data);
+    _renderUpdateSummaryPanel(res,data,target);
+    _renderUpdateWhatsNewLinks(data,{mode:'summary'});
+  }catch(e){
+    console.warn('[updates] summary failed',e);
+    _renderUpdateSummaryPanel({
+      summary_sections:[
+        {title:"What you'll notice",items:['Could not generate the summary right now.']},
+        {title:'Worth knowing',items:['Try again later, or use the comparison links below for the raw update details.']},
+      ],
+    },data,target);
+  }
+}
+function _renderUpdateWhatsNewLinks(data){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:{};
+  const container=$('updateWhatsNewLinks');
+  if(!container) return;
+  container.replaceChildren();
+  const targets=_updateWhatsNewTargets(data);
+  if(!targets.length){
+    container.style.display='none';
+    _hideUpdateSummaryPanel();
+    return;
+  }
+  container.style.display='block';
+  _pruneGeneratedSummaries(data);
+  const useSummary=(options.mode||'')==='summary'||window._whatsNewSummaryEnabled===true;
+  if(useSummary){
+    targets.forEach((target,idx)=>{
+      if(idx>0) container.appendChild(document.createTextNode(' \u00b7 '));
+      const btn=document.createElement('button');
+      btn.type='button';
+      btn.className='linklike';
+      btn.style.color='var(--accent)';
+      btn.style.textDecoration='underline';
+      btn.style.background='none';
+      btn.style.border='0';
+      btn.style.padding='0';
+      btn.style.cursor='pointer';
+      btn.textContent=_updateSummaryButtonLabel(target,data);
+      btn.onclick=()=>showWhatsNewSummary(target.key);
+      container.appendChild(btn);
+    });
+    return;
+  }
+  _hideUpdateSummaryPanel();
+  if(targets.length===1){
+    const target=targets[0];
+    const link=document.createElement('a');
+    link.href=target.url;
+    link.target='_blank';
+    link.rel='noopener';
+    link.style.color='var(--accent)';
+    link.style.textDecoration='underline';
+    link.textContent="What's new in "+target.label+'?';
+    container.appendChild(link);
+    return;
+  }
+  _appendUpdateDiffLinks(container,targets,"What's new: ");
+}
 function _showUpdateBanner(data){
   const parts=[];
-  if(data.webui&&data.webui.behind>0) parts.push(`WebUI: ${data.webui.behind} update${data.webui.behind>1?'s':''}`);
-  if(data.agent&&data.agent.behind>0) parts.push(`Agent: ${data.agent.behind} update${data.agent.behind>1?'s':''}`);
-  if(!parts.length)return;
+  const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
+  const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
+  if(webuiPart) parts.push(webuiPart);
+  if(agentPart) parts.push(agentPart);
+  window._updateData=data;
+  if(!parts.length){
+    _renderUpdateWhatsNewLinks(data);
+    const staleBanner=$('updateBanner');
+    if(staleBanner) staleBanner.classList.remove('visible');
+    return;
+  }
   const msg=$('updateMsg');
   if(msg) msg.textContent='\u2B06 '+parts.join(', ')+' available';
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
-  window._updateData=data;
+  const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
+  _renderUpdateWhatsNewLinks(data,{mode:summaryMode});
 }
 function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');
   sessionStorage.setItem('hermes-update-dismissed','1');
 }
+function _isUpdateApplyNetworkError(error){
+  if(error && error.status) return false;
+  const message=(error&&error.message)||String(error||'');
+  return /Failed to fetch|NetworkError|Load failed/i.test(message);
+}
+function _formatUpdateApplyExceptionMessage(error){
+  if(_isUpdateApplyNetworkError(error)){
+    return 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.';
+  }
+  const message=(error&&error.message)||String(error||'unknown error');
+  return 'Update failed: '+message;
+}
 async function applyUpdates(){
+  if(window._updateApplyInFlight) return;
+  window._updateApplyInFlight=true;
   const btn=$('btnApplyUpdate');
+  const resetApplyButton=(delayMs)=>{
+    const reset=()=>{
+      window._updateApplyInFlight=false;
+      if(btn){btn.disabled=false;btn.textContent='Update Now';}
+    };
+    if(delayMs>0) setTimeout(reset,delayMs);
+    else reset();
+  };
   if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
@@ -2849,12 +5287,19 @@ async function applyUpdates(){
   const targets=[];
   if(window._updateData?.webui?.behind>0) targets.push('webui');
   if(window._updateData?.agent?.behind>0) targets.push('agent');
+  if(!targets.length){
+    const msg='No update target selected. Refresh update status and retry.';
+    if(errEl){errEl.textContent=msg;errEl.style.display='block';}
+    else showToast(msg,5000,'error');
+    resetApplyButton(0);
+    return;
+  }
   try{
     for(const target of targets){
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target})});
+      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
       if(!res.ok){
         _showUpdateError(target,res);
-        if(btn){btn.disabled=false;btn.textContent='Update Now';}
+        resetApplyButton(0);
         return;
       }
     }
@@ -2863,9 +5308,10 @@ async function applyUpdates(){
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload();
   }catch(e){
-    if(errEl){errEl.textContent='Update failed: '+e.message;errEl.style.display='block';}
-    else showToast('Update failed: '+e.message);
-    if(btn){btn.disabled=false;btn.textContent='Update Now';}
+    const msg=_formatUpdateApplyExceptionMessage(e);
+    if(errEl){errEl.textContent=msg;errEl.style.display='block';}
+    else showToast(msg);
+    resetApplyButton(_isUpdateApplyNetworkError(e)?5000:0);
   }
 }
 function _showUpdateError(target,res){
@@ -2899,7 +5345,7 @@ async function forceUpdate(btn){
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target})});
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target}),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
       btn.disabled=false;btn.textContent='Force update';
@@ -2934,7 +5380,7 @@ async function _waitForServerThenReload(opts){
   await new Promise(r=>setTimeout(r, interval));
   while(Date.now()<deadline){
     try{
-      const r=await fetch('/health',{cache:'no-store'});
+      const r=await fetch(new URL('health', document.baseURI||location.href).href,{cache:'no-store'});
       if(r.ok){
         let data={};
         try{ data=await r.json(); }catch(_){}
@@ -2949,11 +5395,12 @@ async function _waitForServerThenReload(opts){
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
-function getPendingSessionMessage(session){
+function getPendingSessionMessage(session, messagesOverride=null){
   const text=String(session?.pending_user_message||'').trim();
   if(!text) return null;
   const attachments=Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[];
-  const messages=Array.isArray(session?.messages)?session.messages:[];
+  const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
+  const messages=Array.isArray(sourceMessages)?sourceMessages:[];
   const lastUser=[...messages].reverse().find(m=>m&&m.role==='user');
   if(lastUser){
     const lastText=String(msgContent(lastUser)||'').trim();
@@ -2998,8 +5445,9 @@ async function checkInflightOnBoot(sid) {
 
 function syncTopbar(){
   if(!S.session){
-    document.title=window._botName||'Hermes';
+    document.title=assistantDisplayName();
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
+    if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncTerminalButton==='function') syncTerminalButton();
     if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
@@ -3017,10 +5465,23 @@ function syncTopbar(){
   }
   const sessionTitle=S.session.title||t('untitled');
   const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
-  document.title=sessionTitle+' \u2014 '+(window._botName||'Hermes');
+  document.title=sessionTitle+' \u2014 '+assistantDisplayName();
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
-  const _topbarMeta=$('topbarMeta');if(_topbarMeta)_topbarMeta.textContent=t('n_messages',vis.length);
+  const _topbarMeta=$('topbarMeta');
+  if(_topbarMeta){
+    const sourceLabel=(S.session&&S.session.is_cli_session&&(S.session.source_label||S.session.source_tag||S.session.raw_source))||'';
+    const metaText=t('n_messages',vis.length);
+    _topbarMeta.textContent=metaText;
+    if(sourceLabel){
+      const badge=document.createElement('span');
+      badge.className='topbar-source-badge';
+      badge.textContent=sourceLabel+(S.session.read_only?' · read-only':'');
+      _topbarMeta.appendChild(document.createTextNode(' '));
+      _topbarMeta.appendChild(badge);
+    }
+  }
   if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+  if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
   const modelOverride=S._pendingProfileModel;
@@ -3032,35 +5493,67 @@ function syncTopbar(){
     _applyModelToDropdown(modelOverride,$('modelSelect'),providerOverride);
     currentModel=modelOverride;
   } else {
-    const applied=_applyModelToDropdown(currentModel,$('modelSelect'),S.session.model_provider||null);
-    // If the model isn't in the current provider list, silently reset to the
-    // first available model so stale values don't pollute the picker (#829).
-    if(!applied && currentModel){
-      const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
-      // Also defer if a live model fetch is still in flight — the model may be
-      // in the list once the fetch completes. Persisting now would corrupt the
-      // session with the wrong model before live models arrive (#1169).
-      const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
-      if(liveStillPending){
-        // Live fetch in flight — don't touch sel.value or S.session.model yet.
-        // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
-      } else {
-        // Stale session model not in the current provider catalog — reset to the
-        // first available model rather than injecting an "(unavailable)" option
-        // that visually appears under the wrong provider group (#829).
-        const modelSel=$('modelSelect');
-        const first=modelSel&&modelSel.querySelector('optgroup > option, option');
-        if(first){
-          modelSel.value=first.value;
-          if(!deferModelCorrection){
-            S.session.model=first.value;
-            S.session.model_provider=_getOptionProviderId(first)||null;
-            // Persist the correction so the session doesn't re-inject on next load.
-            fetch(new URL('api/session/update',document.baseURI||location.href).href,{
-              method:'POST',credentials:'include',
-              headers:{'Content-Type':'application/json'},
-              body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value,model_provider:S.session.model_provider||null})
-            }).catch(()=>{});
+    const modelSel=$('modelSelect');
+    const rawCurrentModel=String(currentModel||'').trim();
+    const hasSessionModel=rawCurrentModel&&rawCurrentModel.toLowerCase()!=='unknown';
+    if(!hasSessionModel){
+      // Missing/unknown session metadata must not leave the picker on the
+      // previously viewed chat's model (#1771). Apply the configured default
+      // first, then the first available option only as an HTML fallback.
+      const fallback=_applySessionModelFallback(modelSel);
+      if(fallback){
+        // Defer state mutation + network write while the live model resolution
+        // is in flight — sessions.js sets _modelResolutionDeferred=true between
+        // the fast-path session render and the resolve_model=1 round-trip.
+        // Persisting here would race that resolution and would also issue
+        // silent /api/session/update POSTs against imported/read-only CLI
+        // sessions whose model field reads "unknown" (#1779 stage-310 review).
+        // The visible sel.value change still happens above for UX; only the
+        // state mutation + persist defers.
+        const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
+        if(!deferModelCorrection){
+          S.session.model=fallback.model;
+          S.session.model_provider=fallback.model_provider||null;
+          currentModel=fallback.model;
+          _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
+        }
+      }
+    } else {
+      const applied=_applyModelToDropdown(currentModel,modelSel,S.session.model_provider||null);
+      // If the session model is missing from the current provider list, inject
+      // a session-scoped option instead of displaying the previous/static
+      // selection. Only fall back if that repair path is unavailable.
+      if(!applied){
+        const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
+        const missingModelIsRoutable=_providerDefersMissingModelFallback(S.session.model_provider||window._activeProvider||null);
+        // Also defer if a live model fetch is still in flight — the model may be
+        // in the list once the fetch completes. Persisting now would corrupt the
+        // session with the wrong model before live models arrive (#1169).
+        const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+        if(liveStillPending||missingModelIsRoutable){
+          // Live fetch in flight — don't touch sel.value or S.session.model yet.
+          // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
+          // Named custom providers/OpenRouter can also route vendor-prefixed IDs
+          // outside the static catalog, so preserve the user's explicit choice.
+          if(typeof _ensureModelOptionInDropdown==='function'){
+            const sessionOption=_ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null);
+            if(sessionOption) currentModel=sessionOption;
+          }
+        } else {
+          const sessionOption=(typeof _ensureModelOptionInDropdown==='function')
+            ? _ensureModelOptionInDropdown(currentModel,modelSel,S.session.model_provider||null)
+            : null;
+          if(sessionOption){
+            currentModel=sessionOption;
+          } else {
+            const fallback=_applySessionModelFallback(modelSel);
+            if(fallback&&!deferModelCorrection){
+              S.session.model=fallback.model;
+              S.session.model_provider=fallback.model_provider||null;
+              currentModel=fallback.model;
+              // Persist the correction so the session doesn't re-inject on next load.
+              _persistSessionModelCorrection(fallback.model,S.session.model_provider||null);
+            }
           }
         }
       }
@@ -3104,33 +5597,64 @@ function _messageHasReasoningPayload(m){
   if(!m||m.role!=='assistant') return false;
   if(m.reasoning) return true;
   if(Array.isArray(m.content)) return m.content.some(p=>p&&(p.type==='thinking'||p.type==='reasoning'));
-  return /<think>[\s\S]*?<\/think>|<\|channel>thought\n[\s\S]*?<channel\|>|<\|turn\|>thinking\n[\s\S]*?<turn\|>/.test(String(m.content||''));
+  return /^\s*(?:<think>[\s\S]*?<\/think>|<\|channel\|?>thought\n?[\s\S]*?<channel\|>|<\|turn\|>thinking\n[\s\S]*?<turn\|>)/.test(String(m.content||''));
 }
-function _assistantRoleHtml(tsTitle=''){
-  const _bn=window._botName||'Hermes';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span></div>`;
+function _formatTurnTps(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)||n<=0) return '';
+  const fixed=n>=100?Math.round(n).toLocaleString():n>=10?n.toFixed(1):n.toFixed(1);
+  return `${fixed} t/s`;
 }
-function _createAssistantTurn(tsTitle=''){
+function isTpsDisplayEnabled(){
+  return window._showTps===true;
+}
+function _assistantRoleHtml(tsTitle='', tpsText=''){
+  const _bn=assistantDisplayName();
+  const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span>${tps}</div>`;
+}
+function _setAssistantTurnTps(turn, tpsText=''){
+  if(!turn) return;
+  const role=turn.querySelector('.msg-role.assistant');
+  if(!role) return;
+  let chip=role.querySelector('.msg-tps-inline');
+  const text=String(tpsText||'').trim();
+  if(!text){if(chip) chip.remove();return;}
+  if(!chip){
+    chip=document.createElement('span');
+    chip.className='msg-tps-inline';
+    chip.title='Tokens per second';
+    role.appendChild(chip);
+  }
+  chip.textContent=text;
+}
+function _setLiveAssistantTps(value){
+  _setAssistantTurnTps($('liveAssistantTurn'), isTpsDisplayEnabled()?_formatTurnTps(value):'');
+}
+function _createAssistantTurn(tsTitle='', tpsText=''){
   const row=document.createElement('div');
   row.className='msg-row assistant-turn';
   row.dataset.role='assistant';
-  row.innerHTML=`${_assistantRoleHtml(tsTitle)}<div class="assistant-turn-blocks"></div>`;
+  if(S.session) row.dataset.sessionId=S.session.session_id;
+  row.innerHTML=`${_assistantRoleHtml(tsTitle, tpsText)}<div class="assistant-turn-blocks"></div>`;
   return row;
 }
 function _assistantTurnBlocks(turn){
   return turn?turn.querySelector('.assistant-turn-blocks'):null;
 }
-function _thinkingCardHtml(text){
+function _thinkingCardHtml(text, open){
   const clean=_sanitizeThinkingDisplayText(text);
-  return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
+  const classes=`thinking-card${open?' open':''}`;
+  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${_renderThinkingDisplayHtml(clean)}</pre></div></div>`;
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
 }
-function _thinkingActivityNode(text){
+function _thinkingActivityNode(text, open){
   const row=document.createElement('div');
   row.className='agent-activity-thinking';
-  row.innerHTML=_thinkingCardHtml(text);
+  row.innerHTML=_thinkingCardHtml(text, open);
   return row;
 }
 // ── Activity-group user expand intent (#1298) ──────────────────────────────
@@ -3148,11 +5672,45 @@ function _thinkingActivityNode(text){
 // finalized into a settled assistant turn (the live attribute is removed in
 // _convertLiveActivityGroupToSettled / when liveAssistantTurn loses its id).
 let _liveActivityUserExpanded;
+const ACTIVITY_GROUP_COLLAPSED_BY_DEFAULT=false;
+const _activityDisclosureStoragePrefix='hermes-activity-disclosure:';
+function _activityDisclosureStorageKey(activityKey){
+  if(!activityKey||!S.session||!S.session.session_id) return null;
+  return _activityDisclosureStoragePrefix+S.session.session_id+':'+activityKey;
+}
+function _readActivityDisclosureState(activityKey){
+  const key=_activityDisclosureStorageKey(activityKey);
+  if(!key) return null;
+  try{
+    const saved=localStorage.getItem(key);
+    return saved==='open'||saved==='closed'?saved:null;
+  }catch(_){return null;}
+}
+function _writeActivityDisclosureState(activityKey, open){
+  const key=_activityDisclosureStorageKey(activityKey);
+  if(!key) return;
+  try{localStorage.setItem(key, open?'open':'closed');}catch(_){}
+}
+function _copyActivityDisclosureState(fromActivityKey, toActivityKey){
+  const state=_readActivityDisclosureState(fromActivityKey);
+  if(state) _writeActivityDisclosureState(toActivityKey, state==='open');
+}
+function _activityKeyForLiveTurn(){
+  return S.activeStreamId?'live:'+S.activeStreamId:null;
+}
 function _onLiveActivityToggle(group){
   if(!group) return;
   // Only track explicit user clicks on the live group, not programmatic toggles.
   if(group.getAttribute('data-live-tool-call-group')!=='1') return;
   _liveActivityUserExpanded = !group.classList.contains('tool-call-group-collapsed');
+}
+function _toggleActivityGroup(summary){
+  const group=summary&&summary.closest?summary.closest('.tool-call-group'):null;
+  if(!group) return;
+  const collapsed=group.classList.toggle('tool-call-group-collapsed');
+  summary.setAttribute('aria-expanded',String(!collapsed));
+  _writeActivityDisclosureState(group.getAttribute('data-activity-disclosure-key'), !collapsed);
+  if(typeof _onLiveActivityToggle==='function') _onLiveActivityToggle(group);
 }
 function _clearLiveActivityUserIntent(){
   _liveActivityUserExpanded = undefined;
@@ -3161,26 +5719,49 @@ function ensureActivityGroup(inner, opts){
   opts=opts||{};
   if(!inner) return null;
   const live=!!opts.live;
-  const selector=live?'.tool-call-group[data-live-tool-call-group="1"]':'.tool-call-group[data-agent-activity-group="1"]';
+  const activityKey=opts.activityKey||(live?_activityKeyForLiveTurn():null);
+  const selector=live?'.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]':'.tool-call-group[data-agent-activity-group="1"]';
   let group=inner.querySelector(selector);
   if(!group){
     group=document.createElement('div');
-    let collapsed=opts.collapsed!==false;
+    let collapsed=opts.collapsed===undefined?ACTIVITY_GROUP_COLLAPSED_BY_DEFAULT:opts.collapsed!==false;
+    const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
-    // activity group within the same turn (#1298).
+    // activity group within the same turn (#1298), then let persisted chat/turn
+    // state win across session switches and reloads.
     if(live && _liveActivityUserExpanded === true) collapsed=false;
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
+    if(savedState==='open') collapsed=false;
+    else if(savedState==='closed') collapsed=true;
     group.className='tool-call-group agent-activity-group'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
-    if(live) group.setAttribute('data-live-tool-call-group','1');
-    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="const g=this.closest('.tool-call-group');const c=g.classList.toggle('tool-call-group-collapsed');this.setAttribute('aria-expanded',String(!c));if(typeof _onLiveActivityToggle==='function')_onLiveActivityToggle(g);"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-list">tools / thinking</span><span class="tool-call-group-count">0</span></button><div class="tool-call-group-body"></div>`;
+    if(activityKey) group.setAttribute('data-activity-disclosure-key',activityKey);
+    if(live){
+      group.setAttribute('data-live-tool-call-group','1');
+      group.setAttribute('data-live-activity-current','1');
+    }
+    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="_toggleActivityGroup(this)"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-duration"></span></button><div class="tool-call-group-body"></div>`;
     const anchor=opts.anchor||null;
     if(anchor&&anchor.parentElement===inner) anchor.insertAdjacentElement('afterend', group);
     else inner.appendChild(group);
+  }else if(activityKey&&!group.getAttribute('data-activity-disclosure-key')){
+    group.setAttribute('data-activity-disclosure-key',activityKey);
+  }
+  if(live){
+    _setActivityElapsedStartedAt(group);
+    _ensureLiveActivityBaseline(group);
   }
   _syncToolCallGroupSummary(group);
+  if(live) _startActivityElapsedTimer(group);
   return group;
+}
+function closeCurrentLiveActivityGroup(){
+  const turn=$('liveAssistantTurn');
+  if(!turn) return;
+  turn.querySelectorAll('.tool-call-group[data-live-tool-call-group="1"][data-live-activity-current="1"]').forEach(group=>{
+    group.removeAttribute('data-live-activity-current');
+  });
 }
 function _compressionStateForCurrentSession(){
   const state=window._compressionUi;
@@ -3194,6 +5775,7 @@ function isCompressionUiRunning(){
 }
 function clearCompressionUi(){
   window._compressionUi=null;
+  _clearCompressionElapsedTimer();
   _setCompressionSessionLock(null);
   renderCompressionUi();
 }
@@ -3202,8 +5784,14 @@ function setCompressionUi(state){
     clearCompressionUi();
     return;
   }
-  window._compressionUi={...state};
-  if(state.sessionId) _setCompressionSessionLock(state.sessionId);
+  const nextState={...state};
+  if(nextState.automatic&&nextState.phase==='running'&&!_compressionElapsedStartedAt(nextState)){
+    nextState.startedAt=Date.now()/1000;
+  }
+  window._compressionUi=nextState;
+  if(nextState.sessionId) _setCompressionSessionLock(nextState.sessionId);
+  if(nextState.automatic&&nextState.phase==='running') _startCompressionElapsedTimer();
+  else _clearCompressionElapsedTimer();
   renderCompressionUi();
 }
 function _compressionCardsHtml(state){
@@ -3269,19 +5857,46 @@ function _compressionCardsHtml(state){
     </div>
     ${referenceHtml}`;
 }
-function _autoCompressionCardsHtml(state){
+function _autoCompressionBaseDetail(state){
   const fallback='Context auto-compressed to continue the conversation';
-  const detail=String(state.message||fallback).trim()||fallback;
-  const preview=String(state.summary?.headline||detail).trim()||detail;
+  const running=state&&state.phase==='running';
+  return running
+    ? (String(state.message||'Auto-compressing context...').trim()||'Auto-compressing context...')
+    : (String(state&&state.message||fallback).trim()||fallback);
+}
+function _autoCompressionPreviewText(state){
+  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
+  const running=state&&state.phase==='running';
+  const detail=_autoCompressionBaseDetail(state);
+  if(!running) return (String(state&&state.summary?.headline||copy.preview||detail).trim()||detail);
+  const elapsedLabel=_compressionElapsedLabel(state);
+  return [detail, elapsedLabel].filter(Boolean).join(' · ');
+}
+function _autoCompressionDetailText(state){
+  const running=state&&state.phase==='running';
+  const base=_autoCompressionBaseDetail(state);
+  const elapsedLabel=running?_compressionElapsedLabel(state):'';
+  if(running)return elapsedLabel?`Elapsed: ${elapsedLabel}`:base;
+  const continuation=String(state&&state.continuationSessionId||'').trim();
+  const handoff=continuation?`Continued in compressed session: ${continuation}`:'';
+  return [base,handoff].filter(Boolean).join('\n');
+}
+function _autoCompressionCardsHtml(state){
+  const copy=_engineAwareCompressionCopy(String(state&&state.engine||_compressionEngineForSession()).toLowerCase(), String(state&&state.mode||_compressionModeForSession()).toLowerCase());
+  const running=state&&state.phase==='running';
+  const preview=_autoCompressionPreviewText(state);
+  const cardDetail=_autoCompressionDetailText(state);
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1">
       ${_compressionStatusCardHtml({
-        statusLabel: t('auto_compress_label'),
+        statusLabel: (String(state&&state.engine||'').toLowerCase()==='lcm'||String(state&&state.mode||'').toLowerCase()==='lossless_retrieval')?copy.label:t('auto_compress_label'),
         previewText: preview,
-        detail,
-        icon: li('check',13),
-        open: false,
-        variantClass: 'tool-card-compress-complete tool-card-compress-auto',
+        detail: cardDetail,
+        icon: running ? '<span class="tool-card-running-dot"></span>' : li('check',13),
+        open: running,
+        variantClass: running
+          ? 'tool-card-compress-running tool-card-compress-auto'
+          : 'tool-card-compress-complete tool-card-compress-auto',
       })}
     </div>`;
 }
@@ -3291,15 +5906,111 @@ function _compressionCardsNode(state){
   wrap.innerHTML=`<div class="compression-turn-blocks">${_compressionCardsHtml(state)}</div>`;
   return wrap;
 }
+function appendLiveCompressionCard(state){
+  if(!S.session||!S.activeStreamId||!state) return false;
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    if(S.session) turn.dataset.sessionId=S.session.session_id;
+    $('msgInner').appendChild(turn);
+  }
+  const inner=_assistantTurnBlocks(turn);
+  if(!inner) return false;
+  closeCurrentLiveActivityGroup();
+  const node=_compressionCardsNode(state);
+  if(!node) return false;
+  node.setAttribute('data-live-compression-card','1');
+  if(state.automatic&&state.phase==='running'){
+    const started=_compressionElapsedStartedAt(state)||Date.now()/1000;
+    node.setAttribute('data-compression-started-at',String(started));
+    node.setAttribute('data-compression-message',String(state.message||'Auto-compressing context...'));
+    _startCompressionElapsedTimer();
+  } else {
+    // Completion or error: clear the elapsed-timer attributes so the
+    // interval reader (_compressionLiveCardState) doesn't keep treating
+    // the replaced card as a running compression (#2973).
+    node.removeAttribute('data-compression-started-at');
+    node.removeAttribute('data-compression-message');
+    // Only clear the global timer when the *active* session has no running
+    // compression.  An SSE completion for a background session must not
+    // kill the timer that's driving the current session's display.
+    const _activeCompState = _compressionStateForCurrentSession();
+    if (!_activeCompState || !_activeCompState.automatic || _activeCompState.phase !== 'running') {
+      _clearCompressionElapsedTimer();
+    }
+  }
+  const existing=inner.querySelector('[data-live-compression-card="1"]');
+  if(existing) existing.replaceWith(node);
+  else inner.appendChild(node);
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
+  return true;
+}
+function _isHandoffSummaryToolPayload(value){
+  if(!value||typeof value!=='object'||Array.isArray(value)) return false;
+  return value._handoff_summary_card === true;
+}
+function _parseHandoffSummaryPayload(content){
+  if(!content) return null;
+  if(typeof content==='object' && !Array.isArray(content)) return _isHandoffSummaryToolPayload(content)?content:null;
+  if(typeof content!=='string') return null;
+  try {
+    const parsed=JSON.parse(content);
+    return _isHandoffSummaryToolPayload(parsed)?parsed:null;
+  } catch (e) {
+    return null;
+  }
+}
+function _handoffSummaryStateFromMessage(m){
+  if(!m||m.role!=='tool') return null;
+  const payload = _parseHandoffSummaryPayload(m.content);
+  if(!payload) return null;
+  if(String(payload.session_id||'') && S.session && String(m.session_id||'') && String(payload.session_id)!==String(S.session.session_id||'')) {
+    return null;
+  }
+  const summary = String(payload.summary||'').trim();
+  if(!summary) return null;
+  return {
+    phase: 'done',
+    channel: payload.channel || null,
+    rounds: Number.isFinite(payload.rounds)?payload.rounds:null,
+    summary,
+    fallback: !!payload.fallback,
+    generatedAt: Number(payload.generated_at) || null,
+  };
+}
+function _collectHandoffSummaryStates(messages){
+  const states=[];
+  if(!Array.isArray(messages)) return states;
+  for(let i=0;i<messages.length;i++){
+    const state=_handoffSummaryStateFromMessage(messages[i]);
+    if(state) states.push({state, rawIdx:i});
+  }
+  return states;
+}
 function _isContextCompactionMessage(m){
   if(!m||!m.role||m.role==='tool') return false;
   const text=msgContent(m)||String(m.content||'');
   return /^\s*\[context compaction/i.test(text) || /^\s*context compaction/i.test(text);
 }
+function _isPreservedCompressionTaskListMarkerText(text){
+  return /^\s*\[your active task list was preserved across context compression\]/i.test(String(text||''));
+}
+function _isPreservedCompressionTaskListMarkerOnlyText(text){
+  return _isPreservedCompressionTaskListMarkerText(text)
+    && !String(text||'')
+      .replace(/^\s*\[your active task list was preserved across context compression\]\s*/i,'')
+      .trim();
+}
 function _isPreservedCompressionTaskListMessage(m){
   if(!m||m.role!=='user') return false;
   const text=msgContent(m)||String(m.content||'');
   return /^\s*\[your active task list was preserved across context compression\]/i.test(text);
+}
+function _isMarkerOnlyAssistantCompressionMessage(m){
+  if(!m||m.role!=='assistant') return false;
+  const text=msgContent(m)||String(m.content||'');
+  return _isPreservedCompressionTaskListMarkerOnlyText(text);
 }
 function _preservedCompressionTaskListPreview(text){
   const body=String(text||'')
@@ -3326,9 +6037,11 @@ function _compressionAnchorIndex(visWithIdx, anchorKey, fallbackIdx=null){
     for(let i=visWithIdx.length-1;i>=0;i--){
       const candidate=_compressionMessageAnchorKey(visWithIdx[i].m);
       if(!candidate) continue;
+      const anchorTs=String(anchorKey.ts??'');
+      const candidateTs=String(candidate.ts??'');
       if(
         candidate.role===String(anchorKey.role||'') &&
-        String(candidate.ts??'')===String(anchorKey.ts??'') &&
+        (!anchorTs||!candidateTs||candidateTs===anchorTs) &&
         String(candidate.text||'')===String(anchorKey.text||'') &&
         Number(candidate.attachments||0)===Number(anchorKey.attachments||0)
       ){
@@ -3338,15 +6051,34 @@ function _compressionAnchorIndex(visWithIdx, anchorKey, fallbackIdx=null){
   }
   return typeof fallbackIdx==='number' ? fallbackIdx : null;
 }
+function _latestCompressionReferenceMessage(messages, summaryText=''){
+  if(!Array.isArray(messages)||!messages.length) return {message:null, rawIdx:-1};
+  const summaryNorm=String(summaryText||'').replace(/\s+/g,' ').trim();
+  for(let i=messages.length-1;i>=0;i--){
+    const m=messages[i];
+    if(!_isContextCompactionMessage(m)) continue;
+    if(!summaryNorm) return {message:m, rawIdx:i};
+    let content='';
+    try{
+      content=String(msgContent(m)||'');
+    }catch(_){
+      content=String((m&&m.content)||'');
+    }
+    const contentNorm=content.replace(/\s+/g,' ').trim();
+    if(contentNorm.includes(summaryNorm)) return {message:m, rawIdx:i};
+  }
+  return {message:null, rawIdx:-1};
+}
 function _compressionReferenceCardHtml(text, open=false){
+  const copy=_engineAwareCompressionCopy();
   const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
       <div class="tool-card tool-card-compress-reference${open?' open':''}">
         <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
           <span class="tool-card-icon">${li('star',13)}</span>
-          <span class="tool-card-name">${esc(t('context_compaction_label'))}</span>
-          <span class="tool-card-preview">${esc(t('reference_only_label'))} · ${esc(preview)}</span>
+          <span class="tool-card-name">${esc(copy.label)}</span>
+          <span class="tool-card-preview">${esc(copy.preview)} · ${esc(preview)}</span>
           <span class="tool-card-toggle">${li('chevron-right',12)}</span>
           <button class="msg-copy-btn msg-action-btn tool-card-copy compression-reference-copy" title="${t('copy')}" onclick="copyMsg(this);event.stopPropagation()">${li('copy',13)}</button>
         </div>
@@ -3376,9 +6108,29 @@ function _preservedCompressionTaskListCardHtml(m, open=false){
 function _preservedCompressionTaskListCardsHtml(messages){
   return (messages||[]).map(m=>_preservedCompressionTaskListCardHtml(m, false)).join('');
 }
+function _latestTodoToolItems(messages){
+  for(let i=(messages||[]).length-1;i>=0;i--){
+    const m=messages[i];
+    if(!m||m.role!=='tool') continue;
+    try{
+      const payload=typeof m.content==='string'?JSON.parse(m.content):m.content;
+      if(payload&&Array.isArray(payload.todos)) return payload.todos;
+    }catch(_){ }
+  }
+  return null;
+}
+function _hasActiveTodoItems(items){
+  return Array.isArray(items) && items.some(item=>{
+    const status=String(item&&item.status||'').trim().toLowerCase();
+    return status==='pending'||status==='in_progress';
+  });
+}
 function _latestPreservedCompressionTaskListMessages(messages){
   const latest=[...(messages||[])].reverse().find(m=>_isPreservedCompressionTaskListMessage(m));
-  return latest?[latest]:[];
+  if(!latest) return [];
+  const latestTodos=_latestTodoToolItems(messages);
+  if(Array.isArray(latestTodos) && !_hasActiveTodoItems(latestTodos)) return [];
+  return [latest];
 }
 function _isSameLocalDay(dateA, dateB){
   return dateA.getFullYear()===dateB.getFullYear()
@@ -3399,6 +6151,31 @@ function _formatMessageFooterTimestamp(tsVal){
   }
   const opts={month:'short', day:'numeric', hour:'numeric', minute:'2-digit'};
   return fmt?fmt(date,opts):date.toLocaleString([], opts);
+}
+function _compressionEngineForSession(){
+  return String(
+    (S.session&&(
+      S.session.compression_anchor_engine
+      || S.session.context_engine
+    )) || 'compressor'
+  ).trim().toLowerCase() || 'compressor';
+}
+function _compressionModeForSession(){
+  return String(
+    (S.session&&S.session.compression_anchor_mode) || 'summary_compaction'
+  ).trim().toLowerCase() || 'summary_compaction';
+}
+function _engineAwareCompressionCopy(engine=_compressionEngineForSession(), mode=_compressionModeForSession()){
+  if(engine==='lcm'||mode==='lossless_retrieval'){
+    return {
+      label:t('retrieval_context_label'),
+      preview:t('retrieval_context_preview'),
+    };
+  }
+  return {
+    label:t('context_compaction_label'),
+    preview:t('reference_only_label'),
+  };
 }
 function _compressionStatusCardHtml({
   statusLabel,
@@ -3425,6 +6202,73 @@ function _compressionStatusCardHtml({
       ${bodyHtml}
     </div>`;
 }
+function _handoffStateForCurrentSession(){
+  const state=window._handoffUi;
+  if(!state||!S.session||state.sessionId!==S.session.session_id) return null;
+  return state;
+}
+function clearHandoffUi(){
+  window._handoffUi=null;
+  renderMessages();
+}
+function setHandoffUi(state){
+  if(!state){
+    clearHandoffUi();
+    return;
+  }
+  window._handoffUi={...state};
+  renderMessages();
+}
+function _handoffCardsHtml(state){
+  if(!state) return '';
+  const channel=String(state.channel||'').trim();
+  const label=channel?`${channel} handoff summary`:'Handoff summary';
+  const isError=state.phase==='error';
+  const isDone=state.phase==='done';
+  const isFallback=!!state.fallback;
+  const detail=isError
+    ? String(state.errorText||'Could not generate summary. Please try again.')
+    : isDone
+      ? String(state.summary||'')
+      : 'Generating handoff summary...';
+  const meta=typeof state.rounds==='number'
+    ? `${state.rounds} external conversation rounds`
+    : '';
+  const icon=isError
+    ? li('x',13)
+    : isDone
+      ? li('check',13)
+      : '<span class="tool-card-running-dot"></span>';
+  const bodyHtml=isDone&&!isError
+    ? (
+      `${renderMd(detail)}${
+        isFallback
+          ? '<p class="handoff-summary-fallback-note">Fallback summary generated from recent turns; no model-based rewrite was used.</p>'
+          : ''
+      }`
+    )
+    : `<p>${esc(detail)}</p>`;
+  return `
+    <div class="tool-card-row compression-card-row handoff-card-row" data-compression-card="1" data-handoff-card="1">
+      <div class="tool-card tool-card-handoff-summary${isError?' tool-card-compress-error':''} open">
+        <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
+          ${icon}
+          <span class="tool-card-name">${esc(label)}</span>
+          ${meta?`<span class="tool-card-preview">${esc(meta)}</span>`:''}
+          <span class="tool-card-toggle">${li('chevron-right',12)}</span>
+        </div>
+        <div class="tool-card-detail">
+          <div class="tool-card-result handoff-summary-body">${bodyHtml}</div>
+        </div>
+      </div>
+    </div>`;
+}
+function _handoffCardsNode(state){
+  const wrap=document.createElement('div');
+  wrap.className='compression-turn handoff-turn';
+  wrap.innerHTML=`<div class="compression-turn-blocks">${_handoffCardsHtml(state)}</div>`;
+  return wrap;
+}
 function _contextCompactionMessageHtml(m, tsTitle='', preservedMessages=[]){
   const text=msgContent(m)||String(m.content||'');
   return `<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text, false, tsTitle)}${_preservedCompressionTaskListCardsHtml(preservedMessages)}</div></div>`;
@@ -3436,14 +6280,9 @@ function renderCompressionUi(){
   el.style.display='none';
 }
 // Session render cache: avoids full markdown+DOM rebuild when switching back
-// to a session that was already rendered with the same message count.
+// to a session whose rendered transcript inputs are unchanged.
 // Keyed by session_id. Only used on cross-session navigation, never for
 // in-session updates (new messages, edits, stream events).
-//
-// Known limitation: cache key is session_id + message count. Edits and retries
-// that mutate message content without changing the count will serve stale HTML
-// on back-navigation until the user triggers an in-session update. Acceptable
-// for the common read-only back-navigation case; not suitable as a general cache.
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
 function clearMessageRenderCache(){
@@ -3451,25 +6290,228 @@ function clearMessageRenderCache(){
   _sessionHtmlCacheSid=null;
 }
 
-function renderMessages(){
+function _messageRenderCacheSignature(){
+  let hash=2166136261;
+  function add(value){
+    const s=String(value==null?'':value);
+    for(let i=0;i<s.length;i++){
+      hash^=s.charCodeAt(i);
+      hash=Math.imul(hash,16777619)>>>0;
+    }
+    hash^=31;
+    hash=Math.imul(hash,16777619)>>>0;
+  }
+  const messages=Array.isArray(S.messages)?S.messages:[];
+  add(messages.length);
+  for(const m of messages){
+    if(!m||typeof m!=='object'){ add('missing'); continue; }
+    add(m.role);add(m.timestamp);add(m._ts);add(m._error);add(m._statusCard);
+    add(msgContent(m));
+    if(Array.isArray(m.content)){
+      add('content-array');
+      m.content.forEach(part=>{
+        if(!part||typeof part!=='object'){ add(part); return; }
+        add(part.type);add(part.id);add(part.name);add(part.text);add(part.content);
+      });
+    }
+    if(Array.isArray(m.tool_calls)){
+      add('message-tool-calls');add(m.tool_calls.length);
+      m.tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.type);add(JSON.stringify(tc&&tc.function||{}));});
+    }
+    if(Array.isArray(m._partial_tool_calls)){
+      add('partial-tool-calls');add(m._partial_tool_calls.length);
+      m._partial_tool_calls.forEach(tc=>{add(tc&&tc.id);add(tc&&tc.name);add(tc&&tc.snippet);});
+    }
+    if(_messageHasReasoningPayload(m)) add(m.reasoning||m.thinking||m._reasoning||'reasoning');
+    if(Array.isArray(m.attachments)) m.attachments.forEach(a=>add(a&&typeof a==='object'?JSON.stringify(a):a));
+  }
+  const toolCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
+  add('settled-tool-calls');add(toolCalls.length);
+  toolCalls.forEach(tc=>{
+    if(!tc||typeof tc!=='object'){ add(tc); return; }
+    add(tc.tid);add(tc.id);add(tc.name);add(tc.done);add(tc.is_diff);add(tc.assistant_msg_idx);add(tc.snippet);add(JSON.stringify(tc.args||{}));
+  });
+  if(S.session){
+    add(S.session.message_count);add(S.session.updated_at);add(S.session.compression_anchor_visible_idx);
+    add(JSON.stringify(S.session.compression_anchor_message_key||null));
+    add(S.session.compression_anchor_summary||'');
+  }
+  return `${messages.length}:${toolCalls.length}:${hash.toString(16)}`;
+}
+
+function _clipCliToolSnippet(text, maxLen=20000){
+  const s=String(text||'');
+  if(s.length<=maxLen) return s;
+  return `${s.slice(0,maxLen)}\n\n... truncated ${s.length-maxLen} chars ...`;
+}
+
+function _cliToolResultText(raw){
+  const s=String(raw||'');
+  try{
+    const rd=JSON.parse(s);
+    if(rd && typeof rd==='object'){
+      for(const key of ['output','result','error','content','diff','patch']){
+        if(Object.prototype.hasOwnProperty.call(rd,key)){
+          const v=rd[key];
+          if(v==null) return '';
+          return typeof v==='string' ? v : JSON.stringify(v,null,2);
+        }
+      }
+    }
+  }catch(e){}
+  return s;
+}
+
+function _cliLooksLikePatchDiff(text){
+  const s=String(text||'');
+  if(!s) return false;
+  if(/\*\*\* Begin Patch/.test(s)) return true;
+  if(/^diff --git /m.test(s)) return true;
+  if(/^@@\s/m.test(s)) return true;
+  if(/(^|\n)---\s+/.test(s) && /(^|\n)\+\+\+\s+/.test(s)) return true;
+  return false;
+}
+
+function _cliToolResultSnippet(raw){
+  const fullText=_cliToolResultText(raw);
+  if(_cliLooksLikePatchDiff(fullText)) return _clipCliToolSnippet(fullText);
+  return String(fullText||'').slice(0,4000);
+}
+
+function _prefixedCliDiffLines(prefix, value){
+  return String(value||'').split('\n').map(line=>`${prefix}${line}`).join('\n');
+}
+
+function _firstOwnedValue(obj, keys){
+  for(const key of keys){
+    if(obj && Object.prototype.hasOwnProperty.call(obj,key)) return obj[key];
+  }
+  return undefined;
+}
+
+function _cliPatchSnippetFromArgs(name, args){
+  if(!args || typeof args!=='object') return '';
+  const toolName=String(name||'').toLowerCase();
+  for(const key of ['patch','diff']){
+    const v=args[key];
+    if(typeof v==='string' && v.trim()) return _clipCliToolSnippet(v);
+  }
+  for(const key of ['input','content']){
+    const v=args[key];
+    if(typeof v==='string' && _cliLooksLikePatchDiff(v)) return _clipCliToolSnippet(v);
+  }
+  const isEditLike=toolName==='apply_patch'
+    || toolName==='patch'
+    || toolName.includes('edit')
+    || toolName==='replace'
+    || toolName==='str_replace';
+  if(!isEditLike) return '';
+  const oldValue=_firstOwnedValue(args,['old_string','old_str','old','before']);
+  const newValue=_firstOwnedValue(args,['new_string','new_str','new','after']);
+  if(oldValue!==undefined || newValue!==undefined){
+    const path=String(_firstOwnedValue(args,['file_path','path','filename'])||'');
+    const lines=[];
+    if(path) lines.push(path);
+    if(oldValue!==undefined) lines.push(_prefixedCliDiffLines('-', oldValue));
+    if(newValue!==undefined) lines.push(_prefixedCliDiffLines('+', newValue));
+    return _clipCliToolSnippet(lines.join('\n'));
+  }
+  if(Array.isArray(args.edits)){
+    const path=String(_firstOwnedValue(args,['file_path','path','filename'])||'');
+    const chunks=[];
+    if(path) chunks.push(path);
+    args.edits.slice(0,5).forEach(edit=>{
+      if(!edit || typeof edit!=='object') return;
+      const before=_firstOwnedValue(edit,['old_string','old_str','old','before']);
+      const after=_firstOwnedValue(edit,['new_string','new_str','new','after']);
+      if(before!==undefined) chunks.push(_prefixedCliDiffLines('-', before));
+      if(after!==undefined) chunks.push(_prefixedCliDiffLines('+', after));
+    });
+    if(chunks.length) return _clipCliToolSnippet(chunks.join('\n'));
+  }
+  return '';
+}
+
+function _cliToolCardSnippet(resultSnippet, patchSnippet){
+  if(_cliLooksLikePatchDiff(resultSnippet)) return resultSnippet;
+  if(!patchSnippet) return resultSnippet || '';
+  const result=String(resultSnippet||'').trim();
+  if(!result) return patchSnippet;
+  const generic=/^(success|ok|done|done\.|exit code: 0)$/i.test(result);
+  if(generic) return patchSnippet;
+  return `${resultSnippet}\n\n${patchSnippet}`;
+}
+
+function _cliToolCardHasDiffSnippet(resultSnippet, patchSnippet){
+  return !!patchSnippet || _cliLooksLikePatchDiff(resultSnippet);
+}
+
+function _captureMessageScrollSnapshot(){
+  const el=$('messages');
+  if(!el) return null;
+  return {top:el.scrollTop};
+}
+function _restoreMessageScrollSnapshot(snapshot){
+  const el=$('messages');
+  if(!el||!snapshot) return;
+  const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
+  _programmaticScroll=true;
+  el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  _lastScrollTop=el.scrollTop;
+  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+}
+function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
+  // Terminal stream renders can happen after S.activeStreamId is cleared.
+  // In that case, preserveScroll asks the normal pin-state helper to decide:
+  // pinned users stay at bottom; users who manually scrolled up get their
+  // pre-render scrollTop restored after the DOM replacement.
+  if(preserveScroll){
+    if(_scrollPinned) scrollIfPinned();
+    else _restoreMessageScrollSnapshot(scrollSnapshot);
+    return;
+  }
+  if(S.activeStreamId){
+    scrollIfPinned();
+    return;
+  }
+  scrollToBottom();
+}
+
+function renderMessages(options){
+  const preserveScroll=!!(options&&options.preserveScroll);
+  const scrollSnapshot=preserveScroll?_captureMessageScrollSnapshot():null;
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const msgCount=S.messages.length;
+  if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
+  const renderWindowSize=_currentMessageRenderWindowSize();
+  let cachedRenderSignature=null;
+  const hasTransientTranscriptUi=!!(
+    (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
+    (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
+  );
 
   // Fast path: switching back to a previously rendered session with same count.
   // Guard: sid !== _sessionHtmlCacheSid ensures in-session updates (edits,
   // new messages, tool_complete) always get a fresh rebuild.
   // Skip cache if this session is still streaming — the live smd parser writes
   // into a DOM node inside the cached subtree; serving cached HTML detaches it.
-  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]){
+  // Also skip cache for transient transcript cards such as /compress and
+  // cross-channel handoff summaries; otherwise the cached transcript returns
+  // before those cards can be inserted.
+  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
+    const renderSignature=_messageRenderCacheSignature();
+    cachedRenderSignature=renderSignature;
     const cached=_sessionHtmlCache.get(sid);
-    if(cached&&cached.msgCount===msgCount){
+    if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===renderSignature){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
-      if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
+      _wireMessageWindowLoadEarlierButton();
+      if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+      _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+      requestAnimationFrame(()=>postProcessRenderedMessages(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
+      if(typeof renderComposerTodos==='function') renderComposerTodos();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
@@ -3477,12 +6519,17 @@ function renderMessages(){
 
   const compressionState=_compressionStateForCurrentSession();
   if(window._compressionUi && !compressionState) clearCompressionUi();
+  const handoffState=_handoffStateForCurrentSession();
+  if(window._handoffUi && !handoffState) window._handoffUi=null;
   const sessionCompressionAnchor=(
     S.session && typeof S.session.compression_anchor_visible_idx==='number'
   ) ? S.session.compression_anchor_visible_idx : null;
   const sessionCompressionAnchorKey=(
     S.session && S.session.compression_anchor_message_key && typeof S.session.compression_anchor_message_key==='object'
   ) ? S.session.compression_anchor_message_key : null;
+  const sessionCompressionSummary=(
+    S.session && typeof S.session.compression_anchor_summary==='string'
+  ) ? S.session.compression_anchor_summary.trim() : '';
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const vis=S.messages.filter(m=>{
     if(!m||!m.role||m.role==='tool')return false;
@@ -3493,36 +6540,71 @@ function renderMessages(){
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
       if(hasTc||hasTu||_messageHasReasoningPayload(m)) return true;
     }
-    return msgContent(m)||m.attachments?.length;
+    return m._statusCard||msgContent(m)||m.attachments?.length;
   });
   $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
   inner.innerHTML='';
-  // Show "load older" indicator when older messages are available
-  if(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0){
-    const indicator=document.createElement('div');
-    indicator.id='loadOlderIndicator';
-    indicator.className='load-older-indicator';
-    indicator.textContent=typeof t==='function'?t('load_older_messages'):'↑ Scroll up or click to load older messages';
-    indicator.onclick=()=>{if(typeof _loadOlderMessages==='function') _loadOlderMessages();};
-    inner.appendChild(indicator);
-  }
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
-  const referenceMessage=S.messages.find(m=>_isContextCompactionMessage(m));
-  const referenceText=referenceMessage?msgContent(referenceMessage)||String(referenceMessage.content||''):'';
-  const referenceNode=(!compressionState && referenceMessage && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey))
+  const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
+    S.messages,
+    sessionCompressionSummary
+  );
+  const referenceText=referenceMessage
+    ? msgContent(referenceMessage)||String(referenceMessage.content||'')
+    : sessionCompressionSummary;
+  const referenceNode=(!compressionState && !!referenceText && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   let preservedCompressionTaskCardsAttached=!!referenceNode;
-  const visWithIdx=[];
+  // Cache visWithIdx so expanding the render window (Load earlier) doesn't
+  // re-scan S.messages from scratch.  Invalidate only when the message array
+  // length changes — i.e. new messages arrived or session was truncated.
+  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length){
+    const rebuilt=[];
+    let ri=0;
+    for(const m of S.messages){
+      if(!m||!m.role||m.role==='tool'){ri++;continue;}
+      if(_isPreservedCompressionTaskListMessage(m)){ri++;continue;}
+      const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+      const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) rebuilt.push({m,rawIdx:ri});
+      ri++;
+    }
+    _visWithIdxCache=rebuilt;
+    _visWithIdxCacheLen=S.messages.length;
+  }
+  const visWithIdx=_visWithIdxCache;
   const preservedCompressionRawIdxs=[];
   let rawIdx=0;
   for(const m of S.messages){
     if(!m||!m.role||m.role==='tool'){rawIdx++;continue;}
     if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
-    const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-    const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
     rawIdx++;
+  }
+  // Show a top affordance when earlier transcript content exists either in
+  // memory (DOM windowing) or on the server (paginated session fetch).
+  // Prefer expanding the local render window first so a fully loaded long
+  // session can reduce DOM nodes without losing in-memory transcript data.
+  const windowStart=Math.max(0, visWithIdx.length-renderWindowSize);
+  const hiddenBeforeCount=windowStart;
+  const renderVisWithIdx=visWithIdx.slice(windowStart);
+  const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
+  const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
+  if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+  if(hiddenBeforeCount>0 || hasServerOlder){
+    const indicator=document.createElement('button');
+    indicator.type='button';
+    indicator.id='loadOlderIndicator';
+    indicator.className='load-older-indicator message-window-load-earlier';
+    indicator.textContent=hiddenBeforeCount>0
+      ? `Load earlier messages (${hiddenBeforeCount} hidden)`
+      : (typeof t==='function'?t('load_older_messages'):'Load earlier messages');
+    indicator.onclick=()=>{
+      if(hiddenBeforeCount>0) _showEarlierRenderedMessages();
+      else if(typeof _loadOlderMessages==='function') _loadOlderMessages();
+    };
+    inner.appendChild(indicator);
+    _wireMessageWindowLoadEarlierButton();
   }
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){
@@ -3531,20 +6613,60 @@ function renderMessages(){
       break;
     }
   }
-  const insertionAnchor=_compressionAnchorIndex(
+  const insertionAnchorFull=_compressionAnchorIndex(
     visWithIdx,
     compressionState ? compressionState.anchorMessageKey : sessionCompressionAnchorKey,
     compressionState
       ? (typeof compressionState.anchorVisibleIdx==='number' ? compressionState.anchorVisibleIdx : compressionState.anchorRawIdx)
       : sessionCompressionAnchor
   );
+  let insertionAnchor=null;
+  if(typeof insertionAnchorFull==='number'){
+    if(insertionAnchorFull<windowStart) insertionAnchor=renderVisWithIdx.length?0:null;
+    else if(insertionAnchorFull<windowStart+renderVisWithIdx.length) insertionAnchor=insertionAnchorFull-windowStart;
+    else insertionAnchor=renderVisWithIdx.length?renderVisWithIdx.length-1:null;
+  }
   let _prevSepKey=null;
   let currentAssistantTurn=null;
+  // Only build question→assistant mapping for the visible window, not the
+  // full visWithIdx.  The jump-to-question button is only rendered for
+  // assistant messages that appear in the current render window anyway.
+  const questionRawIdxByAssistantRawIdx=new Map();
+  // Seed lastQuestionRawIdx from hidden messages so the first visible
+  // assistant message still gets a valid jump target even when its
+  // corresponding user message sits just before the render window.
+  let lastQuestionRawIdx=-1;
+  for(let i=0;i<windowStart;i++){
+    const role=visWithIdx[i]?.m?.role;
+    if(role==='user') lastQuestionRawIdx=visWithIdx[i].rawIdx;
+  }
+  for(const entry of renderVisWithIdx){
+    const role=entry&&entry.m&&entry.m.role;
+    if(role==='user') lastQuestionRawIdx=entry.rawIdx;
+    else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+  }
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
-  for(let vi=0;vi<visWithIdx.length;vi++){
-    const {m,rawIdx}=visWithIdx[vi];
+  // Only collect tool-call assistant indices for messages that are actually
+  // rendered in the current window.  S.toolCalls can grow large in long turns,
+  // but we only need the ones whose assistant_msg_idx falls inside the visible
+  // range.
+  const toolCallAssistantIdxs=new Set();
+  if(Array.isArray(S.toolCalls)){
+    const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
+    for(const tc of S.toolCalls){
+      if(!tc) continue;
+      const idx=tc.assistant_msg_idx;
+      if(idx!==undefined && renderedRawIdxs.has(idx)){
+        toolCallAssistantIdxs.add(idx);
+      }
+    }
+  }
+  // Windowed render loop replaces the legacy full loop:
+  // for(let vi=0;vi<visWithIdx.length;vi++)
+  for(let vi=0;vi<renderVisWithIdx.length;vi++){
+    const {m,rawIdx}=renderVisWithIdx[vi];
     const _tsSep=m._ts||m.timestamp;
     if(_tsSep){
       const _d=new Date(_tsSep*1000);
@@ -3563,32 +6685,41 @@ function renderMessages(){
       thinkingText=content.filter(p=>p&&(p.type==='thinking'||p.type==='reasoning')).map(p=>p.thinking||p.reasoning||p.text||'').join('\n');
       content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
     }
-    if(!thinkingText && m.reasoning) thinkingText=m.reasoning;
+    if(!thinkingText && (m.reasoning_content || m.reasoning)) thinkingText=m.reasoning_content || m.reasoning;
     if(!thinkingText && typeof content==='string'){
-      const thinkMatch=content.match(/<think>([\s\S]*?)<\/think>/);
+      const thinkMatch=content.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
       if(thinkMatch){
         thinkingText=thinkMatch[1].trim();
-        content=content.replace(/<think>[\s\S]*?<\/think>\s*/,'').trimStart();
+        content=content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'').trimStart();
       }
       if(!thinkingText){
         // Historical name "gemmaMatch" refers to MiniMax <|channel>thought format.
-        const gemmaMatch=content.match(/<\|channel>thought\n([\s\S]*?)<channel\|>/);
+        const gemmaMatch=content.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
         if(gemmaMatch){
           thinkingText=gemmaMatch[1].trim();
-          content=content.replace(/<\|channel>thought\n[\s\S]*?<channel\|>\s*/,'').trimStart();
+          content=content.replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'').trimStart();
         }
       }
       if(!thinkingText){
         // Gemma 4 uses asymmetric <|turn|>thinking\n...<turn|> delimiters.
-        const gemmaTurnMatch=content.match(/<\|turn\|>thinking\n([\s\S]*?)<turn\|>/);
+        const gemmaTurnMatch=content.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
         if(gemmaTurnMatch){
           thinkingText=gemmaTurnMatch[1].trim();
-          content=content.replace(/<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trimStart();
+          content=content.replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trimStart();
         }
       }
     }
     const isUser=m.role==='user';
-    const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
+    if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
+      content='**Error:** No response received after context compression. Please retry.';
+    }
+    const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;
+    if(thinkingText&&!isUser){
+      thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent);
+    }
+    const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
+    const nextRendered=renderVisWithIdx[vi+1];
+    const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
@@ -3601,7 +6732,12 @@ function renderMessages(){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    const bodyHtml = isUser ? _renderUserFencedBlocks(content) : renderMd(_stripXmlToolCallsDisplay(String(content)));
+    let bodyHtml = _getCachedRender(displayContent, isUser);
+    if(!isUser&&m.provider_details){
+      const summary=m.provider_details_label||'Provider details';
+      bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
+    }
+    const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
@@ -3616,7 +6752,16 @@ function renderMessages(){
     const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span></div>`;
+    // #3114: show jump-to-question on every assistant message that has a
+    // resolvable question target, not just the turn-final one. Multi-step
+    // turns (tool_call -> assistant -> tool_call -> assistant) otherwise
+    // strip the button from every intermediate assistant bubble and the
+    // user loses the navigation affordance.
+    const _qJumpTarget=(!isUser&&!m._live)?questionRawIdxByAssistantRawIdx.get(rawIdx):undefined;
+    const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
+      ? _questionJumpButtonHtml(_qJumpTarget)
+      : '';
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       if(compressionState || referenceNode){
@@ -3636,9 +6781,10 @@ function renderMessages(){
       currentAssistantTurn=null;
       const row=document.createElement('div');
       row.className='msg-row';
+      row.id=_userMessageDomId(rawIdx);
       row.dataset.msgIdx=rawIdx;
       row.dataset.role='user';
-      row.dataset.rawText=String(content).trim();
+      row.dataset.rawText=String(displayContent).trim();
       row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       inner.appendChild(row);
       userRows.set(rawIdx, row);
@@ -3646,7 +6792,7 @@ function renderMessages(){
     }
 
     if(!currentAssistantTurn){
-      currentAssistantTurn=_createAssistantTurn(tsTitle);
+      currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
       inner.appendChild(currentAssistantTurn);
     }
     const seg=document.createElement('div');
@@ -3667,8 +6813,10 @@ function renderMessages(){
       if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml);
-    if(hasVisibleBody){
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml);
+    if(statusHtml){
+      seg.insertAdjacentHTML('beforeend', statusHtml);
+    }else if(hasVisibleBody){
       seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
@@ -3680,8 +6828,8 @@ function renderMessages(){
   function _insertCompressionLikeNode(node, anchorIndex){
     if(!node) return;
     const anchorIdx=anchorIndex===undefined?insertionAnchor:anchorIndex;
-    if(anchorIdx!==null && visWithIdx[anchorIdx]){
-      const anchorRawIdx=visWithIdx[anchorIdx].rawIdx;
+    if(anchorIdx!==null && renderVisWithIdx[anchorIdx]){
+      const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
       const anchorSeg=assistantSegments.get(anchorRawIdx);
       if(anchorSeg){
         const turn=anchorSeg.closest('.assistant-turn');
@@ -3699,16 +6847,64 @@ function renderMessages(){
     }
     inner.appendChild(node);
   }
+  function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
+    if(!node) return;
+    if(rawIdx<firstRenderedRawIdx) return;
+    if(!renderVisWithIdx.length){
+      inner.appendChild(node);
+      return;
+    }
+    let anchorIdx=null;
+    for(let i=0;i<renderVisWithIdx.length;i++){
+      if(renderVisWithIdx[i].rawIdx > rawIdx){
+        anchorIdx=i;
+        break;
+      }
+    }
+    if(anchorIdx===null){
+      inner.appendChild(node);
+      return;
+    }
+    const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
+    const anchorSeg=assistantSegments.get(anchorRawIdx);
+    if(anchorSeg){
+      const turn=anchorSeg.closest('.assistant-turn');
+      const blocks=_assistantTurnBlocks(turn);
+      if(blocks){
+        blocks.insertBefore(node, anchorSeg);
+        return;
+      }
+      const turnParent=turn && turn.parentElement;
+      if(turnParent){
+        turnParent.insertBefore(node, turn);
+        return;
+      }
+    }
+    const userRow=userRows.get(anchorRawIdx);
+    if(userRow && userRow.parentElement){
+      userRow.parentElement.insertBefore(node, userRow);
+      return;
+    }
+    inner.appendChild(node);
+  }
   const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   const preservedOnlyAnchor=preservedCompressionRawIdxs.length
-    ? (()=>{let idx=null;for(let i=0;i<visWithIdx.length;i++){if(visWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
+    ? (()=>{let idx=null;for(let i=0;i<renderVisWithIdx.length;i++){if(renderVisWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
     : null;
+  const handoffSummaryStates=_collectHandoffSummaryStates(S.messages);
 
   _insertCompressionLikeNode(compressionNode);
-  _insertCompressionLikeNode(referenceNode);
+  if(referenceNode&&referenceMessageRawIdx>=0) _insertCompressionLikeNodeByRawIdx(referenceNode, referenceMessageRawIdx);
+  else _insertCompressionLikeNode(referenceNode);
   _insertCompressionLikeNode(preservedOnlyNode, preservedOnlyAnchor);
+  _insertCompressionLikeNode(handoffState?_handoffCardsNode(handoffState):null, renderVisWithIdx.length?renderVisWithIdx.length-1:null);
+  for(const entry of handoffSummaryStates){
+    if(!entry||!entry.state) continue;
+    if(entry.rawIdx<firstRenderedRawIdx) continue;
+    _insertCompressionLikeNodeByRawIdx(_handoffCardsNode(entry.state), entry.rawIdx);
+  }
   renderCompressionUi();
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
@@ -3719,24 +6915,17 @@ function renderMessages(){
   // a display list from per-message tool_calls (OpenAI format) stored in each
   // assistant message. This covers the reload case described in issue #140.
   if(!S.busy && (!S.toolCalls||!S.toolCalls.length)){
-    // Pass 1: index tool outputs by tool_call_id / tool_use_id so the
+    // Index tool outputs by tool_call_id / tool_use_id so the
     // fallback-built cards carry their result snippet (not just the command).
     // Without this step CLI-origin sessions reload with empty tool cards.
     const resultsByTid={};
-    const _snipFromRaw=(raw)=>{
-      const s=String(raw||'');
-      try{
-        const rd=JSON.parse(s);
-        if(rd && typeof rd==='object') return String(rd.output||rd.result||rd.error||s).slice(0,200);
-      }catch(e){}
-      return s.slice(0,200);
-    };
-    S.messages.forEach(m=>{
+    const fallbackToolSources=[];
+    S.messages.forEach((m,rawIdx)=>{
       if(!m) return;
       // OpenAI / Hermes CLI format: role=tool with tool_call_id
       if(m.role==='tool'){
         const tid=m.tool_call_id||m.tool_use_id||'';
-        if(tid) resultsByTid[tid]=_snipFromRaw(m.content);
+        if(tid) resultsByTid[tid]=_cliToolResultSnippet(m.content);
         return;
       }
       // Anthropic format: tool_result blocks inside a user message content array
@@ -3748,13 +6937,18 @@ function renderMessages(){
           const raw=typeof p.content==='string'?p.content
                    :Array.isArray(p.content)?p.content.map(c=>c&&c.text?c.text:'').join('')
                    :'';
-          resultsByTid[tid]=_snipFromRaw(raw);
+          resultsByTid[tid]=_cliToolResultSnippet(raw);
         });
+      }
+      if(m.role==='assistant'){
+        const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+        const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
+        const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+        if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});
       }
     });
     const derived=[];
-    S.messages.forEach((m,rawIdx)=>{
-      if(m.role!=='assistant') return;
+    fallbackToolSources.forEach(({m,rawIdx})=>{
       // OpenAI format: top-level tool_calls field on the assistant message
       (m.tool_calls||[]).forEach(tc=>{
         if(!tc||typeof tc!=='object') return;
@@ -3762,10 +6956,20 @@ function renderMessages(){
         const name=fn.name||tc.name||'tool';
         let args={};
         try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){}
+        const tid=tc.id||tc.call_id||'';
+        const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+        const resultSnippet=resultsByTid[tid]||'';
         let argsSnap={};
         Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-        const tid=tc.id||tc.call_id||'';
-        derived.push({name,snippet:resultsByTid[tid]||'',tid,assistant_msg_idx:rawIdx,args:argsSnap,done:true});
+        derived.push({
+          name,
+          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+          tid,
+          assistant_msg_idx:rawIdx,
+          args:argsSnap,
+          done:true,
+        });
       });
       // Anthropic format: tool_use blocks inside assistant content array
       if(Array.isArray(m.content)){
@@ -3773,19 +6977,48 @@ function renderMessages(){
           if(!p||typeof p!=='object'||p.type!=='tool_use') return;
           const name=p.name||'tool';
           const args=p.input||{};
+          const tid=p.id||'';
+          const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+          const resultSnippet=resultsByTid[tid]||'';
           const argsSnap={};
           if(args && typeof args==='object'){
             Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
           }
-          const tid=p.id||'';
-          derived.push({name,snippet:resultsByTid[tid]||'',tid,assistant_msg_idx:rawIdx,args:argsSnap,done:true});
+          derived.push({
+            name,
+            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+            tid,
+            assistant_msg_idx:rawIdx,
+            args:argsSnap,
+            done:true,
+          });
         });
       }
+      (m._partial_tool_calls||[]).forEach(tc=>{
+        if(!tc||typeof tc!=='object') return;
+        const name=tc.name||'tool';
+        const args=(tc.args&&typeof tc.args==='object')?tc.args:{};
+        const tid=tc.tid||tc.id||'';
+        const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+        const resultSnippet=String(tc.snippet||tc.preview||'');
+        const argsSnap={};
+        Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
+        derived.push({
+          name,
+          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+          tid,
+          assistant_msg_idx:rawIdx,
+          args:argsSnap,
+          done:tc.done!==false,
+        });
+      });
     });
     if(derived.length) S.toolCalls=derived;
   }
   if(!S.busy){
-    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card])').forEach(el=>el.remove());
+    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"])').forEach(el=>el.remove());
     const byAssistant = {};
     for(const tc of (S.toolCalls||[])){
       const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;
@@ -3800,17 +7033,22 @@ function renderMessages(){
         const cards=byAssistant[aIdx]||[];
         let anchorRow=assistantSegments.get(aIdx)||null;
         if(!anchorRow&&assistantIdxs.length){
+          if(aIdx<assistantIdxs[0]) continue;
           const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
           anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
         }
         if(!anchorRow) continue;
         const anchorParent=anchorRow.parentElement;
-        const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode});
+        let insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
+        const group=ensureActivityGroup(anchorParent,{collapsed:ACTIVITY_GROUP_COLLAPSED_BY_DEFAULT,anchor:insertAfterNode,activityKey:`assistant:${aIdx}`});
+        const sourceMsg=S.messages[aIdx]||{};
+        if(sourceMsg._turnDuration!==undefined) group.setAttribute('data-turn-duration', String(sourceMsg._turnDuration));
         const body=group&&group.querySelector('.tool-call-group-body');
         if(!body) continue;
         const thinkingText=assistantThinking.get(aIdx);
-        if(thinkingText) body.appendChild(_thinkingActivityNode(thinkingText));
+        if(thinkingText){
+          body.appendChild(_thinkingActivityNode(thinkingText, false));
+        }
         for(const tc of cards){
           body.appendChild(buildToolCard(tc));
         }
@@ -3822,6 +7060,7 @@ function renderMessages(){
         const aIdx = parseInt(key);
         let anchorRow=assistantSegments.get(aIdx)||null;
         if(!anchorRow&&assistantIdxs.length){
+          if(aIdx<assistantIdxs[0]) continue;
           const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
           anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
         }
@@ -3858,44 +7097,83 @@ function renderMessages(){
       }
     }
   }
-  // Render per-turn token usage on each assistant message that has it (#503).
-  // Replaces the old cumulative-total-on-last-bubble approach.
-  if(window._showTokenUsage){
-    const asstRows=inner.querySelectorAll('.assistant-turn');
-    let ai=0; // assistant-only index for DOM rows
-    for(let mi=0;mi<S.messages.length;mi++){
-      const msg=S.messages[mi];
-      if(msg.role!=='assistant'){continue;}
-      if(!msg._turnUsage){ai++;continue;}
-      if(ai>=asstRows.length) continue;
-      const row=asstRows[ai];
-      const footerRows=row.querySelectorAll('.msg-foot');
+  // Render per-turn duration and optional token usage on assistant messages.
+  // Duration stays visible even when token usage is disabled, because it answers
+  // the basic "how long did that turn take?" UX question. Only walk rendered
+  // assistant segments so hidden messages above the DOM window cannot skew the
+  // footer-to-message mapping.
+  {
+    const renderedAssistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
+    for(const mi of renderedAssistantIdxs){
+      const msg=S.messages[mi]||{};
+      if(msg.role!=='assistant') continue;
+      const routing=msg._gatewayRouting||null;
+      const gatewayText=_formatGatewayModelLabel(S.session&&S.session.model||'', '', routing);
+      const failoverText=_gatewayRoutingFailoverText(routing);
+      const modelWarningText=_gatewayModelWarningText(routing);
+      const hasTurnUsage=!!msg._turnUsage;
+      const compactActivityForMessage=isSimplifiedToolCalling()&&(
+        assistantThinking.has(mi)||
+        toolCallAssistantIdxs.has(mi)
+      );
+      const durationText=compactActivityForMessage?'':_formatTurnDuration(msg._turnDuration);
+      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;
+      const seg=assistantSegments.get(mi);
+      const row=seg?seg.closest('.assistant-turn'):null;
+      const footerRows=row?row.querySelectorAll('.msg-foot'):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline')){ai++;continue;}
-      const usage=document.createElement('span');
-      usage.className='msg-usage-inline';
-      const inTok=msg._turnUsage.input_tokens||0;
-      const outTok=msg._turnUsage.output_tokens||0;
-      const cost=msg._turnUsage.estimated_cost;
-      let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-      if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-      usage.textContent=text;
-      targetFoot.classList.add('msg-foot-with-usage');
-      targetFoot.insertBefore(usage, targetFoot.firstChild);
-      ai++;
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline')) continue;
+      const fragments=[];
+      if(modelWarningText){
+        const warning=document.createElement('span');
+        warning.className='msg-model-warning-inline';
+        warning.textContent=modelWarningText;
+        fragments.push(warning);
+      }
+      if(failoverText){
+        const failover=document.createElement('span');
+        failover.className='gateway-failover-inline';
+        failover.textContent=failoverText;
+        fragments.push(failover);
+      }
+      if(gatewayText){
+        const gateway=document.createElement('span');
+        gateway.className='msg-gateway-inline';
+        gateway.textContent=gatewayText;
+        fragments.push(gateway);
+      }
+      if(durationText){
+        const duration=document.createElement('span');
+        duration.className='msg-duration-inline';
+        duration.textContent=`Done in ${durationText}`;
+        fragments.push(duration);
+      }
+      if(window._showTokenUsage&&hasTurnUsage){
+        const usage=document.createElement('span');
+        usage.className='msg-usage-inline';
+        const inTok=msg._turnUsage.input_tokens||0;
+        const outTok=msg._turnUsage.output_tokens||0;
+        const cost=msg._turnUsage.estimated_cost;
+        let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
+        if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+        const cacheHitPct=msg._turnUsage.cache_hit_percent;
+        if(cacheHitPct!=null) text+=` · ${t('usage_cached_percent',cacheHitPct)}`;
+        usage.textContent=text;
+        fragments.push(usage);
+      }
+      if(fragments.length){
+        targetFoot.classList.add('msg-foot-with-usage');
+        for(let i=fragments.length-1;i>=0;i--) targetFoot.insertBefore(fragments[i], targetFoot.firstChild);
+      }
     }
   }
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
-  if(S.activeStreamId){
-    scrollIfPinned();
-  } else {
-    scrollToBottom();
-  }
+  _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();}); 
+  requestAnimationFrame(()=>postProcessRenderedMessages(inner));
+  if(typeof renderComposerTodos==='function') renderComposerTodos();
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -3904,11 +7182,12 @@ function renderMessages(){
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
-  if(sid){
+  if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
-      _sessionHtmlCache.set(sid,{html:_html,msgCount});
+      const renderSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;
+      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize,signature:renderSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
@@ -3947,7 +7226,7 @@ function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='tool-card-row';
   const icon=toolIcon(tc.name);
-  const hasDetail=tc.snippet||(tc.args&&Object.keys(tc.args).length>0);
+  const hasDetail=(tc.snippet&&tc.snippet!==tc.preview)||(tc.args&&Object.keys(tc.args).length>0);
   let displaySnippet='';
   if(tc.snippet){
     const s=tc.snippet;
@@ -3959,6 +7238,8 @@ function buildToolCard(tc){
     }
   }
   const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
+  const moreLabel=tc.is_diff?'Show diff':'Show more';
+  const lessLabel=tc.is_diff?'Hide diff':'Show less';
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
@@ -3972,6 +7253,7 @@ function buildToolCard(tc){
       <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
         ${runIndicator}
         <span class="tool-card-icon">${icon}</span>
+        <span class="tool-card-badge">Tool output</span>
         <span class="tool-card-name">${esc(displayName)}</span>
         <span class="tool-card-preview">${esc(previewText)}</span>
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
@@ -3982,7 +7264,7 @@ function buildToolCard(tc){
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
           <pre>${esc(displaySnippet)}</pre>
-          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?'Show more':'Show less'">Show more</button>`:''}
+          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?this.dataset.moreLabel:this.dataset.lessLabel">${esc(moreLabel)}</button>`:''}
         </div>`:''}
       </div>`:''}
     </div>`;
@@ -3993,27 +7275,53 @@ function _syncToolCallGroupSummary(group){
   if(!group) return;
   const cards=Array.from(group.querySelectorAll('.tool-card-row .tool-card'));
   const toolCount=cards.length;
-  const thinkingCount=group.querySelectorAll('.agent-activity-thinking .thinking-card').length;
-  const names=cards.map(card=>{
-    const el=card.querySelector('.tool-card-name');
-    return el?String(el.textContent||'').trim():'';
-  }).filter(Boolean);
-  const uniqueNames=[...new Set(names)];
   const label=group.querySelector('.tool-call-group-label');
-  const list=group.querySelector('.tool-call-group-list');
-  const badge=group.querySelector('.tool-call-group-count');
-  const parts=[];
-  if(thinkingCount) parts.push('thinking');
-  if(uniqueNames.length) parts.push(uniqueNames.slice(0,5).join(', ')+(uniqueNames.length>5?'…':''));
-  const total=toolCount+thinkingCount;
+  const durationEl=group.querySelector('.tool-call-group-duration');
   if(label){
-    if(thinkingCount&&toolCount) label.textContent=`Activity: thinking + ${toolCount} tool${toolCount===1?'':'s'}`;
-    else if(thinkingCount) label.textContent='Activity: thinking';
-    else if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
+    if(group.getAttribute('data-live-tool-call-group')==='1'){
+      label.textContent=toolCount?`Activity: ${toolCount} tool${toolCount===1?'':'s'}`:'Activity · Running';
+    }else if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
     else label.textContent='Activity';
+    label.setAttribute('data-sweep-label', label.textContent);
   }
-  if(list) list.textContent=parts.join(' · ')||'tools / thinking';
-  if(badge) badge.textContent=String(total);
+  if(durationEl){
+    if(group.getAttribute('data-live-tool-call-group')==='1'){
+      const activeText=_activityElapsedLabel(group);
+      const progressText=_activityLiveProgressLabel(group);
+      if(activeText) group.setAttribute('data-active-turn-elapsed',activeText);
+      else group.removeAttribute('data-active-turn-elapsed');
+      durationEl.textContent=[progressText, activeText].filter(Boolean).join(' · ');
+      durationEl.style.display=durationEl.textContent?'':'none';
+    }else{
+      const durationText=_formatTurnDuration(group.dataset.turnDuration);
+      durationEl.textContent=durationText?`Done in ${durationText}`:'';
+      durationEl.style.display=durationText?'':'none';
+    }
+  }
+}
+
+function _activityProgressLabelForToolName(name){
+  const key=String(name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
+  if(!key) return 'Working';
+  if(key.includes('search')||key.includes('grep')) return 'Searching workspace';
+  if(key.includes('read')||key.includes('view')||key.includes('open')) return 'Reading files';
+  if(key.includes('write')||key.includes('patch')||key.includes('edit')) return 'Updating files';
+  if(key.includes('terminal')||key.includes('shell')||key.includes('command')||key.includes('process')) return 'Running command';
+  if(key.includes('web')||key.includes('fetch')||key.includes('curl')) return 'Checking web data';
+  if(key.includes('todo')||key.includes('plan')) return 'Planning next steps';
+  return 'Working';
+}
+
+function _activityLiveProgressLabel(group){
+  if(!group||group.getAttribute('data-live-tool-call-group')!=='1') return '';
+  const idleAge=_activityLastObservedAge(group);
+  if(idleAge!==null&&idleAge>=90) return `No recent activity for ${_formatActiveElapsedTimer(idleAge)}`;
+  const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
+  const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
+  const waiting=group.querySelector('.agent-activity-status-waiting .agent-activity-status-label');
+  if(latest) return _activityProgressLabelForToolName(latest.textContent);
+  if(waiting&&waiting.textContent) return waiting.textContent;
+  return 'Starting agent';
 }
 
 // ── Live tool card helpers (called during SSE streaming) ──
@@ -4077,8 +7385,21 @@ function appendLiveToolCard(tc){
   }
   const children=Array.from(inner.children);
   const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')).pop();
-  const group=ensureActivityGroup(inner,{live:true,collapsed:false,anchor});
+  const group=ensureActivityGroup(inner,{live:true,collapsed:ACTIVITY_GROUP_COLLAPSED_BY_DEFAULT,anchor,activityKey:_activityKeyForLiveTurn()});
   const body=group.querySelector('.tool-call-group-body');
+  const toolName=_toolDisplayName(tc);
+  const toolEventId=tid?`tool-${tid}`:`tool-${String(tc.name||'tool').replace(/[^a-z0-9_-]/gi,'_')}`;
+  const toolDone=tc.done!==false;
+  _appendActivityEvent(group,{
+    id:toolEventId,
+    kind:'tool',
+    label:toolDone?`Tool finished: ${toolName}`:`Running tool: ${toolName}`,
+    detail:tc.preview||tc.snippet||'',
+    status:toolDone?(tc.is_error?'error':'done'):'waiting',
+    ts:_activityNowSeconds(),
+  });
+  const waiting=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"] .agent-activity-status-label');
+  if(waiting&&!toolDone) waiting.textContent='Waiting on tool result';
   // Update existing card in place (tool_complete after tool_start)
   if(tid){
     const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
@@ -4098,6 +7419,7 @@ function appendLiveToolCard(tc){
 }
 
 function clearLiveToolCards(){
+  if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
   const inner=_assistantTurnBlocks($('liveAssistantTurn'));
   if(inner) inner.querySelectorAll('.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]').forEach(el=>el.remove());
   // Reset the per-turn user expand intent so the next turn starts at the
@@ -4205,12 +7527,36 @@ async function regenerateResponse(btn) {
   } catch(e) { setStatus(t('regen_failed') + e.message); }
 }
 
+function postProcessRenderedMessages(container) {
+  highlightCode(container);
+  addCopyButtons(container);
+  loadDiffInline(container);
+  loadCsvInline(container);
+  loadExcalidrawInline(container);
+  loadPdfInline(container);
+  loadHtmlInline(container);
+  renderMermaidBlocks(container);
+  renderKatexBlocks(container);
+  initTreeViews(container);
+}
+
 function highlightCode(container) {
-  // Apply Prism.js syntax highlighting to all code blocks in container (or whole messages area)
-  if(typeof Prism === 'undefined' || !Prism.highlightAllUnder) return;
+  // Apply Prism.js syntax highlighting only to *new* code blocks.
+  // Previously every renderMessages() called Prism.highlightAllUnder() which
+  // re-scanned and re-highlighted every <pre> in the container — expensive in
+  // long sessions with dozens of code blocks.  Now we only touch blocks that
+  // don't already have the data-highlighted marker.
+  if(typeof Prism === 'undefined') return;
   const el = container || $('msgInner');
   if(!el) return;
-  Prism.highlightAllUnder(el);
+  // Prefer per-element highlight (avoids the full DOM walk of highlightAllUnder)
+  const blocks = el.querySelectorAll('pre code:not([data-highlighted])');
+  if(blocks.length === 0) return;
+  for(let i = 0; i < blocks.length; i++){
+    const block = blocks[i];
+    if(typeof Prism.highlightElement === 'function') Prism.highlightElement(block);
+    block.dataset.highlighted = '1';
+  }
 }
 
 // Lazy load js-yaml for YAML tree view support
@@ -4220,16 +7566,17 @@ function _loadJsyamlThen(cb){
   if(_jsyamlLoading){ setTimeout(()=>_loadJsyamlThen(cb),100); return; }
   _jsyamlLoading=true;
   const s=document.createElement('script');
-  s.src='https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js';
-  s.integrity='sha384-8pLvVQkv7pCQqFk7AChLpdEe7gXz9h8GAb7cS0zVeJuKhxR5PU5aEET5pRpHZvxUorzdM';
+  s.src='static/vendor/js-yaml/4.1.0/js-yaml.min.js';
+  s.integrity='sha384-+pxiN6T7yvpryuJmE1gM9PX7yQit15auDb+ZwwvJOd/4be2Cie5/IuVXgQb/S9du';
   s.crossOrigin='anonymous';
   s.onload=()=>{ _jsyamlLoading=false; cb(); };
   s.onerror=()=>{ _jsyamlLoading=false; }; // CDN blocked, fall back to raw
   document.head.appendChild(s);
 }
 
-function initTreeViews(){
-  document.querySelectorAll('.code-tree-wrap:not([data-tree-init])').forEach(wrap=>{
+function initTreeViews(container){
+  const root=container||document;
+  root.querySelectorAll('.code-tree-wrap:not([data-tree-init])').forEach(wrap=>{
     const rawText=wrap.dataset.raw;
     const lang=wrap.dataset.lang;
     let parsed=null;
@@ -4386,12 +7733,14 @@ function addCopyButtons(container){
 let _mermaidLoading=false;
 let _mermaidReady=false;
 
-function loadDiffInline(){
+function loadDiffInline(container){
   const DIFF_MAX_SIZE=512*1024; // 512 KB cap for inline diff rendering
-  document.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const sessionId=el.dataset.sessionId||'';
+    fetch(_mediaApiHref(path,{sessionId}))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
@@ -4413,12 +7762,14 @@ function loadDiffInline(){
   });
 }
 
-function loadCsvInline(){
+function loadCsvInline(container){
   const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
-  document.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const sessionId=el.dataset.sessionId||'';
+    fetch(_mediaApiHref(path,{sessionId}))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>CSV_MAX_SIZE){
@@ -4448,12 +7799,14 @@ function loadCsvInline(){
   });
 }
 
-function loadExcalidrawInline(){
+function loadExcalidrawInline(container){
   const EXCALIDRAW_MAX_SIZE=512*1024; // 512 KB cap
-  document.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    const sessionId=el.dataset.sessionId||'';
+    fetch(_mediaApiHref(path,{sessionId}))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
@@ -4471,7 +7824,7 @@ function loadExcalidrawInline(){
           return;
         }
         const fname=esc(path.split('/').pop());
-        const downloadUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const downloadUrl=_mediaApiHref(path,{sessionId,download:true});
         el.outerHTML=`<div class="excalidraw-embed-wrap" title="${t('excalidraw_simplified')}">
   <div class="msg-artifact-header">
     <span class="msg-media-label">${t('excalidraw_label')}</span>
@@ -4573,19 +7926,48 @@ function _renderExcalidrawCanvases(){
 // download link in that case. The 4 MB size cap is checked client-side after
 // the full buffer is received — ideally the server would enforce it before
 // streaming (out of scope for this client-side PR).
-let _pdfjsReady=false, _pdfjsLoading=false;
-function loadPdfInline(){
+let _pdfjsReady=false, _pdfjsLoading=false, _pdfjsLoadPromise=null;
+function _ensurePdfJsLoaded(){
+  if(_pdfjsReady&&window._pdfjsLib) return Promise.resolve(window._pdfjsLib);
+  if(_pdfjsLoadPromise) return _pdfjsLoadPromise;
+  _pdfjsLoading=true;
+  const pdfJsSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
+  const pdfJsWorkerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
+  _pdfjsLoadPromise=import(pdfJsSrc).then(pdfjsLib=>{
+    pdfjsLib.GlobalWorkerOptions.workerSrc=pdfJsWorkerSrc;
+    window._pdfjsLib=pdfjsLib;
+    window._pdfjsReady=true;
+    _pdfjsReady=true;
+    window.dispatchEvent(new Event('pdfjs-ready'));
+    return pdfjsLib;
+  }).catch(err=>{
+    _pdfjsLoadPromise=null;
+    _pdfjsLoading=false;
+    throw err;
+  });
+  return _pdfjsLoadPromise;
+}
+function loadPdfInline(container){
   const PDF_MAX_SIZE=4*1024*1024; // 4 MB cap for inline PDF preview
-  document.querySelectorAll('.pdf-preview-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.pdf-preview-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
+    const sessionId=el.dataset.sessionId||'';
     const fname=path.split('/').pop()||path;
+    const downloadHref=()=>_mediaApiHref(path,{sessionId,download:true});
+    const mediaHref=(opts)=>_mediaApiHref(path,{sessionId,...(opts||{})});
+    const renderPdfFallback=(messageKey)=>{
+      if(!el.parentNode) return;
+      const dlUrl=downloadHref();
+      el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t(messageKey)}</span></div>`;
+    };
     const loadPdf=(pdfjsLib)=>{
-      fetch('api/media?path='+encodeURIComponent(path))
+      fetch(mediaHref())
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
-            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
+            renderPdfFallback('pdf_too_large');
             return;
           }
           return pdfjsLib.getDocument({data:buf}).promise;
@@ -4603,9 +7985,16 @@ function loadPdfInline(){
               // Canvas bitmap is runtime state, not part of HTML serialization.
               // Attach the canvas as a DOM node — interpolating its serialized
               // form into a template string parses back as an empty canvas.
-              const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+              const dlUrl=downloadHref();
+              const openUrl=mediaHref({inline:true});
               const wrap=document.createElement('div');
-              wrap.className='pdf-preview-wrap';
+              wrap.className='pdf-preview-wrap pdf-preview-wrap--interactive';
+              wrap.dataset.openUrl=openUrl;
+              wrap.dataset.downloadUrl=dlUrl;
+              wrap.dataset.title=fname;
+              wrap.tabIndex=0;
+              wrap.setAttribute('role','button');
+              wrap.setAttribute('aria-label',`${fname} — click to expand full-page preview`);
               wrap.innerHTML=`<div class="pdf-preview-header"><span>📄 ${esc(fname)}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body"></div>`;
               wrap.querySelector('.pdf-preview-body').appendChild(canvas);
               el.replaceWith(wrap);
@@ -4613,68 +8002,58 @@ function loadPdfInline(){
           });
         })
         .catch(()=>{
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-          el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+          renderPdfFallback('pdf_error');
         });
     };
-    if(_pdfjsReady){
-      loadPdf(window._pdfjsLib);
-    } else if(!_pdfjsLoading){
-      _pdfjsLoading=true;
-      const s=document.createElement('script');
-      s.src='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
-      s.type='module';
-      s.textContent=`
-        import * as pdfjsLib from '${s.src}';
-        pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
-        window._pdfjsLib=pdfjsLib;
-        window._pdfjsReady=true;
-        window.dispatchEvent(new Event('pdfjs-ready'));
-      `;
-      document.head.appendChild(s);
-      window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
-      setTimeout(()=>{
-        if(!_pdfjsReady){
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-          if(el.parentNode){
-            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
-          }
-        }
-      },15000);
-    } else {
-      window.addEventListener('pdfjs-ready',()=>{ loadPdf(window._pdfjsLib); },{once:true});
-    }
+    let bootTimedOut=false;
+    const bootTimeout=setTimeout(()=>{
+      bootTimedOut=true;
+      renderPdfFallback('pdf_error');
+    },15000);
+    _ensurePdfJsLoaded()
+      .then(pdfjsLib=>{
+        if(bootTimedOut) return;
+        clearTimeout(bootTimeout);
+        loadPdf(pdfjsLib);
+      })
+      .catch(()=>{
+        clearTimeout(bootTimeout);
+        renderPdfFallback('pdf_error');
+      });
   });
 }
 
 // ── HTML inline preview (sandboxed iframe) ─────────────────────────────────
-function loadHtmlInline(){
+function loadHtmlInline(container){
   const HTML_MAX_SIZE=256*1024; // 256 KB cap for inline HTML preview
-  document.querySelectorAll('.html-preview-load:not([data-loaded])').forEach(el=>{
+  const root=container||document;
+  root.querySelectorAll('.html-preview-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
+    const sessionId=el.dataset.sessionId||'';
     const fname=path.split('/').pop()||path;
-    fetch('api/media?path='+encodeURIComponent(path))
+    fetch(_mediaApiHref(path,{sessionId}))
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-          el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
+          const openUrl=_mediaApiHref(path,{sessionId,inline:true});
+          el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const openUrl=_mediaApiHref(path,{sessionId,inline:true});
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${dlUrl}" download="${esc(fname)}" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
+        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
-        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const dlUrl=_mediaApiHref(path,{sessionId,download:true});
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
   });
 }
 
-function renderMermaidBlocks(){
-  const blocks=document.querySelectorAll('.mermaid-block:not([data-rendered])');
+function renderMermaidBlocks(container){
+  const root=container||document;
+  const blocks=root.querySelectorAll('.mermaid-block:not([data-rendered])');
   if(!blocks.length) return;
   if(!_mermaidReady){
     if(!_mermaidLoading){
@@ -4723,14 +8102,35 @@ function renderMermaidBlocks(){
 let _katexLoading=false;
 let _katexReady=false;
 
-function renderKatexBlocks(){
-  const blocks=document.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])');
+function _isStreamingEquationPending(el,root){
+  const tagName=(el&&el.tagName||'').toLowerCase();
+  if(tagName!=='equation-block'&&tagName!=='equation-inline') return false;
+  // streaming-markdown fills custom equation elements while the parser owns the
+  // open node. If the equation is currently the last descendant of the live
+  // assistant body, we cannot tell whether more TeX is still coming. Skip it
+  // during live debounce passes so a partial source is not permanently marked
+  // data-rendered before the final parser_end flush.
+  let node=el;
+  while(node&&node!==root){
+    if(node.nextSibling) return false;
+    node=node.parentNode;
+  }
+  return Boolean(node===root);
+}
+
+function renderKatexBlocks(container,options){
+  const root=container||document;
+  const streaming=Boolean(options&&options.streaming);
+  const blocks=root.querySelectorAll(
+    '.katex-block:not([data-rendered]),.katex-inline:not([data-rendered]),'+
+    'equation-block:not([data-rendered]),equation-inline:not([data-rendered])'
+  );
   if(!blocks.length) return;
   if(!_katexReady){
     if(!_katexLoading){
       _katexLoading=true;
       const script=document.createElement('script');
-      script.src='https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js';
+      script.src='static/vendor/katex/0.16.22/katex.min.js';
       script.integrity='sha384-cMkvdD8LoxVzGF/RPUKAcvmm49FQ0oxwDF3BGKtDXcEc+T1b2N+teh/OJfpU0jr6';
       script.crossOrigin='anonymous';
       script.onload=()=>{
@@ -4744,9 +8144,11 @@ function renderKatexBlocks(){
     return;
   }
   blocks.forEach(el=>{
+    if(streaming&&_isStreamingEquationPending(el,root)) return;
     el.dataset.rendered='true';
     const src=el.textContent||'';
-    const displayMode=el.dataset.katex==='display';
+    const tagName=(el.tagName||'').toLowerCase();
+    const displayMode=el.dataset.katex==='display'||tagName==='equation-block';
     try{
       katex.render(src,el,{
         displayMode,
@@ -4765,8 +8167,22 @@ function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
   const openClass=isSimplifiedToolCalling()?'':' open';
   return (clean&&String(clean).trim())
-    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
+    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${_renderThinkingDisplayHtml(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
+}
+function _renderThinkingInto(row,text=''){
+  if(!row) return;
+  const clean=_sanitizeThinkingDisplayText(text);
+  if(!clean){
+    row.innerHTML=_thinkingMarkup(text);
+    return;
+  }
+  const pre=row.querySelector('.thinking-card-body pre');
+  if(pre){
+    pre.innerHTML=_renderThinkingDisplayHtml(clean);
+    return;
+  }
+  row.innerHTML=_thinkingMarkup(text);
 }
 function finalizeThinkingCard(){
   // Guard: only finalize thinking card if we're looking at the session that started it.
@@ -4800,25 +8216,20 @@ function finalizeThinkingCard(){
   const turn=$('liveAssistantTurn');
   const group=turn&&turn.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(group){
-    // Respect the user's explicit expand intent (#1298) — only force-collapse
-    // when the user has not manually expanded this turn's activity group, or
-    // has manually collapsed it. Otherwise the panel snaps shut whenever new
-    // activity arrives, even mid-read.
-    if(_liveActivityUserExpanded !== true){
-      group.classList.add('tool-call-group-collapsed');
-      const summary=group.querySelector('.tool-call-group-summary');
-      if(summary) summary.setAttribute('aria-expanded','false');
-    }
-    const active=group.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
+    // Keep Activity visible by default. User/persisted disclosure state still
+    // wins through ensureActivityGroup(), and a manually-collapsed live group
+    // already carries the collapsed class here.
+    const active=turn.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
     if(active) active.removeAttribute('data-thinking-active');
     _syncToolCallGroupSummary(group);
   }
 }
-function appendThinking(text=''){
+function appendThinking(text='', options){
   // Guard: ignore if session was switched during an async SSE stream.
   // The old stream's reasoning events can still fire after switch;
   // without this check they would pollute the new session's DOM.
-  if(!S.session||!S.activeStreamId) return;
+  const allowPendingPlaceholder=!!(options&&options.pending===true);
+  if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -4848,8 +8259,10 @@ function appendThinking(text=''){
       if(anchor) anchor.insertAdjacentElement('afterend', row);
       else blocks.appendChild(row);
     }
-    row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
-    row.innerHTML=_thinkingMarkup(text);
+    const clean=_sanitizeThinkingDisplayText(text);
+    const hasClean=!!String(clean||'').trim();
+    row.className=hasClean?'assistant-segment thinking-card-row':'assistant-segment';
+    _renderThinkingInto(row,text);
     scrollIfPinned();
     // Auto-scroll the thinking card body to bottom if the user is watching
     // (scroll pinned). If the user scrolled up to read history, leave it alone.
@@ -4859,31 +8272,62 @@ function appendThinking(text=''){
     }
     return;
   }
-  if(!String(text||'').trim()){
-    scrollIfPinned();
-    return;
-  }
+  const thinkingText=String(text||'').trim()||'Thinking…';
+  const cleanThinking=_sanitizeThinkingDisplayText(thinkingText);
   const allChildren=Array.from(blocks.children);
   const anchor=allChildren.filter(el=>
     el.id!=='toolRunningRow' &&
-    el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')
+    el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row')
   ).pop();
-  const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor});
+  const group=ensureActivityGroup(blocks,{live:true,collapsed:ACTIVITY_GROUP_COLLAPSED_BY_DEFAULT,anchor,activityKey:_activityKeyForLiveTurn()});
   const body=group&&group.querySelector('.tool-call-group-body');
   if(!body) return;
+  if(!cleanThinking||cleanThinking==='Thinking…'){
+    const hasRunningTool=!!body.querySelector('.tool-card.tool-card-running');
+    const hasToolCard=!!body.querySelector('.tool-card-row');
+    let label;
+    let detail;
+    if(!S.activeStreamId && options && options.pending){
+      label='Starting agent';
+      detail='Creating the stream and sending your message…';
+    }else if(hasRunningTool){
+      label='Waiting on tool result';
+      detail='The tool is still running; the response will continue after it completes.';
+    }else if(hasToolCard){
+      label='Waiting on model';
+      detail='Tool finished; waiting for the model to continue.';
+    }else{
+      label='Waiting for first model token';
+      detail='Stream connected; no model output has arrived yet.';
+    }
+    _appendActivityEvent(group,{id:'thinking-placeholder',kind:'waiting',label,detail,status:'waiting',ts:_activityNowSeconds()});
+    const active=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
+    if(active) active.removeAttribute('data-thinking-active');
+    _syncToolCallGroupSummary(group);
+    scrollIfPinned();
+    return;
+  }
+  const placeholder=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"]');
+  if(placeholder) placeholder.remove();
   let row=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
   if(!row){
-    row=document.createElement('div');
-    row.className='agent-activity-thinking';
-    row.setAttribute('data-thinking-active','1');
-    body.insertBefore(row, body.firstChild);
+    const thinkingCards=Array.from(body.querySelectorAll('.agent-activity-thinking'));
+    row=thinkingCards.pop()||null;
+    if(row) row.setAttribute('data-thinking-active','1');
   }
-  row.innerHTML=_thinkingMarkup(text);
+  if(!row){
+    row=_thinkingActivityNode(thinkingText, false);
+    row.setAttribute('data-thinking-active','1');
+    body.appendChild(row);
+  }else{
+    _renderThinkingInto(row,thinkingText);
+  }
+  _activityMarkObserved(group);
   _syncToolCallGroupSummary(group);
   scrollIfPinned();
   if(_scrollPinned){
-    const thinkingBody=row&&row.querySelector('.thinking-card-body');
-    if(thinkingBody) thinkingBody.scrollTop=thinkingBody.scrollHeight;
+    const body=row&&row.querySelector('.thinking-card-body');
+    if(body) body.scrollTop=body.scrollHeight;
   }
 }
 function updateThinking(text=''){appendThinking(text);}
@@ -4901,7 +8345,10 @@ function removeThinking(){
   if(blocks) blocks.querySelectorAll('.agent-activity-thinking').forEach(el=>el.remove());
   if(blocks) blocks.querySelectorAll('.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
     _syncToolCallGroupSummary(group);
-    if(!group.querySelector('.tool-card-row,.agent-activity-thinking')) group.remove();
+    if(!group.querySelector('.tool-card-row,.agent-activity-thinking')){
+      if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
+      group.remove();
+    }
   });
   if(turn&&blocks&&!blocks.children.length) turn.remove();
 }
@@ -4959,6 +8406,256 @@ function renderBreadcrumb(){
   }
 }
 
+const WORKSPACE_HIDDEN_FILE_NAMES=new Set([
+  '.DS_Store','._.DS_Store','.AppleDouble','.Spotlight-V100','.Trashes','.fseventsd',
+  'Thumbs.db','Desktop.ini','ehthumbs.db','$RECYCLE.BIN',
+  '.directory','.git','.svn','.hg','node_modules','__pycache__',
+  '.pytest_cache','.mypy_cache','.ruff_cache','.tox','.venv','venv'
+]);
+const WORKSPACE_HIDDEN_FILE_PREFIXES=['._','.Trash-'];
+function _workspaceShouldHideEntry(item){
+  if(!item||S.showHiddenWorkspaceFiles)return false;
+  const name=String(item.name||'');
+  if(!name)return false;
+  if(WORKSPACE_HIDDEN_FILE_NAMES.has(name))return true;
+  return WORKSPACE_HIDDEN_FILE_PREFIXES.some(prefix=>name.startsWith(prefix));
+}
+function _visibleWorkspaceEntries(entries){
+  const list=Array.isArray(entries)?entries:[];
+  return S.showHiddenWorkspaceFiles?list:list.filter(item=>!_workspaceShouldHideEntry(item));
+}
+function _syncWorkspaceHiddenToggle(){
+  const el=$('workspaceShowHiddenFiles');
+  if(el)el.checked=!!S.showHiddenWorkspaceFiles;
+  // Reflect "hidden files are visible" state on the panel heading + kebab dot,
+  // so users can see they've flipped a non-default workspace pref without
+  // having to open the menu. The menu itself stays out of the way otherwise.
+  const ind=$('workspaceHiddenIndicator');
+  if(ind){
+    if(S.showHiddenWorkspaceFiles){ ind.hidden=false; ind.removeAttribute('hidden'); }
+    else { ind.hidden=true; ind.setAttribute('hidden',''); }
+  }
+  const dot=$('workspacePrefsDot');
+  if(dot){
+    if(S.showHiddenWorkspaceFiles){ dot.hidden=false; dot.removeAttribute('hidden'); }
+    else { dot.hidden=true; dot.setAttribute('hidden',''); }
+  }
+}
+function toggleWorkspaceHiddenFiles(value){
+  S.showHiddenWorkspaceFiles=!!value;
+  try{localStorage.setItem('hermes-workspace-show-hidden-files',S.showHiddenWorkspaceFiles?'1':'0');}catch(_){}
+  _syncWorkspaceHiddenToggle();
+  renderFileTree();
+}
+try{S.showHiddenWorkspaceFiles=localStorage.getItem('hermes-workspace-show-hidden-files')==='1';}catch(_){}
+
+// ── Workspace preferences kebab menu (#1793 UX refinement) ───────────────
+// The "Show hidden files" toggle used to live as a permanent inline row
+// below the breadcrumb bar. That ate ~32px of vertical space on every
+// panel view (root, subdir, file preview), even though the toggle is a
+// set-once preference — most users flip it once or never. Moving the
+// control into a kebab dropdown reclaims the space; the small "(hidden
+// files visible)" indicator on the heading reflects the non-default state
+// so the affordance isn't lost.
+let _workspacePrefsMenu = null;
+let _workspacePrefsAnchor = null;
+function _closeWorkspacePrefsMenu(){
+  if(_workspacePrefsMenu){ _workspacePrefsMenu.remove(); _workspacePrefsMenu=null; }
+  if(_workspacePrefsAnchor){
+    _workspacePrefsAnchor.classList.remove('active');
+    _workspacePrefsAnchor.setAttribute('aria-expanded','false');
+    _workspacePrefsAnchor=null;
+  }
+}
+function _positionWorkspacePrefsMenu(anchorEl){
+  if(!_workspacePrefsMenu||!anchorEl) return;
+  const rect=anchorEl.getBoundingClientRect();
+  const menuW=Math.min(260, Math.max(220, _workspacePrefsMenu.scrollWidth||220));
+  let left=rect.right-menuW;
+  if(left<8) left=8;
+  if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
+  let top=rect.bottom+6;
+  const menuH=_workspacePrefsMenu.offsetHeight||0;
+  if(top+menuH>window.innerHeight-8 && rect.top>menuH+12) top=rect.top-menuH-6;
+  if(top<8) top=8;
+  _workspacePrefsMenu.style.left=left+'px';
+  _workspacePrefsMenu.style.top=top+'px';
+}
+function _buildWorkspacePrefsMenu(){
+  const menu=document.createElement('div');
+  menu.className='workspace-prefs-menu open';
+  menu.setAttribute('role','menu');
+  // The checkbox keeps id="workspaceShowHiddenFiles" so existing call
+  // sites (and the existing test_issue1793_file_tree_cruft_filter test)
+  // can find it the same way as before. Only the parent container moves.
+  const labelTxt = (typeof t==='function' ? t('workspace_show_hidden_files') : 'Show hidden files');
+  const descTxt  = (typeof t==='function' ? t('workspace_show_hidden_files_desc') : 'Include .DS_Store, .git, node_modules, and other hidden / system files in the file tree.');
+  const row=document.createElement('label');
+  row.className='workspace-prefs-item';
+  row.setAttribute('role','menuitemcheckbox');
+  row.innerHTML=
+    '<input type="checkbox" id="workspaceShowHiddenFiles" '+
+    'onchange="toggleWorkspaceHiddenFiles(this.checked)">'+
+    '<span class="workspace-prefs-copy">'+
+      '<span class="workspace-prefs-name">'+esc(labelTxt)+'</span>'+
+      '<span class="workspace-prefs-meta">'+esc(descTxt)+'</span>'+
+    '</span>';
+  const cb=row.querySelector('input');
+  if(cb) cb.checked=!!S.showHiddenWorkspaceFiles;
+  menu.appendChild(row);
+  return menu;
+}
+function toggleWorkspacePrefsMenu(e){
+  if(e&&e.preventDefault) e.preventDefault();
+  if(e&&e.stopPropagation) e.stopPropagation();
+  // Anchor preference: the kebab button. The indicator chip can also open
+  // the same menu (click on "(hidden visible)"), but anchor positioning
+  // always references the kebab so the menu lands in the same place.
+  const anchor=$('btnWorkspacePrefs')||(e&&e.currentTarget)||null;
+  if(_workspacePrefsMenu&&_workspacePrefsAnchor===anchor){ _closeWorkspacePrefsMenu(); return; }
+  _closeWorkspacePrefsMenu();
+  const menu=_buildWorkspacePrefsMenu();
+  document.body.appendChild(menu);
+  _workspacePrefsMenu=menu;
+  _workspacePrefsAnchor=anchor;
+  if(anchor){ anchor.classList.add('active'); anchor.setAttribute('aria-expanded','true'); }
+  _positionWorkspacePrefsMenu(anchor);
+}
+document.addEventListener('click',e=>{
+  if(!_workspacePrefsMenu) return;
+  if(_workspacePrefsMenu.contains(e.target)) return;
+  if(_workspacePrefsAnchor&&_workspacePrefsAnchor.contains(e.target)) return;
+  // Indicator chip is also an opener — clicking it should toggle, not close.
+  const ind=$('workspaceHiddenIndicator');
+  if(ind&&ind.contains(e.target)) return;
+  _closeWorkspacePrefsMenu();
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&_workspacePrefsMenu) _closeWorkspacePrefsMenu();
+});
+window.addEventListener('resize',()=>{
+  if(_workspacePrefsMenu&&_workspacePrefsAnchor) _positionWorkspacePrefsMenu(_workspacePrefsAnchor);
+});
+
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',_syncWorkspaceHiddenToggle);
+else _syncWorkspaceHiddenToggle();
+
+function bindWorkspaceHeadingActions(){
+  const heading=$('workspacePanelHeading');
+  if(!heading||heading.dataset.bound==='1')return;
+  heading.dataset.bound='1';
+  const goRoot=()=>{
+    if(S.session&&S.session.workspace) loadDir('.');
+  };
+  heading.onclick=goRoot;
+  heading.onkeydown=(e)=>{
+    if(!(S.session&&S.session.workspace)) return;
+    if(e.key==='Enter'||e.key===' '){
+      e.preventDefault();
+      goRoot();
+    }
+  };
+  heading.oncontextmenu=(e)=>{
+    if(!(S.session&&S.session.workspace)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    _showWorkspaceRootContextMenu(e);
+  };
+  _syncWorkspaceHeadingState();
+}
+
+function _syncWorkspaceHeadingState(){
+  const heading=$('workspacePanelHeading');
+  if(!heading) return;
+  const enabled=!!(S.session&&S.session.workspace);
+  heading.classList.toggle('workspace-panel-heading--enabled',enabled);
+  if(enabled){
+    heading.setAttribute('role','button');
+    heading.setAttribute('tabindex','0');
+    heading.setAttribute('aria-disabled','false');
+    heading.title='Workspace root';
+  } else {
+    heading.removeAttribute('role');
+    heading.removeAttribute('tabindex');
+    heading.setAttribute('aria-disabled','true');
+    heading.title=t('no_workspace');
+  }
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',bindWorkspaceHeadingActions);
+else bindWorkspaceHeadingActions();
+
+function _workspaceContextMenuItem(label, onClick, opts={}){
+  const item=document.createElement('div');
+  item.textContent=label;
+  item.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:'+(opts.danger?'var(--error,#e94560)':'var(--text)')+';';
+  item.onmouseenter=()=>item.style.background='var(--hover-bg)';
+  item.onmouseleave=()=>item.style.background='';
+  item.onclick=onClick;
+  return item;
+}
+
+function _copyTextWithFallback(text, successMsg, failurePrefix){
+  const done=()=>showToast(successMsg);
+  const fail=(err)=>showToast(failurePrefix+(err&&err.message?err.message:String(err||'')));
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    return navigator.clipboard.writeText(text).then(done).catch(err=>{
+      const ta=document.createElement('textarea');
+      ta.value=text;
+      ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+      document.body.appendChild(ta);
+      ta.select();
+      let copied=false;
+      try{copied=document.execCommand('copy');}catch(_){}
+      ta.remove();
+      if(copied) done(); else fail(err);
+    });
+  }
+  const ta=document.createElement('textarea');
+  ta.value=text;
+  ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+  document.body.appendChild(ta);
+  ta.select();
+  let copied=false;
+  try{copied=document.execCommand('copy');}catch(err){ta.remove();fail(err);return Promise.resolve();}
+  ta.remove();
+  if(copied) done(); else fail('clipboard unavailable');
+  return Promise.resolve();
+}
+
+function _showWorkspaceRootContextMenu(e){
+  document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
+  const menu=document.createElement('div');
+  menu.className='file-ctx-menu workspace-root-ctx-menu';
+  menu.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:160px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+  const vw=window.innerWidth,vh=window.innerHeight;
+  menu.style.left=(e.clientX+160>vw?e.clientX-170:e.clientX)+'px';
+  menu.style.top=(e.clientY+80>vh?e.clientY-80:e.clientY)+'px';
+
+  menu.appendChild(_workspaceContextMenuItem(t('reveal_in_finder'),async()=>{
+    menu.remove();
+    try{await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});}
+    catch(err){showToast(t('reveal_failed')+(err.message||err));}
+  }));
+
+  menu.appendChild(_workspaceContextMenuItem(t('open_in_vscode'),async()=>{
+    menu.remove();
+    try{await api('/api/file/open-vscode',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});}
+    catch(err){showToast(t('open_in_vscode_failed')+(err.message||err));}
+  }));
+
+  menu.appendChild(_workspaceContextMenuItem(t('copy_file_path'),async()=>{
+    menu.remove();
+    try{
+      const r=await api('/api/file/path',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:'.'})});
+      await _copyTextWithFallback((r&&r.path)||'.',t('path_copied'),t('path_copy_failed'));
+    }catch(err){showToast(t('path_copy_failed')+(err.message||err));}
+  }));
+
+  document.body.appendChild(menu);
+  const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
+  setTimeout(()=>document.addEventListener('click',dismiss),0);
+}
+
 // Track expanded directories for tree view
 if(!S._expandedDirs) S._expandedDirs=new Set();
 // Cache of fetched directory contents: path -> entries[]
@@ -4978,11 +8675,12 @@ function renderFileTree(){
   }
   if(emptyEl) emptyEl.style.display='none';
   box.style.display='';
-  if(!S.entries||!S.entries.length){
+  const visibleEntries=_visibleWorkspaceEntries(S.entries);
+  if(!visibleEntries.length){
     if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
     return;
   }
-  _renderTreeItems(box, S.entries, 0);
+  _renderTreeItems(box, visibleEntries, 0);
 }
 
 function _renderTreeItems(container, entries, depth){
@@ -5000,6 +8698,13 @@ function _renderTreeItems(container, entries, depth){
       const isExpanded=S._expandedDirs.has(item.path);
       arrow.textContent=isExpanded?'\u25BE':'\u25B8';
       el.appendChild(arrow);
+    }else{
+      // Keep file icons aligned with sibling directories that occupy this
+      // slot with the expand/collapse toggle. #2554
+      const spacer=document.createElement('span');
+      spacer.className='file-tree-toggle-placeholder';
+      spacer.setAttribute('aria-hidden','true');
+      el.appendChild(spacer);
     }
 
     // Icon
@@ -5009,9 +8714,28 @@ function _renderTreeItems(container, entries, depth){
 
     // Name
     const nameEl=document.createElement('span');
-    nameEl.className='file-name';nameEl.textContent=item.name;nameEl.title=t('double_click_rename');
+    nameEl.className='file-name';nameEl.textContent=item.name;
+    // Tooltip only on FILES — dblclick renames them. On directories, dblclick
+    // navigates into the folder; rename lives in the right-click context menu
+    // (the "Double-click to rename" hint here would be misleading). #1710.
+    if(item.type!=='dir')nameEl.title=t('double_click_rename');
+    // Single-click opens (file) or expand-toggles (dir) but is debounced 300ms so a
+    // double-click can cancel it and trigger rename instead. Without the debounce, the
+    // click bubbles to el.onclick before dblclick can fire — that's #1698. Without the
+    // restored activation, single-click on the filename does nothing — that's #1707.
+    let _nameClickTimer=null;
+    nameEl.onclick=(e)=>{
+      e.stopPropagation();
+      if(_nameClickTimer){clearTimeout(_nameClickTimer);_nameClickTimer=null;}
+      _nameClickTimer=setTimeout(()=>{
+        _nameClickTimer=null;
+        // Delegate to the row's existing single-click handler (openFile / dir toggle).
+        if(typeof el.onclick==='function')el.onclick(e);
+      },300);
+    };
     nameEl.ondblclick=(e)=>{
       e.stopPropagation();
+      if(_nameClickTimer){clearTimeout(_nameClickTimer);_nameClickTimer=null;}
       // For directories, double-click navigates (breadcrumb view)
       if(item.type==='dir'){loadDir(item.path);return;}
       const inp=document.createElement('input');
@@ -5108,7 +8832,7 @@ function _renderTreeItems(container, entries, depth){
 
     // Render children if directory is expanded
     if(item.type==='dir'&&S._expandedDirs.has(item.path)){
-      const children=S._dirCache[item.path]||[];
+      const children=_visibleWorkspaceEntries(S._dirCache[item.path]||[]);
       if(children.length){
         _renderTreeItems(container, children, depth+1);
       }else{
@@ -5150,10 +8874,85 @@ function _showFileContextMenu(e, item){
   const renameItem=document.createElement('div');
   renameItem.textContent=t('rename_title');
   renameItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
-  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover)';
+  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover-bg)';
   renameItem.onmouseleave=()=>renameItem.style.background='';
   renameItem.onclick=()=>{menu.remove();_inlineRenameFileItem(item);};
   menu.appendChild(renameItem);
+
+  // Reveal in File Manager
+  const revealItem=document.createElement('div');
+  revealItem.textContent=t('reveal_in_finder');
+  revealItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  revealItem.onmouseenter=()=>revealItem.style.background='var(--hover-bg)';
+  revealItem.onmouseleave=()=>revealItem.style.background='';
+  revealItem.onclick=async()=>{menu.remove();try{await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});}catch(err){showToast(t('reveal_failed')+(err.message||err));}};
+  menu.appendChild(revealItem);
+
+  // Open in VS Code (#2735)
+  const vscodeItem=document.createElement('div');
+  vscodeItem.textContent=t('open_in_vscode');
+  vscodeItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  vscodeItem.onmouseenter=()=>vscodeItem.style.background='var(--hover-bg)';
+  vscodeItem.onmouseleave=()=>vscodeItem.style.background='';
+  vscodeItem.onclick=async()=>{menu.remove();try{await api('/api/file/open-vscode',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});}catch(err){showToast(t('open_in_vscode_failed')+(err.message||err));}};
+  menu.appendChild(vscodeItem);
+
+  // Copy file path — resolves the absolute on-disk path on the server (so the
+  // user gets the full /home/.../workspace/foo.py rather than the relative
+  // path the file tree shows) and writes it to the OS clipboard. Useful for
+  // pasting into terminals, editors, or other apps without taking the slower
+  // Reveal-in-Finder round trip.
+  const copyPathItem=document.createElement('div');
+  copyPathItem.textContent=t('copy_file_path');
+  copyPathItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  copyPathItem.onmouseenter=()=>copyPathItem.style.background='var(--hover-bg)';
+  copyPathItem.onmouseleave=()=>copyPathItem.style.background='';
+  copyPathItem.onclick=async()=>{
+    menu.remove();
+    try{
+      const r=await api('/api/file/path',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});
+      const abs=(r&&r.path)||item.path;
+      try{
+        await navigator.clipboard.writeText(abs);
+        showToast(t('path_copied'));
+      }catch(clipErr){
+        // Fallback for browsers where Clipboard API is gated (older Safari,
+        // non-secure contexts). Use the legacy execCommand path against a
+        // hidden textarea — this is the same pattern boot.js uses for the
+        // "Copy" buttons on code blocks.
+        const ta=document.createElement('textarea');
+        ta.value=abs;
+        ta.style.cssText='position:fixed;left:-9999px;top:-9999px;';
+        document.body.appendChild(ta);
+        ta.select();
+        let copied=false;
+        try{copied=document.execCommand('copy');}catch(_){}
+        ta.remove();
+        if(copied) showToast(t('path_copied'));
+        else showToast(t('path_copy_failed')+(clipErr&&clipErr.message?clipErr.message:String(clipErr)));
+      }
+    }catch(err){
+      showToast(t('path_copy_failed')+(err.message||err));
+    }
+  };
+  menu.appendChild(copyPathItem);
+
+  // Download as zip — only for directories. Streams the folder contents
+  // through /api/folder/download which builds the zip on the fly.
+  if(item.type==='dir'){
+    const dlItem=document.createElement('div');
+    dlItem.textContent=t('download_folder');
+    dlItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+    dlItem.onmouseenter=()=>dlItem.style.background='var(--hover-bg)';
+    dlItem.onmouseleave=()=>dlItem.style.background='';
+    dlItem.onclick=()=>{
+      menu.remove();
+      const url='/api/folder/download?session_id='+encodeURIComponent(S.session.session_id)
+              + '&path='+encodeURIComponent(item.path||'');
+      window.location.href=url;
+    };
+    menu.appendChild(dlItem);
+  }
 
   // Divider + Delete
   const sep=document.createElement('hr');
@@ -5162,7 +8961,7 @@ function _showFileContextMenu(e, item){
   const delItem=document.createElement('div');
   delItem.textContent=t('delete_title');
   delItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--error,#e94560);';
-  delItem.onmouseenter=()=>delItem.style.background='var(--hover)';
+  delItem.onmouseenter=()=>delItem.style.background='var(--hover-bg)';
   delItem.onmouseleave=()=>delItem.style.background='';
   delItem.onclick=()=>{menu.remove();if(item.type==='dir')deleteWorkspaceDir(item.path,item.name);else deleteWorkspaceFile(item.path,item.name);};
   menu.appendChild(delItem);
@@ -5174,7 +8973,18 @@ function _showFileContextMenu(e, item){
 
 async function _inlineRenameFileItem(item){
   if(!S.session)return;
-  const newName=await showPromptDialog({message:t('rename_prompt'),defaultValue:item.name,placeholder:item.name,confirmLabel:t('rename_title')});
+  // Pre-fill the input with the current name and select just the stem
+  // (everything before the last '.') so the user can immediately retype the
+  // basename while preserving the extension — matches macOS Finder. For
+  // directories or names with no '.', the helper selects the full value.
+  // `selectStem` also handles dotfiles ('.gitignore') by full-selecting.
+  const newName=await showPromptDialog({
+    message:t('rename_prompt'),
+    value:item.name,
+    confirmLabel:t('rename_title'),
+    selectStem:item.type!=='dir',
+    selectAll:item.type==='dir'
+  });
   if(!newName||newName===item.name)return;
   try{
     await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
@@ -5300,7 +9110,22 @@ function renderTray(){ // non-media files use paperclip chip
     tray.appendChild(chip);
   });
 }
-function addFiles(files){for(const f of files){if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);}renderTray();}
+function _uploadTooLargeMessage(file){
+  const fileSizeMb=Math.ceil(((file&&file.size)||0)/1024/1024);
+  return t('upload_too_large',MAX_UPLOAD_MB,fileSizeMb);
+}
+function _showUploadTooLarge(file){
+  const message=`${t('upload_failed')}${file&&file.name?file.name:'file'} \u2014 ${_uploadTooLargeMessage(file)}`;
+  if(typeof setStatus==='function')setStatus(`\u274c ${message}`);
+  else if(typeof showToast==='function')showToast(message,5000,'error');
+}
+function addFiles(files){
+  for(const f of files){
+    if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
+    if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);
+  }
+  renderTray();
+}
 async function uploadPendingFiles(){
   if(!S.pendingFiles.length||!S.session)return[];
   const names=[];let failures=0;
@@ -5308,9 +9133,11 @@ async function uploadPendingFiles(){
   barWrap.classList.add('active');bar.style.width='0%';
   const total=S.pendingFiles.length;
   for(let i=0;i<total;i++){
-    const f=S.pendingFiles[i];const fd=new FormData();
-    fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
+    const f=S.pendingFiles[i];
     try{
+      if(f&&f.size>MAX_UPLOAD_BYTES)throw new Error(_uploadTooLargeMessage(f));
+      const fd=new FormData();
+      fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
       const isArchive=_ARCHIVE_EXTS.test(f.name);
       const url=new URL(isArchive?'api/upload/extract':'api/upload',document.baseURI||location.href).href;
       const res=await fetch(url,{method:'POST',credentials:'include',body:fd});

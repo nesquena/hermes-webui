@@ -103,7 +103,7 @@ class TestIssue1436BackendFallback:
         return captured
 
     def test_persisted_context_length_passed_through_unchanged(self):
-        """When Session.context_length is non-zero, return it as-is (no fallback)."""
+        """Fast metadata loads keep the persisted value to avoid catalog work."""
         s = self._stub_session(context_length=200_000, model="claude-sonnet-4.6")
         result = self._invoke_get_session(s, fallback_returns=999_999)
         body = result["data"]["session"]
@@ -111,6 +111,94 @@ class TestIssue1436BackendFallback:
             f"persisted context_length must pass through unchanged, "
             f"got {body['context_length']}"
         )
+
+    def test_resolved_model_load_refreshes_stale_persisted_context_length(self):
+        """The deferred resolve_model=1 load must refresh stale context metadata.
+
+        Session switching first asks for messages=0&resolve_model=0 for speed,
+        then follows with messages=0&resolve_model=1 to hydrate the final
+        model/provider display.  That second path is also where a stale
+        context_length from a prior model must be corrected; otherwise a
+        resumed DeepSeek 1M session can stay stuck on an old 200k window until
+        the user manually toggles models.
+        """
+        import api.routes as routes
+
+        captured = {}
+
+        def fake_j(h, data, status=200):
+            captured["data"] = data
+
+        fake_module = MagicMock()
+        fake_module.get_model_context_length = MagicMock(return_value=1_000_000)
+
+        s = self._stub_session(context_length=200_000, model="deepseek-v4-pro")
+        handler = MagicMock()
+        parsed = urlparse(
+            "/api/session?session_id=test-1436&messages=0&resolve_model=1"
+        )
+
+        with patch("api.routes.get_session", return_value=s), \
+             patch("api.routes.j", side_effect=fake_j), \
+             patch.dict("sys.modules", {"agent.model_metadata": fake_module}):
+            routes.handle_get(handler, parsed)
+
+        body = captured["data"]["session"]
+        assert body["context_length"] == 1_000_000, (
+            "resolve_model=1 must refresh stale persisted context_length from "
+            "current model metadata"
+        )
+
+    def test_session_model_update_refreshes_context_metadata(self):
+        """Changing the session model must not keep the prior model's window."""
+        import api.routes as routes
+
+        captured = {}
+
+        def fake_j(h, data, status=200):
+            captured["data"] = data
+
+        fake_module = MagicMock()
+        fake_module.get_model_context_length = MagicMock(return_value=1_000_000)
+
+        s = self._stub_session(context_length=200_000, model="old-model")
+        s.model_provider = "old-provider"
+        s.workspace = "/tmp"
+        s.threshold_tokens = 100_000
+        s.last_prompt_tokens = 80_000
+        s.save = MagicMock()
+        s.compact.return_value = {
+            **s.compact.return_value,
+            "model": "deepseek-v4-pro",
+            "model_provider": "deepseek",
+            "context_length": 1_000_000,
+            "threshold_tokens": 0,
+            "last_prompt_tokens": 0,
+        }
+        handler = MagicMock()
+        parsed = urlparse("/api/session/update")
+
+        body = {
+            "session_id": "test-1436",
+            "workspace": "/tmp",
+            "model": "deepseek-v4-pro",
+            "model_provider": "deepseek",
+        }
+        with patch("api.routes._check_csrf", return_value=True), \
+             patch("api.routes.read_body", return_value=body), \
+             patch("api.routes.get_session", return_value=s), \
+             patch("api.routes.resolve_trusted_workspace", return_value="/tmp"), \
+             patch("api.routes.j", side_effect=fake_j), \
+             patch.dict("sys.modules", {"agent.model_metadata": fake_module}):
+            routes.handle_post(handler, parsed)
+
+        assert s.model == "deepseek-v4-pro"
+        assert s.model_provider == "deepseek"
+        assert s.context_length == 1_000_000
+        assert s.threshold_tokens == 0
+        assert s.last_prompt_tokens == 0
+        s.save.assert_called_once()
+        assert captured["data"]["session"]["context_length"] == 1_000_000
 
     def test_zero_context_length_falls_back_to_model_metadata(self):
         """Pre-#1318 sessions with context_length=0 must resolve via model_metadata."""
@@ -276,13 +364,19 @@ class TestIssue1436SourceMarkers:
 
     def test_routes_load_path_imports_get_model_context_length(self):
         src = ROUTES.read_text(encoding="utf-8")
-        # The import must appear inside the GET /api/session load-path block.
+        # The session load path can call a helper, but the lazy import must
+        # remain in routes.py so WebUI still works with older/missing agent
+        # bundles by swallowing metadata-resolution failures.
         start = src.find('if parsed.path == "/api/session":')
         end = src.find('if parsed.path == "/api/projects":', start)
         block = src[start:end]
-        assert "from agent.model_metadata import get_model_context_length" in block, (
-            "GET /api/session load-path block must lazy-import "
-            "get_model_context_length for the context_length=0 fallback (#1436)"
+        assert "_resolve_context_length_for_session_model" in block, (
+            "GET /api/session load-path block must resolve model context "
+            "metadata for the context_length fallback (#1436)"
+        )
+        assert "from agent.model_metadata import get_model_context_length" in src, (
+            "routes.py must lazy-import get_model_context_length for the "
+            "context_length fallback (#1436)"
         )
 
     def test_routes_load_path_marks_fix_with_issue_number(self):

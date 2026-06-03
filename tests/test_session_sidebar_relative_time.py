@@ -46,6 +46,8 @@ def _run_session_time_case(script_body: str) -> dict:
           session_time_hours_ago: (n) => `${{n}}h`,
           session_time_days_ago: (n) => `${{n}}d`,
           session_time_last_week: '1w',
+          session_time_bucket_active: 'Active',
+          session_time_bucket_recent: 'Recent',
           session_time_bucket_today: 'Today',
           session_time_bucket_yesterday: 'Yesterday',
           session_time_bucket_this_week: 'This week',
@@ -56,6 +58,7 @@ def _run_session_time_case(script_body: str) -> dict:
           const val = translations[key];
           return typeof val === 'function' ? val(...args) : val;
         }}
+        const SESSION_RECENT_WINDOW_MS = 3 * 60 * 60 * 1000;
         {functions}
         {script_body}
         """
@@ -85,6 +88,28 @@ def test_session_sidebar_renders_relative_time_and_meta_rows():
     assert ".session-item.active .session-title" in STYLE_CSS
     assert "|| _sessionTimeBucketLabel" not in SESSIONS_JS
     assert "const ONE_DAY=86400000;" not in SESSIONS_JS
+
+
+def test_session_sidebar_pinned_bucket_precedes_attention_and_recent():
+    render_fn = _extract_function(SESSIONS_JS, "renderSessionListFromCache")
+    active_split = "const activeSessions=orderedSessions.filter(s=>_isSessionEffectivelyStreaming(s));"
+    unread_split = "const unreadSessions=orderedSessions.filter(s=>!_isSessionEffectivelyStreaming(s)&&_hasUnreadForSession(s));"
+    pinned_split = "const pinnedIdleSessions=orderedSessions.filter(s=>s.pinned&&!_isSessionEffectivelyStreaming(s)&&!_hasUnreadForSession(s));"
+    inactive_split = "const unpinned=orderedSessions.filter(s=>!s.pinned&&!_isSessionEffectivelyStreaming(s)&&!_hasUnreadForSession(s));"
+    recent_loop = "for(const s of unpinned)"
+    active_group = "groups.push({label:t('session_time_bucket_active'),items:activeSessions,isActive:true})"
+    unread_group = "groups.push({label:t('session_time_bucket_unread'),items:unreadSessions,isUnread:true})"
+    pinned_group = "groups.push({label:'★ Pinned',items:pinnedIdleSessions,isPinned:true})"
+
+    assert active_split in render_fn
+    assert unread_split in render_fn
+    assert pinned_split in render_fn
+    assert inactive_split in render_fn
+    assert active_group in render_fn
+    assert unread_group in render_fn
+    assert pinned_group in render_fn
+    assert render_fn.index(pinned_group) < render_fn.index(active_group) < render_fn.index(unread_group) < render_fn.index(recent_loop)
+    assert "session-date-header'+(g.isPinned?' pinned':'')+(g.isUnread?' unread':'')+(g.isActive?' active':'')" in render_fn
 
 
 def test_session_timestamp_prefers_last_message_at_over_metadata_updated_at():
@@ -121,20 +146,23 @@ def test_relative_time_uses_calendar_boundaries_and_year_for_old_sessions():
     assert "2024" in result["oldDate"]
 
 
-def test_relative_time_today_bucket():
-    """Session from 2 hours ago should bucket as 'Today'."""
+def test_relative_time_recent_bucket_precedes_today_bucket():
+    """Sessions within 3 hours bucket as Recent; older same-day sessions stay Today."""
     result = _run_session_time_case(
         """
         const now = Date.UTC(2026, 3, 15, 14, 0, 0);
         const twoHoursAgo = now - 2 * 60 * 60 * 1000;
+        const fourHoursAgo = now - 4 * 60 * 60 * 1000;
         process.stdout.write(JSON.stringify({
           relative: _formatRelativeSessionTime(twoHoursAgo, now),
-          bucket: _sessionTimeBucketLabel(twoHoursAgo, now),
+          recentBucket: _sessionTimeBucketLabel(twoHoursAgo, now),
+          todayBucket: _sessionTimeBucketLabel(fourHoursAgo, now),
         }));
         """
     )
     assert result["relative"] == "2h"
-    assert result["bucket"] == "Today"
+    assert result["recentBucket"] == "Recent"
+    assert result["todayBucket"] == "Today"
 
 
 def test_relative_time_handles_just_now_and_dst_safe_yesterday_boundary():
@@ -162,6 +190,8 @@ def test_relative_time_strings_are_localized_in_english_and_spanish_bundles():
         "session_time_hours_ago",
         "session_time_days_ago",
         "session_time_last_week",
+        "session_time_bucket_active",
+        "session_time_bucket_recent",
         "session_time_bucket_today",
         "session_time_bucket_yesterday",
         "session_time_bucket_this_week",
@@ -169,3 +199,12 @@ def test_relative_time_strings_are_localized_in_english_and_spanish_bundles():
         "session_time_bucket_older",
     ):
         assert key in I18N_JS
+
+
+def test_german_relative_time_translations_interpolate_numbers():
+    assert "session_time_minutes_ago: (n) => `Vor ${n} Minuten`" in I18N_JS
+    assert "session_time_hours_ago: (n) => `Vor ${n} Stunden`" in I18N_JS
+    assert "session_time_days_ago: (n) => `Vor ${n} Tagen`" in I18N_JS
+    assert "session_time_minutes_ago: 'Vor {n} Minuten'" not in I18N_JS
+    assert "session_time_hours_ago: 'Vor {n} Stunden'" not in I18N_JS
+    assert "session_time_days_ago: 'Vor {n} Tagen'" not in I18N_JS

@@ -21,6 +21,8 @@ Tests are static (regex / AST-level) — no browser required.
 
 import pathlib
 import re
+import json
+import subprocess
 
 REPO = pathlib.Path(__file__).parent.parent
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
@@ -105,6 +107,31 @@ class TestIndexHtmlSmdScript:
     def test_smd_loaded_as_module(self):
         assert 'type="module"' in INDEX_HTML or "type='module'" in INDEX_HTML, (
             "streaming-markdown must be loaded with type=\"module\" (it is an ES module)"
+        )
+
+    def test_smd_vendor_import_is_mount_agnostic(self):
+        """Import must resolve relative to current document, not a bare
+        specifier (rejected by ES module spec, #1849) and not root-absolute
+        (escapes /hermes/-style subpath mounts). The `./` form is the only
+        shape that satisfies both: ES-spec-valid AND mount-agnostic.
+        """
+        assert "from './static/vendor/smd.min.js'" in INDEX_HTML, (
+            "index.html must use the './static/vendor/smd.min.js' form — "
+            "bare specifiers are rejected by the ES module spec (#1849) and "
+            "leading-/ paths break subpath deployments such as /hermes/"
+        )
+        # Forbid the bare form (#1849 broke streaming-markdown silently)
+        assert "import * as smd from 'static/vendor/smd.min.js'" not in INDEX_HTML, (
+            "bare specifier is rejected by the ES module spec — use './static/...'"
+        )
+        # Forbid the root-absolute form (subpath deployments escape the mount)
+        assert "from '/static/vendor/smd.min.js'" not in INDEX_HTML, (
+            "streaming-markdown import must not be root-absolute; root-absolute "
+            "static paths break subpath deployments such as /hermes/"
+        )
+        assert 'from "/static/vendor/smd.min.js"' not in INDEX_HTML, (
+            "streaming-markdown import must not be root-absolute; root-absolute "
+            "static paths break subpath deployments such as /hermes/"
         )
 
 
@@ -244,6 +271,103 @@ class TestSmdHelpers:
         )
 
 
+class TestSmdUnderscoreEmphasisParity:
+    """Live smd rendering must match renderMd()'s emphasis semantics.
+
+    The settled renderMd() path only treats asterisks as emphasis markers. The
+    smd parser also emits underscore emphasis tokens, so the live renderer wraps
+    smd's renderer and emits those tokens as literal underscores instead.
+    """
+
+    def test_smd_underscore_renderer_wrapper_exists(self):
+        fn = extract_fn(MESSAGES_JS, "_smdRendererWithoutUnderscoreEmphasis")
+        assert fn is not None, (
+            "messages.js must define _smdRendererWithoutUnderscoreEmphasis()"
+        )
+
+    def test_smd_new_parser_wraps_renderer(self):
+        fn = extract_fn(MESSAGES_JS, "_smdNewParser")
+        assert fn and "_smdRendererWithoutUnderscoreEmphasis(" in fn, (
+            "_smdNewParser must wrap the smd renderer before parser creation"
+        )
+
+    def test_smd_wrapper_targets_only_underscore_tokens(self):
+        fn = extract_fn(MESSAGES_JS, "_smdRendererWithoutUnderscoreEmphasis")
+        assert fn and "ITALIC_UND" in fn and "STRONG_UND" in fn, (
+            "The smd wrapper must neutralize underscore emphasis tokens"
+        )
+        assert fn and "ITALIC_AST" not in fn and "STRONG_AST" not in fn, (
+            "The smd wrapper must preserve asterisk emphasis tokens"
+        )
+
+    def test_smd_wrapper_keeps_nested_token_stack(self):
+        fn = extract_fn(MESSAGES_JS, "_smdRendererWithoutUnderscoreEmphasis")
+        assert fn and "tokenStack" in fn and "tokenStack.push(null)" in fn, (
+            "The wrapper must track non-suppressed tokens so nested links/code "
+            "inside underscore text still close through the base renderer"
+        )
+
+    def test_smd_wrapper_runtime_matches_render_md_emphasis_policy(self):
+        helper = extract_fn(MESSAGES_JS, "_smdRendererWithoutUnderscoreEmphasis")
+        assert helper, "_smdRendererWithoutUnderscoreEmphasis function not found"
+        script = f"""
+import * as smd from './static/vendor/smd.min.js';
+globalThis.window = {{ smd }};
+{helper}
+function render(input){{
+  const out=[];
+  const stack=[];
+  const renderer=_smdRendererWithoutUnderscoreEmphasis({{
+    data: {{}},
+    add_token(_data, token){{
+      let tag='';
+      if(token===smd.ITALIC_AST||token===smd.ITALIC_UND) tag='em';
+      if(token===smd.STRONG_AST||token===smd.STRONG_UND) tag='strong';
+      stack.push(tag);
+      if(tag) out.push('<'+tag+'>');
+    }},
+    end_token() {{
+      const tag=stack.pop();
+      if(tag) out.push('</'+tag+'>');
+    }},
+    add_text(_data, text) {{ out.push(text); }},
+    set_attr() {{}},
+  }});
+  const parser=smd.parser(renderer);
+  smd.parser_write(parser,input);
+  smd.parser_end(parser);
+  return out.join('');
+}}
+const cases = {{
+  identifiers: render('agent_response and foo_bar stay literal'),
+  singleUnderscore: render('this is _not emphasis_ now'),
+  doubleUnderscore: render('this is __not strong__ now'),
+  asteriskItalic: render('this is *emphasis* now'),
+  asteriskStrong: render('this is **strong** now'),
+  nestedLinkShape: render('keep _[label](https://example.com)_ literal'),
+}};
+console.log(JSON.stringify(cases));
+"""
+        completed = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=REPO,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        cases = json.loads(completed.stdout)
+        assert "<em>" not in cases["identifiers"]
+        assert "agent_response" in cases["identifiers"]
+        assert "foo_bar" in cases["identifiers"]
+        assert cases["singleUnderscore"].count("<em>") == 0
+        assert "_not emphasis_" in cases["singleUnderscore"]
+        assert cases["doubleUnderscore"].count("<strong>") == 0
+        assert "__not strong__" in cases["doubleUnderscore"]
+        assert "<em>emphasis</em>" in cases["asteriskItalic"]
+        assert "<strong>strong</strong>" in cases["asteriskStrong"]
+        assert "_label_" in cases["nestedLinkShape"]
+
+
 # ── 4. _scheduleRender: smd path vs fallback ──────────────────────────────────
 
 class TestScheduleRenderSmdPath:
@@ -268,6 +392,17 @@ class TestScheduleRenderSmdPath:
         fn = self.get_fn()
         assert fn and "renderMd" in fn, (
             "renderMd fallback must still exist in _scheduleRender when smd unavailable"
+        )
+
+    def test_fallback_formats_first_segment_with_render_md(self):
+        fn = self.get_fn()
+        assert fn, "_scheduleRender not found"
+        assert "const fallbackText" in fn, (
+            "_scheduleRender fallback should choose the visible segment text once"
+        )
+        assert "renderMd(fallbackText)" in fn, (
+            "When smd is unavailable, the first live segment must still be "
+            "formatted with renderMd instead of inserting raw parsed.displayText"
         )
 
     def test_smd_new_parser_called_lazily(self):
@@ -382,6 +517,53 @@ class TestDoneEventSmd:
             "before renderMessages() in the 'done' handler source"
         )
 
+    def test_done_handler_preserves_bottom_follow_on_final_render(self):
+        """Final DOM replacement must keep auto-following users at the bottom.
+
+        The live stream path can be visually at bottom while _scrollPinned was
+        knocked false by history/windowing/layout preservation. On `done`, the
+        live DOM is replaced with persisted messages; if the handler blindly calls
+        renderMessages({preserveScroll:true}) while the pin flag is false, the
+        transcript can jump to the top. Capture bottom/follow intent before the
+        replacement and explicitly bottom only for those users.
+        """
+        fn = self.get_fn()
+        assert fn, "'done' handler not found"
+        assert "shouldFollowOnDone" in fn, (
+            "'done' handler must capture whether the viewed transcript should "
+            "continue following before replacing the live DOM."
+        )
+        follow_idx = fn.index("shouldFollowOnDone")
+        render_idx = fn.index("renderMessages({preserveScroll:true})")
+        assert follow_idx < render_idx, (
+            "Follow intent must be captured before renderMessages() replaces the "
+            "live transcript DOM."
+        )
+        after_render = fn[render_idx:render_idx + 500]
+        assert "if(shouldFollowOnDone" in after_render and "scrollToBottom()" in after_render, (
+            "After final render, done handler must call scrollToBottom() when the "
+            "user was pinned/near-bottom before DOM replacement."
+        )
+        assert "_isMessagePaneNearBottom" in fn, (
+            "Done follow capture must include a near-bottom DOM check, not only "
+            "the possibly-stale _scrollPinned flag."
+        )
+
+    def test_done_handler_prefers_message_tool_metadata_but_keeps_recovered_journal_cards(self):
+        """If final messages already contain tool metadata, renderMessages()
+        should still keep journal-recovered session.tool_calls for interrupted tails.
+
+        Pure session-level summaries remain a fallback, but `_recovered_from_run_journal`
+        cards must survive mixed histories because the recovered assistant anchor has
+        visible text without inline tool_calls.
+        """
+        fn = self.get_fn()
+        assert fn, "'done' handler not found"
+        done_before_render = fn[:fn.index("renderMessages({preserveScroll:true})")]
+        assert "window._resolveSessionToolCalls" in done_before_render
+        assert "_recovered_from_run_journal" in done_before_render
+        assert "S.toolCalls=resolvedToolCalls.toolCalls||[];" in done_before_render or "S.toolCalls = resolvedToolCalls.toolCalls || [];" in done_before_render
+
 
 # ── 7. apperror event: smd parser ends cleanly ───────────────────────────────
 
@@ -486,7 +668,8 @@ class TestSmdUrlSchemeSanitization:
     def test_sanitize_uses_scheme_allowlist(self):
         # The allowlist regex must permit the safe schemes that the legacy
         # renderMd path emitted (http/https + relative/anchor paths + mailto/tel)
-        # and reject everything else — including javascript:, data:, vbscript:, file:.
+        # and reject dangerous executable schemes. file:// anchors are rewritten
+        # to api/media before click time rather than allowed through raw.
         assert "_SMD_SAFE_URL_RE" in MESSAGES_JS, (
             "Expected a _SMD_SAFE_URL_RE regex defining the safe-scheme allowlist"
         )
@@ -497,10 +680,17 @@ class TestSmdUrlSchemeSanitization:
         pattern = m.group(1)
         # Must mention https? and must NOT mention javascript/vbscript/data
         assert "https?" in pattern, "allowlist must permit https?:"
+        assert "file:" not in pattern, "raw file: anchors must be rewritten, not allowed through"
+        assert "api" in MESSAGES_JS, "allowlist must permit rewritten api/media anchors"
         for bad in ("javascript", "vbscript", "data:"):
             assert bad not in pattern, (
                 f"allowlist must NOT mention {bad!r} — schemes are denied by default"
             )
+
+    def test_file_anchor_rewrite_helper_exists(self):
+        assert "_smdFileHref" in MESSAGES_JS
+        assert "_smdMediaHref(" in MESSAGES_JS
+        assert "new URL(rel,document.baseURI||location.href)" in MESSAGES_JS
 
     def test_sanitize_called_after_smd_write(self):
         # _smdWrite must invoke _sanitizeSmdLinks on assistantBody after feeding the parser,

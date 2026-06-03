@@ -1,0 +1,585 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DreamIT Host - Business Proposal and Capability Statement</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+@page {
+  size: A4;
+  margin: 14mm 13mm 16mm 13mm;
+  @bottom-center {
+    content: "DreamIT Host | Business Proposal | Page " counter(page) " of " counter(pages);
+    font-size: 8pt;
+    color: #64748b;
+  }
+}
+
+@page :first {
+  margin: 0;
+  @bottom-center { content: none; }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #0f172a;
+  font-size: 9.7pt;
+  line-height: 1.46;
+  background: white;
+}
+h1, h2, h3, h4 { margin: 0; line-height: 1.12; }
+p { margin: 0 0 7px 0; }
+ul { margin: 5px 0 0 18px; padding: 0; }
+li { margin: 3px 0; }
+.small { font-size: 8.4pt; color: #64748b; }
+.kicker {
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 8.4pt;
+  font-weight: 800;
+  color: #b9e2ff;
+  margin-bottom: 10px;
+}
+
+.cover {
+  width: 210mm;
+  height: 297mm;
+  background: linear-gradient(145deg, #07162f 0%, #0a2346 44%, #018aff 100%);
+  color: white;
+  position: relative;
+  overflow: hidden;
+  page-break-after: always;
+}
+.cover:before {
+  content: "";
+  position: absolute;
+  right: -28mm;
+  top: -22mm;
+  width: 110mm;
+  height: 110mm;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.09);
+}
+.cover:after {
+  content: "";
+  position: absolute;
+  left: -18mm;
+  bottom: -28mm;
+  width: 88mm;
+  height: 88mm;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.06);
+}
+.cover-inner {
+  position: relative;
+  z-index: 2;
+  padding: 24mm 24mm 18mm 24mm;
+  height: 100%;
+}
+.logo-row {
+  display: table;
+  width: 100%;
+}
+.logo-cell, .meta-cell {
+  display: table-cell;
+  vertical-align: top;
+}
+.logo-cell img {
+  width: 58mm;
+  height: auto;
+}
+.meta-cell {
+  text-align: right;
+  font-size: 8.6pt;
+  color: #dbeafe;
+}
+.meta-cell strong {
+  color: white;
+  display: block;
+  font-size: 9pt;
+  margin-bottom: 2px;
+}
+.hero-copy {
+  margin-top: 26mm;
+  max-width: 132mm;
+}
+.hero-copy h1 {
+  font-size: 28pt;
+  letter-spacing: -0.045em;
+  margin-bottom: 10px;
+}
+.hero-copy .sub {
+  font-size: 12.6pt;
+  line-height: 1.48;
+  color: #eaf7ff;
+  margin-bottom: 18px;
+}
+.hero-strip {
+  display: table;
+  width: 100%;
+  border-spacing: 10px 0;
+  margin-left: -10px;
+}
+.hero-strip .metric {
+  display: table-cell;
+  width: 33.33%;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 14px;
+  padding: 12px 12px 11px;
+  vertical-align: top;
+}
+.metric strong {
+  display: block;
+  color: white;
+  font-size: 15pt;
+  margin-bottom: 4px;
+  letter-spacing: -0.03em;
+}
+.metric span {
+  color: #e4f4ff;
+  font-size: 8.7pt;
+  line-height: 1.35;
+}
+.cover-footer {
+  position: absolute;
+  left: 24mm;
+  right: 24mm;
+  bottom: 16mm;
+  font-size: 8.2pt;
+  color: rgba(255,255,255,0.82);
+  display: table;
+  width: calc(100% - 48mm);
+}
+.cover-footer span {
+  display: table-cell;
+}
+.cover-footer span:last-child {
+  text-align: right;
+}
+
+.section {
+  margin-top: 14px;
+}
+.section h2 {
+  font-size: 14.5pt;
+  color: #082f5f;
+  margin-bottom: 8px;
+  padding-bottom: 5px;
+  border-bottom: 2px solid #d7ecff;
+}
+.grid {
+  display: table;
+  width: 100%;
+  border-spacing: 9px 0;
+  margin-left: -9px;
+  margin-right: -9px;
+}
+.col {
+  display: table-cell;
+  vertical-align: top;
+  width: 50%;
+}
+.card {
+  border: 1px solid #dce9f5;
+  border-radius: 14px;
+  padding: 12px 13px;
+  background: #fbfdff;
+  break-inside: avoid;
+  margin-bottom: 9px;
+}
+.card h3 {
+  font-size: 11.4pt;
+  color: #0b376c;
+  margin-bottom: 5px;
+}
+.callout {
+  border-left: 5px solid #018aff;
+  background: #eef8ff;
+  padding: 11px 13px;
+  border-radius: 10px;
+  margin-top: 10px;
+}
+.pill {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 99px;
+  background: #eaf6ff;
+  color: #07599d;
+  font-weight: 700;
+  font-size: 8pt;
+  margin: 2px 3px 2px 0;
+}
+.score-row {
+  display: table;
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 7px;
+}
+.score-row > div {
+  display: table-cell;
+  width: 25%;
+  padding: 10px;
+  border: 1px solid #dce9f5;
+  background: #f8fbff;
+  vertical-align: top;
+}
+.score-row strong {
+  display: block;
+  font-size: 16pt;
+  color: #018aff;
+  letter-spacing: -0.03em;
+  margin-bottom: 4px;
+}
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 9.1pt;
+}
+.table th {
+  text-align: left;
+  background: #082f5f;
+  color: white;
+  padding: 8px;
+}
+.table td {
+  border: 1px solid #dce9f5;
+  padding: 8px;
+  vertical-align: top;
+}
+.table tr:nth-child(even) td { background: #f8fbff; }
+.table tr { break-inside: avoid; page-break-inside: avoid; }
+.timeline {
+  position: relative;
+  padding-left: 15px;
+}
+.timeline:before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: #cfe8ff;
+}
+.t-item {
+  position: relative;
+  margin-bottom: 11px;
+  break-inside: avoid;
+}
+.t-item:before {
+  content: "";
+  position: absolute;
+  left: -15px;
+  top: 4px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #018aff;
+  box-shadow: 0 0 0 3px #eaf6ff;
+}
+.t-year {
+  font-size: 8.6pt;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: #018aff;
+  font-weight: 800;
+  margin-bottom: 2px;
+}
+.t-item h4 {
+  font-size: 10.4pt;
+  color: #082f5f;
+  margin-bottom: 3px;
+}
+.brand-band {
+  background: linear-gradient(90deg, #071c34 0%, #0b376c 60%, #018aff 100%);
+  color: white;
+  border-radius: 15px;
+  padding: 15px 16px;
+  margin-top: 12px;
+  break-inside: avoid;
+}
+.brand-band h2 {
+  color: white;
+  border-bottom-color: rgba(255,255,255,0.2);
+}
+.brand-band p, .brand-band li { color: #e2efff; }
+.start-page { break-before: page; page-break-before: always; }
+.contact-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 8px 0;
+  margin-left: -8px;
+}
+.contact-table td {
+  width: 33.33%;
+  background: #f8fbff;
+  border: 1px solid #dce9f5;
+  border-radius: 12px;
+  padding: 10px 12px;
+  vertical-align: top;
+}
+.contact-table strong {
+  display: block;
+  color: #082f5f;
+  margin-bottom: 3px;
+}
+</style>
+</head>
+<body>
+  <section class="cover">
+    <div class="cover-inner">
+      <div class="logo-row">
+        <div class="logo-cell">
+          <img src="file:///root/opencode-conf-worktrees/zcloud-tool-name/.opencode/skills/dit-dreamit-brand/assets/logos/svg/dreamit-logo-white.svg" alt="DreamIT Host">
+        </div>
+        <div class="meta-cell">
+          <strong>Prepared</strong>
+          Tuesday 2 June 2026
+          <br><br>
+          <strong>Document</strong>
+          Business Proposal and Capability Statement
+        </div>
+      </div>
+
+      <div class="hero-copy">
+        <div class="kicker">Client-facing proposal</div>
+        <h1>Australian hosting, support and infrastructure for businesses that need speed, reliability and real people behind the service.</h1>
+        <p class="sub">DreamIT Host is positioned as a Melbourne-led hosting and managed services business serving Australian organisations with web hosting, email, reseller, VPS, CDN and support capabilities backed by local service and performance-focused infrastructure.</p>
+      </div>
+
+      <div class="hero-strip">
+        <div class="metric"><strong>100%</strong><span>Australian owned and operated, with local support publicly based in Melbourne.</span></div>
+        <div class="metric"><strong>2014</strong><span>Origins in DreamIT Solutions, with DreamIT Host launched in 2016 after early web design and hosting demand.</span></div>
+        <div class="metric"><strong>24/7</strong><span>Australian ticket support, with ticket, live chat and phone support pathways published on the business website.</span></div>
+      </div>
+
+      <div class="cover-footer">
+        <span>DreamIT Host business overview</span>
+        <span>Client, partner and prospect use</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Executive summary</h2>
+    <div class="grid">
+      <div class="col">
+        <div class="card">
+          <h3>What DreamIT Host is</h3>
+          <p>DreamIT Host presents itself as an Australian hosting provider built for small to mid-sized businesses, agencies, eCommerce sites and higher-traffic websites that want performance, local support and a broader service stack than commodity budget hosting.</p>
+          <p>The public offer spans web hosting, email hosting, reseller hosting, VPS and managed server options, domains, backups and a premium CDN layer.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <h3>Where it differentiates</h3>
+          <p>The clearest positioning themes are Australian ownership, Melbourne-based support, free migrations, performance-oriented infrastructure, DirectAdmin and LiteSpeed based hosting, and a customer experience designed for businesses that do not want offshore-only support.</p>
+          <div>
+            <span class="pill">Web hosting</span><span class="pill">Email hosting</span><span class="pill">Reseller</span><span class="pill">VPS</span><span class="pill">CDN</span><span class="pill">Managed support</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="score-row">
+      <div><strong>4</strong>Public server locations listed - Melbourne, Sydney, Perth and Auckland</div>
+      <div><strong>45 days</strong>Published satisfaction guarantee window</div>
+      <div><strong>400+</strong>One-click applications promoted on the public hosting offer</div>
+      <div><strong>Hourly</strong>Backup cadence highlighted in public hosting materials</div>
+    </div>
+    <div class="callout"><strong>Proposal angle:</strong> DreamIT Host is a good fit for customers who want Australian hosting with accessible support, migration help, and a stronger service relationship than a generic low-touch provider.</div>
+  </section>
+
+  <section class="section start-page">
+    <h2>Business overview</h2>
+    <table class="table">
+      <tr><th>Area</th><th>Publicly stated position</th><th>Why it matters to clients</th></tr>
+      <tr>
+        <td><strong>Ownership and team</strong></td>
+        <td>DreamIT Host states it is 100% Australian owned and operated, with customer support based in Melbourne. The About page also names CEO Jamie Le and COO Abs Bahloul.</td>
+        <td>Clients looking for local accountability can see a named leadership team and a support location within Australia.</td>
+      </tr>
+      <tr>
+        <td><strong>Core services</strong></td>
+        <td>Web hosting, email hosting, reseller hosting, VPS, managed server pathways, domains, CDN and backups.</td>
+        <td>This gives customers a single provider path from entry hosting to more serious infrastructure needs.</td>
+      </tr>
+      <tr>
+        <td><strong>Support model</strong></td>
+        <td>24/7 Australian ticket support, live chat, and published phone support windows.</td>
+        <td>Support access is a major differentiator when businesses need fast answers during incidents or migrations.</td>
+      </tr>
+      <tr>
+        <td><strong>Infrastructure posture</strong></td>
+        <td>Public materials highlight NVMe storage, LiteSpeed, CloudLinux, KernelCare, DirectAdmin, backups and security tooling.</td>
+        <td>These stack choices support speed, maintainability and a more performance-focused hosting story.</td>
+      </tr>
+    </table>
+  </section>
+
+  <section class="section">
+    <h2>What DreamIT Host offers</h2>
+    <div class="grid">
+      <div class="col">
+        <div class="card">
+          <h3>Hosting and infrastructure</h3>
+          <ul>
+            <li>Business web hosting for WordPress, Magento and general websites</li>
+            <li>Email hosting and premium SMTP capabilities through Dream Relay</li>
+            <li>Reseller hosting for agencies and IT providers</li>
+            <li>VPS and managed server options for higher-demand workloads</li>
+            <li>CDN services to improve speed and content delivery reach</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Operational features</h3>
+          <ul>
+            <li>Free migrations for websites, files and email</li>
+            <li>Hourly, daily, weekly and monthly backup retention referenced publicly</li>
+            <li>SSL, DNS and account management features for everyday business use</li>
+            <li>400+ one-click apps and WordPress staging or cloning on hosting plans</li>
+          </ul>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <h3>Who it suits</h3>
+          <ul>
+            <li>Australian small businesses that want local support</li>
+            <li>Agencies and designers managing multiple customer websites</li>
+            <li>eCommerce sites that need stronger performance headroom</li>
+            <li>Organisations moving away from impersonal mass-market hosts</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>Commercial story</h3>
+          <p>DreamIT Host appears to sell on value rather than just on headline price. The stronger story is not "cheapest host". It is "Australian service, practical performance, and migration support without making customers do the hard part alone".</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section start-page">
+    <h2>Why clients choose DreamIT Host</h2>
+    <div class="grid">
+      <div class="col">
+        <div class="card">
+          <h3>Local support with named accountability</h3>
+          <p>Many hosting providers compete on price while pushing support offshore or making it hard to escalate. DreamIT Host publicly leans into Melbourne-based support, which is a meaningful commercial differentiator for customers that value responsiveness and clarity.</p>
+        </div>
+        <div class="card">
+          <h3>Performance-oriented hosting stack</h3>
+          <p>Public materials highlight NVMe storage, LiteSpeed, CloudLinux, DirectAdmin, security tooling and AMD EPYC based server hardware. That gives the business a credible performance and reliability narrative for business websites.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <h3>Migration and continuity focus</h3>
+          <p>Free migration support and visible backup positioning reduce the fear of switching providers. For many customers, the real blocker is not price. It is the perceived pain of moving.</p>
+        </div>
+        <div class="card">
+          <h3>Broad enough to grow with the client</h3>
+          <p>A customer can start with standard hosting, add email or reseller capabilities, move into VPS or managed services, and stay within one brand relationship instead of replatforming every time needs change.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="brand-band">
+      <h2>Key business strengths</h2>
+      <ul>
+        <li>Australian ownership and Melbourne support provide a simple trust signal.</li>
+        <li>Service breadth supports both direct customers and agency or reseller channels.</li>
+        <li>Migration, backup and security messaging address the main fears buyers have when changing hosts.</li>
+        <li>DirectAdmin, LiteSpeed and NVMe help position the service as practical and performance-focused rather than generic.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Infrastructure and support footprint</h2>
+    <table class="table">
+      <tr><th>Capability</th><th>Public detail</th><th>Client-facing implication</th></tr>
+      <tr>
+        <td><strong>Server location options</strong></td>
+        <td>Melbourne, Sydney, Perth and Auckland are listed as available server locations.</td>
+        <td>Clients can choose geography closer to their users or operational preference.</td>
+      </tr>
+      <tr>
+        <td><strong>Support channels</strong></td>
+        <td>Ticketing through My DreamIT, live chat, email and published phone support availability.</td>
+        <td>There is a clearer escalation path than with low-touch providers that only expose a knowledge base.</td>
+      </tr>
+      <tr>
+        <td><strong>Security and platform tooling</strong></td>
+        <td>CloudLinux, KernelCare, security controls, malware scanning and backup tooling are all featured in hosting materials.</td>
+        <td>Useful for clients who care about patching discipline, isolation and faster recovery from issues.</td>
+      </tr>
+      <tr>
+        <td><strong>CDN and content delivery</strong></td>
+        <td>The public site promotes a premium CDN offer and WordPress integration.</td>
+        <td>Supports a stronger story for speed-sensitive sites and distributed user bases.</td>
+      </tr>
+    </table>
+  </section>
+
+  <section class="section start-page">
+    <h2>Business growth timeline</h2>
+    <div class="timeline">
+      <div class="t-item">
+        <div class="t-year">2014</div>
+        <h4>DreamIT Solutions begins</h4>
+        <p>Origins in WordPress and WooCommerce website work before the hosting business was formally launched.</p>
+      </div>
+      <div class="t-item">
+        <div class="t-year">2016</div>
+        <h4>DreamIT Host launches</h4>
+        <p>The public history states the hosting brand launched to address a gap for reliable Australian web and email hosting for small businesses.</p>
+      </div>
+      <div class="t-item">
+        <div class="t-year">2017 - 2021</div>
+        <h4>Platform expansion</h4>
+        <p>Reseller hosting, Dream Relay, infrastructure rebuilds, Auckland expansion, DNS upgrades and DirectAdmin platform growth all appear in the published business timeline.</p>
+      </div>
+      <div class="t-item">
+        <div class="t-year">2025</div>
+        <h4>Regional Victoria expansion</h4>
+        <p>The About page says DreamIT Host expanded into Geelong to provide local hosting, managed services and IT support to regional Victorian businesses.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2>Recommended use cases for this proposal</h2>
+    <div class="grid">
+      <div class="col">
+        <div class="card">
+          <h3>Sales conversations</h3>
+          <p>Use this document as a concise business introduction for prospects comparing Australian providers or asking what makes DreamIT Host different from a mainstream budget host.</p>
+        </div>
+      </div>
+      <div class="col">
+        <div class="card">
+          <h3>Partnership and referral introductions</h3>
+          <p>It also works as a lightweight capability statement for agencies, IT consultants and referral partners who want to understand the service breadth quickly.</p>
+        </div>
+      </div>
+    </div>
+
+    <h2>Contact and next steps</h2>
+    <table class="contact-table">
+      <tr>
+        <td><strong>Email</strong>hello@dreamithost.com.au</td>
+        <td><strong>Phone</strong>1300 434 151</td>
+        <td><strong>Support path</strong>My DreamIT ticketing and live chat</td>
+      </tr>
+    </table>
+
+    <div class="callout"><strong>Next-step recommendation:</strong> if you want this turned from a general business proposal into a true sales document, the next version should be tailored to one audience - for example agencies, local SMBs, eCommerce merchants, or managed IT clients.</div>
+
+    <p class="small" style="margin-top:10px;">This proposal is based on public DreamIT Host website content reviewed on 2 June 2026, including the home page, About page and web hosting pages.</p>
+  </section>
+</body>
+</html>

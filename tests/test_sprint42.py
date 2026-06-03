@@ -9,6 +9,7 @@ Covers:
 - streaming.py: SessionDB init is placed before AIAgent construction
 """
 import ast
+import threading
 import pathlib
 import re
 import queue
@@ -54,13 +55,18 @@ class TestSessionDBInjection(unittest.TestCase):
         )
 
     def test_sessiondb_init_in_try_except(self):
-        """SessionDB() init must be wrapped in try/except for non-fatal failure handling."""
-        # Check that the try/except pattern surrounding SessionDB() is present
-        pattern = r"try:\s*\n\s*from hermes_state import SessionDB\s*\n\s*_session_db\s*=\s*SessionDB\(\)"
+        """SessionDB init must be wrapped in try/except for non-fatal failure handling."""
+        # Check that the try/except pattern surrounding SessionDB(db_path=...) is present.
+        pattern = (
+            r"try:\s*\n"
+            r"\s*from hermes_state import SessionDB\s*\n"
+            r'\s*_state_db_path\s*=\s*\(Path\(_profile_home\)\s*/\s*"state\.db"\)\s*if\s*_profile_home\s*else\s*None\s*\n'
+            r"\s*_session_db\s*=\s*SessionDB\(db_path=_state_db_path\)"
+        )
         self.assertRegex(
             STREAMING_PY,
             pattern,
-            "SessionDB() init must be inside a try block for non-fatal error handling (PR #356)",
+            "SessionDB(db_path=...) init must be inside a try block for non-fatal error handling",
         )
 
     def test_sessiondb_failure_logs_warning(self):
@@ -212,6 +218,7 @@ class TestRuntimeRouteInjection(unittest.TestCase):
 
         fake_session = FakeSession()
         fake_stream_id = "stream-runtime-route"
+        fake_session.active_stream_id = fake_stream_id
         fake_queue = queue.Queue()
         fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
         fake_runtime_module.resolve_runtime_provider = resolve_runtime_provider
@@ -250,6 +257,294 @@ class TestRuntimeRouteInjection(unittest.TestCase):
         self.assertEqual(init_kwargs["credential_pool"], "openai-codex")
         self.assertEqual(init_kwargs["api_key"], "rt-key")
         self.assertIs(init_kwargs["session_db"], fake_session_db)
+
+    def test_runtime_provider_forwards_interim_assistant_callback(self):
+        """WebUI must pass interim_assistant_callback to AIAgent and emit SSE events."""
+        import api.streaming as streaming
+
+        captured = {}
+
+        class CapturingAgent:
+            def __init__(
+                self,
+                model=None,
+                provider=None,
+                base_url=None,
+                api_key=None,
+                platform=None,
+                quiet_mode=False,
+                enabled_toolsets=None,
+                fallback_model=None,
+                session_id=None,
+                session_db=None,
+                stream_delta_callback=None,
+                reasoning_callback=None,
+                tool_progress_callback=None,
+                interim_assistant_callback=None,
+                clarify_callback=None,
+                **kwargs,
+            ):
+                captured["init_kwargs"] = dict(
+                    model=model, provider=provider, base_url=base_url, api_key=api_key,
+                    platform=platform, quiet_mode=quiet_mode,
+                    enabled_toolsets=enabled_toolsets, fallback_model=fallback_model,
+                    session_id=session_id, session_db=session_db,
+                    stream_delta_callback=stream_delta_callback,
+                    reasoning_callback=reasoning_callback,
+                    tool_progress_callback=tool_progress_callback,
+                    interim_assistant_callback=interim_assistant_callback,
+                    clarify_callback=clarify_callback,
+                )
+                self.session_id = session_id
+                self.context_compressor = None
+                self.session_prompt_tokens = 0
+                self.session_completion_tokens = 0
+                self.session_estimated_cost_usd = None
+                self.reasoning_config = None
+                self.ephemeral_system_prompt = None
+                self._last_error = None
+                self.interim_assistant_callback = interim_assistant_callback
+                captured["agent"] = self
+
+            def run_conversation(self, **kwargs):
+                if self.interim_assistant_callback:
+                    self.interim_assistant_callback("Inspecting repo structure.", already_streamed=False)
+                return {
+                    "messages": [
+                        {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                        {"role": "assistant", "content": "ok"},
+                    ]
+                }
+
+            def interrupt(self, _message):
+                captured["interrupted"] = True
+
+        class FakeSession:
+            session_id = "sess-interim-test"
+            title = "Test"
+            workspace = "/tmp"
+            model = "gpt-4o"
+            messages = []
+            personality = None
+            input_tokens = 0
+            output_tokens = 0
+            estimated_cost = None
+            tool_calls = []
+            active_stream_id = None
+            pending_user_message = None
+            pending_attachments = []
+            pending_started_at = None
+
+            def save(self, touch_updated_at=True, skip_index=True):
+                pass
+
+            def compact(self):
+                return {
+                    "session_id": self.session_id, "title": self.title,
+                    "workspace": self.workspace, "model": self.model,
+                    "created_at": 0, "updated_at": 0, "pinned": False,
+                    "archived": False, "project_id": None, "profile": None,
+                    "input_tokens": 0, "output_tokens": 0,
+                    "estimated_cost": None, "personality": None,
+                }
+
+            @property
+            def path(self):
+                return "/tmp/fake.json"
+
+        fake_stream_id = "stream-interim-callback"
+        fake_queue = queue.Queue()
+        fake_rt_module = types.ModuleType("hermes_cli.runtime_provider")
+        fake_rt_module.resolve_runtime_provider = mock.Mock(return_value={
+            "provider": "openai-codex",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "rt-key",
+            "api_mode": "codex_responses",
+            "command": "codex",
+            "args": ["exec", "--json"],
+            "credential_pool": object(),
+        })
+        fake_hermes_cli = types.ModuleType("hermes_cli")
+        fake_hermes_cli.runtime_provider = fake_rt_module
+        fake_hermes_state = types.ModuleType("hermes_state")
+        fake_hermes_state.SessionDB = mock.Mock(return_value=object())
+
+        fake_session = FakeSession()
+        fake_session.active_stream_id = fake_stream_id
+
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
+             mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent), \
+             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-4o", "openai-codex", None)), \
+             mock.patch("api.config.get_config", return_value={}), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+             mock.patch.dict(sys.modules, {
+                 "hermes_cli": fake_hermes_cli,
+                 "hermes_cli.runtime_provider": fake_rt_module,
+                 "hermes_state": fake_hermes_state,
+             }):
+            streaming.STREAMS[fake_stream_id] = fake_queue
+            streaming._run_agent_streaming(
+                session_id="sess-interim-test",
+                msg_text="hello",
+                model="gpt-4o",
+                workspace="/tmp",
+                stream_id=fake_stream_id,
+            )
+
+        init_kwargs = captured["init_kwargs"]
+        self.assertIsNotNone(init_kwargs["interim_assistant_callback"])
+        self.assertTrue(callable(init_kwargs["interim_assistant_callback"]))
+        self.assertIn("WebUI progress guidance", captured["agent"].ephemeral_system_prompt)
+        self.assertIn("Match the normal Hermes messaging style", captured["agent"].ephemeral_system_prompt)
+        self.assertIn("user-visible progress updates", captured["agent"].ephemeral_system_prompt)
+
+        interim_events = []
+        while not fake_queue.empty():
+            try:
+                interim_events.append(fake_queue.get_nowait())
+            except queue.Empty:
+                break
+        self.assertTrue(
+            any(event == "interim_assistant" for event, _ in interim_events),
+            "interim_assistant callback should emit interim_assistant SSE events",
+        )
+        self.assertTrue(
+            any(
+                event == "interim_assistant" and event_data.get("text") == "Inspecting repo structure."
+                for event, event_data in interim_events
+            ),
+            "interim_assistant event should carry the assistant commentary text"
+        )
+
+    def test_clarify_callback_passes_configured_timeout_seconds(self):
+        """clarify prompt data should use clarify.timeout from config when present."""
+        import api.streaming as streaming
+
+        captured = {}
+        submit_payloads = []
+
+        class FakeEntry:
+            def __init__(self, value):
+                self.result = value
+                self.event = threading.Event()
+                self.event.set()
+
+        def fake_submit_pending(_sid, payload):
+            submit_payloads.append(payload)
+            return FakeEntry("selected")
+
+        class CapturingAgent:
+            def __init__(self, model=None, provider=None, base_url=None, api_key=None,
+                         platform=None, quiet_mode=False, enabled_toolsets=None,
+                         fallback_model=None, session_id=None, session_db=None,
+                         stream_delta_callback=None, reasoning_callback=None,
+                         tool_progress_callback=None, clarify_callback=None, **kwargs):
+                self.clarify_callback = clarify_callback
+                self.session_id = session_id
+                captured["init_kwargs"] = {
+                    "clarify_callback": clarify_callback,
+                }
+
+            def run_conversation(self, **kwargs):
+                if self.clarify_callback:
+                    captured["clarify_result"] = self.clarify_callback(
+                        "Need user confirmation",
+                        ["first", "second"],
+                    )
+                return {
+                    "messages": [
+                        {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                        {"role": "assistant", "content": "ok"},
+                    ]
+                }
+
+            def interrupt(self, _message):
+                captured["interrupted"] = True
+
+        class FakeSession:
+            session_id = "sess-clarify-timeout"
+            title = "clarify-timeout test"
+            workspace = "/tmp"
+            model = "gpt-5.4"
+            messages = []
+            personality = None
+            input_tokens = 0
+            output_tokens = 0
+            estimated_cost = None
+            tool_calls = []
+            active_stream_id = None
+            pending_user_message = None
+            pending_attachments = []
+            pending_started_at = None
+
+            def save(self, touch_updated_at=True, **_kwargs):
+                pass
+
+            def compact(self):
+                return {
+                    "session_id": self.session_id,
+                    "title": self.title,
+                    "workspace": self.workspace,
+                    "model": self.model,
+                    "created_at": 0,
+                    "updated_at": 0,
+                    "pinned": False,
+                    "archived": False,
+                    "project_id": None,
+                    "profile": None,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "estimated_cost": None,
+                    "personality": None,
+                }
+
+            @property
+            def path(self):
+                return "/tmp/fake.json"
+
+        fake_stream_id = "stream-clarify-timeout"
+        fake_queue = queue.Queue()
+        fake_rt_module = types.ModuleType("hermes_cli.runtime_provider")
+        fake_rt_module.resolve_runtime_provider = mock.Mock(return_value={
+            "provider": "openai-codex",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "rt-key",
+            "api_mode": "codex_responses",
+            "command": "codex",
+            "args": ["exec", "--json"],
+            "credential_pool": object(),
+        })
+        fake_hermes_cli = types.ModuleType("hermes_cli")
+        fake_hermes_cli.runtime_provider = fake_rt_module
+        fake_hermes_state = types.ModuleType("hermes_state")
+        fake_hermes_state.SessionDB = mock.Mock(return_value=object())
+
+        fake_session = FakeSession()
+        fake_session.active_stream_id = fake_stream_id
+
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
+             mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent), \
+             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-5.4", "openai-codex", None)), \
+             mock.patch.object(streaming, "get_config", return_value={"clarify": {"timeout": 300}}), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+             mock.patch("api.clarify.submit_pending", side_effect=fake_submit_pending), \
+             mock.patch.dict(sys.modules, {
+                "hermes_cli": fake_hermes_cli,
+                "hermes_cli.runtime_provider": fake_rt_module,
+                "hermes_state": fake_hermes_state,
+             }):
+            streaming.STREAMS[fake_stream_id] = fake_queue
+            streaming._run_agent_streaming(
+                session_id="sess-clarify-timeout",
+                msg_text="please run task",
+                model="gpt-5.4",
+                workspace="/tmp",
+                stream_id=fake_stream_id,
+            )
+
+        self.assertEqual(captured["clarify_result"], "selected")
+        self.assertEqual(len(submit_payloads), 1)
+        self.assertEqual(submit_payloads[0]["timeout_seconds"], 300)
 
 
 class TestSessionDBAST(unittest.TestCase):
@@ -390,9 +685,11 @@ def test_streaming_persists_reasoning_in_session():
     assert "_reasoning_text = ''" in src, \
         "_reasoning_text variable not initialised in streaming.py"
 
-    # on_reasoning must accumulate into _reasoning_text
-    assert '_reasoning_text += str(text)' in src, \
-        "on_reasoning callback does not accumulate into _reasoning_text"
+    # on_reasoning must accumulate non-echo reasoning into _reasoning_text
+    assert '_reasoning_text += reasoning_delta' in src, \
+        "on_reasoning callback does not accumulate accepted reasoning deltas into _reasoning_text"
+    assert '_is_visible_output_echo(reasoning_delta)' in src, \
+        "on_reasoning callback should suppress reasoning deltas that only echo visible streamed output"
 
     # Persistence block must exist before raw_session is built
     assert "Persist reasoning trace in the session so it survives reload" in src, \
@@ -462,7 +759,7 @@ def test_streaming_restores_prior_reasoning_metadata_after_followup():
     src = (REPO / 'api' / 'streaming.py').read_text()
     assert "def _restore_reasoning_metadata(" in src, \
         "streaming.py must define a helper to restore prior reasoning metadata"
-    assert "s.context_messages = _next_context_messages" in src, \
+    assert "_next_context_messages" in src and "s.context_messages" in src, \
         "streaming.py must restore prior reasoning metadata into model context"
     assert "s.messages = _merge_display_messages_after_agent_result(" in src, \
         "streaming.py must merge restored result messages into the visible transcript"
@@ -475,7 +772,7 @@ def test_routes_restores_prior_reasoning_metadata_after_followup():
     src = (REPO / 'api' / 'routes.py').read_text()
     assert "_restore_reasoning_metadata" in src, \
         "routes.py must import reasoning metadata restoration helper"
-    assert "s.context_messages = _next_context_messages" in src, \
+    assert "_next_context_messages" in src and "s.context_messages" in src, \
         "routes.py must restore prior reasoning metadata into model context"
     assert 's.messages = _merge_display_messages_after_agent_result(' in src, \
         "routes.py must merge restored result messages into the visible transcript"
@@ -562,7 +859,10 @@ class TestCredentialPoolBackwardCompat(unittest.TestCase):
         fake_hermes_state = types.ModuleType("hermes_state")
         fake_hermes_state.SessionDB = mock.Mock(return_value=None)
 
-        with mock.patch.object(streaming, "get_session", return_value=FakeSession()), \
+        fake_session = FakeSession()
+        fake_session.active_stream_id = fake_stream_id
+
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
              mock.patch.object(streaming, "_get_ai_agent", return_value=OlderAgent), \
              mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-4o", "openai", None)), \
              mock.patch("api.config.get_config", return_value={}), \
@@ -585,3 +885,139 @@ class TestCredentialPoolBackwardCompat(unittest.TestCase):
         # Agent was constructed successfully
         self.assertIn("session_id", captured["init_kwargs"])
         self.assertEqual(captured["init_kwargs"]["session_id"], "sess-compat-test")
+
+
+class TestAgentCacheCredentialPoolStability(unittest.TestCase):
+    """Credential-pool token churn must not evict cached WebUI agents."""
+
+    def test_credential_pool_signature_ignores_volatile_runtime_token(self):
+        import api.streaming as streaming
+
+        pool = object()
+        self.assertEqual(
+            streaming._agent_cache_api_key_sig('token-a', pool),
+            streaming._agent_cache_api_key_sig('token-b', pool),
+        )
+        self.assertNotEqual(
+            streaming._agent_cache_api_key_sig('token-a', None),
+            streaming._agent_cache_api_key_sig('token-b', None),
+        )
+
+    def test_cached_agent_runtime_refresh_swaps_key_without_losing_agent_state(self):
+        import api.streaming as streaming
+
+        class FakeAgent:
+            def __init__(self):
+                self.api_key = 'old-token'
+                self.base_url = 'https://chatgpt.com/backend-api/codex'
+                self.api_mode = 'codex_responses'
+                self._client_kwargs = {
+                    'api_key': 'old-token',
+                    'base_url': self.base_url,
+                    'default_headers': {'old': 'header'},
+                }
+                self._credential_pool = 'old-pool'
+                self.context_compressor = type('Compressor', (), {
+                    'base_url': self.base_url,
+                    'api_key': 'old-token',
+                })()
+                self._primary_runtime = {
+                    'base_url': self.base_url,
+                    'api_key': 'old-token',
+                    'client_kwargs': dict(self._client_kwargs),
+                    'compressor_base_url': self.base_url,
+                    'compressor_api_key': 'old-token',
+                }
+                self.header_refreshes = []
+                self.replacements = []
+                self.prefetch_survives = object()
+
+            def _apply_client_headers_for_base_url(self, base_url):
+                self.header_refreshes.append((base_url, self._client_kwargs['api_key']))
+                self._client_kwargs['default_headers'] = {'refreshed-for': self._client_kwargs['api_key']}
+
+            def _replace_primary_openai_client(self, *, reason):
+                self.replacements.append(reason)
+                return True
+
+        agent = FakeAgent()
+        preserved = agent.prefetch_survives
+        changed = streaming._refresh_cached_agent_runtime(agent, {
+            'api_key': 'new-token',
+            'base_url': 'https://chatgpt.com/backend-api/codex',
+            'credential_pool': 'new-pool',
+        })
+
+        self.assertTrue(changed)
+        self.assertIs(agent.prefetch_survives, preserved)
+        self.assertEqual(agent.api_key, 'new-token')
+        self.assertEqual(agent._client_kwargs['api_key'], 'new-token')
+        self.assertEqual(agent._credential_pool, 'new-pool')
+        self.assertEqual(agent._primary_runtime['api_key'], 'new-token')
+        self.assertEqual(agent._primary_runtime['client_kwargs']['api_key'], 'new-token')
+        self.assertEqual(agent._primary_runtime['compressor_api_key'], 'new-token')
+        self.assertEqual(getattr(agent.context_compressor, 'api_key'), 'new-token')
+        self.assertEqual(agent.header_refreshes, [('https://chatgpt.com/backend-api/codex', 'new-token')])
+        self.assertEqual(agent.replacements, ['webui_credential_refresh'])
+
+    def test_same_key_refresh_repairs_stale_primary_runtime_snapshot(self):
+        import api.streaming as streaming
+
+        class FakeAgent:
+            api_key = 'current-token'
+            base_url = 'https://chatgpt.com/backend-api/codex'
+            api_mode = 'codex_responses'
+            _client_kwargs = {
+                'api_key': 'current-token',
+                'base_url': 'https://chatgpt.com/backend-api/codex',
+            }
+            _primary_runtime = {
+                'api_key': 'old-token',
+                'base_url': 'https://chatgpt.com/backend-api/codex',
+                'client_kwargs': {
+                    'api_key': 'old-token',
+                    'base_url': 'https://chatgpt.com/backend-api/codex',
+                },
+            }
+
+        agent = FakeAgent()
+        ok = streaming._refresh_cached_agent_runtime(agent, {'api_key': 'current-token'})
+
+        self.assertTrue(ok)
+        self.assertEqual(agent._primary_runtime['api_key'], 'current-token')
+        self.assertEqual(agent._primary_runtime['client_kwargs']['api_key'], 'current-token')
+
+    def test_fallback_active_refresh_requests_rebuild_without_mutating_fallback(self):
+        import api.streaming as streaming
+
+        class FakeAgent:
+            api_key = 'fallback-token'
+            base_url = 'https://fallback.example/v1'
+            api_mode = 'codex_responses'
+            _fallback_activated = True
+            _client_kwargs = {
+                'api_key': 'fallback-token',
+                'base_url': 'https://fallback.example/v1',
+            }
+            _primary_runtime = {
+                'api_key': 'old-primary-token',
+                'base_url': 'https://chatgpt.com/backend-api/codex',
+                'client_kwargs': {
+                    'api_key': 'old-primary-token',
+                    'base_url': 'https://chatgpt.com/backend-api/codex',
+                },
+                'compressor_api_key': 'old-primary-token',
+                'compressor_base_url': 'https://chatgpt.com/backend-api/codex',
+            }
+
+        agent = FakeAgent()
+        ok = streaming._refresh_cached_agent_runtime(agent, {
+            'api_key': 'new-primary-token',
+            'base_url': 'https://chatgpt.com/backend-api/codex',
+        })
+
+        self.assertFalse(ok)
+        self.assertEqual(agent.api_key, 'fallback-token')
+        self.assertEqual(agent._client_kwargs['api_key'], 'fallback-token')
+        self.assertEqual(agent._primary_runtime['api_key'], 'old-primary-token')
+        self.assertEqual(agent._primary_runtime['client_kwargs']['api_key'], 'old-primary-token')

@@ -21,6 +21,23 @@ SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
+def _extract_js_function_body(src: str, name: str) -> str:
+    start = src.find(f"function {name}(")
+    assert start >= 0, f"function {name} not found"
+    brace = src.find("{", start)
+    assert brace >= 0, f"function {name} body not found"
+    depth = 1
+    i = brace + 1
+    while depth > 0 and i < len(src):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, f"function {name} body did not close"
+    return src[start:i]
+
+
 # ── Bug 1: workspace panel header collapse priority ──────────────────────────
 
 
@@ -53,7 +70,26 @@ class TestWorkspacePanelCollapsePriority:
             "compresses all three children simultaneously."
         )
         assert "gap:6px" in rule
-        assert "overflow:hidden" in rule
+        # Note: `.panel-header` was changed from overflow:hidden to overflow:visible
+        # in #1775 so its tooltip pseudo-elements can escape the header bar
+        # (otherwise the workspace-panel header tooltips like "New file" get
+        # clipped). The title-text ellipsis is preserved by the inner span
+        # `.workspace-panel-title-group > span:first-child` which has its own
+        # overflow:hidden + text-overflow:ellipsis. So we check that EITHER
+        # the parent uses overflow:hidden (legacy) or that the inner span
+        # handles its own ellipsis (current).
+        if "overflow:hidden" not in rule:
+            inner_span_idx = STYLE_CSS.find(".workspace-panel-title-group > span:first-child{")
+            assert inner_span_idx != -1, (
+                ".panel-header lost overflow:hidden but no inner span "
+                "rule (.workspace-panel-title-group > span:first-child) handles the "
+                "title-text ellipsis as a fallback."
+            )
+            inner_rule = STYLE_CSS[inner_span_idx: STYLE_CSS.find("}", inner_span_idx) + 1]
+            assert "overflow:hidden" in inner_rule and "text-overflow:ellipsis" in inner_rule, (
+                ".workspace-panel-title-group > span:first-child must own the ellipsis "
+                "behaviour now that the parent is overflow:visible."
+            )
 
     def test_panel_actions_pushed_right_and_never_shrinks(self):
         """`.panel-actions` must have flex-shrink:0 and margin-left:auto so
@@ -70,26 +106,21 @@ class TestWorkspacePanelCollapsePriority:
         )
 
     def test_workspace_label_shrinks_with_ellipsis(self):
-        """The "Workspace" label (`panel-header > span:first-child`) must
-        shrink with ellipsis truncation rather than overflow uncontrollably."""
+        """The "Workspace" label must shrink with ellipsis truncation."""
         # Find the rule
-        sel = ".panel-header > span:first-child"
+        sel = ".workspace-panel-title-group > span:first-child"
         idx = STYLE_CSS.find(sel)
         assert idx >= 0, f"Selector {sel!r} not found in style.css"
         rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
         assert "text-overflow:ellipsis" in rule
         assert "min-width:0" in rule
-        assert "flex-shrink:2" in rule  # shrinks before icons (icons are 0)
 
-    def test_git_badge_shrinks_first(self):
-        """`.git-badge` must shrink faster than the label so it disappears
-        first as the panel narrows."""
+    def test_git_badge_uses_second_row(self):
+        """`.git-badge` should sit beneath the title/action row."""
         idx = STYLE_CSS.find(".git-badge{")
         rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
-        assert "flex-shrink:3" in rule, (
-            ".git-badge must have flex-shrink:3 so it shrinks before the "
-            "label (flex-shrink:2) and the icons (flex-shrink:0)."
-        )
+        assert "grid-column:1 / -1" in rule
+        assert "grid-row:2" in rule
 
     def test_container_query_hides_git_badge_first(self):
         """At narrow widths the git badge gets `display:none` BEFORE the
@@ -109,7 +140,7 @@ class TestWorkspacePanelCollapsePriority:
         assert "@container rightpanel (max-width: 160px)" in STYLE_CSS
         idx = STYLE_CSS.find("@container rightpanel (max-width: 160px)")
         block = STYLE_CSS[idx: idx + 200]
-        assert ".panel-header > span:first-child{display:none" in block
+        assert ".workspace-panel-title-group{display:none" in block
 
     def test_breakpoints_in_correct_order(self):
         """Sanity: the git-badge breakpoint (220px) must be wider than the
@@ -138,9 +169,7 @@ class TestProjectDotPlacement:
         of the title and timestamp), not to the title span (which truncates
         with ellipsis and would clip the dot off long titles)."""
         # Find _renderOneSession body
-        idx = SESSIONS_JS.find("function _renderOneSession(")
-        assert idx >= 0
-        body = SESSIONS_JS[idx: idx + 6000]
+        body = _extract_js_function_body(SESSIONS_JS, "_renderOneSession")
         # Must append dot to titleRow
         assert "titleRow.appendChild(dot)" in body, (
             "Project dot must be appended to titleRow as a flex sibling, "
@@ -156,8 +185,7 @@ class TestProjectDotPlacement:
         """The dot is appended AFTER title.appendChild and BEFORE ts append
         — that ordering puts the dot between the title and the timestamp
         in the flex row."""
-        idx = SESSIONS_JS.find("function _renderOneSession(")
-        body = SESSIONS_JS[idx: idx + 6000]
+        body = _extract_js_function_body(SESSIONS_JS, "_renderOneSession")
         title_pos = body.find("titleRow.appendChild(title);")
         dot_pos = body.find("titleRow.appendChild(dot);")
         ts_pos = body.find("titleRow.appendChild(ts);")

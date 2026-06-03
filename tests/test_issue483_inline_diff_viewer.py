@@ -56,14 +56,17 @@ class TestMediaDiffInline:
         """loadDiffInline() function should be defined."""
         with open("static/ui.js", "r", encoding="utf-8") as f:
             content = f.read()
-        assert "function loadDiffInline()" in content
+        assert "function loadDiffInline" in content
 
     def test_loadDiffInline_called_in_post_render(self):
-        """loadDiffInline() should be called in post-render (after addCopyButtons)."""
+        """loadDiffInline() should be called by the consolidated post-render pass."""
         with open("static/ui.js", "r", encoding="utf-8") as f:
             content = f.read()
-        count = content.count("loadDiffInline()")
-        assert count >= 2, f"loadDiffInline() called {count} times, expected >= 2 (cached + fresh render)"
+        assert "requestAnimationFrame(()=>postProcessRenderedMessages(inner))" in content
+        start = content.find("function postProcessRenderedMessages")
+        body = content[start:start + 500]
+        assert "addCopyButtons(container)" in body
+        assert "loadDiffInline(container)" in body
 
     def test_diff_inline_error_class(self):
         """Should have error state class."""

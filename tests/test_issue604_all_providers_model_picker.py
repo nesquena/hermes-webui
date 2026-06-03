@@ -75,7 +75,10 @@ class TestConfigProvidersDetection:
         # Find the config providers detection block
         m = re.search(r'Also detect providers explicitly listed', src)
         assert m, "Comment about config.yaml providers detection must exist"
-        block = src[m.start():m.start() + 500]
+        # 1500-char window absorbs documentation expansion (e.g. the
+        # _canonicalise_provider_id discussion added in #1568) without
+        # losing the structural-assertion intent.
+        block = src[m.start():m.start() + 1500]
         assert "_PROVIDER_MODELS" in block, \
             "Config providers detection must check against _PROVIDER_MODELS"
 

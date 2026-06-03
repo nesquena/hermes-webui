@@ -116,12 +116,22 @@ def test_timestamp_hidden_when_attention_state_is_present():
     assert ".session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
 
 
+def test_plain_mouse_hover_does_not_mark_session_row_dragging():
+    """Pointermove fires during ordinary hover; drag styling must require an active press."""
+    assert "let _gestureState='idle';" in SESSIONS_JS
+    assert "_gestureState='pressing';" in SESSIONS_JS
+    assert "if(_gestureState==='idle') return false;" in SESSIONS_JS
+    assert "_gestureState='idle';" in SESSIONS_JS
+    assert ".session-item.dragging:hover" in STYLE_CSS
+
+
 def test_sidebar_uses_local_inflight_state_for_immediate_spinner():
     messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text()
 
     assert "function _isSessionLocallyStreaming(s)" in SESSIONS_JS
-    assert "(isActive && S.busy)" in SESSIONS_JS
-    assert "INFLIGHT[s.session_id]" in SESSIONS_JS
+    assert "isActive && Boolean(S.busy)" in SESSIONS_JS
+    assert "function _purgeStaleInflightEntries()" in SESSIONS_JS
+    assert "delete INFLIGHT[sid];" in SESSIONS_JS
     assert "function _isSessionEffectivelyStreaming(s)" in SESSIONS_JS
     assert "const isStreaming=_isSessionEffectivelyStreaming(s);" in SESSIONS_JS
     assert "if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();" in messages_js
@@ -136,6 +146,33 @@ def test_date_group_caret_expanded_down_collapsed_right():
     ]
     assert "transform:rotate(0deg);" in caret_block
     assert ".session-date-caret.collapsed{transform:rotate(-90deg);}" in STYLE_CSS
+
+
+def test_date_groups_render_as_cards_with_count_pills():
+    assert "wrapper.className='session-date-group';" in SESSIONS_JS
+    assert "count.className='session-date-count';" in SESSIONS_JS
+    assert "count.textContent=String(g.items.length);" in SESSIONS_JS
+    assert "conversation${g.items.length===1?'':'s'}" in SESSIONS_JS
+    assert "hdr.appendChild(caret);hdr.appendChild(label);hdr.appendChild(count);" in SESSIONS_JS
+
+    group_block = STYLE_CSS[
+        STYLE_CSS.find(".session-date-group{"):
+        STYLE_CSS.find(".session-date-header{")
+    ]
+    assert "border:1px solid var(--border);" in group_block
+    assert "border-radius:12px;" in group_block
+    assert "background:color-mix" in group_block
+
+    count_block = STYLE_CSS[
+        STYLE_CSS.find(".session-date-count{"):
+        STYLE_CSS.find(".session-date-body{")
+    ]
+    assert "margin-left:auto;" in count_block
+    assert "border-radius:999px;" in count_block
+    assert "background:var(--hover-bg);" in count_block
+
+    assert ".session-date-body{display:flex;flex-direction:column;gap:2px;}" in STYLE_CSS
+    assert ".session-date-body .session-item{margin-bottom:0;}" in STYLE_CSS
 
 
 def test_apperror_path_calls_render_session_list():

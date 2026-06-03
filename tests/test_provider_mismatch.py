@@ -128,8 +128,13 @@ class TestCheckProviderMismatch:
         src = _read("static/ui.js")
         idx = src.find("function _checkProviderMismatch")
         block = src[idx:idx + 800]
-        assert "openrouter" in block.lower(), (
+        assert "_providerSkipsModelMismatchWarning(ap)" in block, (
             "_checkProviderMismatch must skip the check for openrouter"
+        )
+        helper_idx = src.find("function _providerSkipsModelMismatchWarning")
+        helper = src[helper_idx:helper_idx + 350]
+        assert "openrouter" in helper.lower(), (
+            "_providerSkipsModelMismatchWarning must skip OpenRouter"
         )
 
     def test_skips_check_for_custom(self):
@@ -137,8 +142,28 @@ class TestCheckProviderMismatch:
         src = _read("static/ui.js")
         idx = src.find("function _checkProviderMismatch")
         block = src[idx:idx + 800]
-        assert "custom" in block.lower(), (
+        assert "_providerSkipsModelMismatchWarning(ap)" in block, (
             "_checkProviderMismatch must skip the check for custom provider"
+        )
+        helper_idx = src.find("function _providerSkipsModelMismatchWarning")
+        helper = src[helper_idx:helper_idx + 350]
+        assert "p==='custom'" in helper, (
+            "_providerSkipsModelMismatchWarning must skip bare custom providers"
+        )
+
+    def test_skips_check_for_named_custom_provider(self):
+        """Named custom providers are aggregators too — skip the warning."""
+        src = _read("static/ui.js")
+        idx = src.find("function _checkProviderMismatch")
+        block = src[idx:idx + 800]
+        assert "_providerSkipsModelMismatchWarning(ap)" in block, (
+            "_checkProviderMismatch must skip named custom providers like custom:zenmux"
+        )
+        helper_idx = src.find("function _providerSkipsModelMismatchWarning")
+        assert helper_idx != -1, "named custom provider skip helper must exist"
+        helper = src[helper_idx:helper_idx + 350]
+        assert "p.startsWith('custom:')" in helper, (
+            "named custom providers must be treated like custom aggregators"
         )
 
     def test_active_provider_stored_on_model_load(self):
@@ -497,6 +522,31 @@ def test_non_openrouter_slash_model_provider_context_stays_unqualified():
     assert runtime_model == "anthropic/claude-sonnet-4.6"
 
 
+def test_cursor_acp_slash_model_always_gets_provider_hint():
+    """ACP subprocess models with '/' must not fall through to config default."""
+    import api.config as config
+
+    old_cfg = dict(config.cfg)
+    config.cfg["model"] = {
+        "provider": "openai-codex",
+        "default": "gpt-5.5",
+    }
+    try:
+        runtime_model = config.model_with_provider_context(
+            "cursor/composer-2.5",
+            "cursor-acp",
+        )
+        model, provider, base_url = config.resolve_model_provider(runtime_model)
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+
+    assert runtime_model == "@cursor-acp:cursor/composer-2.5"
+    assert model == "cursor/composer-2.5"
+    assert provider == "cursor-acp"
+    assert base_url is None
+
+
 def test_api_session_new_persists_model_provider_context():
     """POST /api/session/new returns compact session model_provider metadata."""
     created, status = _post(
@@ -794,6 +844,139 @@ def test_named_custom_provider_hint_with_colon_is_preserved(monkeypatch):
     assert effective == "@custom:sub2api:gpt-5.4-mini"
 
 
+def test_issue1734_stale_openai_slash_session_model_repairs_to_codex(monkeypatch):
+    """Legacy openai/... session IDs must not route to OpenRouter when Codex is active."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+                {
+                    "provider": "OpenRouter",
+                    "provider_id": "openrouter",
+                    "models": [{"id": "openai/gpt-5.4-mini", "label": "GPT-5.4 Mini"}],
+                },
+            ],
+        },
+    )
+
+    effective, provider, changed = routes._resolve_compatible_session_model_state(
+        "openai/gpt-5.4-mini",
+        None,
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.5"
+    assert provider == "openai-codex"
+
+
+def test_issue1734_chat_start_persists_repaired_codex_provider(monkeypatch):
+    """/api/chat/start should save repaired Codex model state before spawning."""
+    import contextlib
+    import io
+    import json
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        session_id = "issue1734_session"
+        workspace = "/tmp/hermes-webui-test"
+        model = "openai/gpt-5.4-mini"
+        model_provider = None
+        active_stream_id = None
+        pending_user_message = None
+        pending_attachments = []
+        pending_started_at = None
+        messages = [{"role": "user", "content": "old"}]
+        context_messages = []
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(
+                {
+                    "touch_updated_at": touch_updated_at,
+                    "model": self.model,
+                    "model_provider": self.model_provider,
+                    "pending_user_message": self.pending_user_message,
+                }
+            )
+
+    captured_thread = {}
+
+    class FakeThread:
+        def __init__(self, target, args=(), kwargs=None, daemon=None):
+            captured_thread.update(
+                {"target": target, "args": args, "kwargs": kwargs or {}, "daemon": daemon}
+            )
+
+        def start(self):
+            captured_thread["started"] = True
+
+    class FakeHandler:
+        def __init__(self):
+            self.wfile = io.BytesIO()
+            self.status = None
+            self.sent_headers = {}
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.sent_headers[key] = value
+
+        def end_headers(self):
+            pass
+
+    session = DummySession()
+    monkeypatch.setattr(routes, "get_session", lambda sid: session)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: value)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: contextlib.nullcontext())
+    monkeypatch.setattr(routes, "set_last_workspace", lambda workspace: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: object())
+    monkeypatch.setattr(routes.threading, "Thread", FakeThread)
+
+    handler = FakeHandler()
+    routes._handle_chat_start(
+        handler,
+        {"session_id": session.session_id, "message": "new turn"},
+    )
+    payload = json.loads(handler.wfile.getvalue().decode("utf-8"))
+
+    assert handler.status == 200
+    assert payload["effective_model"] == "gpt-5.5"
+    assert payload["effective_model_provider"] == "openai-codex"
+    assert session.model == "gpt-5.5"
+    assert session.model_provider == "openai-codex"
+    assert captured_thread["args"][2] == "gpt-5.5"
+    assert captured_thread["kwargs"]["model_provider"] == "openai-codex"
+    assert save_calls[-1]["model_provider"] == "openai-codex"
+
+
 def test_stale_at_provider_model_falls_back_when_family_mismatches(monkeypatch):
     """Unroutable @provider:model should not invent a bare model for another family."""
     import api.routes as routes
@@ -953,7 +1136,9 @@ class TestModelSwitchToast:
         # Find the onchange block
         idx = src.find("modelSelect').onchange")
         assert idx != -1, "modelSelect.onchange not found in boot.js"
-        block = src[idx:idx + 1100]
+        end = src.find("$('msg').addEventListener", idx)
+        assert end != -1, "modelSelect.onchange block terminator not found in boot.js"
+        block = src[idx:end]
         assert "model_scope_toast" in block, (
             "modelSelect.onchange must show that the selected model applies to this conversation"
         )
@@ -1013,10 +1198,13 @@ class TestFrontendModelProviderState:
         assert "_modelStateForSelect" in src
         assert "model_provider:modelState.model_provider||null" in src
 
-    def test_new_session_sends_model_provider(self):
+    def test_new_session_carries_visible_picker_model_into_create_request(self):
         src = _read("static/sessions.js")
-        assert "_modelStateForSelect(modelSel,selectedDefaultModel)" in src
-        assert "model_provider:newModelState.model_provider||null" in src
+        start = src.index("async function newSession(")
+        body = src[start:src.index("const data=await api('/api/session/new'", start)]
+        assert "profile:S.activeProfile||'default'" in body
+        assert "reqBody.model=newModelState.model" in body
+        assert "reqBody.model_provider=newModelState.model_provider||null" in body
 
     def test_ui_has_json_model_state_storage(self):
         src = _read("static/ui.js")
@@ -1024,6 +1212,37 @@ class TestFrontendModelProviderState:
         assert "function _writePersistedModelState" in src
         assert "_providerQualifiedModelValueForSelect(sel, modelId)" in src
         assert "return _modelStateForSelect(sel,modelId).model" in src
+
+    def test_named_custom_live_models_keep_provider_prefix(self):
+        """Live models from custom:* providers should keep explicit provider context."""
+        src = _read("static/ui.js")
+        idx = src.find("function _addLiveModelsToSelect")
+        assert idx != -1, "_addLiveModelsToSelect must exist"
+        block = src[idx:idx + 2200]
+        assert "_isNamedCustomActiveProvider=_ap.startsWith('custom:')" in block, (
+            "named custom providers must be recognized during live model hydration"
+        )
+        assert "_providerLower=String(provider||'').toLowerCase()" in block
+        assert "_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap" in block, (
+            "custom:* live model fetches must qualify added model IDs with @custom:name:"
+        )
+
+    def test_named_custom_missing_dropdown_model_does_not_persist_fallback(self):
+        """syncTopbar must not overwrite custom:* selections just because the static picker lacks them."""
+        src = _read("static/ui.js")
+        helper_idx = src.find("function _providerDefersMissingModelFallback")
+        assert helper_idx != -1, "custom-provider missing-model fallback helper must exist"
+        helper = src[helper_idx:helper_idx + 500]
+        assert "p.startsWith('custom:')" in helper, (
+            "named custom providers can route vendor-prefixed models outside the static catalog"
+        )
+        idx = src.find("function syncTopbar")
+        assert idx != -1, "syncTopbar must exist"
+        block = src[idx:idx + 5200]
+        assert "missingModelIsRoutable=_providerDefersMissingModelFallback" in block
+        assert "liveStillPending||missingModelIsRoutable" in block, (
+            "syncTopbar must preserve routable custom:* selections instead of forcing fallback persistence"
+        )
 
 
 def test_unknown_prefix_model_passes_through_unchanged(monkeypatch):
@@ -1211,8 +1430,11 @@ def test_stale_ui_js_does_not_inject_unavailable_option():
         "stale models should be silently reset to the first available model (#829)"
     )
 
-    # The new silent-reset pattern must be present
-    assert "first.value" in src and "S.session.model=first.value" in src, (
-        "renderSession() must silently reset S.session.model to the first "
-        "available option when the session model is not in the dropdown (#829)"
+    # The reset path remains, but #1771 now prefers the configured default
+    # before using the first HTML option as a last-resort fallback.
+    assert "_applySessionModelFallback" in src and "configuredDefault" in src, (
+        "stale session models should be reset through the safe fallback helper"
+    )
+    assert "const first=sel.querySelector('optgroup > option, option');" in src, (
+        "the first available option should remain only as a fallback when no configured default applies"
     )
