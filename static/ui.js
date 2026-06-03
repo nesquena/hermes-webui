@@ -1340,11 +1340,19 @@ function _addLiveModelsToSelect(provider, models, sel){
     sel.appendChild(providerGroup);
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
-  // Normalized dedup: strip one @provider: prefix and namespace so
+  // Normalized dedup: strip @provider: prefix and namespace so
   // 'minimax/minimax-m2.7' matches '@nous:minimax/minimax-m2.7' (#907).
+  // Named custom IDs (@custom:name:model) have a known two-segment prefix
+  // and must strip both to dedup against bare model IDs (#3478).
   const _normId=id=>{
     let s=String(id||'');
-    if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1);
+    if(s.startsWith('@')&&s.includes(':')){
+      if(s.startsWith('@custom:')){
+        s=s.substring(s.lastIndexOf(':')+1)||s;
+      }else{
+        s=s.substring(s.indexOf(':')+1);
+      }
+    }
     s=s.split('/').pop();
     return s.replace(/-/g,'.').toLowerCase();
   };
