@@ -5504,6 +5504,7 @@ def handle_post(handler, parsed) -> bool:
                 # starts from the same point as the original.
                 context_engine=getattr(session, "context_engine", None),
                 context_engine_state=copy.deepcopy(getattr(session, "context_engine_state", None) or {}),
+                todos=copy.deepcopy(getattr(session, "todos", None) or []),
                 created_at=time.time(),
                 updated_at=time.time(),
             )
@@ -6133,6 +6134,7 @@ def handle_post(handler, parsed) -> bool:
             # Context engine — inherit state so branch's context engine starts correctly
             context_engine=getattr(source, "context_engine", None),
             context_engine_state=copy.deepcopy(getattr(source, "context_engine_state", None) or {}),
+            todos=copy.deepcopy(getattr(source, "todos", None) or []),
             parent_session_id=source.session_id,
             session_source="fork",
         )

@@ -1061,7 +1061,7 @@ Resolution: Phase B replaces with thread-local or explicit parameter passing.
     v0.11  Sprint 9 (March 31, 2026):
             Arch: app.js deleted; replaced by ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js
             Features: tool call cards (inline collapsible, live + history), attachment persistence,
-                       todo list panel (parses tool results from session history)
+                       todo list panel (prefers session.todos, falls back to parsing tool results from session history)
             Tests: 10 new, 149/149 total
     v0.9  Sprint 7 (March 31, 2026):
             Features: cron edit+delete, skill create/edit/delete, memory write, session content search

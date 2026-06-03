@@ -433,6 +433,32 @@ def _coerce_session_timestamp(value):
     return dt.astimezone(datetime.timezone.utc).timestamp()
 
 
+_TODO_ALLOWED_STATUSES = {'pending', 'in_progress', 'completed', 'cancelled'}
+
+
+def _normalize_session_todos(value) -> list[dict]:
+    """Return a compact, durable todo list shape safe for session payloads."""
+    if not isinstance(value, list):
+        return []
+    normalized = []
+    for idx, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        content = str(item.get('content') or '').strip()
+        if not content:
+            continue
+        todo_id = str(item.get('id') or f'todo-{idx}').strip() or f'todo-{idx}'
+        status = str(item.get('status') or 'pending').strip().lower()
+        if status not in _TODO_ALLOWED_STATUSES:
+            status = 'pending'
+        normalized.append({
+            'id': todo_id,
+            'content': content,
+            'status': status,
+        })
+    return normalized
+
+
 def _message_timestamp(message):
     if not isinstance(message, dict):
         return None
@@ -611,6 +637,7 @@ class Session:
                 worktree_created_at=None,
                 enabled_toolsets=None,
                 composer_draft=None,
+                todos=None,
                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -668,6 +695,7 @@ class Session:
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        self.todos = _normalize_session_todos(todos)
         raw_message_count = kwargs.get('message_count')
         parsed_message_count = None
         if raw_message_count is not None:
@@ -736,7 +764,7 @@ class Session:
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
-            'enabled_toolsets', 'composer_draft',
+            'enabled_toolsets', 'composer_draft', 'todos',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['message_count'] = len(self.messages or [])
@@ -964,6 +992,7 @@ class Session:
             'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            'todos': self.todos if isinstance(self.todos, list) else [],
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,

@@ -21,7 +21,7 @@
 
 ### Fixed
 
-- The current session todo list can now render as an always-visible checklist directly above the message composer, with completed items ticked/struck through and legacy fallback to transcript-derived todo state preserved.
+- The current session todo list can now render as an always-visible checklist directly above the message composer, with completed items ticked/struck through, a manual collapse toggle, per-session saved open/closed state, and automatic collapse when all items are settled.
 - Hermes `todo` tool runs now persist a normalized per-session `todos` field that the WebUI Todos panel prefers over transcript scraping, so the task list remains visible across refreshes/settled-session reloads while still falling back to legacy tool-message parsing for older sessions.
 - Markdown tables now render inside a horizontal-scroll wrapper and keep short first columns such as `Priority` from collapsing into vertical letter stacks, while long text/code columns wrap more readably.
 - PDF and other local `MEDIA:` previews/download links now resolve against `document.baseURI` instead of using bare `api/media?...` relative URLs, so deep-linked `/session/<id>` pages no longer misroute preview/download requests to `/session/api/media...`; the PDF preview bootstrap also now uses a real dynamic `import()` for PDF.js instead of a broken mixed `script.src` + inline module body loader that left previews stuck at `Loading PDF (0)…`.

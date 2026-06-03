@@ -644,9 +644,196 @@ function _closeImgLightbox(lb) {
   lb.style.animation = 'lb-in .12s ease reverse';
   setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
 }
+function _openPdfPreviewFromWrap(wrap){
+  if(!wrap) return false;
+  const url=wrap.dataset.openUrl||'';
+  if(!url) return false;
+  _openPdfLightbox(url, wrap.dataset.title||'PDF preview', wrap.dataset.downloadUrl||'');
+  return true;
+}
+function _pdfLightboxSetStatus(lb, current, total){
+  if(!lb) return;
+  lb._pdfCurrentPage=Math.max(1, Number(current)||1);
+  lb._pdfTotalPages=Math.max(0, Number(total)||0);
+  const status=lb.querySelector('.pdf-lightbox-page-status');
+  if(status){
+    status.textContent=lb._pdfTotalPages?`${lb._pdfCurrentPage} / ${lb._pdfTotalPages}`:`${lb._pdfCurrentPage}`;
+  }
+  const input=lb.querySelector('.pdf-lightbox-page-input');
+  if(input && document.activeElement!==input){
+    input.value=String(lb._pdfCurrentPage);
+  }
+}
+function _pdfLightboxScrollToPage(lb, pageNum, behavior='smooth'){
+  if(!lb) return;
+  const pages=[...(lb.querySelectorAll('.pdf-lightbox-page[data-page]')||[])];
+  if(!pages.length) return;
+  const total=pages.length;
+  const targetPage=Math.min(total, Math.max(1, Number(pageNum)||1));
+  const target=pages[targetPage-1];
+  const body=lb.querySelector('.pdf-lightbox-body');
+  if(!target || !body) return;
+  body.scrollTo({top:Math.max(0,target.offsetTop-12),behavior});
+  _pdfLightboxSetStatus(lb,targetPage,total);
+}
+function _pdfLightboxSyncCurrentPage(lb){
+  if(!lb) return;
+  const body=lb.querySelector('.pdf-lightbox-body');
+  const pages=[...(lb.querySelectorAll('.pdf-lightbox-page[data-page]')||[])];
+  if(!body || !pages.length) return;
+  const probe=body.scrollTop + body.clientHeight*0.35;
+  let current=1;
+  for(const page of pages){
+    const pageNum=Number(page.dataset.page)||1;
+    if(page.offsetTop<=probe) current=pageNum;
+    else break;
+  }
+  _pdfLightboxSetStatus(lb,current,pages.length);
+}
+async function _renderPdfLightbox(lb, url){
+  if(!lb || !url) return;
+  const body=lb.querySelector('.pdf-lightbox-body');
+  const pagesWrap=lb.querySelector('.pdf-lightbox-pages');
+  const loading=lb.querySelector('.pdf-lightbox-loading');
+  if(!body || !pagesWrap) return;
+  if(loading) loading.textContent=t('pdf_loading','document');
+  pagesWrap.innerHTML='';
+  try{
+    const pdfjsLib=await _ensurePdfJsLoaded();
+    const res=await fetch(url);
+    if(!res.ok) throw new Error(String(res.status||'fetch'));
+    const buf=await res.arrayBuffer();
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    if(lb._pdfClosed) return;
+    lb._pdfDoc=pdf;
+    _pdfLightboxSetStatus(lb,1,pdf.numPages||0);
+    const maxWidth=Math.min(Math.max((body.clientWidth||window.innerWidth)-48,320),1100);
+    for(let i=1;i<=pdf.numPages;i++){
+      if(lb._pdfClosed) return;
+      const page=await pdf.getPage(i);
+      const baseViewport=page.getViewport({scale:1});
+      const scale=maxWidth/baseViewport.width;
+      const viewport=page.getViewport({scale});
+      const canvas=document.createElement('canvas');
+      canvas.className='pdf-lightbox-page-canvas';
+      canvas.width=Math.ceil(viewport.width);
+      canvas.height=Math.ceil(viewport.height);
+      const pageWrap=document.createElement('div');
+      pageWrap.className='pdf-lightbox-page';
+      pageWrap.dataset.page=String(i);
+      const label=document.createElement('div');
+      label.className='pdf-lightbox-page-label';
+      label.textContent=`Page ${i}`;
+      pageWrap.appendChild(label);
+      pageWrap.appendChild(canvas);
+      pagesWrap.appendChild(pageWrap);
+      await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;
+      if(i===1 && loading) loading.hidden=true;
+    }
+    if(loading) loading.hidden=true;
+    _pdfLightboxSyncCurrentPage(lb);
+  }catch(_){
+    if(loading){
+      loading.hidden=false;
+      loading.textContent=t('pdf_error');
+    }
+  }
+}
+function _openPdfLightbox(url, title, downloadUrl){
+  if(!url) return;
+  const lb=document.createElement('div');
+  lb.className='pdf-lightbox';
+  lb.setAttribute('role','dialog');
+  lb.setAttribute('aria-modal','true');
+  lb.setAttribute('aria-label', title||'PDF preview');
+  lb._pdfClosed=false;
+  const dialog=document.createElement('div');
+  dialog.className='pdf-lightbox-dialog';
+  dialog.onclick=e=>e.stopPropagation();
+  const bar=document.createElement('div');
+  bar.className='pdf-lightbox-bar';
+  const titleEl=document.createElement('div');
+  titleEl.className='pdf-lightbox-title';
+  titleEl.textContent=title||'PDF preview';
+  const actions=document.createElement('div');
+  actions.className='pdf-lightbox-actions';
+  const pageStatus=document.createElement('span');
+  pageStatus.className='pdf-lightbox-page-status';
+  pageStatus.textContent='1 / ?';
+  actions.appendChild(pageStatus);
+  const pageInput=document.createElement('input');
+  pageInput.className='pdf-lightbox-page-input';
+  pageInput.type='number';
+  pageInput.min='1';
+  pageInput.inputMode='numeric';
+  pageInput.value='1';
+  pageInput.setAttribute('aria-label','Page number');
+  actions.appendChild(pageInput);
+  const goBtn=document.createElement('button');
+  goBtn.className='pdf-lightbox-go';
+  goBtn.type='button';
+  goBtn.textContent='Go';
+  goBtn.onclick=()=>_pdfLightboxScrollToPage(lb,pageInput.value,'smooth');
+  actions.appendChild(goBtn);
+  pageInput.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){
+      e.preventDefault();
+      _pdfLightboxScrollToPage(lb,pageInput.value,'smooth');
+    }
+  });
+  if(downloadUrl){
+    const dl=document.createElement('a');
+    dl.className='pdf-lightbox-download';
+    dl.href=downloadUrl;
+    dl.download=title||'document.pdf';
+    dl.textContent=t('pdf_download')+' ↓';
+    actions.appendChild(dl);
+  }
+  const close=document.createElement('button');
+  close.className='pdf-lightbox-close';
+  close.type='button';
+  close.setAttribute('aria-label','Close');
+  close.textContent='×';
+  close.onclick=()=>_closePdfLightbox(lb);
+  actions.appendChild(close);
+  bar.appendChild(titleEl);
+  bar.appendChild(actions);
+  const body=document.createElement('div');
+  body.className='pdf-lightbox-body';
+  body.addEventListener('scroll',()=>_pdfLightboxSyncCurrentPage(lb),{passive:true});
+  const loading=document.createElement('div');
+  loading.className='pdf-lightbox-loading';
+  loading.textContent=t('pdf_loading','document');
+  const pagesWrap=document.createElement('div');
+  pagesWrap.className='pdf-lightbox-pages';
+  body.appendChild(loading);
+  body.appendChild(pagesWrap);
+  dialog.appendChild(bar);
+  dialog.appendChild(body);
+  lb.appendChild(dialog);
+  lb.onclick=()=>_closePdfLightbox(lb);
+  document.body.appendChild(lb);
+  lb._keyHandler=e=>{
+    if(e.key==='Escape') _closePdfLightbox(lb);
+  };
+  document.addEventListener('keydown', lb._keyHandler);
+  void _renderPdfLightbox(lb, url);
+}
+function _closePdfLightbox(lb){
+  if(!lb || !lb.parentNode) return;
+  lb._pdfClosed=true;
+  document.removeEventListener('keydown', lb._keyHandler);
+  lb.style.animation='lb-in .12s ease reverse';
+  setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
+}
 
 document.addEventListener('click', e => {
   if(!e.target || !e.target.closest) return;
+  const pdfWrap=e.target.closest('.pdf-preview-wrap--interactive');
+  if(pdfWrap && !e.target.closest('a,button')){
+    _openPdfPreviewFromWrap(pdfWrap);
+    return;
+  }
   const workspaceLink=e.target.closest('a[href^="#workspace="]');
   if(workspaceLink){
     e.preventDefault();
@@ -669,6 +856,14 @@ document.addEventListener('click', e => {
     _openImgLightbox(img);
     return;
   }
+});
+document.addEventListener('keydown', e => {
+  if(!e.target || !e.target.closest) return;
+  if(e.key!=='Enter' && e.key!==' ') return;
+  const pdfWrap=e.target.closest('.pdf-preview-wrap--interactive');
+  if(!pdfWrap) return;
+  e.preventDefault();
+  _openPdfPreviewFromWrap(pdfWrap);
 });
 
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
@@ -3222,8 +3417,9 @@ function renderMd(raw){
       if(/^\[x\] /i.test(text)) _ih='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
       else if(/^\[ \] /.test(text)) _ih='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
       else _ih=inlineMd(text);
-      if(indent) html+=`<li style="margin-left:16px">${_ih}</li>`;
-      else html+=`<li>${_ih}</li>`;
+      const _liCls=/^\x00D\d+\x00$/.test(_ih)?' class="list-block-embed"':'';
+      if(indent) html+=`<li${_liCls} style="margin-left:16px">${_ih}</li>`;
+      else html+=`<li${_liCls}>${_ih}</li>`;
     }
     return html+'</ul>';
   });
@@ -3239,7 +3435,9 @@ function renderMd(raw){
       const num=numMatch?parseInt(numMatch[1],10):null;
       const text=l.replace(/^ {0,4}\d+\. /,'');
       const valAttr=num!==null?` value="${num}"`:'';
-      html+=`<li${valAttr}>${inlineMd(text)}</li>`;
+      const itemHtml=inlineMd(text);
+      const clsAttr=/^\x00D\d+\x00$/.test(itemHtml)?' class="list-block-embed"':'';
+      html+=`<li${clsAttr}${valAttr}>${itemHtml}</li>`;
     }
     return html+'</ol>';
   });
@@ -3439,6 +3637,12 @@ function renderMd(raw){
   const parts=s.split(/\n{2,}/);
   s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|table|div|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
+  // MEDIA placeholders can appear inside backticks in user/assistant markdown
+  // (for example: `MEDIA:/path/file.pdf`). The code-span pass wraps the stash
+  // token in <code>…</code>, but the restore step below wants to emit block/media
+  // HTML. Unwrap those exact code wrappers first so inline PDF/file previews are
+  // not forced inside a <code> element, which breaks list-item/block layout.
+  s=s.replace(/<code>\s*\x00D(\d+)\x00\s*<\/code>/g,(_,i)=>`\x00D${i}\x00`);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
     const ref=media_stash[+i];
@@ -6307,6 +6511,7 @@ function renderMessages(options){
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       requestAnimationFrame(()=>postProcessRenderedMessages(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
+      if(typeof renderComposerTodos==='function') renderComposerTodos();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
@@ -6968,6 +7173,7 @@ function renderMessages(options){
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>postProcessRenderedMessages(inner));
+  if(typeof renderComposerTodos==='function') renderComposerTodos();
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -7780,8 +7986,15 @@ function loadPdfInline(container){
               // Attach the canvas as a DOM node — interpolating its serialized
               // form into a template string parses back as an empty canvas.
               const dlUrl=downloadHref();
+              const openUrl=mediaHref({inline:true});
               const wrap=document.createElement('div');
-              wrap.className='pdf-preview-wrap';
+              wrap.className='pdf-preview-wrap pdf-preview-wrap--interactive';
+              wrap.dataset.openUrl=openUrl;
+              wrap.dataset.downloadUrl=dlUrl;
+              wrap.dataset.title=fname;
+              wrap.tabIndex=0;
+              wrap.setAttribute('role','button');
+              wrap.setAttribute('aria-label',`${fname} — click to expand full-page preview`);
               wrap.innerHTML=`<div class="pdf-preview-header"><span>📄 ${esc(fname)}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body"></div>`;
               wrap.querySelector('.pdf-preview-body').appendChild(canvas);
               el.replaceWith(wrap);

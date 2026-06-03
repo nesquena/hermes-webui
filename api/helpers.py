@@ -337,9 +337,9 @@ def _redact_value(v, *, _enabled: bool | None = None):
 
 
 def redact_session_data(session_dict: dict) -> dict:
-    """Redact credentials from message content and tool_call data before API response.
+    """Redact credentials from message-like session fields before API response.
 
-    Applies to: messages[], tool_calls[], and title.
+    Applies to: messages[], tool_calls[], todos[], and title.
     The underlying session file is not modified; redaction is response-layer only.
 
     Reads the ``api_redact_enabled`` setting ONCE for the entire response and
@@ -357,6 +357,8 @@ def redact_session_data(session_dict: dict) -> dict:
         result['messages'] = _redact_value(result['messages'], _enabled=_enabled)
     if 'tool_calls' in result:
         result['tool_calls'] = _redact_value(result['tool_calls'], _enabled=_enabled)
+    if 'todos' in result:
+        result['todos'] = _redact_value(result['todos'], _enabled=_enabled)
     return result
 
 

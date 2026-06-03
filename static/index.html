@@ -543,7 +543,10 @@
         <button id="queuePill" class="queue-pill" aria-label="Show queued messages" type="button"></button>
       </div>
       <div class="composer-todo-strip" id="composerTodoStrip" hidden>
-        <div class="composer-todo-strip-header" data-i18n="current_task_list">Current task list</div>
+        <button class="composer-todo-toggle" id="composerTodoToggle" type="button" aria-expanded="true" aria-controls="composerTodoList" onclick="toggleComposerTodosCollapsed()">
+          <span class="composer-todo-strip-header" data-i18n="current_task_list">Current task list</span>
+          <span class="composer-todo-toggle-icon" id="composerTodoToggleIcon" aria-hidden="true"></span>
+        </button>
         <div class="composer-todo-list" id="composerTodoList"></div>
       </div>
       <div class="composer-box" id="composerBox">

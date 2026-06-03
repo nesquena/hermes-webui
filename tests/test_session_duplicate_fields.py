@@ -122,6 +122,16 @@ def test_duplicate_copies_enabled_toolsets():
         "Duplicate must copy enabled_toolsets"
 
 
+def test_duplicate_copies_todos():
+    """Explicit session todo state must survive duplication."""
+    block, _ = _extract_duplicate_block()
+    ctor = _find_session_ctor(block)
+    assert _has_field(ctor, 'todos'), \
+        "Duplicate must copy todos"
+    assert _has_deepcopy_for(ctor, 'todos'), \
+        "todos must be deepcopied (mutable list)"
+
+
 def test_duplicate_copies_llm_title_generated():
     """llm_title_generated flag should be preserved to avoid regenerating title."""
     block, _ = _extract_duplicate_block()
@@ -349,6 +359,16 @@ def test_branch_copies_enabled_toolsets():
     ctor = _find_session_ctor(block, 'branch')
     assert _has_field(ctor, 'enabled_toolsets'), \
         "Branch must copy enabled_toolsets"
+
+
+def test_branch_copies_todos():
+    """Branch must inherit explicit session todo state from source."""
+    block, _ = _extract_branch_block()
+    ctor = _find_session_ctor(block, 'branch')
+    assert _has_field(ctor, 'todos'), \
+        "Branch must copy todos"
+    assert _has_deepcopy_for(ctor, 'todos'), \
+        "Branch todos must be deepcopied (mutable list)"
 
 
 def test_branch_copies_context_messages():

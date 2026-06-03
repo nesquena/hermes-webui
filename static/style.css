@@ -1677,7 +1677,12 @@
   .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
   .composer-todo-strip{max-width:clamp(780px,60vw,1100px);margin:0 auto 10px;padding:10px 12px;background:var(--surface);border:1px solid var(--border2);border-radius:12px;color:var(--text);}
   .composer-todo-strip[hidden]{display:none!important;}
+  .composer-todo-strip.is-collapsed .composer-todo-list{display:none;}
+  .composer-todo-toggle{width:100%;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0;background:none;border:none;color:inherit;cursor:pointer;text-align:left;font:inherit;}
+  .composer-todo-toggle:hover .composer-todo-strip-header{color:var(--text);}
   .composer-todo-strip-header{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px;}
+  .composer-todo-toggle-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--muted);}
+  .composer-todo-strip.is-collapsed .composer-todo-strip-header{margin-bottom:0;}
   .composer-todo-list{display:flex;flex-direction:column;gap:6px;}
   .composer-todo-item{display:flex;align-items:flex-start;gap:10px;padding:2px 0;min-width:0;}
   .composer-todo-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px;}
@@ -2218,7 +2223,9 @@
     .msg-role{font-size:12px;}
     .composer-wrap{padding:8px 10px 12px!important;}
     .composer-todo-strip{margin:0 auto 8px;padding:8px 10px;border-radius:10px;}
+    .composer-todo-toggle{gap:10px;}
     .composer-todo-strip-header{margin-bottom:6px;}
+    .composer-todo-strip.is-collapsed .composer-todo-strip-header{margin-bottom:0;}
     .composer-todo-item{gap:8px;}
     .composer-box{border-radius:12px;}
     .composer-box textarea{min-height:40px;}

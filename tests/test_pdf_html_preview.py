@@ -255,6 +255,10 @@ class TestCSSClasses:
     def test_pdf_preview_wrap(self):
         css = _read_css()
         assert '.pdf-preview-wrap' in css
+        assert '.pdf-preview-wrap--interactive' in css, 'PDF preview should expose a clickable interactive state for full-page expand'
+        assert '.msg-body li>.pdf-preview-wrap' in css, 'Inline PDF previews inside markdown list items should align with their bullet instead of dropping to a new line'
+        assert '.msg-body li.list-block-embed' in css, 'List items whose content is just an embed should be tagged for special bullet alignment'
+        assert '.msg-body li.list-block-embed::before' in css, 'Embed-only list items should draw their own bullet so the marker sits at the top of the block like code blocks do'
 
     def test_pdf_preview_header(self):
         css = _read_css()
@@ -276,11 +280,10 @@ class TestCSSClasses:
     def test_pdf_preview_canvas(self):
         css = _read_css()
         assert '.pdf-preview-canvas' in css
-        m = re.search(r'\.pdf-preview-canvas\{[^}]+\}', css)
-        assert m, '.pdf-preview-canvas rule must exist'
-        rule = m.group()
-        assert 'width:auto' in rule, 'PDF canvas should keep its intrinsic width instead of being forced to shrink to the chat column'
-        assert 'max-width:none' in rule, 'PDF canvas should not be hard-clamped to 100% width'
+        rules = re.findall(r'\.pdf-preview-canvas\{[^}]+\}', css)
+        assert rules, '.pdf-preview-canvas rule must exist'
+        assert any('width:auto' in rule for rule in rules), 'PDF canvas should keep its intrinsic width instead of being forced to shrink to the chat column'
+        assert any('max-width:none' in rule for rule in rules), 'PDF canvas should not be hard-clamped to 100% width'
 
     def test_pdf_preview_fallback(self):
         css = _read_css()
@@ -290,6 +293,19 @@ class TestCSSClasses:
         css = _read_css()
         # pdf-download-link class used in JS; styled via header a selector
         assert '.pdf-download-link' in css or '.pdf-preview-header a' in css
+
+    def test_pdf_lightbox_css(self):
+        css = _read_css()
+        for cls in ['.pdf-lightbox', '.pdf-lightbox-dialog', '.pdf-lightbox-bar', '.pdf-lightbox-body', '.pdf-lightbox-pages', '.pdf-lightbox-page', '.pdf-lightbox-page-canvas', '.pdf-lightbox-page-input', '.pdf-lightbox-go', '.pdf-lightbox-close']:
+            assert cls in css, f'{cls} must be defined for full-page PDF.js preview overlay'
+        overlay = re.search(r'\.pdf-lightbox\{[^}]+\}', css)
+        dialog = re.search(r'\.pdf-lightbox-dialog\{[^}]+\}', css)
+        bar = re.search(r'\.pdf-lightbox-bar\{[^}]+\}', css)
+        body = re.search(r'\.pdf-lightbox-body\{[^}]+\}', css)
+        assert overlay and 'padding:8px' in overlay.group(), 'Quick tighten should reduce outer PDF modal padding'
+        assert dialog and 'width:min(98vw,1440px)' in dialog.group() and 'height:min(96vh,1160px)' in dialog.group(), 'Quick tighten should expand the usable PDF dialog area'
+        assert bar and 'padding:6px 10px' in bar.group(), 'Quick tighten should reduce title-bar padding'
+        assert body and 'overflow:auto' in body.group(), 'PDF.js full viewer body should support continuous vertical scroll'
 
     def test_html_preview_wrap(self):
         css = _read_css()
@@ -396,3 +412,22 @@ class TestPdfCanvasAttachmentNotSerialized:
             'PDF preview must attach the rendered canvas as a DOM node '
             '(appendChild / replaceWith), not interpolate it as a string'
         )
+
+    def test_pdf_preview_wrap_is_marked_interactive_with_open_url(self):
+        block = self._pdf_block()
+        assert 'pdf-preview-wrap--interactive' in block, 'Rendered PDF preview should be marked interactive for click-to-expand behavior'
+        assert 'wrap.dataset.openUrl=openUrl' in block, 'Rendered PDF preview should carry a full-preview URL'
+        assert "wrap.setAttribute('role','button')" in block, 'Rendered PDF preview should expose button semantics for keyboard users'
+        ui = _read_js('ui.js')
+        assert "const _liCls=/^\\x00D\\d+\\x00$/.test(_ih)?' class=\"list-block-embed\"':'';" in ui, 'Unordered markdown list items that are pure embed placeholders should be tagged for special bullet alignment'
+        assert "const clsAttr=/^\\x00D\\d+\\x00$/.test(itemHtml)?' class=\"list-block-embed\"':'';" in ui, 'Ordered markdown list items that are pure embed placeholders should be tagged for special bullet alignment'
+
+    def test_pdf_lightbox_helpers_exist(self):
+        ui = _read_js('ui.js')
+        for fn in ['function _openPdfLightbox', 'function _closePdfLightbox', 'function _openPdfPreviewFromWrap', 'function _pdfLightboxSetStatus', 'function _pdfLightboxScrollToPage', 'function _pdfLightboxSyncCurrentPage', 'async function _renderPdfLightbox']:
+            assert fn in ui, f'{fn} must exist for the PDF.js full viewer'
+        assert 'pageStatus.className=' in ui and 'pdf-lightbox-page-status' in ui, 'PDF.js viewer should expose current-page status'
+        assert "pageInput.className='pdf-lightbox-page-input'" in ui, 'PDF.js viewer should expose a jump-to-page input'
+        assert "goBtn.className='pdf-lightbox-go'" in ui, 'PDF.js viewer should expose a jump-to-page action'
+        assert "body.addEventListener('scroll',()=>_pdfLightboxSyncCurrentPage(lb),{passive:true});" in ui, 'PDF.js viewer should track the visible page while scrolling'
+        assert "const pagesWrap=document.createElement('div');" in ui and "pagesWrap.className='pdf-lightbox-pages'" in ui, 'PDF.js viewer should render into a dedicated multi-page container'

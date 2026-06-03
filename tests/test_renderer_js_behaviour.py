@@ -86,6 +86,17 @@ def _render(driver_path, markdown: str) -> str:
     return result.stdout
 
 
+def test_inline_backticked_media_pdf_not_wrapped_in_code(driver_path):
+    md = "- `MEDIA:/root/.hermes/webui/attachments/37023dbd9641/pdf_exports/SOW_DreamIT_redline_jamie_tracked.pdf`"
+    out = _render(driver_path, md)
+    assert '<code><div class="pdf-preview-load"' not in out, (
+        'MEDIA PDF previews must not be restored inside <code> when users wrap the MEDIA token in backticks'
+    )
+    assert '<li><div class="pdf-preview-load"' in out or '<li class="list-block-embed">' in out, (
+        'Backticked MEDIA PDF inside a list item should restore as the preview block itself, not a code span'
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Blockquote prefix strip — the bug commit 04e7b53 introduced was a one-char
 # regex regression where `^>[\t]?` (only tab) replaced `^>[ \t]?` (space or

@@ -275,6 +275,9 @@ def test_redact_session_data_messages():
             {"name": "terminal", "args": {"command": f"gh auth login --token {_FAKE_GITHUB_PAT}"},
              "snippet": "ok"},
         ],
+        "todos": [
+            {"id": "t1", "content": f"rotate {_FAKE_GITHUB_PAT}", "status": "pending"},
+        ],
     }
     result = redact_session_data(session)
     dump = json.dumps(result)

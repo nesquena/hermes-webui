@@ -259,21 +259,38 @@ def test_done_handler_guards_setbusy_with_inflight_check(cleanup_test_sessions):
 
 
 def test_refresh_handler_does_not_drop_tool_messages_needed_by_todos(cleanup_test_sessions):
-    """Todo panel state must survive session reload/refresh.
+    """Todo surfaces must survive session reload/refresh.
     The UI can hide tool-role messages from the visible transcript, but it must not
-    destroy the raw session messages because loadTodos reconstructs state from the
-    latest todo tool output.
+    destroy the raw session messages because todo state can still fall back to the
+    latest todo tool output when explicit session.todos is absent.
     """
     sessions_src = (REPO_ROOT / "static/sessions.js").read_text()
     ui_src = (REPO_ROOT / "static/ui.js").read_text()
     panels_src = (REPO_ROOT / "static/panels.js").read_text()
+    index_src = (REPO_ROOT / "static/index.html").read_text()
 
     assert "data.session.messages=(data.session.messages||[]).filter(" not in sessions_src, \
         "sessions.js must not overwrite raw session.messages when filtering transcript display"
     assert "S.messages = (data.session.messages || []).filter(" not in ui_src, \
         "ui.js refreshSession must not rebuild S.messages by discarding tool messages from the raw session payload"
+    assert "function _getCurrentSessionTodos()" in panels_src, \
+        "panels.js must expose shared current-session todo resolution"
+    assert "function renderComposerTodos()" in panels_src, \
+        "panels.js must render the composer todo strip from shared todo state"
+    assert "function toggleComposerTodosCollapsed()" in panels_src, \
+        "panels.js must expose a manual collapse toggle for the composer todo strip"
+    assert "function _composerTodosStateKey()" in panels_src and "localStorage.setItem(key, JSON.stringify(state || {}));" in panels_src, \
+        "composer todo collapse state must persist per session in localStorage"
+    assert "collapsed = !hasActive;" in panels_src, \
+        "composer todo strip should auto-collapse when all items are settled"
+    assert "let todos = Array.isArray(S.session && S.session.todos) ? S.session.todos : [];" in panels_src, \
+        "todo renderers must prefer explicit session.todos when available"
     assert "const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;" in panels_src, \
-        "loadTodos must prefer raw S.session.messages so todo state survives reloads"
+        "todo renderers must still fall back to raw S.session.messages so legacy todo state survives reloads"
+    assert "id=\"composerTodoStrip\"" in index_src and "id=\"composerTodoList\"" in index_src and "id=\"composerTodoToggle\"" in index_src, \
+        "index.html must include composer todo strip markup and collapse toggle above the message prompt"
+    assert "if(typeof renderComposerTodos==='function') renderComposerTodos();" in ui_src, \
+        "ui.js must refresh the composer todo strip when messages render"
 
 
 def test_cancel_button_not_cleared_across_sessions(cleanup_test_sessions):

@@ -2647,38 +2647,163 @@ async function loadKanbanTask(taskId){
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
 }
 
+function _getCurrentSessionTodos() {
+  const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;
+  let todos = Array.isArray(S.session && S.session.todos) ? S.session.todos : [];
+  // Back-compat fallback: parse the most recent todo state from tool message history.
+  if (!todos.length) {
+    for (let i = sourceMessages.length - 1; i >= 0; i--) {
+      const m = sourceMessages[i];
+      if (m && m.role === 'tool') {
+        try {
+          const d = JSON.parse(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
+          if (d && Array.isArray(d.todos) && d.todos.length) {
+            todos = d.todos;
+            break;
+          }
+        } catch(e) {}
+      }
+    }
+  }
+  return Array.isArray(todos) ? todos : [];
+}
+
+function _todoStatusMeta(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  return {
+    pending: { icon: li('square',14), color: 'var(--muted)' },
+    in_progress: { icon: li('loader',14), color: 'var(--blue)' },
+    completed: { icon: li('check',14), color: 'rgba(100,200,100,.88)' },
+    cancelled: { icon: li('x',14), color: 'rgba(200,100,100,.6)' },
+  }[normalized] || { icon: li('square',14), color: 'var(--muted)' };
+}
+
+function _renderTodoItemsHtml(todos, opts) {
+  const options = opts || {};
+  const compact = !!options.compact;
+  return todos.map(t => {
+    const meta = _todoStatusMeta(t.status);
+    const completed = String(t.status || '').trim().toLowerCase() === 'completed';
+    const cancelled = String(t.status || '').trim().toLowerCase() === 'cancelled';
+    if (compact) {
+      return `
+        <div class="composer-todo-item${completed?' is-completed':''}${cancelled?' is-cancelled':''}">
+          <span class="composer-todo-icon" style="color:${meta.color}">${meta.icon}</span>
+          <span class="composer-todo-text">${esc(t.content)}</span>
+        </div>`;
+    }
+    return `
+      <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
+        <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${meta.color}">${meta.icon}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;color:${completed?'var(--muted)':'var(--text)'};${completed?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(t.content)}</div>
+          <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(t.id)} · ${esc(t.status)}</div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function _composerTodosStateKey() {
+  const sid = S.session && S.session.session_id;
+  return sid ? `hermes-webui-composer-todos:${sid}` : null;
+}
+
+function _readComposerTodosUiState() {
+  const key = _composerTodosStateKey();
+  if (!key) return null;
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch(_) {
+    return null;
+  }
+}
+
+function _writeComposerTodosUiState(state) {
+  const key = _composerTodosStateKey();
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify(state || {}));
+  } catch(_) {}
+}
+
+function _composerTodosSignature(todos) {
+  return JSON.stringify((todos || []).map(t => [t && t.id, t && t.status, t && t.content]));
+}
+
+function _hasActiveComposerTodos(todos) {
+  return Array.isArray(todos) && todos.some(t => {
+    const status = String(t && t.status || '').trim().toLowerCase();
+    return status === 'pending' || status === 'in_progress';
+  });
+}
+
+function _setComposerTodosCollapsed(collapsed, opts) {
+  const wrap = $('composerTodoStrip');
+  const list = $('composerTodoList');
+  const toggle = $('composerTodoToggle');
+  const icon = $('composerTodoToggleIcon');
+  if (!wrap || !list || !toggle || !icon) return;
+  wrap.classList.toggle('is-collapsed', !!collapsed);
+  list.hidden = !!collapsed;
+  toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  icon.innerHTML = collapsed ? li('chevron-down', 14) : li('chevron-up', 14);
+  const options = opts || {};
+  if (options.persist !== false) {
+    const state = _readComposerTodosUiState() || {};
+    state.collapsed = !!collapsed;
+    if (options.signature != null) state.signature = options.signature;
+    _writeComposerTodosUiState(state);
+  }
+}
+
+function toggleComposerTodosCollapsed() {
+  const wrap = $('composerTodoStrip');
+  const todos = _getCurrentSessionTodos();
+  if (!wrap || !todos.length) return;
+  const signature = _composerTodosSignature(todos);
+  const nextCollapsed = !wrap.classList.contains('is-collapsed');
+  _setComposerTodosCollapsed(nextCollapsed, { persist: true, signature });
+}
+
+function renderComposerTodos() {
+  const wrap = $('composerTodoStrip');
+  const list = $('composerTodoList');
+  const toggle = $('composerTodoToggle');
+  if (!wrap || !list || !toggle) return;
+  const todos = _getCurrentSessionTodos();
+  if (!todos.length) {
+    wrap.hidden = true;
+    wrap.classList.remove('is-collapsed');
+    list.hidden = false;
+    list.innerHTML = '';
+    toggle.setAttribute('aria-expanded', 'true');
+    return;
+  }
+  const signature = _composerTodosSignature(todos);
+  const saved = _readComposerTodosUiState();
+  const hasActive = _hasActiveComposerTodos(todos);
+  let collapsed;
+  if (!saved || saved.signature !== signature) {
+    collapsed = !hasActive;
+    _writeComposerTodosUiState({ collapsed, signature });
+  } else {
+    collapsed = !!saved.collapsed;
+  }
+  wrap.hidden = false;
+  list.innerHTML = _renderTodoItemsHtml(todos, { compact: true });
+  _setComposerTodosCollapsed(collapsed, { persist: false, signature });
+}
+
 function loadTodos() {
   const panel = $('todoPanel');
   if (!panel) return;
-  const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;
-  // Parse the most recent todo state from message history
-  let todos = [];
-  for (let i = sourceMessages.length - 1; i >= 0; i--) {
-    const m = sourceMessages[i];
-    if (m && m.role === 'tool') {
-      try {
-        const d = JSON.parse(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
-        if (d && Array.isArray(d.todos) && d.todos.length) {
-          todos = d.todos;
-          break;
-        }
-      } catch(e) {}
-    }
-  }
+  const todos = _getCurrentSessionTodos();
   if (!todos.length) {
     panel.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:4px 0">${esc(t('todos_no_active'))}</div>`;
     return;
   }
-  const statusIcon = {pending:li('square',14), in_progress:li('loader',14), completed:li('check',14), cancelled:li('x',14)};
-  const statusColor = {pending:'var(--muted)', in_progress:'var(--blue)', completed:'rgba(100,200,100,.8)', cancelled:'rgba(200,100,100,.5)'};
-  panel.innerHTML = todos.map(t => `
-    <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[t.status]||'var(--muted)'}">${statusIcon[t.status]||li('square',14)}</span>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:13px;color:${t.status==='completed'?'var(--muted)':t.status==='in_progress'?'var(--text)':'var(--text)'};${t.status==='completed'?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(t.content)}</div>
-        <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(t.id)} · ${esc(t.status)}</div>
-      </div>
-    </div>`).join('');
+  panel.innerHTML = _renderTodoItemsHtml(todos, { compact: false });
 }
 
 // ────────────────────────────────────────────────────────────────────────────
