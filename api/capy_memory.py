@@ -489,6 +489,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_assignees_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_collaborators_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_collaborators_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_participation_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_participation_path_repo(origin_uri)
@@ -4943,6 +4948,150 @@ def _github_assignees_refresh_summary(origin_uri: str, payload: list[Any]) -> st
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_collaborators_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _segment_looks_like_collaborators(raw_segment: str) -> bool:
+        segment = raw_segment.lower()
+        return segment == "collaborators" or segment.startswith("collaborators")
+
+    def _matches_collaborators_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 4 and path[0] == "" and lowered[1] == "repos" and any(
+            _segment_looks_like_collaborators(segment) for segment in path[3:]
+        )
+
+    return _matches_collaborators_shape(parts.path) or _matches_collaborators_shape(unquote(parts.path))
+
+
+def _github_collaborators_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com" or parts.scheme != "https" or parts.netloc != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "collaborators"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_collaborator_login_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    login = value.strip()
+    if not login or login != value:
+        return False
+    if _safe_public_text(login, limit=80) != login or _refresh_value_is_blocked(login):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", login))
+
+
+def _github_collaborator_id_is_safe(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and 0 < value <= 10_000_000_000
+
+
+def _github_collaborator_role_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    role = value.strip()
+    if not role or role != value:
+        return False
+    if _safe_public_text(role, limit=60) != role or _refresh_value_is_blocked(role):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,59}", role))
+
+
+def _github_collaborator_ignored_value_is_safe(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str)
+            and not _refresh_value_is_blocked(key)
+            and _github_collaborator_ignored_value_is_safe(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return all(_github_collaborator_ignored_value_is_safe(item) for item in value)
+    return not _refresh_value_is_blocked(value)
+
+
+def _github_collaborator_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    allowed_summary_keys = {"login", "id", "role_name", "site_admin"}
+    allowed_ignored_keys = {
+        "avatar_url",
+        "events_url",
+        "followers_url",
+        "following_url",
+        "gists_url",
+        "gravatar_id",
+        "html_url",
+        "node_id",
+        "organizations_url",
+        "permissions",
+        "received_events_url",
+        "repos_url",
+        "site_admin",
+        "starred_url",
+        "subscriptions_url",
+        "type",
+        "url",
+        "user_view_type",
+    }
+    for key, value in row.items():
+        if key in allowed_summary_keys:
+            continue
+        if key not in allowed_ignored_keys or not _github_collaborator_ignored_value_is_safe(value):
+            return False
+    if not _github_collaborator_login_is_safe(row.get("login")):
+        return False
+    if not _github_collaborator_id_is_safe(row.get("id")):
+        return False
+    if "role_name" in row and not _github_collaborator_role_name_is_safe(row.get("role_name")):
+        return False
+    if "site_admin" in row and not isinstance(row.get("site_admin"), bool):
+        return False
+    return True
+
+
+def _json_payload_is_github_collaborators_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_collaborators_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_collaborator_row_is_safe(row) for row in payload)
+
+
+def _github_collaborators_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_collaborators_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_collaborator_row_is_safe(row)]
+    parts = [f"GitHub collaborators for {repo}", f"collaborator count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        login = _safe_public_text(row.get("login"), limit=80)
+        row_parts = [f"collaborator: {login}", f"id: {int(row.get('id'))}"]
+        if "role_name" in row:
+            row_parts.append(f"role: {_safe_public_text(row.get('role_name'), limit=60)}")
+        if "site_admin" in row:
+            row_parts.append(f"site admin: {str(row.get('site_admin')).lower()}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -5167,6 +5316,20 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
     if _github_assignees_path_matches(origin_uri):
+        raise ValueError("refresh failed")
+    collaborators_repo = _github_collaborators_path_repo(origin_uri)
+    if collaborators_repo:
+        if not _json_payload_is_github_collaborators_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub collaborators {collaborators_repo}"
+        summary = _github_collaborators_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_collaborators_path_matches(origin_uri):
         raise ValueError("refresh failed")
     forks_repo = _github_forks_path_repo(origin_uri)
     if forks_repo:
@@ -5500,6 +5663,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_assignees_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_assignees_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_collaborators_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_collaborators_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_license_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_license_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -5564,6 +5730,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_assignees_path_matches(safe_origin_uri):
         if not _github_assignees_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_collaborators_path_matches(safe_origin_uri):
+        if not _github_collaborators_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     request = Request(
@@ -5660,6 +5830,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_assignees_path_matches(safe_origin_uri) and (
             not _github_assignees_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_collaborators_path_matches(safe_origin_uri) and (
+            not _github_collaborators_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -6281,6 +6456,11 @@ def run_source_refresh_jobs(
         source_id = _safe_public_id(payload.get("source_id"), fallback="source")
         raw_origin_uri = str(payload.get("origin_uri") or "").strip()
         if _github_issue_labels_path_matches(raw_origin_uri) and not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com"):
+            origin_uri = f"capy-memory://{source_id}"
+        elif _github_collaborators_path_matches(raw_origin_uri) and (
+            not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
+            or not _github_collaborators_path_repo(raw_origin_uri)
+        ):
             origin_uri = f"capy-memory://{source_id}"
         elif (
             (
