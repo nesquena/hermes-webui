@@ -40,7 +40,9 @@ def test_llm_wiki_status_reads_synthetic_fixture_without_exposing_content(tmp_pa
     assert status["page_count"] == 2
     assert status["raw_source_count"] == 1
     assert status["last_updated"] is not None
-    assert status["last_writer"] is None
+    # log.md in the fixture has a "## [2026-05-04] update | ..." heading,
+    # so the new last-writer reader must surface that action verb.
+    assert status["last_writer"] == "ai-agent (update)"
     assert status["toggle_available"] is False
     assert status["docs_url"].endswith("/research-llm-wiki")
     serialized = repr(status)
