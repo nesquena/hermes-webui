@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from tests._pytest_port import BASE
+from tests._pytest_port import TEST_PORT
 
 
 # ── SO_EXCLUSIVEADDRUSE on Windows ──────────────────────────────────────────
@@ -18,7 +18,7 @@ from tests._pytest_port import BASE
 @pytest.mark.skipif(sys.platform != 'win32', reason='Windows-only socket option')
 def test_exclusive_addr_use_set_on_windows():
     from server import QuietHTTPServer
-    port = BASE + 901
+    port = TEST_PORT + 901
     httpd = QuietHTTPServer(('127.0.0.1', port), BaseHTTPRequestHandler)
     try:
         val = httpd.socket.getsockopt(
@@ -36,7 +36,7 @@ def test_probe_detects_live_server():
     """_abort_if_already_serving must call sys.exit when a live server responds."""
     from server import _abort_if_already_serving
 
-    port = BASE + 902
+    port = TEST_PORT + 902
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
@@ -61,7 +61,7 @@ def test_probe_allows_startup_when_nothing_listening():
     """_abort_if_already_serving must return normally on a free port."""
     from server import _abort_if_already_serving
 
-    port = BASE + 903
+    port = TEST_PORT + 903
     _abort_if_already_serving('127.0.0.1', port)
 
 
@@ -70,7 +70,7 @@ def test_probe_allows_startup_on_unresponsive_socket():
     kernel backlog) should not block startup."""
     from server import _abort_if_already_serving
 
-    port = BASE + 904
+    port = TEST_PORT + 904
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(('127.0.0.1', port))
@@ -85,6 +85,6 @@ def test_probe_normalizes_wildcard_host():
     """0.0.0.0 and :: should probe 127.0.0.1, not the literal wildcard."""
     from server import _abort_if_already_serving
 
-    port = BASE + 905
+    port = TEST_PORT + 905
     _abort_if_already_serving('0.0.0.0', port)
     _abort_if_already_serving('::', port)
