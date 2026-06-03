@@ -499,6 +499,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_teams_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_pull_requested_reviewers_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or _github_pull_requested_reviewers_path_info(raw_origin_text) is None
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_participation_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_participation_path_repo(origin_uri)
@@ -4544,6 +4549,122 @@ def _github_pull_files_refresh_summary(origin_uri: str, payload: list[Any]) -> s
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_pull_requested_reviewers_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _matches_requested_reviewers_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 6
+            and path[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "pulls"
+            and any(segment.startswith("requested_reviewers") for segment in lowered[5:] if segment)
+        )
+
+    return _matches_requested_reviewers_shape(parts.path) or _matches_requested_reviewers_shape(unquote(parts.path))
+
+
+def _github_pull_requested_reviewers_path_info(origin_uri: str) -> tuple[str, int] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme != "https" or (parts.hostname or "").strip().lower() != "api.github.com" or port is not None:
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "pulls"
+        or not re.fullmatch(r"[1-9][0-9]*", path[5])
+        or path[6] != "requested_reviewers"
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", int(path[5])
+
+
+def _github_requested_reviewer_user_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if "id" in row and _safe_optional_nonnegative_int(row.get("id")) is None:
+        return False
+    raw_login = row.get("login")
+    if not isinstance(raw_login, str) or not _github_comment_login_is_safe(raw_login):
+        return False
+    return True
+
+
+def _github_requested_reviewer_team_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if "id" in row and _safe_optional_nonnegative_int(row.get("id")) is None:
+        return False
+    raw_slug = row.get("slug")
+    if not isinstance(raw_slug, str) or not _github_team_slug_is_safe(raw_slug):
+        return False
+    return True
+
+
+def _json_payload_is_github_pull_requested_reviewers_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_pull_requested_reviewers_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if any(key in payload for key in ("version", "items")):
+        return False
+    users = payload.get("users")
+    teams = payload.get("teams")
+    if not isinstance(users, list) or not isinstance(teams, list):
+        return False
+    if len(users) > 500 or len(teams) > 500:
+        return False
+    return all(_github_requested_reviewer_user_row_is_safe(row) for row in users) and all(
+        _github_requested_reviewer_team_row_is_safe(row) for row in teams
+    )
+
+
+def _github_pull_requested_reviewers_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    _repo, number = _github_pull_requested_reviewers_path_info(origin_uri) or ("repository", 0)
+    raw_users = payload.get("users")
+    raw_teams = payload.get("teams")
+    users: list[Any] = raw_users if isinstance(raw_users, list) else []
+    teams: list[Any] = raw_teams if isinstance(raw_teams, list) else []
+    reviewer_logins = [
+        _safe_public_text(row.get("login"), limit=80)
+        for row in users
+        if _github_requested_reviewer_user_row_is_safe(row)
+    ]
+    team_slugs = [
+        _safe_public_text(row.get("slug"), limit=100)
+        for row in teams
+        if _github_requested_reviewer_team_row_is_safe(row)
+    ]
+    parts = [
+        f"GitHub pull request #{number} requested reviewers",
+        f"reviewer count: {len(users)}",
+        f"team count: {len(teams)}",
+    ]
+    if reviewer_logins:
+        parts.append(f"reviewers: {', '.join(reviewer_logins[:5])}")
+    if team_slugs:
+        parts.append(f"teams: {', '.join(team_slugs[:5])}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_contributors_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -5755,6 +5876,19 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    requested_reviewers_info = _github_pull_requested_reviewers_path_info(origin_uri)
+    if requested_reviewers_info is not None:
+        if not _json_payload_is_github_pull_requested_reviewers_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        _repo, number = requested_reviewers_info
+        return {
+            "metadata_only": True,
+            "title": f"GitHub PR requested reviewers #{number}",
+            "summary": _github_pull_requested_reviewers_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_pull_requested_reviewers_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     if _json_payload_is_github_pull_commits_metadata(origin_uri, payload):
         title = f"GitHub PR commits #{(_github_pull_commits_path_number(origin_uri) or 0)}"
         summary = _github_pull_commits_refresh_summary(origin_uri, payload)
@@ -6272,6 +6406,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_teams_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_teams_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_pull_requested_reviewers_path_matches(raw_origin_uri):
+        if (
+            not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
+            or _github_pull_requested_reviewers_path_info(raw_origin_uri) is None
+        ):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_contents_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or _github_contents_path_info(raw_origin_uri) is None:
             raise RuntimeError("refresh fetcher disabled")
@@ -6362,6 +6502,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_teams_path_matches(safe_origin_uri):
         if not _github_teams_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_pull_requested_reviewers_path_matches(safe_origin_uri):
+        if (
+            _github_pull_requested_reviewers_path_info(safe_origin_uri) is None
+            or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com")
+        ):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     request = Request(
@@ -6483,6 +6630,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_teams_path_matches(safe_origin_uri) and (
             not _github_teams_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_pull_requested_reviewers_path_matches(safe_origin_uri) and (
+            _github_pull_requested_reviewers_path_info(safe_origin_uri) is None
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
