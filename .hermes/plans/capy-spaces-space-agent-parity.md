@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-spaces): show system widget safety receipts`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the trusted system-widget add flow now preserves and renders backend `autonomy_policy`, `progress_event`, and `output_compaction` receipts after the widget manager refresh.
+  - Kept the UI receipt metadata-only: hostile fixture renderer/script/API-auth/raw-prompt/secret fields in the route response remain absent from the DOM while the visible card shows action policy, required preflight, model-route hint, system-widget progress, and compaction evidence.
+
 - `feat(spaces): record widget-event list progress`
   - Added RED/GREEN backend coverage proving widget-event list tool responses now emit metadata-only `tool.completed` progress receipts with safe `widget.events:<space_id>` run ids and thread those run ids into regenerated output-compaction evidence.
   - Kept inbox reads redacted and advisory-only: ignored request renderer/source/API-auth fields, scripts, tokens, secret-looking values, and persisted prompt-like event details are not exposed.
