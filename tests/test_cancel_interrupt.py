@@ -163,3 +163,128 @@ class TestCancelInterrupt:
         event_type, data = q.get_nowait()
         assert event_type == 'cancel'
         assert data['message'] == 'Cancelled by user'
+
+    def test_cancel_preserves_partial_text_when_interrupt_pops_buffers(self):
+        """Regression (Codex pre-release finding on #3475): the partial-text /
+        reasoning / tool-call buffers must be snapshotted UNDER streams_lock
+        BEFORE agent.interrupt() runs. Otherwise the worker's finally block can
+        pop those live buffers (it does so under STREAMS_LOCK) the instant the
+        interrupt wakes it, and the cancelled turn silently loses its
+        already-streamed partial text.
+
+        We simulate that race deterministically: the mock agent's interrupt()
+        clears the live STREAM_* maps, mimicking the worker finally. The fix
+        must still persist the partial text captured before the interrupt.
+        """
+        from unittest.mock import patch
+        from api.config import (
+            STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
+        )
+
+        stream_id = "race_stream_partial"
+        session_id = "sess_race_partial"
+
+        q = queue.Queue()
+        STREAMS[stream_id] = q
+        CANCEL_FLAGS[stream_id] = threading.Event()
+        STREAM_PARTIAL_TEXT[stream_id] = "partial answer so far"
+        STREAM_REASONING_TEXT[stream_id] = "thinking..."
+        STREAM_LIVE_TOOL_CALLS[stream_id] = [{"name": "search"}]
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+
+        def _interrupt(_msg):
+            # Mimic the worker's finally block popping the live buffers the
+            # moment the interrupt wakes it (it runs under STREAMS_LOCK in prod;
+            # here we just clear to model the worst-case post-interrupt state).
+            STREAM_PARTIAL_TEXT.pop(stream_id, None)
+            STREAM_REASONING_TEXT.pop(stream_id, None)
+            STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
+
+        mock_agent.interrupt = Mock(side_effect=_interrupt)
+        AGENT_INSTANCES[stream_id] = mock_agent
+
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = []
+        mock_session.save = Mock()
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+        mock_agent.interrupt.assert_called_once_with("Cancelled by user")
+        # The cancelled turn must carry the partial text that was live BEFORE the
+        # interrupt popped the buffers. Find it in the appended messages.
+        appended = [m for m in mock_session.messages if isinstance(m, dict)]
+        joined = " ".join(str(m.get("content", "")) for m in appended)
+        assert "partial answer so far" in joined, (
+            "cancelled turn lost its already-streamed partial text — the snapshot "
+            "must be captured under streams_lock BEFORE agent.interrupt()"
+        )
+
+    def test_cancel_preserves_partial_text_on_detached_active_run_path(self):
+        """Regression (Codex 2nd pre-release finding on #3475): the under-lock
+        snapshot must also cover the STREAMS-absent / ACTIVE_RUNS-present path.
+        When the browser SSE has detached (no STREAMS entry) but the worker is
+        still live in ACTIVE_RUNS, cancel resolves the agent from
+        SESSION_AGENT_CACHE; the partial-text snapshot must still be taken
+        before agent.interrupt() pops the live buffers.
+        """
+        from unittest.mock import patch
+        from api.config import (
+            STREAM_PARTIAL_TEXT, STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
+        )
+
+        stream_id = "detached_race_stream"
+        session_id = "sess_detached_race"
+
+        # NOTE: deliberately NO STREAMS entry — this is the detached path.
+        STREAM_PARTIAL_TEXT[stream_id] = "detached partial text"
+        STREAM_REASONING_TEXT[stream_id] = "detached reasoning"
+        STREAM_LIVE_TOOL_CALLS[stream_id] = [{"name": "tool"}]
+
+        mock_agent = Mock()
+        mock_agent.session_id = session_id
+
+        def _interrupt(_msg):
+            STREAM_PARTIAL_TEXT.pop(stream_id, None)
+            STREAM_REASONING_TEXT.pop(stream_id, None)
+            STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)
+
+        mock_agent.interrupt = Mock(side_effect=_interrupt)
+
+        ACTIVE_RUNS[stream_id] = {
+            "session_id": session_id,
+            "started_at": 1.0,
+            "phase": "running",
+        }
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[session_id] = (mock_agent, "sig")
+
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "q"
+        mock_session.pending_attachments = []
+        mock_session.pending_started_at = 1.0
+        mock_session.messages = []
+        mock_session.save = Mock()
+
+        with patch("api.streaming.get_session", return_value=mock_session), \
+                patch("api.streaming._cached_agent_matches_session", return_value=True):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+        mock_agent.interrupt.assert_called_once_with("Cancelled by user")
+        appended = [m for m in mock_session.messages if isinstance(m, dict)]
+        joined = " ".join(str(m.get("content", "")) for m in appended)
+        assert "detached partial text" in joined, (
+            "detached-path cancel lost its partial text — the under-lock snapshot "
+            "must cover the ACTIVE_RUNS-only path too, not just STREAMS-present"
+        )

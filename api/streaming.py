@@ -7024,9 +7024,41 @@ def cancel_stream(stream_id: str) -> bool:
     stream_present = False
     agent = None
     q = None
+    # Snapshots captured UNDER streams_lock so the worker's finally block (which
+    # pops STREAM_PARTIAL_TEXT/REASONING/TOOL_CALLS under STREAMS_LOCK) cannot
+    # race agent.interrupt() and clear these buffers before we read them — a
+    # cancelled turn would otherwise silently lose its already-streamed
+    # partial text / reasoning / tool-calls (Codex pre-release finding).
+    _snap_partial_text = None
+    _snap_reasoning = None
+    _snap_tool_calls = None
+    _snap_flag = None
+    _snap_agent = None
 
     with streams_lock:
         stream_present = stream_id in streams
+        # Snapshot everything the worker's finally could pop, WHILE the lock is
+        # held and before any interrupt lets that finally run — for BOTH the
+        # STREAMS-present and the ACTIVE_RUNS-only (detached) paths. The buffers
+        # are keyed by stream_id independent of STREAMS membership, so a detached
+        # cancel must snapshot them too or it loses the already-streamed text.
+        _snap_flag = cancel_flags.get(stream_id)
+        _snap_agent = agent_instances.get(stream_id)
+        _snap_partial_text = partial_texts.get(stream_id, '')
+        if not _snap_partial_text:
+            _live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
+            if _live_partials is not partial_texts:
+                _snap_partial_text = _live_partials.get(stream_id, '')
+        _snap_reasoning = STREAM_REASONING_TEXT.get(stream_id, '')
+        if not _snap_reasoning:
+            _live_reasoning = getattr(_live_config, 'STREAM_REASONING_TEXT', STREAM_REASONING_TEXT)
+            if _live_reasoning is not STREAM_REASONING_TEXT:
+                _snap_reasoning = _live_reasoning.get(stream_id, '')
+        _snap_tool_calls = list(STREAM_LIVE_TOOL_CALLS.get(stream_id, []) or [])
+        if not _snap_tool_calls:
+            _live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)
+            if _live_tools is not STREAM_LIVE_TOOL_CALLS:
+                _snap_tool_calls = list(_live_tools.get(stream_id, []) or [])
         if stream_present:
             q = streams.get(stream_id)
         else:
@@ -7048,13 +7080,16 @@ def cancel_stream(stream_id: str) -> bool:
         if active_run_entry and not active_run_session_id:
             active_run_session_id = str(active_run_entry.get("session_id") or "").strip() or None
 
-    # Set WebUI layer cancel flag
-    flag = cancel_flags.get(stream_id)
+    # Set WebUI layer cancel flag. Prefer the snapshot captured under the lock;
+    # fall back to a fresh lookup for the ACTIVE_RUNS-only path (stream absent).
+    flag = _snap_flag if _snap_flag is not None else cancel_flags.get(stream_id)
     if flag:
         flag.set()
 
-    # Interrupt the AIAgent instance to stop tool execution
-    agent = agent_instances.get(stream_id)
+    # Interrupt the AIAgent instance to stop tool execution. Use the
+    # lock-snapshot agent when the stream was present; otherwise fall back to
+    # the session agent cache via the active-run session id.
+    agent = _snap_agent if _snap_agent is not None else agent_instances.get(stream_id)
     if agent is None and active_run_session_id:
         try:
             with _live_config.SESSION_AGENT_CACHE_LOCK:
@@ -7107,32 +7142,34 @@ def cancel_stream(stream_id: str) -> bool:
         cancel_flags.pop(stream_id, None)
         agent_instances.pop(stream_id, None)
     # STREAM_PARTIAL_TEXT is intentionally NOT popped here — the agent thread may
-    # still be appending tokens. We capture the snapshot two lines below; the
-    # streaming finally block handles the cleanup when the thread exits.
+    # still be appending tokens, and the streaming finally block handles cleanup
+    # when the thread exits. We already snapshotted the buffers under streams_lock
+    # at the top of this function (see _snap_*), so they're safe to read below
+    # even if the worker's finally has since popped the live maps.
 
-    # Capture partial text and session_id while holding STREAMS_LOCK (avoids a
-    # race where the agent thread deallocates the agent object or clears the
-    # partial text after we release).
+    # Resolve the cancel session id and reuse the under-lock snapshots.
     # Session cleanup (get_session + save) must happen OUTSIDE the lock —
     # get_session() acquires LOCK, and the streaming thread does LOCK first
     # then STREAMS_LOCK, so inverting the order here would cause deadlock.
     _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
     if not _cancel_session_id and active_run_session_id:
         _cancel_session_id = active_run_session_id
-    _cancel_partial_text = partial_texts.get(stream_id, '')
-    # Fallback: check the live config's partial text map if we used an alias
-    # and the text wasn't found in the alias (defensive, matches streams fallback above).
+    # Use the snapshots captured under streams_lock above (the worker's finally
+    # may have popped the live buffers by now via agent.interrupt()). For the
+    # ACTIVE_RUNS-only path (stream absent) the snapshots are None → fall back to
+    # a best-effort live read.
+    _cancel_partial_text = _snap_partial_text if _snap_partial_text is not None else partial_texts.get(stream_id, '')
     if not _cancel_partial_text:
         live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
         if live_partials is not partial_texts:
             _cancel_partial_text = live_partials.get(stream_id, '')
     # Capture reasoning trace and live tool calls (#1361 §A + §B)
-    _cancel_reasoning = STREAM_REASONING_TEXT.get(stream_id, '')
+    _cancel_reasoning = _snap_reasoning if _snap_reasoning is not None else STREAM_REASONING_TEXT.get(stream_id, '')
     if not _cancel_reasoning:
         live_reasoning = getattr(_live_config, 'STREAM_REASONING_TEXT', STREAM_REASONING_TEXT)
         if live_reasoning is not STREAM_REASONING_TEXT:
             _cancel_reasoning = live_reasoning.get(stream_id, '')
-    _cancel_tool_calls = STREAM_LIVE_TOOL_CALLS.get(stream_id, [])
+    _cancel_tool_calls = _snap_tool_calls if _snap_tool_calls is not None else STREAM_LIVE_TOOL_CALLS.get(stream_id, [])
     if not _cancel_tool_calls:
         live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)
         if live_tools is not STREAM_LIVE_TOOL_CALLS:
