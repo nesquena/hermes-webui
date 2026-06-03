@@ -23345,6 +23345,20 @@ def test_system_widget_route_adds_allowlisted_trusted_widget_metadata_only(monke
         "system_panel": "chat",
     }
     assert body["revision_event_id"]
+    assert body["autonomy_policy"]["action"] == "space.system_widget.upsert"
+    assert body["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert body["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert body["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert body["autonomy_policy"]["metadata_only"] is True
+    assert body["progress_event"]["event_type"] == "tool.completed"
+    assert body["progress_event"]["family"] == "tool"
+    assert body["progress_event"]["run_id"] == f"system-widget.upsert:{created['space_id']}"
+    assert body["progress_event"]["redaction_status"] == "metadata_only"
+    assert body["output_compaction"]["tool"] == "capy-spaces-tool-action"
+    assert body["output_compaction"]["command"] == "space.system_widget.upsert"
+    assert body["output_compaction"]["metadata_only"] is True
+    assert body["output_compaction"]["redaction_status"] == "metadata_only"
+    assert "system-chat" in body["output_compaction"]["text"]
     stored = spaces.read_widget(created["space_id"], "system-chat")
     assert stored["system"] == {"panel": "chat", "trusted": True}
     assert "renderer" not in stored

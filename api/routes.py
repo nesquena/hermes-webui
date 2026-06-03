@@ -5648,7 +5648,15 @@ def handle_post(handler, parsed) -> bool:
             panel = body.get("panel")
             if not space_id or not panel:
                 return bad(handler, "Missing space_id or panel")
-            return j(handler, capy_spaces.upsert_system_widget(space_id, panel, body.get("layout") or {}))
+            return j(
+                handler,
+                capy_spaces.upsert_system_widget(
+                    space_id,
+                    panel,
+                    body.get("layout") or {},
+                    include_safety_receipts=True,
+                ),
+            )
         except RuntimeError as e:
             return bad(handler, str(e), 403)
         except ValueError as e:

@@ -10245,7 +10245,13 @@ def add_camera_stream(space_id: str, stream: dict[str, Any], *, action: str = "s
     }
 
 
-def upsert_system_widget(space_id: str, panel: str, layout: dict[str, Any] | None = None) -> dict[str, Any]:
+def upsert_system_widget(
+    space_id: str,
+    panel: str,
+    layout: dict[str, Any] | None = None,
+    *,
+    include_safety_receipts: bool = False,
+) -> dict[str, Any]:
     """Add/update an allowlisted trusted WebUI system widget as safe metadata."""
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
@@ -10263,11 +10269,28 @@ def upsert_system_widget(space_id: str, panel: str, layout: dict[str, Any] | Non
             "system": {"panel": safe_panel, "trusted": True},
         },
     )
-    return {
-        "space_id": result["space_id"],
-        "widget": _widget_summary(read_widget(result["space_id"], spec["id"])),
+    sid = result["space_id"]
+    wid = spec["id"]
+    response = {
+        "space_id": sid,
+        "widget": _widget_summary(read_widget(sid, wid)),
         "revision_event_id": result["revision_event_id"],
     }
+    if include_safety_receipts:
+        autonomy_policy = _space_widget_mutation_action_policy_receipt("space.system_widget.upsert", None)
+        progress_event = _record_space_tool_progress_event(sid, run_prefix="system-widget.upsert")
+        response["autonomy_policy"] = autonomy_policy
+        response["progress_event"] = progress_event
+        response["output_compaction"] = _space_tool_action_output_compaction_receipt(
+            action="space.system_widget.upsert",
+            space_id=sid,
+            widget_id=wid,
+            widget_count=1,
+            revision_event_id=response.get("revision_event_id"),
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+        )
+    return response
 
 
 def patch_widget(
@@ -12934,6 +12957,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "space.open",
         "space.reload",
         "space.update",
+        "system-widget.upsert",
         "template.install",
         "template.reset",
         "widget.delete",
