@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.238] — 2026-06-03 — Release HF (stage-q9 — New Conversation hits the fast path on cold start)
+
+### Fixed
+- Clicking **New Conversation** on a cold start no longer hangs for 3–4s on a catalog rebuild. `POST /api/session/new`'s fast path (`_resolve_compatible_session_model_state`) returns immediately only when the request carries both a `model` and a truthy `model_provider`; on a cold/unhydrated dropdown the client sent `model_provider=null`, so the request fell into `get_available_models()` and rebuilt the full catalog (the "first click slow, later clicks fast" asymmetry from #2518). `newSession()` (`static/sessions.js`) now falls back to `window._activeProvider` (then the previous session's `model_provider`) when the dropdown option carries no provider, so the first click takes the fast path too. **Two guards keep this safe:** (1) a slash-qualified (`gemini/…`) or `@provider:model` slug already carries a foreign provider namespace from a prior backend, so the fallback deliberately leaves `model_provider=null` for those; (2) even a *bare* model can carry a known family prefix (`gpt`→openai, `claude`→anthropic, `gemini`→google) — if that family maps to a different provider than the fallback we'd attach, `model_provider` is left null too. Both cases preserve the server slow-path's family-aware cross-provider repair rather than silently re-pointing the new session at the wrong backend (#2518 follow-up, @franksong2702).
+
 ## [v0.51.237] — 2026-06-03 — Release HE (stage-q8 — reconcile early-cancel against live worker state)
 
 ### Fixed

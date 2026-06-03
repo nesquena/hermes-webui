@@ -516,7 +516,45 @@ async function newSession(flash, options={}){
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
-      reqBody.model_provider=newModelState.model_provider||null;
+      // Cold-start / picker-without-provider fallback: when the dropdown option's
+      // data-provider is empty/'default' or the persisted state predates provider
+      // tracking, newModelState.model_provider is null. POST /api/session/new's
+      // fast path in _resolve_compatible_session_model_state requires both model
+      // and a truthy model_provider; without it, the request falls into
+      // get_available_models() and a 3-4s cold catalog rebuild. window._activeProvider
+      // is hydrated at boot (ui.js) and on config refresh (panels.js), so it's a
+      // safe default that matches the user's configured route. S.session.model_provider
+      // is the previous-session fallback when the dropdown is unhydrated.
+      //
+      // Guard: a slash-qualified model (e.g. "gemini/gemini-2.5") or an
+      // @provider:model string already carries a foreign provider namespace from
+      // a previous session that was served by a different backend. Attaching
+      // the current _activeProvider to such a slug would let the server's fast
+      // path pass it through without consulting the catalog, silently
+      // re-pointing the new session at the wrong backend (the very case the
+      // slow-path normalization in _resolve_compatible_session_model_state is
+      // designed to fix — see routes.py docstring around line 1891-1894). For
+      // those models we leave the wire shape with model_provider=null so the
+      // slow path's cross-provider repair still runs. Closes the open
+      // follow-up from #2518.
+      const _bareModel=!/[/]/.test(newModelState.model)&&!newModelState.model.startsWith('@');
+      // Second guard (#3410-followup): even a bare model can carry a known
+      // family prefix (gpt→openai, claude→anthropic, gemini→google). If that
+      // family maps to a DIFFERENT provider than the fallback we'd attach, the
+      // server fast path passes the pair through verbatim (no validation) and
+      // silently routes to the wrong backend — so leave model_provider=null and
+      // let the slow-path family repair run (mirrors routes.py _normalize_provider_id).
+      const _fallbackProvider=_bareModel?(window._activeProvider||(S.session&&S.session.model_provider)||''):'';
+      const _familyProvider=(m=>{const s=String(m||'').toLowerCase();
+        if(s.startsWith('gpt'))return 'openai';if(s.startsWith('claude'))return 'anthropic';
+        if(s.startsWith('gemini'))return 'google';return '';})(newModelState.model);
+      const _normProv=p=>{const s=String(p||'').toLowerCase();
+        if(s.startsWith('openai'))return 'openai';if(s.startsWith('anthropic')||s.startsWith('claude'))return 'anthropic';
+        if(s.startsWith('google')||s.startsWith('gemini'))return 'google';return s;};
+      const _familyMismatch=_familyProvider&&_fallbackProvider&&_normProv(_fallbackProvider)!==_familyProvider;
+      reqBody.model_provider=newModelState.model_provider
+        ||((_bareModel&&!_familyMismatch)?(_fallbackProvider||null):null)
+        ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=data.session;S.messages=data.session.messages||[];
