@@ -4817,3 +4817,64 @@ main.main.showing-logs > #mainLogs{display:flex;}
 }
 
 #composerMobileCtxBadge { display: none !important; }
+
+/* ── Session export to PDF (#3381) ──────────────────────────────────────────
+   Options dialog + an off-screen, print-only transcript. The export root is
+   kept in the layout (so KaTeX measures correctly) but positioned off-screen;
+   only the @media print block reveals it and hides the rest of the app. */
+.pdf-export-opts-overlay{
+  position:fixed; inset:0; z-index:10000;
+  display:flex; align-items:center; justify-content:center;
+  background:rgba(0,0,0,.5);
+}
+.pdf-export-opts{
+  width:min(360px,92vw);
+  background:var(--surface-1,#1b1d22); color:var(--text-1,#e8e8ea);
+  border:1px solid var(--border-1,rgba(255,255,255,.12));
+  border-radius:12px; padding:20px 22px;
+  box-shadow:0 18px 50px rgba(0,0,0,.45);
+}
+.pdf-export-opts-title{ margin:0 0 14px; font-size:1.05rem; font-weight:700; }
+.pdf-export-opt-row{
+  display:flex; align-items:center; justify-content:space-between;
+  gap:12px; margin:12px 0;
+}
+.pdf-export-opt-row select{
+  background:var(--surface-2,#26282e); color:inherit;
+  border:1px solid var(--border-1,rgba(255,255,255,.14));
+  border-radius:8px; padding:6px 10px;
+}
+.pdf-export-opt-row input[type=checkbox]{ width:16px; height:16px; }
+.pdf-export-opts-actions{ display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
+
+/* Off-screen on screen; only printed via the @media print block below. */
+.pdf-export-root{
+  position:absolute; left:-100000px; top:0;
+  width:820px; padding:0; margin:0;
+}
+
+@media print{
+  body.pdf-exporting > *:not(#pdfExportRoot){ display:none !important; }
+  body.pdf-exporting #pdfExportRoot{
+    position:static !important; left:auto !important; top:auto !important;
+    width:auto !important; display:block !important;
+    -webkit-print-color-adjust:exact; print-color-adjust:exact;
+  }
+  #pdfExportRoot.pdf-theme-light{ background:#fff; color:#101114; }
+  #pdfExportRoot.pdf-theme-dark{ background:#0d0e12; color:#e6e7ea; }
+  #pdfExportRoot .pdf-export-title{ font-size:18pt; margin:0 0 14pt; }
+  #pdfExportRoot .pdf-msg{ margin:0 0 14pt; page-break-inside:avoid; break-inside:avoid; }
+  #pdfExportRoot .pdf-msg-head{ display:flex; gap:10pt; align-items:baseline; margin:0 0 4pt; }
+  #pdfExportRoot .pdf-msg-role{ text-transform:uppercase; letter-spacing:.04em; font-size:9pt; opacity:.7; }
+  #pdfExportRoot .pdf-msg-ts{ font-size:8pt; opacity:.55; }
+  #pdfExportRoot .pdf-msg-body{ font-size:11pt; line-height:1.55; }
+  #pdfExportRoot pre, #pdfExportRoot code{
+    white-space:pre-wrap !important; word-break:break-word;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:9.5pt;
+  }
+  #pdfExportRoot pre{ padding:8pt; border-radius:4pt; page-break-inside:avoid; }
+  #pdfExportRoot.pdf-theme-light pre{ background:#f4f4f5; border:1px solid #e4e4e7; }
+  #pdfExportRoot.pdf-theme-dark pre{ background:#18181b; border:1px solid #27272a; }
+  #pdfExportRoot img{ max-width:100% !important; height:auto !important; }
+  @page{ margin:14mm; }
+}

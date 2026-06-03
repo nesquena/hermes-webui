@@ -2224,6 +2224,144 @@ function _appendSessionCopyLinkAction(menu, session){
   ));
 }
 
+// ── Session export to PDF (#3381) ───────────────────────────────────────────
+// Dependency-free: render an export-only transcript into an off-screen
+// container with a dedicated `@media print` stylesheet, then call
+// `window.print()` so the browser's own PDF engine produces the file. Unlike a
+// plain Ctrl+P we own the markup and CSS, and we reuse `renderMd` + KaTeX so
+// code blocks and math keep fidelity (rather than being rasterised by an
+// external lib). v1 scope: current session, theme + timestamp toggles. Message
+// selection is intentionally deferred to a follow-up (see issue #3381).
+function _pdfExportRoleLabel(role){
+  if(role==='user') return t('export_pdf_role_user');
+  if(role==='assistant') return t('export_pdf_role_assistant');
+  return role ? (role.charAt(0).toUpperCase()+role.slice(1)) : '';
+}
+
+function _pdfExportFormatTimestamp(ts){
+  if(!ts) return '';
+  try{ return new Date(ts*1000).toLocaleString(); }catch(_){ return ''; }
+}
+
+function _removePdfExportRoot(){
+  const el=document.getElementById('pdfExportRoot');
+  if(el) el.remove();
+}
+
+function _buildPdfExportRoot(session, messages, opts){
+  const root=document.createElement('div');
+  root.id='pdfExportRoot';
+  root.className='pdf-export-root '+(opts.theme==='dark'?'pdf-theme-dark':'pdf-theme-light');
+  const title=String((session&&(session.title||session.name))||t('export_pdf_default_title')).trim()||t('export_pdf_default_title');
+  const header=document.createElement('div');
+  header.className='pdf-export-header';
+  header.innerHTML='<h1 class="pdf-export-title">'+esc(title)+'</h1>';
+  root.appendChild(header);
+  messages.forEach(m=>{
+    const role=(m&&m.role)||'';
+    const block=document.createElement('div');
+    block.className='pdf-msg pdf-msg-'+(role||'other');
+    let head='<div class="pdf-msg-head"><span class="pdf-msg-role">'+esc(_pdfExportRoleLabel(role))+'</span>';
+    if(opts.timestamps){
+      const tsText=_pdfExportFormatTimestamp(m&&(m._ts||m.timestamp));
+      if(tsText) head+='<span class="pdf-msg-ts">'+esc(tsText)+'</span>';
+    }
+    head+='</div>';
+    block.innerHTML=head+'<div class="pdf-msg-body md">'+renderMd((m&&m.content)||'')+'</div>';
+    root.appendChild(block);
+  });
+  return root;
+}
+
+function _exportSessionToPdf(session, opts){
+  try{
+    _removePdfExportRoot();
+    // Current-session transcript only: keep user/assistant content, drop
+    // status cards and control markers so the export is a clean conversation.
+    const messages=(S.messages||[]).filter(m=>m && (m.role==='user'||m.role==='assistant') && m.content && !m._statusCard);
+    if(!messages.length){
+      if(typeof showToast==='function') showToast(t('export_pdf_empty'),3000);
+      return;
+    }
+    const root=_buildPdfExportRoot(session, messages, opts);
+    document.body.appendChild(root);
+    // Reuse the existing render pipeline for fidelity (math + code colours).
+    try{ if(typeof renderKatexBlocks==='function') renderKatexBlocks(root); }catch(_){}
+    try{ if(window.Prism && typeof Prism.highlightAllUnder==='function') Prism.highlightAllUnder(root); }catch(_){}
+    document.body.classList.add('pdf-exporting');
+    const cleanup=()=>{
+      document.body.classList.remove('pdf-exporting');
+      _removePdfExportRoot();
+      window.removeEventListener('afterprint',cleanup);
+    };
+    window.addEventListener('afterprint',cleanup);
+    // Let layout and KaTeX settle before opening the print dialog.
+    setTimeout(()=>{ try{ window.print(); }catch(_err){ cleanup(); } }, 60);
+  }catch(err){
+    document.body.classList.remove('pdf-exporting');
+    _removePdfExportRoot();
+    if(typeof showToast==='function') showToast(t('export_pdf_failed')+(err&&err.message?err.message:String(err)),4000,'error');
+  }
+}
+
+function _openSessionPdfExportDialog(session){
+  const existing=document.getElementById('pdfExportOptsOverlay');
+  if(existing) existing.remove();
+  const overlay=document.createElement('div');
+  overlay.id='pdfExportOptsOverlay';
+  overlay.className='pdf-export-opts-overlay';
+  overlay.innerHTML=
+    '<div class="pdf-export-opts" role="dialog" aria-modal="true" aria-label="'+esc(t('export_pdf_title'))+'">'
+    + '<h3 class="pdf-export-opts-title">'+esc(t('export_pdf_title'))+'</h3>'
+    + '<label class="pdf-export-opt-row"><span>'+esc(t('export_pdf_theme'))+'</span>'
+      + '<select id="pdfExportTheme">'
+        + '<option value="light">'+esc(t('export_pdf_theme_light'))+'</option>'
+        + '<option value="dark">'+esc(t('export_pdf_theme_dark'))+'</option>'
+      + '</select></label>'
+    + '<label class="pdf-export-opt-row"><span>'+esc(t('export_pdf_include_timestamps'))+'</span>'
+      + '<input type="checkbox" id="pdfExportTimestamps" checked></label>'
+    + '<div class="pdf-export-opts-actions">'
+      + '<button type="button" class="ws-opt" id="pdfExportCancel">'+esc(t('cancel'))+'</button>'
+      + '<button type="button" class="ws-opt session-action-opt is-active" id="pdfExportConfirm">'+esc(t('export_pdf_confirm'))+'</button>'
+    + '</div>'
+    + '</div>';
+  document.body.appendChild(overlay);
+  const onKey=(e)=>{ if(e.key==='Escape') close(); };
+  const close=()=>{
+    overlay.remove();
+    document.removeEventListener('keydown',onKey);
+  };
+  document.addEventListener('keydown',onKey);
+  overlay.addEventListener('click',(e)=>{ if(e.target===overlay) close(); });
+  const cancelBtn=overlay.querySelector('#pdfExportCancel');
+  const confirmBtn=overlay.querySelector('#pdfExportConfirm');
+  if(cancelBtn) cancelBtn.onclick=close;
+  if(confirmBtn) confirmBtn.onclick=()=>{
+    const themeSel=overlay.querySelector('#pdfExportTheme');
+    const tsCb=overlay.querySelector('#pdfExportTimestamps');
+    const opts={ theme:(themeSel&&themeSel.value)||'light', timestamps:!!(tsCb&&tsCb.checked) };
+    close();
+    _exportSessionToPdf(session, opts);
+  };
+  setTimeout(()=>{ if(confirmBtn) confirmBtn.focus(); },0);
+}
+
+function _appendSessionExportPdfAction(menu, session){
+  // v1 exports the current (open) conversation, so the action only appears on
+  // the active session's menu and operates on the already-loaded S.messages
+  // without an extra fetch. Exporting an arbitrary session row is a follow-up.
+  if(!(S.session && session && S.session.session_id===session.session_id)) return;
+  menu.appendChild(_buildSessionAction(
+    t('session_export_pdf'),
+    t('session_export_pdf_desc'),
+    li('download'),
+    async()=>{
+      closeSessionActionMenu();
+      _openSessionPdfExportDialog(session);
+    }
+  ));
+}
+
 function _appendSessionDuplicateAction(menu, session){
   menu.appendChild(_buildSessionAction(
     t('session_duplicate'),
@@ -2430,6 +2568,7 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
+  _appendSessionExportPdfAction(menu, session);
   if(!isExternalSession){
     if(session.worktree_path){
       menu.appendChild(_buildSessionAction(
