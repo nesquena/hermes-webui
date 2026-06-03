@@ -5741,7 +5741,14 @@ function switchSettingsSection(name){
   if(dd && dd.value!==section) dd.value=section;
   // Lazy-load integration panels when their tabs are opened
   if(section==='providers') loadProvidersPanel();
-  if(section==='plugins') loadPluginsPanel();
+  if(section==='plugins'){
+    const tabBtn=document.querySelector('[data-settings-section="plugins"]');
+    if(tabBtn && tabBtn.style.display==='none'){
+      section='conversation';
+    } else {
+      loadPluginsPanel();
+    }
+  }
 }
 
 function _syncHermesPanelSessionActions(){
@@ -6457,6 +6464,9 @@ async function loadPluginsPanel(){
   try{
     const data=await api('/api/plugins');
     const plugins=Array.isArray((data||{}).plugins)?data.plugins:[];
+    // Hide the Plugins tab when no plugins are installed (#3457)
+    const tabBtn=document.querySelector('[data-settings-section="plugins"]');
+    if(tabBtn) tabBtn.style.display=(data&&data.empty)?'none':'';
     list.innerHTML='';
     if(plugins.length===0){
       list.style.display='none';
