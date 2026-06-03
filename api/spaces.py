@@ -4076,7 +4076,7 @@ def _record_research_progress_event(space_id: str, *, source_count: int, note_co
 
         return record_progress_event(
             {
-                "event_type": "tool.completed",
+                "event_type": "taskboard.updated",
                 "run_id": run_id,
                 "space_id": space_id,
                 "payload": {
@@ -4089,8 +4089,8 @@ def _record_research_progress_event(space_id: str, *, source_count: int, note_co
         return {
             "stored": False,
             "queued": False,
-            "event_type": "tool.completed",
-            "family": "tool",
+            "event_type": "taskboard.updated",
+            "family": "taskboard",
             "run_id": run_id,
             "redaction_status": "metadata_only",
             "error": "progress event recording unavailable",

@@ -12600,12 +12600,12 @@ def test_set_research_progress_records_metadata_only_progress_event(monkeypatch,
     serialized = json.dumps({"result": result, "status": status}, sort_keys=True).lower()
 
     assert result["progress_event"]["stored"] is True
-    assert result["progress_event"]["event_type"] == "tool.completed"
-    assert result["progress_event"]["family"] == "tool"
+    assert result["progress_event"]["event_type"] == "taskboard.updated"
+    assert result["progress_event"]["family"] == "taskboard"
     assert result["progress_event"]["run_id"] == "research:research-progress-events"
     assert status["recent_event_count"] == 1
-    assert status["recent_family_counts"] == {"tool": 1}
-    assert status["recent_events"][0]["event_type"] == "tool.completed"
+    assert status["recent_family_counts"] == {"taskboard": 1}
+    assert status["recent_events"][0]["event_type"] == "taskboard.updated"
     assert "renderer" not in serialized
     assert "<script" not in serialized
     assert "api_key" not in serialized
@@ -12779,8 +12779,8 @@ def test_set_research_progress_keeps_widget_updates_when_progress_log_fails(monk
     assert result["progress_event"] == {
         "stored": False,
         "queued": False,
-        "event_type": "tool.completed",
-        "family": "tool",
+        "event_type": "taskboard.updated",
+        "family": "taskboard",
         "run_id": "research:research-progress-log-fails",
         "redaction_status": "metadata_only",
         "error": "progress event recording unavailable",
