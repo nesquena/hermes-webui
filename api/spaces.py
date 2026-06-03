@@ -85,7 +85,17 @@ _SECRET_LIKE_VALUE_RE = re.compile(
     r"(^|[^a-z0-9])(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token)([^a-z0-9]|$)",
     re.IGNORECASE,
 )
-_EXECUTABLE_VALUE_MARKERS = ("<script", "</script", "javascript:", "onerror", "onload")
+_EXECUTABLE_VALUE_MARKERS = (
+    "<script",
+    "</script",
+    "javascript:",
+    "onclick",
+    "onerror",
+    "onfocus",
+    "onload",
+    "onmessage",
+    "onmouseover",
+)
 _SPACE_REPAIR_UNSAFE_TEXT_RE = re.compile(
     r"(^|[^a-z0-9])(api[\s_-]?auth|api[\s_-]?key|apiauth|apikey|auth(?:orization)?|bearer|body|cookie|credential|credentials|data|generated[ _-]?(?:code|widget[ _-]?body)|html|on[a-z]+|password|raw[ _-]?prompt|renderer|script|secret|source|token)([^a-z0-9]|$)",
     re.IGNORECASE,
@@ -653,6 +663,24 @@ def _recovery_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
     }
 
 
+def _ensure_recovery_reason_prompt_preflight(action: str, reason: Any) -> None:
+    """Fail closed before persisting hostile free-form recovery reason text."""
+    reason_text = re.sub(r"\s+", " ", str(reason or "")).strip()
+    if not reason_text.strip():
+        return
+    from api.capy_policy import prompt_preflight
+
+    receipt = prompt_preflight(reason_text, boundary="recovery_action")
+    blocking_categories = {
+        "role_override",
+        "system_prompt_exfiltration",
+        "tool_coercion",
+    }
+    categories = {str(category) for category in receipt.get("categories") or []}
+    if categories.intersection(blocking_categories):
+        raise ValueError("Recovery action reason prompt preflight blocked")
+
+
 def _recovery_toggle_output_compaction_receipt(
     *,
     action: str,
@@ -1122,11 +1150,12 @@ def _recovery_reason_summary(value: Any, limit: int = 300) -> str:
     text = _context_value(value, limit)
     lowered = text.lower()
     unsafe_marker_re = re.compile(
-        r"(^|[^a-z0-9])(api[_-]?key|api[_-]?auth|apikey|apiauth|auth|authorization|bearer|cookie|credential|credentials|password|secret|token|renderer|source|html|script|data)([^a-z0-9]|$)",
+        r"(^|[^a-z0-9])(api[_-]?key|api[_-]?auth|apikey|apiauth|auth|authorization|bearer|cookie|credential|credentials|generated[ _-]?(?:body|code|widget[ _-]?body|module[ _-]?body)|password|raw[ _-]?prompt|secret|token|renderer|source|html|script|data)([^a-z0-9]|$)",
         re.IGNORECASE,
     )
     if text and (
         unsafe_marker_re.search(text)
+        or _SHARED_DATA_PREFLIGHT_SECRET_SHAPE_RE.search(text)
         or any(marker in lowered for marker in _EXECUTABLE_VALUE_MARKERS)
     ):
         return "[REDACTED]"
@@ -1748,7 +1777,7 @@ def _shared_data_storage_key(key: str) -> str:
 
 
 _SHARED_DATA_PREFLIGHT_SECRET_SHAPE_RE = re.compile(
-    r"(sk-[a-z0-9_.-]{6,}|gh[pousr]_[a-z0-9_.-]{6,}|github_pat_[a-z0-9_.-]{6,}|github\.\.\.[a-z0-9_.-]{3,}|hf_[a-z0-9_.-]{6,}|akia[0-9a-z_.-]{8,}|xox[abprs]-[a-z0-9_.-]{6,}|AIza[0-9A-Za-z_.-]{6,})",
+    r"(sk-[a-z0-9_.-]{6,}|gh[pousr][_-][a-z0-9_.-]{6,}|github_pat_[a-z0-9_.-]{6,}|github\.\.\.[a-z0-9_.-]{3,}|hf_[a-z0-9_.-]{6,}|akia[0-9a-z_.-]{8,}|xox[abprs]-[a-z0-9_.-]{6,}|AIza[0-9A-Za-z_.-]{6,})",
     re.IGNORECASE,
 )
 _SHARED_DATA_PREFLIGHT_HTML_RE = re.compile(r"<\s*/?\s*[a-z][^>]*>", re.IGNORECASE)
@@ -8437,7 +8466,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     }:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
-        result = disable_space_for_recovery(space_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
+        result = disable_space_for_recovery(space_id, reason=data.get("reason") or "disabled from recovery")
         response = {"ok": True, "action": name, **result}
         if is_current:
             response["active_space_id"] = space_id
@@ -8461,7 +8490,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     }:
         is_current = name.startswith("space.current.")
         space_id = validate_space_id(_space_tool_current_id(data) if is_current else _space_tool_non_current_space_id(data))
-        result = enable_space_for_recovery(space_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
+        result = enable_space_for_recovery(space_id, reason=data.get("reason") or "enabled from recovery")
         response = {"ok": True, "action": name, **result}
         if is_current:
             response["active_space_id"] = space_id
@@ -8492,7 +8521,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 _space_tool_non_current_space_id_from_aliases(data, positional_space_index=positional_space_index)
             )
         widget_id = validate_widget_id(_space_tool_widget_id(data, positional_widget_index=positional_widget_index))
-        result = disable_widget_for_recovery(space_id, widget_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
+        result = disable_widget_for_recovery(space_id, widget_id, reason=data.get("reason") or "disabled from recovery")
         response = {"ok": True, "action": name, **result}
         if is_current:
             response["active_space_id"] = space_id
@@ -8523,7 +8552,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 _space_tool_non_current_space_id_from_aliases(data, positional_space_index=positional_space_index)
             )
         widget_id = validate_widget_id(_space_tool_widget_id(data, positional_widget_index=positional_widget_index))
-        result = enable_widget_for_recovery(space_id, widget_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
+        result = enable_widget_for_recovery(space_id, widget_id, reason=data.get("reason") or "enabled from recovery")
         response = {"ok": True, "action": name, **result}
         if is_current:
             response["active_space_id"] = space_id
@@ -8542,7 +8571,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.disablemodule",
     }:
         module_id = validate_module_id(_space_tool_module_id(data))
-        result = disable_module_for_recovery(module_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
+        result = disable_module_for_recovery(module_id, reason=data.get("reason") or "disabled from recovery")
         return {"ok": True, "action": name, **result}
     if name in {
         "space.recovery.enable_module",
@@ -8558,7 +8587,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.admin.recovery.enablemodule",
     }:
         module_id = validate_module_id(_space_tool_module_id(data))
-        result = enable_module_for_recovery(module_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
+        result = enable_module_for_recovery(module_id, reason=data.get("reason") or "enabled from recovery")
         return {"ok": True, "action": name, **result}
     if name in {
         "space.recovery.repair_module",
@@ -8853,6 +8882,7 @@ def create_space_checkpoint(space_id: str, *, reason: Any = "manual checkpoint")
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     sid = validate_space_id(space_id)
+    _ensure_recovery_reason_prompt_preflight("space.checkpoint", reason)
     space = read_space(sid)
     reason_text = "[REDACTED]"
     details = {
@@ -11356,16 +11386,17 @@ def disable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, 
     """Mark an entire Space disabled from safe recovery without deleting its manifest."""
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
+    action = "space.recovery.disable"
+    _ensure_recovery_reason_prompt_preflight(action, reason or "disabled from recovery")
     space = read_space(space_id)
     recovery = space.get("recovery") if isinstance(space.get("recovery"), dict) else {}
     recovery = dict(recovery)
     recovery["safe_mode_available"] = True
     recovery["disabled"] = True
-    recovery["disabled_reason"] = _context_value(reason or "disabled from recovery", 300)
+    recovery["disabled_reason"] = _recovery_reason_summary(reason or "disabled from recovery", 300)
     space["recovery"] = recovery
     saved = _write_manifest(space, "space.recovery_disabled", {"reason": recovery["disabled_reason"]})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="disable")
-    action = "space.recovery.disable"
     prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
     autonomy_policy = _recovery_toggle_action_policy_receipt(action)
     output_compaction = _recovery_toggle_output_compaction_receipt(
@@ -11393,6 +11424,8 @@ def enable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, A
     """Re-enable an entire Space from safe recovery without exposing widget bodies."""
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
+    action = "space.recovery.enable"
+    _ensure_recovery_reason_prompt_preflight(action, reason or "enabled from recovery")
     space = read_space(space_id)
     recovery = space.get("recovery") if isinstance(space.get("recovery"), dict) else {}
     recovery = dict(recovery)
@@ -11400,10 +11433,9 @@ def enable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, A
     recovery["disabled"] = False
     recovery["disabled_reason"] = ""
     space["recovery"] = recovery
-    detail_reason = _context_value(reason or "enabled from recovery", 300)
+    detail_reason = _recovery_reason_summary(reason or "enabled from recovery", 300)
     saved = _write_manifest(space, "space.recovery_enabled", {"reason": detail_reason})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="enable")
-    action = "space.recovery.enable"
     prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
     autonomy_policy = _recovery_toggle_action_policy_receipt(action)
     output_compaction = _recovery_toggle_output_compaction_receipt(
@@ -11437,6 +11469,8 @@ def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = 
     """
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
+    action = "space.widget.recovery.disable"
+    _ensure_recovery_reason_prompt_preflight(action, reason or "disabled from recovery")
     wid = validate_widget_id(widget_id)
     space = read_space(space_id)
     idx = _widget_index(space, wid)
@@ -11445,13 +11479,12 @@ def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = 
     recovery = widget.get("recovery") if isinstance(widget.get("recovery"), dict) else {}
     recovery = dict(recovery)
     recovery["disabled"] = True
-    recovery["disabled_reason"] = _context_value(reason or "disabled from recovery", 300)
+    recovery["disabled_reason"] = _recovery_reason_summary(reason or "disabled from recovery", 300)
     widget["recovery"] = recovery
     widgets[idx] = widget
     space["widgets"] = widgets
     saved = _write_manifest(space, "widget.recovery_disabled", {"widget_id": wid, "reason": recovery["disabled_reason"]})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.disable")
-    action = "space.widget.recovery.disable"
     prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
     autonomy_policy = _recovery_toggle_action_policy_receipt(action)
     output_compaction = _recovery_toggle_output_compaction_receipt(
@@ -11481,6 +11514,8 @@ def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "
     """Re-enable a widget from safe recovery without exposing or executing its source."""
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
+    action = "space.widget.recovery.enable"
+    _ensure_recovery_reason_prompt_preflight(action, reason or "enabled from recovery")
     wid = validate_widget_id(widget_id)
     space = read_space(space_id)
     idx = _widget_index(space, wid)
@@ -11493,10 +11528,9 @@ def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "
     widget["recovery"] = recovery
     widgets[idx] = widget
     space["widgets"] = widgets
-    detail_reason = _context_value(reason or "enabled from recovery", 300)
+    detail_reason = _recovery_reason_summary(reason or "enabled from recovery", 300)
     saved = _write_manifest(space, "widget.recovery_enabled", {"widget_id": wid, "reason": detail_reason})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.enable")
-    action = "space.widget.recovery.enable"
     prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
     autonomy_policy = _recovery_toggle_action_policy_receipt(action)
     output_compaction = _recovery_toggle_output_compaction_receipt(
@@ -11663,12 +11697,14 @@ def _collect_recovery_module_summaries(limit: int = _RECOVERY_MODULE_SUMMARY_LIM
 def disable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
+    action = "space.module.recovery.disable"
+    _ensure_recovery_reason_prompt_preflight(action, reason or "disabled from recovery")
     mid = validate_module_id(module_id)
     module = read_recovery_module(mid)
     recovery = module.get("recovery") if isinstance(module.get("recovery"), dict) else {}
     recovery = dict(recovery)
     recovery["disabled"] = True
-    recovery["disabled_reason"] = _context_value(reason or "disabled from recovery", 300)
+    recovery["disabled_reason"] = _recovery_reason_summary(reason or "disabled from recovery", 300)
     module["recovery"] = recovery
     module["updated_at"] = time.time()
     event_id = _record_module_event(
@@ -11679,7 +11715,6 @@ def disable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str
     module["revision_event_id"] = event_id
     _atomic_write_json(_recovery_module_path(mid), module)
     summary = _module_summary(module)
-    action = "space.module.recovery.disable"
     prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
     progress_event = _record_space_recovery_progress_event(
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
@@ -11706,6 +11741,8 @@ def disable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str
 def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
+    action = "space.module.recovery.enable"
+    _ensure_recovery_reason_prompt_preflight(action, reason or "enabled from recovery")
     mid = validate_module_id(module_id)
     module = read_recovery_module(mid)
     recovery = module.get("recovery") if isinstance(module.get("recovery"), dict) else {}
@@ -11722,7 +11759,6 @@ def enable_module_for_recovery(module_id: str, *, reason: str = "") -> dict[str,
     module["revision_event_id"] = event_id
     _atomic_write_json(_recovery_module_path(mid), module)
     summary = _module_summary(module)
-    action = "space.module.recovery.enable"
     prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
     progress_event = _record_space_recovery_progress_event(
         _RECOVERY_MODULE_PROGRESS_SPACE_ID,
