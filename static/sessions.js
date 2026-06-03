@@ -10,6 +10,7 @@ const ICONS={
   trash:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5v8.5h7v-8.5"/><line x1="7" y1="7" x2="7" y2="11"/><line x1="9" y1="7" x2="9" y2="11"/></svg>',
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
   edit:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L5 13H3v-2z"/><path d="M10 4l2 2"/></svg>',
+  spark:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.8l1.1 3.1 3.1 1.1-3.1 1.1L8 10.2 6.9 7.1 3.8 6l3.1-1.1z"/><path d="M12.5 9.5l.5 1.5 1.5.5-1.5.5-.5 1.5-.5-1.5-1.5-.5 1.5-.5z"/></svg>',
   link:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M6.7 9.3a3 3 0 0 1 0-4.2l1.7-1.7a3 3 0 0 1 4.2 4.2l-1 1"/><path d="M9.3 6.7a3 3 0 0 1 0 4.2l-1.7 1.7a3 3 0 0 1-4.2-4.2l1-1"/></svg>',
 };
 
@@ -17,12 +18,70 @@ const ICONS={
 // responses from in-flight requests when the user switches sessions again
 // before the first request completes (#1060).
 let _loadingSessionId = null;
+// #3306: Snapshot of S.messages captured by loadSession() right before it
+// clears them on a force-reload of the active session. Consumed by
+// _ensureMessagesLoaded() when calling _carryForwardEphemeralTurnFields so
+// ephemeral fields (_turnUsage, _turnDuration, _turnTps, _gatewayRouting,
+// _statusCard) survive the wholesale replace. null when there is nothing
+// to carry forward (initial load, switch-to-different-session, etc.).
+let _pendingCarryForwardSnapshot = null;
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
 // Debounced save — prevents hammering the server on every keystroke.
 let _draftSaveTimer = null;
 const _DRAFT_SAVE_DELAY_MS = 400;
+const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
+
+function _isRestorableNewChatDraftSession(session, requireDraft=false) {
+  if (!session || !session.session_id) return false;
+  const messageCount = Number(session.message_count || 0);
+  if (messageCount !== 0) return false;
+  if (session.active_stream_id || session.pending_user_message || session.worktree_path) return false;
+  const title = session.title || 'Untitled';
+  if (title !== 'Untitled' && title !== 'New Chat') return false;
+  const activeProfile = S.activeProfile || 'default';
+  const sessionProfile = session.profile || 'default';
+  if (sessionProfile !== activeProfile) return false;
+  if (!requireDraft) return true;
+  const draft = session.composer_draft || {};
+  const text = (typeof draft.text === 'string') ? draft.text : '';
+  const files = Array.isArray(draft.files) ? draft.files : [];
+  return !!(text || files.length);
+}
+
+function _rememberNewChatDraftSession(session) {
+  if (!_isRestorableNewChatDraftSession(session)) return;
+  try { localStorage.setItem(NEW_CHAT_DRAFT_SESSION_KEY, session.session_id); } catch (_) {}
+}
+
+function _clearRememberedNewChatDraftSession(sid) {
+  if (!sid) return;
+  try {
+    if (localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY) === sid) {
+      localStorage.removeItem(NEW_CHAT_DRAFT_SESSION_KEY);
+    }
+  } catch (_) {}
+}
+
+async function _restoreRememberedNewChatDraftSession() {
+  let sid = '';
+  try { sid = localStorage.getItem(NEW_CHAT_DRAFT_SESSION_KEY) || ''; } catch (_) { sid = ''; }
+  if (!sid || (S.session && S.session.session_id === sid)) return false;
+  try {
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    const session = data && data.session;
+    if (!_isRestorableNewChatDraftSession(session, true)) {
+      _clearRememberedNewChatDraftSession(sid);
+      return false;
+    }
+    await loadSession(sid, {skipLineageResolve:true});
+    return !!(S.session && S.session.session_id === sid);
+  } catch (_) {
+    _clearRememberedNewChatDraftSession(sid);
+    return false;
+  }
+}
 
 function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
@@ -35,11 +94,11 @@ function _saveComposerDraft(sid, text, files) {
   }, _DRAFT_SAVE_DELAY_MS);
 }
 
-// Fire-and-forget immediate save (used before session switches).
+// Immediate save used before session switches.
 function _saveComposerDraftNow(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
-  api('/api/session/draft', {
+  return api('/api/session/draft', {
     method: 'POST',
     body: JSON.stringify({ session_id: sid, text: text || '', files: files || [] }),
   }).catch(() => {});
@@ -89,6 +148,7 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
 function _clearComposerDraft(sid) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
+  _clearRememberedNewChatDraftSession(sid);
   api('/api/session/draft', {
     method: 'POST',
     body: JSON.stringify({ session_id: sid, text: '' }),
@@ -508,11 +568,51 @@ async function newSession(flash, options={}){
     }
     if(newModelState&&newModelState.model){
       reqBody.model=newModelState.model;
-      reqBody.model_provider=newModelState.model_provider||null;
+      // Cold-start / picker-without-provider fallback: when the dropdown option's
+      // data-provider is empty/'default' or the persisted state predates provider
+      // tracking, newModelState.model_provider is null. POST /api/session/new's
+      // fast path in _resolve_compatible_session_model_state requires both model
+      // and a truthy model_provider; without it, the request falls into
+      // get_available_models() and a 3-4s cold catalog rebuild. window._activeProvider
+      // is hydrated at boot (ui.js) and on config refresh (panels.js), so it's a
+      // safe default that matches the user's configured route. S.session.model_provider
+      // is the previous-session fallback when the dropdown is unhydrated.
+      //
+      // Guard: a slash-qualified model (e.g. "gemini/gemini-2.5") or an
+      // @provider:model string already carries a foreign provider namespace from
+      // a previous session that was served by a different backend. Attaching
+      // the current _activeProvider to such a slug would let the server's fast
+      // path pass it through without consulting the catalog, silently
+      // re-pointing the new session at the wrong backend (the very case the
+      // slow-path normalization in _resolve_compatible_session_model_state is
+      // designed to fix — see routes.py docstring around line 1891-1894). For
+      // those models we leave the wire shape with model_provider=null so the
+      // slow path's cross-provider repair still runs. Closes the open
+      // follow-up from #2518.
+      const _bareModel=!/[/]/.test(newModelState.model)&&!newModelState.model.startsWith('@');
+      // Second guard (#3410-followup): even a bare model can carry a known
+      // family prefix (gpt→openai, claude→anthropic, gemini→google). If that
+      // family maps to a DIFFERENT provider than the fallback we'd attach, the
+      // server fast path passes the pair through verbatim (no validation) and
+      // silently routes to the wrong backend — so leave model_provider=null and
+      // let the slow-path family repair run (mirrors routes.py _normalize_provider_id).
+      const _fallbackProvider=_bareModel?(window._activeProvider||(S.session&&S.session.model_provider)||''):'';
+      const _familyProvider=(m=>{const s=String(m||'').toLowerCase();
+        if(s.startsWith('gpt'))return 'openai';if(s.startsWith('claude'))return 'anthropic';
+        if(s.startsWith('gemini'))return 'google';return '';})(newModelState.model);
+      const _normProv=p=>{const s=String(p||'').toLowerCase();
+        if(s.startsWith('openai'))return 'openai';if(s.startsWith('anthropic')||s.startsWith('claude'))return 'anthropic';
+        if(s.startsWith('google')||s.startsWith('gemini'))return 'google';return s;};
+      const _familyMismatch=_familyProvider&&_fallbackProvider&&_normProv(_fallbackProvider)!==_familyProvider;
+      reqBody.model_provider=newModelState.model_provider
+        ||((_bareModel&&!_familyMismatch)?(_fallbackProvider||null):null)
+        ||null;
     }
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=data.session;S.messages=data.session.messages||[];
+    if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     S.lastUsage={...(data.session.last_usage||{})};
+    if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
     _setActiveSessionUrl(S.session.session_id);
@@ -589,6 +689,7 @@ async function loadSession(sid){
   }
   const forceReload = !!opts.force;
   const currentSid = S.session ? S.session.session_id : null;
+  const sameSessionForceReload = forceReload && currentSid===sid;
   // Clicking the already-open session in the sidebar is a no-op. Reloading it
   // tears down active pane state and can reset the long-session scroll window
   // to the top even though the user did not navigate anywhere. Explicit
@@ -608,9 +709,34 @@ async function loadSession(sid){
   // restored when the user switches back (#1060). Save to server now so the
   // draft survives page refresh and syncs across clients.
   if (currentSid && currentSid !== sid) {
-    _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    // The awaited draft save above yields the event loop. If another
+    // loadSession() started for a different session while we were waiting
+    // (rapid switch B→C), _loadingSessionId now points at that newer load —
+    // bail out before the destructive state-clearing block below so this stale
+    // continuation can't wipe S.messages / write the loading placeholder /
+    // close streams for the session the user actually landed on (#1060 guard,
+    // extended to cover the new pre-switch await).
+    if (_loadingSessionId !== sid) return;
   }
   if (currentSid !== sid || forceReload) {
+    // #3306: When force-reloading the currently-active session (e.g. external
+    // poll triggering a refresh), snapshot the existing messages BEFORE we
+    // clear them. _ensureMessagesLoaded() runs the ephemeral-field
+    // carry-forward (_turnUsage, _turnDuration, _turnTps, _gatewayRouting,
+    // _statusCard) against S.messages, but by the time the API fetch returns
+    // S.messages has already been reset to [] here and the carry-forward is a
+    // no-op. The visible symptom is the token-usage badge vanishing ~10s
+    // after each assistant turn completes. Stash the snapshot so the
+    // carry-forward call can consume it.
+    _pendingCarryForwardSnapshot = (currentSid === sid && forceReload)
+      ? (S.messages || []).slice()
+      : null;
+    // #3239: also capture a reload-width hint BEFORE clearing so the
+    // authoritative reload preserves the already-loaded transcript width
+    // instead of collapsing a long session back to the default tail window.
+    if (sameSessionForceReload) _captureSameSessionForceReloadHint(sid);
+    else _clearSameSessionForceReloadHint();
     S.messages = [];
     S.toolCalls = [];
     _messagesTruncated = false;
@@ -652,12 +778,14 @@ async function loadSession(sid){
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }
     }
+    _clearSameSessionForceReloadHint(sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
     return;
   }
   // Guard: api() may have redirected (401) and returned undefined; in that case
   // the browser is already navigating away, so abort the rest of this flow.
   if (!data) {
+    _clearSameSessionForceReloadHint(sid);
     if (_loadingSessionId === sid) _loadingSessionId = null;
     return;
   }
@@ -739,7 +867,7 @@ async function loadSession(sid){
     // replaying persisted live tools so the compact Activity count survives
     // switching away from and back to an active chat (#1715).
     S.activeStreamId=activeStreamId;
-    syncTopbar();renderMessages();
+    syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
     const restoredLiveTurn=typeof restoreLiveTurnHtmlForSession==='function'&&restoreLiveTurnHtmlForSession(sid);
     if(!restoredLiveTurn){
       appendThinking();
@@ -823,7 +951,7 @@ async function loadSession(sid){
       updateSendBtn();
       setStatus('');
       setComposerStatus('');
-      syncTopbar();renderMessages();appendThinking();loadDir('.');
+      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);appendThinking();loadDir('.');
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
@@ -837,7 +965,7 @@ async function loadSession(sid){
       setStatus('');
       setComposerStatus('');
       updateQueueBadge(sid);
-      syncTopbar();renderMessages();
+      syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);
       if(typeof resumeManualCompressionForSession==='function') resumeManualCompressionForSession(sid);
       const _dirP=loadDir('.');
       // Workspace refresh is guarded by session id inside loadDir(); do not
@@ -1317,6 +1445,57 @@ let _messagesTruncated = false;
 // msg_limit (default 30): only fetch the last N messages for fast switching.
 // Older messages are loaded on-demand via _loadOlderMessages().
 const _INITIAL_MSG_LIMIT = 30;
+let _sameSessionForceReloadHint = null;
+
+function _currentLoadedRenderableMessageCount(){
+  if(typeof _messageRenderableMessageCount==='function'){
+    try{return Math.max(0,Number(_messageRenderableMessageCount())||0);}
+    catch(_){}
+  }
+  let count=0;
+  for(const m of (S.messages||[])){
+    if(m&&m.role&&m.role!=='tool') count++;
+  }
+  return count;
+}
+
+function _captureSameSessionForceReloadHint(sid){
+  const loadedRenderableCount=_currentLoadedRenderableMessageCount();
+  const loadedMessageCount=Array.isArray(S.messages)?S.messages.length:0;
+  const knownMessageCount=Number(S.session&&S.session.session_id===sid&&S.session.message_count)||loadedMessageCount;
+  if(!sid || (loadedRenderableCount<=0 && loadedMessageCount<=0)){
+    _sameSessionForceReloadHint=null;
+    return;
+  }
+  _sameSessionForceReloadHint={
+    session_id:sid,
+    loaded_renderable_count:loadedRenderableCount,
+    loaded_message_count:loadedMessageCount,
+    message_count:knownMessageCount,
+    truncated:!!_messagesTruncated,
+  };
+}
+
+function _clearSameSessionForceReloadHint(sid){
+  if(!_sameSessionForceReloadHint) return;
+  if(!sid || _sameSessionForceReloadHint.session_id===sid) _sameSessionForceReloadHint=null;
+}
+
+function _messageReloadLimitForSession(sid){
+  const hint=_sameSessionForceReloadHint;
+  if(hint&&hint.session_id===sid){
+    const loadedRenderableCount=Math.max(0,Number(hint.loaded_renderable_count)||0);
+    const loadedMessageCount=Math.max(0,Number(hint.loaded_message_count)||0);
+    if(loadedRenderableCount>0 || loadedMessageCount>0){
+      if(!hint.truncated) return null;
+      const previousMessageCount=Math.max(0,Number(hint.message_count)||0);
+      const currentMessageCount=Math.max(0,Number(S.session&&S.session.session_id===sid&&S.session.message_count)||0);
+      const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);
+      return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);
+    }
+  }
+  return _INITIAL_MSG_LIMIT;
+}
 
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   const msgs=Array.isArray(messages)?messages:[];
@@ -1336,10 +1515,18 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
 async function _ensureMessagesLoaded(sid) {
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
+    _clearSameSessionForceReloadHint(sid);
     return;
   }
   // Fetch session messages with a tail window for fast initial load.
-  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${_INITIAL_MSG_LIMIT}`);
+  const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
+  const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';
+  let data;
+  try {
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}`);
+  } finally {
+    _clearSameSessionForceReloadHint(sid);
+  }
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
   _messagesTruncated = !!data.session._messages_truncated;
@@ -1355,11 +1542,21 @@ async function _ensureMessagesLoaded(sid) {
   // #3018: preserve client-side ephemeral turn fields (_turnUsage, _turnDuration,
   // _turnTps, _gatewayRouting, _statusCard) across the loadSession replace.
   if(typeof window._carryForwardEphemeralTurnFields==='function'){
-    msgs=window._carryForwardEphemeralTurnFields(S.messages||[], msgs);
+    // #3306: Prefer the pre-clear snapshot stashed by loadSession() on a
+    // force-reload of the active session; S.messages was reset to [] there
+    // and would otherwise yield an empty carry-forward.
+    const _prev = (Array.isArray(_pendingCarryForwardSnapshot) && _pendingCarryForwardSnapshot.length)
+      ? _pendingCarryForwardSnapshot
+      : (S.messages || []);
+    msgs=window._carryForwardEphemeralTurnFields(_prev, msgs);
+    _pendingCarryForwardSnapshot = null;
   }
+  if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
   S.messages = msgs;
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
+    if(Object.prototype.hasOwnProperty.call(data.session,'todo_state')) S.session.todo_state=data.session.todo_state;
+    else delete S.session.todo_state;
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
   }
@@ -1512,6 +1709,12 @@ async function _loadOlderMessages() {
     // Use $('messages') — the scrollable container (#msgInner is not scrollable).
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
+    // Carry forward ephemeral turn fields (_turnUsage/_turnDuration/_turnTps/
+    // _gatewayRouting/_statusCard) before the wholesale replace so the badge
+    // does not briefly appear and disappear during older-message expansion.
+    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+      nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
+    }
     S.messages = nextMessages;
     _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
     // renderMessages() windows long transcripts from the end. If we do not
@@ -1595,7 +1798,15 @@ async function _ensureAllMessagesLoaded() {
     // prefetch (whose snapshot was taken before this call's mutex
     // acquisition) sees the new value and aborts.
     _bumpMessagesGeneration();
-    S.messages = msgs;
+    // #3306: Same ephemeral-field carry-forward as _ensureMessagesLoaded.
+    // Loading older messages also does a wholesale replace of S.messages
+    // and would otherwise drop _turnUsage/_turnDuration/_turnTps/
+    // _gatewayRouting/_statusCard on the existing turns.
+    let _msgsToAssign = msgs;
+    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+      _msgsToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], msgs);
+    }
+    S.messages = _msgsToAssign;
     _messagesTruncated = false;
     _oldestIdx = 0;
     _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
@@ -1991,12 +2202,28 @@ function _positionSessionActionMenu(anchorEl){
   if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
   _sessionActionMenu.style.left=left+'px';
   _sessionActionMenu.style.top='8px';
+  // Reset any prior clamp so we measure the menu's natural height.
+  _sessionActionMenu.style.maxHeight='';
   const menuH=_sessionActionMenu.offsetHeight || 0;
+  const margin=8;
+  const maxAvail=window.innerHeight-margin*2;
   let top=rect.bottom+6;
-  if(top+menuH>window.innerHeight-8 && rect.top>menuH+12){
+  // Prefer flipping above the row when the menu would overflow the bottom and
+  // there's room above.
+  if(top+menuH>window.innerHeight-margin && rect.top>menuH+12){
     top=rect.top-menuH-6;
   }
-  if(top<8) top=8;
+  // If the menu is taller than the viewport, or still overflows after the flip
+  // attempt (e.g. a top-anchored row with a tall menu and no room above), cap
+  // its height to the viewport and let it scroll instead of clipping off-screen.
+  if(menuH>maxAvail){
+    _sessionActionMenu.style.maxHeight=maxAvail+'px';
+    top=margin;
+  } else {
+    // Clamp vertically so the whole menu stays on-screen at both edges.
+    if(top+menuH>window.innerHeight-margin) top=window.innerHeight-margin-menuH;
+    if(top<margin) top=margin;
+  }
   _sessionActionMenu.style.top=top+'px';
 }
 
@@ -2004,12 +2231,17 @@ function _buildSessionAction(label, meta, icon, onSelect, extraClass=''){
   const opt=document.createElement('button');
   opt.type='button';
   opt.className='ws-opt session-action-opt'+(extraClass?` ${extraClass}`:'');
+  // Compact context-menu shape (#3223 redesign, Nathan 2026-06-01): show only
+  // icon + label, matching VS Code / browser / ChatGPT conversation menus. The
+  // descriptive `meta` is preserved as a hover tooltip (title=) so the
+  // information stays discoverable without consuming permanent vertical space —
+  // this also keeps the menu short enough to avoid viewport clipping.
+  if(meta) opt.title=meta;
   opt.innerHTML=
     `<span class="ws-opt-action">`
       + `<span class="ws-opt-icon">${icon}</span>`
       + `<span class="session-action-copy">`
         + `<span class="ws-opt-name">${esc(label)}</span>`
-        + (meta?`<span class="session-action-meta">${esc(meta)}</span>`:'')
       + `</span>`
     + `</span>`;
   opt.onclick=async(e)=>{
@@ -2261,6 +2493,39 @@ function _openSessionActionMenu(session, anchorEl){
         closeSessionActionMenu();
         await cancelSessionStream(session);
         showToast(t('stream_stopped'));
+      }
+    ));
+  }
+  // Title regeneration matches the backend guard (api/routes.py rejects
+  // read_only OR is_imported with 403). read_only sessions already bailed at
+  // the isReadOnly early-return above; skip imported sessions here so the
+  // action is hidden rather than failing with a 403 toast. This keeps the
+  // is_imported gate scoped to regenerate instead of broadening the shared
+  // _isReadOnlySession() helper (which gates rename/pin/archive/etc.).
+  if(!session.is_imported){
+    menu.appendChild(_buildSessionAction(
+      t('session_title_regenerate'),
+      t('session_title_regenerate_desc'),
+      ICONS.spark,
+      async()=>{
+        closeSessionActionMenu();
+        try{
+          if(typeof showToast==='function') showToast(t('session_title_regenerating'), 1600);
+          const response=await api('/api/session/title/regenerate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
+          const nextTitle=(response&&response.title)||(response&&response.session&&response.session.title)||'';
+          if(nextTitle){
+            session.title=nextTitle;
+            const cached=(_allSessions||[]).find(item=>item&&item.session_id===session.session_id);
+            if(cached) cached.title=nextTitle;
+            if(S.session&&S.session.session_id===session.session_id){S.session.title=nextTitle;syncTopbar();}
+            renderSessionListFromCache();
+          }
+          if(typeof showToast==='function') showToast(t('session_title_regenerated', nextTitle||t('untitled')), 2400);
+        }catch(err){
+          const msg=t('session_title_regenerate_failed')+(err&&err.message?err.message:String(err));
+          setStatus(msg);
+          if(typeof showToast==='function') showToast(msg,3000,'error');
+        }
       }
     ));
   }
@@ -2846,7 +3111,14 @@ function startGatewaySSE(){
                     const next = res.session.messages.filter(m => m && m.role);
                     if (next.length < prev) return;
                     if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;
-                    S.messages = next;
+                    // Carry forward ephemeral turn fields (_turnUsage/
+                    // _turnDuration/_turnTps/_gatewayRouting/_statusCard) so
+                    // gateway-driven CLI refreshes do not drop the badge.
+                    let _nextToAssign = next;
+                    if (typeof window._carryForwardEphemeralTurnFields === 'function') {
+                      _nextToAssign = window._carryForwardEphemeralTurnFields(S.messages || [], next);
+                    }
+                    S.messages = _nextToAssign;
                     if(S.session && S.session.session_id === activeSid){
                       S.session.message_count = next.length;
                       const newest = next.length ? next[next.length - 1] : null;
@@ -3508,7 +3780,11 @@ function _collapseSessionLineageForSidebar(sessions){
 }
 
 function _sessionDisplayTitle(s){
-  const title=String((s&&(s.display_title||s._state_db_title||s.title))||'Untitled').trim();
+  const rawTitle=String((s&&(s.display_title||s._state_db_title||s.title))||'Untitled').trim();
+  const strip=(typeof _stripAttachedFilesMarker==='function')
+    ? _stripAttachedFilesMarker
+    : (text)=>String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
+  const title=strip(rawTitle);
   return title||'Untitled';
 }
 
@@ -3554,6 +3830,41 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   if(existingIdx>=0) _allSessions[existingIdx]={..._allSessions[existingIdx],...row};
   else _allSessions.unshift(row);
   renderSessionListFromCache();
+}
+
+function _sessionRowsWithActiveEphemeralSession(rows){
+  rows=Array.isArray(rows)?rows:[];
+  if(!S.session||!S.session.session_id) return rows;
+  const sid=S.session.session_id;
+  if(rows.some(s=>s&&s.session_id===sid)) return rows;
+  const nowSec=Math.floor(Date.now()/1000);
+  const activeRow={
+    ...S.session,
+    session_id:sid,
+    title:S.session.title||'New Chat',
+    display_title:S.session.display_title||S.session.title||'New Chat',
+    message_count:0,
+    last_message_at:S.session.last_message_at||S.session.updated_at||nowSec,
+    updated_at:S.session.updated_at||S.session.last_message_at||nowSec,
+    profile:S.session.profile||S.activeProfile||'default',
+    is_streaming:false,
+  };
+  return [activeRow,...rows];
+}
+
+function _ensureActiveSessionRowPresent(rows, sourceRows){
+  rows=Array.isArray(rows)?rows:[];
+  const activeSid=_activeSessionIdForSidebar();
+  if(!activeSid||rows.some(s=>s&&s.session_id===activeSid)) return rows;
+  const activeRow=(Array.isArray(sourceRows)?sourceRows:[]).find(s=>s&&s.session_id===activeSid);
+  // Only re-inject the active FRESHLY-CREATED 0-message ephemeral chat. An active
+  // conversation that already has messages and was filtered out by the search
+  // query must stay filtered — re-adding it here would pollute unrelated search
+  // results with the current chat (#3408 review, Codex).
+  if(activeRow && Number(activeRow.message_count||0)<=0){
+    return [activeRow,...rows];
+  }
+  return rows;
 }
 
 function clearOptimisticSessionStreaming(sid){
@@ -3716,14 +4027,16 @@ function renderSessionListFromCache(){
   const searchQueryRaw=($('sessionSearch').value||'').trim();
   const q=searchQueryRaw.toLowerCase();
   const activeSidForSidebar=_activeSessionIdForSidebar();
+  const sidebarRows=_sessionRowsWithActiveEphemeralSession(_allSessions);
   // Merge direct session-id/link matches, title matches, then content matches (deduped).
   // Direct matches must not disable content search: if a user pasted the same
   // session id into another conversation, that content hit should still appear.
-  const allMatched=_sessionSearchMergeMatches(_allSessions,searchQueryRaw,_contentSearchResults);
-  // Never surface ephemeral 0-message sessions in the sidebar — they only become
-  // real once the first message is sent. The server already filters them, but this
-  // guard ensures a brand-new active session doesn't flash into the list while
-  // _allSessions is stale from a prior render (#1171).
+  const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
+  const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
+  // Keep inactive ephemeral 0-message sessions out of the sidebar — they only
+  // become real once the first message is sent. The server already filters them.
+  // Exception: the active freshly-created chat is injected above so it remains
+  // visible/selected until the user sends the first turn or switches away.
   const withMessages=allMatched.filter(s=>
     (s.message_count||0)>0 ||
     _sessionAttentionState(s) ||
@@ -4927,19 +5240,38 @@ function _showProjectPicker(session, anchorEl){
   none.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
-    await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
-    // Sidebar rows are shallow copies of _allSessions entries (see
-    // _attachChildSessionsToSidebarRows), so mutating `session` only updates
-    // the discarded copy. Write into the authoritative cache so the next
-    // renderSessionListFromCache() reflects the move. (#2551)
-    const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
-    if(idx>=0) _allSessions[idx].project_id=null;
-    renderSessionListFromCache();
-    showToast('Removed from project');
+    try {
+      await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
+      // Sidebar rows are shallow copies of _allSessions entries (see
+      // _attachChildSessionsToSidebarRows), so mutating `session` only updates
+      // the discarded copy. Write into the authoritative cache so the next
+      // renderSessionListFromCache() reflects the move. (#2551)
+      const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
+      if(idx>=0) _allSessions[idx].project_id=null;
+      renderSessionListFromCache();
+      showToast('Removed from project');
+    } catch(e) {
+      showToast('Unassign failed: '+(e.message||e));
+    }
   };
   picker.appendChild(none);
-  // Project options
+  // Project options — only show projects matching the session's profile.
+  // #3331 follow-up (Codex gate): mirror the server's root-alias tolerance —
+  // `_profiles_match` treats the literal 'default' and a renamed-root display
+  // name as equivalent, so a server-approved `profile:'default'` project must
+  // not be hidden for a session stamped with the renamed-root profile (and
+  // vice versa). Only hide when BOTH sides are explicit, distinct, AND neither
+  // is the 'default' alias; let the server's allowlist be authoritative for the
+  // default/renamed-root case.
+  const sessionProfile = session ? (session.profile || undefined) : undefined;
+  const _profileHidesProject = (projProfile) => {
+    if(!sessionProfile || !projProfile) return false;
+    if(projProfile === sessionProfile) return false;
+    if(projProfile === 'default' || sessionProfile === 'default') return false;
+    return true;
+  };
   for(const p of _allProjects){
+    if (_profileHidesProject(p.profile)) continue;
     const item=document.createElement('div');
     item.className='project-picker-item'+(session.project_id===p.project_id?' active':'');
     if(p.color){
@@ -4954,12 +5286,14 @@ function _showProjectPicker(session, anchorEl){
     item.onclick=async()=>{
       picker.remove();
       document.removeEventListener('click',close);
-      await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
-      // See #2551 — write to _allSessions, not the shallow sidebar copy.
-      const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
-      if(idx>=0) _allSessions[idx].project_id=p.project_id;
-      renderSessionListFromCache();
-      showToast('Moved to '+p.name);
+      try{
+        await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
+        // See #2551 — write to _allSessions, not the shallow sidebar copy.
+        const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
+        if(idx>=0) _allSessions[idx].project_id=p.project_id;
+        renderSessionListFromCache();
+        showToast('Moved to '+p.name);
+      }catch(e){showToast('Move failed: '+(e.message||e));}
     };
     picker.appendChild(item);
   }
@@ -4977,7 +5311,8 @@ function _showProjectPicker(session, anchorEl){
     });
     if(!name||!name.trim()) return;
     const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
-    const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:name.trim(),color})});
+    const profile = session.profile || undefined;
+    const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:name.trim(),color,profile})});
     if(res.project){
       _allProjects.push(res.project);
       // Now move session into it
@@ -5068,9 +5403,13 @@ function _startProjectRename(proj, chip){
   inp.value=proj.name;
   const finish=async(save)=>{
     if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
-      await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
-      await renderSessionList();
-      showToast('Project renamed');
+      try {
+        await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
+        await renderSessionList();
+        showToast('Project renamed');
+      } catch(e) {
+        showToast('Rename failed: '+(e.message||e));
+      }
     }else{
       renderSessionListFromCache();
     }
@@ -5121,9 +5460,13 @@ function _showProjectContextMenu(e, proj, chip){
     if(hex===(proj.color||'')) dot.style.outline='2px solid var(--text)';
     dot.onclick=async()=>{
       menu.remove();
-      await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:proj.name,color:hex})});
-      await renderSessionList();
-      showToast('Color updated');
+      try {
+        await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:proj.name,color:hex})});
+        await renderSessionList();
+        showToast('Color updated');
+      } catch(e) {
+        showToast('Color update failed: '+(e.message||e));
+      }
     };
     colorRow.appendChild(dot);
   });
@@ -5153,10 +5496,14 @@ async function _confirmDeleteProject(proj){
     danger:true
   });
   if(!ok){return;}
-  await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
-  if(_activeProject===proj.project_id) _activeProject=null;
-  await renderSessionList();
-  showToast('Project deleted');
+  try {
+    await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
+    if(_activeProject===proj.project_id) _activeProject=null;
+    await renderSessionList();
+    showToast('Project deleted');
+  } catch(e) {
+    showToast('Delete failed: '+(e.message||e));
+  }
 }
 
 // Global Escape handler for batch select mode

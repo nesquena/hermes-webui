@@ -32,18 +32,21 @@ def test_streaming_persists_context_fields_on_session_before_save():
 
     # Find the post-merge save block — anchored on the unique reasoning trace
     # marker right above the persistence block.
-    block_start = src.find("if _reasoning_text and s.messages:")
+    block_start = src.find("Persist reasoning trace in the session")
     assert block_start != -1, "Reasoning-trace marker not found in streaming.py"
 
     # Save call follows shortly after
     save_call = src.find("\n                s.save()", block_start)
     assert save_call != -1, "s.save() not found after the post-merge marker"
-    # Limit bumped to 9000 by cancellation finalization guards: the block now also
-    # checks for a late user cancel immediately before the durable final save,
-    # preventing a race that would otherwise save/emit a completed turn after Stop.
-    # The context_length fallback is still a single focused resolver call with
-    # arg-prep scaffold and commentary explaining the failure mode it prevents.
-    assert save_call - block_start < 9000, (
+    # Limit bumped to 16000 by #3455 (server-side <think> split added to the
+    # pre-save reasoning-persist block, + the anchor moved to the comment marker
+    # which sits a few lines above the former `if` anchor). The pre-save block
+    # legitimately grew here. NOTE: this byte-distance assertion is itself brittle
+    # (it must be bumped whenever a legitimate pre-save mutation block is added) — a
+    # structural check (presence of s.save() shortly after the post-merge marker)
+    # would be more durable; left as a follow-up. Earlier limits: 9000 (cancellation
+    # guards) → 13000 (#3263 v1) → 15000 (#3256/#3263 dual-gate).
+    assert save_call - block_start < 16000, (
         "s.save() should be close to the post-merge marker — block expanded unexpectedly. "
         "If you've added a new pre-save mutation block here, bump this limit."
     )

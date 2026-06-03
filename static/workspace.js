@@ -268,12 +268,42 @@ function collectSessionArtifacts(){
     if(!path || seen.has(path)) return;
     seen.add(path); items.push({path, source});
   };
+  // Source 1: session-level tool call summaries (may be empty when messages
+  // carry their own tool metadata — see _syncToolCallsForLoadedMessages).
   for(const tc of (S.toolCalls || [])){
     for(const a of _artifactCandidatesFromToolCall(tc)) push(a.path, a.kind || tc.name || 'tool');
   }
+  // Source 2 & 3: message-level data — both text-mined diffs and structured
+  // tool_calls / tool_use content blocks that survive the S.toolCalls clear.
   for(const msg of (S.messages || [])){
-    const text = msg && (msg.content || msg.text || msg.message || '');
-    for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
+    if(!msg) continue;
+    const text = msg.content || msg.text || msg.message || '';
+    // Text-mined diff/patch fences (existing path).
+    if(typeof text === 'string'){
+      for(const a of _artifactCandidatesFromText(text)) push(a.path, a.kind);
+    }
+    // Structured tool_calls array (OpenAI format: {function:{name,arguments}}).
+    if(Array.isArray(msg.tool_calls)){
+      for(const tc of msg.tool_calls){
+        if(!tc || typeof tc !== 'object') continue;
+        const fn = (tc.function && typeof tc.function === 'object') ? tc.function : tc;
+        const name = fn.name || tc.name || '';
+        let args = fn.arguments || tc.arguments || tc.args || tc.input || {};
+        if(typeof args === 'string'){ try{ args = JSON.parse(args); }catch(_){} }
+        const fakeTc = {name, args, result: tc.result || tc.output || ''};
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || name || 'tool');
+      }
+    }
+    // Structured content array with tool_use blocks (Anthropic format).
+    if(Array.isArray(msg.content)){
+      for(const block of msg.content){
+        if(!block || block.type !== 'tool_use') continue;
+        let inp = block.input || {};
+        if(typeof inp === 'string'){ try{ inp = JSON.parse(inp); }catch(_){} }
+        const fakeTc = {name: block.name || '', args: inp, result: block.result || ''};
+        for(const a of _artifactCandidatesFromToolCall(fakeTc)) push(a.path, a.kind || block.name || 'tool');
+      }
+    }
   }
   return items.slice(0, 50);
 }
@@ -292,7 +322,14 @@ function renderSessionArtifacts(){
     root.innerHTML = '<div class="workspace-artifact-empty">No artifacts detected yet. Files created or edited during this session will appear here.</div>';
     return;
   }
-  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(item.path)}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
+  // Strip workspace prefix for display so long absolute paths don't clutter the list.
+  const ws = S.session && S.session.workspace;
+  const normWs = ws ? ws.replace(/\/+$/,'') + '/' : '';
+  const displayPath = (p) => {
+    if(normWs && p.startsWith(normWs)) return p.slice(normWs.length);
+    return p;
+  };
+  root.innerHTML = items.map(item => `<button type="button" class="workspace-artifact-item" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-path">${esc(displayPath(item.path))}</div><div class="workspace-artifact-meta">${esc(item.source || 'session')}</div></button>`).join('');
 }
 
 async function _workspacePathExists(path){
@@ -308,7 +345,15 @@ async function _workspacePathExists(path){
 async function openArtifactPath(path){
   if(!path) return;
   switchWorkspacePanelTab('files');
-  const rel = path.replace(/^~\//,'').replace(/^\.\//,'');
+  let rel = path.replace(/^~\//,'').replace(/^\.\/+/,'');
+  // Strip workspace prefix so /api/list receives a workspace-relative path.
+  const ws = S.session && S.session.workspace;
+  if(ws){
+    const normWs = ws.replace(/\/+$/,'') + '/';
+    if(rel.startsWith(normWs)) rel = rel.slice(normWs.length);
+    else if(rel === ws.replace(/\/+$/,'')) rel = '.';
+  }
+  if(!rel) rel = '.';
   try{
     if(!(await _workspacePathExists(rel))){
       setStatus(t('file_open_failed'));
@@ -406,8 +451,8 @@ const HTML_EXTS   = new Set(['.html','.htm']);
 const PDF_EXTS    = new Set(['.pdf']);
 const AUDIO_EXTS  = new Set(['.mp3','.wav','.m4a','.aac','.ogg','.oga','.opus','.flac']);
 const VIDEO_EXTS  = new Set(['.mp4','.mov','.m4v','.webm','.ogv','.avi','.mkv']);
-const MD_PREVIEW_RICH_RENDER_MAX_BYTES = 64 * 1024;
-const MD_PREVIEW_RICH_RENDER_MAX_LINES = 1500;
+const MD_PREVIEW_RICH_RENDER_MAX_BYTES = 256 * 1024;
+const MD_PREVIEW_RICH_RENDER_MAX_LINES = 5000;
 // Binary formats that should download rather than preview
 const DOWNLOAD_EXTS = new Set([
   '.docx','.doc','.xlsx','.xls','.pptx','.ppt','.odt','.ods','.odp',
@@ -441,7 +486,28 @@ function largeMarkdownPlainTextStatus(content){
   const bytes=markdownPreviewByteLength(content);
   const lines=markdownPreviewLineCount(content);
   const sizeLabel=bytes>=1024?`${Math.round(bytes/1024)} KB`:`${bytes} B`;
-  return `Large markdown file (${sizeLabel}, ${lines} lines) shown as plain text. Click Edit to view raw.`;
+  return `Large markdown file (${sizeLabel}, ${lines} lines) shown as plain text. Click "Render as markdown anyway" to force rich rendering, or Edit to view raw.`;
+}
+
+function setLargeMarkdownForceRenderVisible(visible){
+  const btn=$('btnRenderMarkdownAnyway');
+  if(btn) btn.style.display=visible?'inline-flex':'none';
+}
+
+function renderMarkdownPreviewContent(data){
+  showPreview('md');
+  $('previewMd').innerHTML=renderMd(data.content);
+  requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
+}
+
+function forceRenderMarkdownPreview(){
+  // #3378 review (Codex): don't force-render from a dirty/open editor — the
+  // cached raw content would not reflect the unsaved edit. Require a saved,
+  // non-dirty state and cached content that belongs to the current file.
+  if(_previewDirty || $('previewEditArea').style.display!=='none') return;
+  if(!_previewRawContent || _previewRawContentPath!==_previewCurrentPath) return;
+  openFile(_previewCurrentPath,{forceRichMarkdown:true});
+  setStatus('Markdown rendered for this file.');
 }
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
@@ -466,6 +532,7 @@ function showPreview(mode){
   // Show "Open in browser" button for iframe-backed document previews
   const openBtn=$('btnOpenInBrowser');
   if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf')?'inline-flex':'none';
+  setLargeMarkdownForceRenderVisible(false);
 }
 
 function updateEditBtn(){
@@ -491,9 +558,13 @@ async function toggleEditMode(){
         session_id:S.session.session_id, path:_previewCurrentPath, content
       })});
       _previewDirty=false;
-      // Update read-only views
+      // Update read-only views AND the cached raw content so a later
+      // "Render as markdown anyway" force-render reflects the just-saved text
+      // (not the stale pre-edit fetch). #3378 review (Codex).
+      _previewRawContent = content;
+      _previewRawContentPath = _previewCurrentPath;
       if(_previewCurrentMode==='code') $('previewCode').textContent=content;
-      else { $('previewMd').innerHTML=renderMd(content); requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();}); }
+      else renderMarkdownPreviewContent({content});
       $('previewEditArea').style.display='none';
       if(_previewCurrentMode==='code') $('previewCode').style.display='';
       else $('previewMd').style.display='';
@@ -517,6 +588,7 @@ async function toggleEditMode(){
 }
 
 let _previewRawContent = '';  // raw text for md files (to populate editor)
+let _previewRawContentPath = '';  // path that _previewRawContent belongs to (#3378 force-render cache guard)
 
 function cancelEditMode(){
   // Discard changes and return to read-only view
@@ -528,10 +600,45 @@ function cancelEditMode(){
   updateEditBtn();
 }
 
+// Map file extensions to Prism.js language identifiers.
+// Prism autoloader fetches missing language components from CDN on demand.
+const _PRISM_LANG_MAP={
+  js:'javascript',mjs:'javascript',jsx:'jsx',ts:'typescript',tsx:'tsx',
+  py:'python',pyw:'python',pyi:'python',
+  rb:'ruby',go:'go',rs:'rust',java:'java',kt:'kotlin',kts:'kotlin',
+  c:'c',h:'c',cpp:'cpp',cxx:'cpp',hpp:'cpp',cc:'cpp',
+  cs:'csharp',swift:'swift',scala:'scala',
+  php:'php',pl:'perl',pm:'perl',r:'r',lua:'lua',
+  sh:'bash',bash:'bash',zsh:'bash',fish:'bash',
+  ps1:'powershell',psm1:'powershell',
+  sql:'sql',graphql:'graphql',
+  json:'json',yaml:'yaml',yml:'yaml',toml:'toml',xml:'xml',
+  html:'markup',htm:'markup',svg:'markup',vue:'markup',
+  css:'css',scss:'scss',sass:'sass',less:'less',
+  md:'markdown',markdown:'markdown',
+  dockerfile:'docker',makefile:'makefile',cmake:'cmake',
+  ini:'ini',cfg:'ini',conf:'ini',properties:'properties',
+  diff:'diff',patch:'diff',
+  txt:'',log:'',csv:'',tsv:'',
+};
+const _PRISM_BASENAME_LANG_MAP={
+  'dockerfile':'docker','makefile':'makefile','gnumakefile':'makefile',
+  'cmakelists.txt':'cmake',
+  '.gitignore':'ignore','.dockerignore':'ignore',
+};
+function _prismLanguageForPath(path){
+  const base=String(path||'').split(/[\\/]/).pop().toLowerCase();
+  if(base.startsWith('dockerfile.')) return 'docker';
+  if(_PRISM_BASENAME_LANG_MAP[base]!==undefined) return _PRISM_BASENAME_LANG_MAP[base];
+  const ext=fileExt(path).replace(/^\./,'');
+  return _PRISM_LANG_MAP[ext]!==undefined?_PRISM_LANG_MAP[ext]:'plaintext';
+}
+
 async function openFile(path, opts={}){
   if(!S.session)return;
   const ext=fileExt(path);
   const bustCache=!!(opts&&opts.bustCache);
+  const forceRichMarkdown=!!(opts&&opts.forceRichMarkdown);
   const cacheBust=bustCache?`&_=${Date.now()}`:'';
 
   // Binary/download-only formats: trigger browser download, don't preview
@@ -576,17 +683,24 @@ async function openFile(path, opts={}){
   } else if(MD_EXTS.has(ext)){
     // Markdown: fetch text, render with renderMd, display as formatted HTML
     try{
-      const data=await api(`/api/file?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
+      // #3378 review (Codex): only reuse cached raw content when it actually
+      // belongs to the requested path. `path===_previewCurrentPath` is tautological
+      // here (_previewCurrentPath was just assigned above), so guard on the
+      // dedicated _previewRawContentPath instead — otherwise a force-render after a
+      // file switch could re-render the previous file's cached content.
+      const data=forceRichMarkdown&&path===_previewRawContentPath&&_previewRawContent
+        ? {content:_previewRawContent}
+        : await api(`/api/file?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
       _previewRawContent = data.content;
-      if(shouldRenderMarkdownPreviewAsPlainText(data.content)){
+      _previewRawContentPath = path;
+      if(!forceRichMarkdown && shouldRenderMarkdownPreviewAsPlainText(data.content)){
         showPreview('code');
         $('previewCode').textContent=data.content;
+        setLargeMarkdownForceRenderVisible(true);
         setStatus(largeMarkdownPlainTextStatus(data.content));
         return;
       }
-      showPreview('md');
-      $('previewMd').innerHTML=renderMd(data.content);
-      requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
+      renderMarkdownPreviewContent(data);
     }catch(e){setStatus(t('file_open_failed'));}
   } else if(HTML_EXTS.has(ext)){
     // HTML: render in sandboxed iframe via raw endpoint.
@@ -614,7 +728,26 @@ async function openFile(path, opts={}){
         return;
       }
       showPreview('code');
-      $('previewCode').textContent=data.content;
+      // Syntax highlighting with Prism.js (already loaded on the page).
+      const codeEl=document.createElement('code');
+      codeEl.textContent=data.content;
+      const lang=_prismLanguageForPath(path);
+      if(lang) codeEl.className='language-'+lang;
+      const pre=$('previewCode');
+      pre.textContent='';
+      // Prism.highlightElement() propagates the language-* class onto the
+      // parent <pre>, so a previously-previewed code file leaves e.g.
+      // "language-css" on #previewCode. A subsequent plain-text file builds a
+      // class-less <code>, and Prism walks up to that stale ancestor class and
+      // mis-highlights prose. Strip any inherited language-* token from the
+      // <pre> before each render so highlighting never leaks across files.
+      pre.className=pre.className.replace(/\blanguage-\S+/g,'').replace(/\s+/g,' ').trim();
+      pre.appendChild(codeEl);
+      // Only invoke Prism when we actually assigned a language; otherwise the
+      // class-less <code> would inherit any ancestor language-* class.
+      if(lang&&typeof Prism!=='undefined'&&typeof Prism.highlightElement==='function'){
+        Prism.highlightElement(codeEl);
+      }
     }catch(e){
       // If it's a 400/too-large error, offer download instead
       downloadFile(path);
@@ -675,6 +808,94 @@ function renderFileBreadcrumb(filePath) {
 
 function openInBrowser(){
   if(!_previewCurrentPath||!S.session) return;
-  const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(_previewCurrentPath)}`;
-  window.open(url,'_blank');
+  const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(_previewCurrentPath)}&inline=1`;
+  window.open(url,'_blank','noopener');
+}
+
+// ── Workspace upload ──────────────────────────────────────────────────
+function triggerWorkspaceUpload() {
+  const input = $('workspaceFileInput');
+  if (!input) return;
+  input.value = '';
+  input.onchange = async () => {
+    const files = input.files;
+    if (!files || !files.length) return;
+    for (const file of files) {
+      await uploadToWorkspace(file, S.currentDir || '.');
+    }
+    if (S.session) loadDir(S.currentDir);
+  };
+  input.click();
+}
+
+async function uploadToWorkspace(file, dir) {
+  if (!S.session) return;
+  const formData = new FormData();
+  formData.append('session_id', S.session.session_id);
+  formData.append('path', dir || '.');
+  formData.append('file', file, file.name);
+  try {
+    showToast(t('uploading') || 'Uploading\u2026', 2000);
+    const data = await api('/api/workspace/upload', {
+      method: 'POST',
+      body: formData,
+      headers: {},
+      timeoutMs: 120000,
+    });
+    if (data && data.error) {
+      showToast(data.error, 5000, 'error');
+    } else if (data && (data.extract_error || (Array.isArray(data.files) && data.files.some(function(f){return f && f.extract_error;})))) {
+      // Archive was rejected (zip-slip / zip-bomb / corrupt / too-many-members):
+      // the file uploaded but extraction failed. Surface it as an error instead
+      // of a misleading "Uploaded" success toast.
+      var msg = data.extract_error
+        || (data.files.find(function(f){return f && f.extract_error;}) || {}).extract_error
+        || 'Archive extraction failed';
+      showToast(msg, 5000, 'error');
+    } else {
+      showToast(t('uploaded') || ('Uploaded ' + (data.filename || file.name)), 2000);
+    }
+  } catch (e) {
+    showToast(t('upload_failed') || ('Upload failed: ' + e.message), 5000, 'error');
+  }
+}
+
+// Drag-and-drop files onto workspace file tree
+if (typeof document !== 'undefined') {
+  const _wsUploadInit = () => {
+    const tree = $('fileTree');
+    if (!tree) return;
+    tree.addEventListener('dragenter', (e) => {
+      if (e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files')) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    });
+    tree.addEventListener('dragover', (e) => {
+      if (e.dataTransfer && e.dataTransfer.types && e.dataTransfer.types.includes('Files')) {
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = 'copy';
+        tree.classList.add('drag-over-upload');
+      }
+    });
+    tree.addEventListener('dragleave', () => {
+      tree.classList.remove('drag-over-upload');
+    });
+    tree.addEventListener('drop', async (e) => {
+      tree.classList.remove('drag-over-upload');
+      if (!e.dataTransfer || !e.dataTransfer.types || !e.dataTransfer.types.includes('Files')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      for (const file of e.dataTransfer.files) {
+        await uploadToWorkspace(file, S.currentDir || '.');
+      }
+      if (S.session) loadDir(S.currentDir);
+    });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _wsUploadInit, {once: true});
+  } else {
+    _wsUploadInit();
+  }
 }

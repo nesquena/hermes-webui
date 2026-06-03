@@ -685,6 +685,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
+  if(!reconnecting&&typeof _resetStreamScrollFollow==='function') _resetStreamScrollFollow();
 
   // On reconnect, restore accumulated text from INFLIGHT so we don't lose
   // progress made before the session switch. Without this the closure starts
@@ -753,6 +754,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return typeof _isPreservedCompressionTaskListMarkerOnlyText==='function'
       && _isPreservedCompressionTaskListMarkerOnlyText(text);
   }
+  function _streamRecoveryControlMessageText(text){
+    const normalized=String(text||'').replace(/\s+/g,' ').trim();
+    if(!normalized) return false;
+    const systemRecovery=/^\[System:/i.test(normalized)
+      && /previous response was cut off by a network error/i.test(normalized)
+      && /continue exactly where you left off/i.test(normalized);
+    const backendRecovery=/^the live worker stopped before this run finished\.?$/i.test(normalized);
+    return !!(systemRecovery || backendRecovery);
+  }
+  function _streamRecoveryControlMessage(m){
+    if(!m||m.role==='tool') return false;
+    if(m.recovery_control===true) return true;
+    // Backward-compat ONLY for pre-marker persisted sessions: match the two
+    // fully-anchored synthetic recovery strings. Do NOT fall back to
+    // provider_details_label — a genuine "Response interrupted" card the user
+    // SHOULD see also carries the 'Interruption details' label, and filtering
+    // on it would drop a real interruption from the transcript (the inverse
+    // data-loss class flagged on the sibling #3300). Marker + strict text only.
+    const text=String(typeof msgContent==='function'?msgContent(m):(m.content||''));
+    return _streamRecoveryControlMessageText(text);
+  }
+  function _filterRecoveryControlMessages(messages){
+    if(!Array.isArray(messages)) return [];
+    return messages.filter((m)=>!_streamRecoveryControlMessage(m));
+  }
   function _replaceMarkerOnlyAssistantWithStreamError(messages){
     if(!Array.isArray(messages)) return false;
     const msg=[...messages].reverse().find(m=>m&&m.role==='assistant');
@@ -809,6 +835,40 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const clean=_stripLiveVisibleAssistantEchoFromThinking(liveReasoningText, visibleInterimSnippets);
     return clean || 'Thinking…';
   }
+  // Split a content string into {reasoning, content} by extracting any <think>...
+  // blocks (or other known reasoning-tag pairs). If reasoning is already
+  // populated on the message (e.g. from a separate on_reasoning stream), the
+  // inline blocks are stripped but the existing reasoning field is preserved.
+  // Provider-bug workaround: M3 (and similar reasoning models) emit the
+  // thinking inline in the OpenAI-compat content stream instead of a separate
+  // reasoning channel, which would otherwise bloat the persisted session
+  // message by 30-50% and miss the m.reasoning field used by the thinking card.
+  function _splitThinkFromContent(rawContent, existingReasoning){
+    const text=String(rawContent||'');
+    if(!text) return {reasoning:existingReasoning||'', content:text};
+    // Extract exactly ONE leading think block (after lstrip), matching the
+    // streaming renderer's _streamDisplay/_parseStreamState semantics EXACTLY —
+    // both strip only the first leading block. A closed <think>...</think> that
+    // appears MID-BODY is, by the renderer's definition, visible content (e.g. a
+    // literal tag inside a fenced code block); a whole-body scan would silently
+    // move it into m.reasoning. And looping multiple leading blocks here (when the
+    // renderer strips only one) would make persisted/reload content diverge from
+    // the live stream. So: leading, single, partial-open left intact (#3455 review, Codex).
+    let extracted='';
+    let remaining=text;
+    const trimmed=text.trimStart();
+    for(const {open,close} of _thinkPairs){
+      if(!trimmed.startsWith(open)) continue;
+      const ci=trimmed.indexOf(close,open.length);
+      if(ci===-1) break; // partial open — leave intact for the live renderer
+      extracted=trimmed.slice(open.length,ci);
+      remaining=trimmed.slice(ci+close.length).replace(/^\s+/,'');
+      break;
+    }
+    if(!extracted) return {reasoning:existingReasoning||'', content:rawContent};
+    const finalReasoning=existingReasoning?existingReasoning+'\n\n'+extracted:extracted;
+    return {reasoning:finalReasoning, content:remaining};
+  }
   function syncInflightAssistantMessage(){
     const inflight=INFLIGHT[activeSid];
     if(!inflight) return;
@@ -819,14 +879,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(msg&&msg.role==='assistant'&&msg._live){assistantIdx=i;break;}
     }
     const ts=Date.now()/1000;
+    // Split inline <think> blocks into m.reasoning so the persisted inflight
+    // state stays compact and the thinking card has a proper source field.
+    const split=_splitThinkFromContent(assistantText, reasoningText);
     if(assistantIdx>=0){
-      inflight.messages[assistantIdx].content=assistantText;
-      inflight.messages[assistantIdx].reasoning=reasoningText||undefined;
+      inflight.messages[assistantIdx].content=split.content;
+      inflight.messages[assistantIdx].reasoning=split.reasoning||undefined;
       inflight.messages[assistantIdx]._ts=inflight.messages[assistantIdx]._ts||ts;
       _throttledPersist();
       return;
     }
-    inflight.messages.push({role:'assistant',content:assistantText,reasoning:reasoningText||undefined,_live:true,_ts:ts});
+    inflight.messages.push({role:'assistant',content:split.content,reasoning:split.reasoning||undefined,_live:true,_ts:ts});
     _throttledPersist();
   }
   function ensureAssistantRow(force=false){
@@ -1884,6 +1947,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          S.messages=_filterRecoveryControlMessages(S.messages || []);
           if(S.session&&S.session.session_id){
             try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
             if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
@@ -1900,6 +1964,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
           // Persist reasoning trace so thinking card survives page reload
           if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
+          // Strip any inline <think> blocks still embedded in the server-side
+          // content (M3 OpenAI-compat doesn't separate reasoning). Move them
+          // to m.reasoning so the persisted session stays compact and the
+          // thinking card has a proper source field on reload.
+          if(lastAsst && typeof lastAsst.content === 'string' && lastAsst.content){
+            const split=_splitThinkFromContent(lastAsst.content, lastAsst.reasoning);
+            if(split.content!==lastAsst.content){
+              lastAsst.content=split.content;
+              if(split.reasoning) lastAsst.reasoning=split.reasoning;
+            }
+          }
           // Stamp _ts on the last assistant message if it has no timestamp
           if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
           if(d.usage){
@@ -2169,6 +2244,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
+        let isRecoveryControlMessage=false;
         try{
           const d=JSON.parse(e.data);
           const isRateLimit=d.type==='rate_limit';
@@ -2178,17 +2254,33 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isModelNotFound=d.type==='model_not_found';
           const isCancelled=d.type==='cancelled';
           const isInterrupted=d.type==='interrupted';
+          isRecoveryControlMessage=isInterrupted && (d.recovery_control===true || _streamRecoveryControlMessageText(d.message));
           const isNoResponse=d.type==='no_response'||d.type==='silent_failure';
           const label=isCancelled?'Task cancelled':isInterrupted?'Response interrupted':isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isGatewayAuthError?(typeof t==='function'?t('gateway_auth_label'):'Gateway authentication failed'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response from provider':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
           const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
-          S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
+          if(isRecoveryControlMessage){
+            if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
+          } else {
+            S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
+          }
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
         }
-        _markSessionViewed(activeSid, S.messages.length);
-        renderMessages({preserveScroll:true});
+        if(isRecoveryControlMessage){
+          (async()=>{
+            if(await _restoreSettledSession(source)) return;
+            if(S.session&&S.session.session_id===activeSid){
+              S.messages=_filterRecoveryControlMessages(S.messages||[]);
+              _markSessionViewed(activeSid, S.messages.length);
+              renderMessages({preserveScroll:true});
+            }
+          })();
+        } else {
+          _markSessionViewed(activeSid, S.messages.length);
+          renderMessages({preserveScroll:true});
+        }
       }else if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
         try{const d=JSON.parse(e.data);trackBackgroundError(activeSid,_errTitle,d.message||'Error');}
@@ -2381,6 +2473,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.session=session;
         const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
         S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+        S.messages=_filterRecoveryControlMessages(S.messages || []);
         if(S.session&&S.session.session_id){
           try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
           if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);

@@ -17,8 +17,8 @@ def test_stream_completion_syncs_rotated_session_id_to_tab_state():
     assert completion_pos != -1
     assert settled_pos != -1
 
-    completion_block = MESSAGES_JS[completion_pos : completion_pos + 500]
-    settled_block = MESSAGES_JS[settled_pos : settled_pos + 500]
+    completion_block = MESSAGES_JS[completion_pos : completion_pos + 900]
+    settled_block = MESSAGES_JS[settled_pos : settled_pos + 900]
 
     for block in (completion_block, settled_block):
         assert "localStorage.setItem('hermes-webui-session',S.session.session_id);" in block

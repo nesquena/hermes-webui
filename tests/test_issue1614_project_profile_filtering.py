@@ -234,8 +234,15 @@ def test_profile_field_on_project_dict_default_create(monkeypatch):
     assert create_idx > 0
     next_handler_idx = src.find('"/api/projects/rename"', create_idx)
     create_block = src[create_idx:next_handler_idx]
-    assert '"profile": get_active_profile_name() or \'default\'' in create_block, (
-        "Project create must stamp the active profile (#1614)"
+    # The create handler must stamp the profile from a (validated) body value or
+    # the active profile. #3331 follow-up: the raw body value is now validated
+    # via _PROFILE_ID_RE before stamping, so the expression reads `_requested_profile`.
+    assert '"profile": _requested_profile or get_active_profile_name() or \'default\'' in create_block, (
+        "Project create must stamp the active profile or accept a validated profile from body (#1614/#3331)"
+    )
+    # And the validation guard must be present (reject unknown/invalid profile ids).
+    assert '_PROFILE_ID_RE.fullmatch(_requested_profile)' in create_block, (
+        "Project create must validate a client-supplied profile before stamping it (#3331)"
     )
 
 
@@ -265,16 +272,16 @@ def test_project_delete_rejects_cross_profile():
     )
 
 
-def test_session_move_rejects_cross_profile_project():
-    """/api/session/move must refuse moves into a project from another profile."""
+def test_session_move_uses_session_profile():
+    """/api/session/move must use session.profile instead of active_profile for authorization."""
     from pathlib import Path
     src = (Path(__file__).parent.parent / 'api' / 'routes.py').read_text(encoding='utf-8')
 
     move_idx = src.find('"/api/session/move"')
     assert move_idx > 0
     move_block = src[move_idx:move_idx + 2000]
-    assert '_profiles_match(target.get("profile"), active_profile)' in move_block, (
-        "session/move must check target project's active-profile ownership"
+    assert '_profiles_match(target.get("profile"), _session_profile)' in move_block, (
+        "session/move must use session-scoped profile (not active_profile) for authorization"
     )
 
 

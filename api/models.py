@@ -637,18 +637,6 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def _maybe_clear_truncation_watermark(self) -> None:
-        watermark = _message_timestamp_as_float({"timestamp": self.truncation_watermark})
-        if watermark is None:
-            return
-        max_message_timestamp = None
-        for msg in self.messages or []:
-            timestamp = _message_timestamp_as_float(msg)
-            if timestamp is not None:
-                max_message_timestamp = timestamp if max_message_timestamp is None else max(max_message_timestamp, timestamp)
-        if max_message_timestamp is not None and max_message_timestamp > watermark:
-            self.truncation_watermark = None
-
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
@@ -671,7 +659,6 @@ class Session:
             )
         if touch_updated_at:
             self.updated_at = time.time()
-        self._maybe_clear_truncation_watermark()
         # Write metadata fields first so load_metadata_only() can read them
         # without parsing the full messages array (which may be 400KB+).
         # Fields are listed in the order they should appear in the JSON file.
@@ -2655,6 +2642,68 @@ def _refresh_index_rows_from_sidecar_metadata(sessions: list[dict]) -> list[dict
     return out
 
 
+def state_db_has_session(sid: str) -> bool:
+    """Return True when ``sid`` exists in the active state.db sessions table.
+
+    Used by file-manager handlers to fall back to a state.db lookup when
+    ``get_session`` raises ``KeyError`` because the session was created by
+    Telegram/CLI (external) rather than the WebUI (issue #3280). The state.db
+    schema stores only metadata (id/title/model/source/...), not a workspace
+    path — the workspace is shared across session storage backends and is
+    resolved separately via ``get_last_workspace()``.
+    """
+    if not sid:
+        return False
+    try:
+        import sqlite3
+    except ImportError:
+        return False
+    db_path = _active_state_db_path()
+    if not db_path.exists():
+        return False
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (str(sid),))
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+class _ExternalSessionView:
+    """Minimal session-shaped view for external (Telegram/CLI) sessions.
+
+    Only exposes the fields file-manager handlers need (``session_id`` and
+    ``workspace``). The workspace falls back to the WebUI's last-used
+    workspace because state.db does not persist a per-session workspace path
+    and the file browser is intentionally workspace-scoped, not
+    session-storage-scoped (issue #3280).
+    """
+
+    __slots__ = ("session_id", "workspace")
+
+    def __init__(self, session_id: str, workspace: str):
+        self.session_id = session_id
+        self.workspace = workspace
+
+
+def get_session_for_file_ops(sid: str):
+    """Return a session-like object for file-manager handlers.
+
+    Tries ``get_session`` first (preserves all existing behavior for WebUI
+    sessions). If that raises ``KeyError``, checks state.db; when the session
+    exists there, returns an ``_ExternalSessionView`` whose ``workspace`` is
+    the active WebUI workspace. If neither has the session, re-raises
+    ``KeyError`` so callers continue to return their existing 404.
+    """
+    try:
+        return get_session(sid, metadata_only=True)
+    except KeyError:
+        if state_db_has_session(sid):
+            return _ExternalSessionView(str(sid), str(get_last_workspace()))
+        raise
+
+
 def _active_state_db_path() -> Path:
     """Return state.db for the active Hermes profile, degrading to HERMES_HOME."""
     try:
@@ -2663,6 +2712,49 @@ def _active_state_db_path() -> Path:
     except Exception:
         hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
     return hermes_home / 'state.db'
+
+
+def agent_session_row_exists(session_id: str, *, profile=None) -> bool:
+    """Return True if ``session_id`` still has a backing row in the agent state.db.
+
+    Used to detect orphaned imported-CLI sidecars (#3238): the WebUI sidebar
+    must NOT rely on the session's presence in ``get_cli_sessions()`` to decide
+    whether its backing CLI row still exists, because that helper caps at
+    ``CLI_VISIBLE_SESSION_LIMIT`` (20) rows — a still-existing session can fall
+    out of the recent window and look "deleted." This is an exact, uncapped
+    existence probe against the ``sessions`` table.
+
+    Degrades safely to ``True`` (assume present) on any error or when the DB is
+    unreadable, so a transient failure never causes a stale-pruning data loss.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    try:
+        import sqlite3
+    except ImportError:
+        return True
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
+    if not db_path.exists():
+        # No agent DB at all on this instance — can't claim the row is gone.
+        return True
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            cols = {str(row[1]) for row in cur.fetchall()}
+            if 'id' not in cols:
+                return True
+            cur.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (sid,))
+            return cur.fetchone() is not None
+    except Exception:
+        logger.debug("agent_session_row_exists probe failed for %s", sid, exc_info=True)
+        return True
 
 
 def _sidebar_title_is_generic_webui(title: str | None) -> bool:
@@ -2858,6 +2950,10 @@ def all_sessions(diag=None):
     return result
 
 
+def _strip_attached_files_marker(text: str) -> str:
+    return re.sub(r"\n\n\[Attached files: [^\]]+\]$", "", str(text or "")).strip()
+
+
 def title_from(messages, fallback: str='Untitled'):
     """Derive a session title from the first user message."""
     for m in messages:
@@ -2865,7 +2961,7 @@ def title_from(messages, fallback: str='Untitled'):
             c = m.get('content', '')
             if isinstance(c, list):
                 c = ' '.join(p.get('text', '') for p in c if isinstance(p, dict) and p.get('type') == 'text')
-            text = str(c).strip()
+            text = _strip_attached_files_marker(str(c))
             if text:
                 return text[:64]
     return fallback
@@ -3810,6 +3906,29 @@ def _session_message_merge_key(msg: dict):
     )
 
 
+def _session_message_dedup_key(msg: dict):
+    """Like _session_message_merge_key but preserves full-precision timestamp.
+
+    Two messages are true duplicates only if role, content, AND exact
+    timestamp all match.  Sub-second timestamp differences indicate
+    legitimately distinct messages (e.g. two assistant turns within the
+    same wall-clock second).
+    """
+    if not isinstance(msg, dict):
+        return ("non_dict", repr(msg))
+    message_identity = msg.get("id") or msg.get("message_id")
+    if message_identity:
+        return ("message_id", str(message_identity))
+    return (
+        "legacy",
+        str(msg.get("role") or ""),
+        str(msg.get("content") or ""),
+        str(msg.get("timestamp") or ""),
+        str(msg.get("tool_call_id") or ""),
+        str(msg.get("tool_name") or msg.get("name") or ""),
+    )
+
+
 def _normalized_session_message_content(msg: dict) -> str:
     if not isinstance(msg, dict):
         return repr(msg)
@@ -3947,17 +4066,34 @@ def merge_session_messages_append_only(
         return sidecar_messages
     if not sidecar_messages:
         if watermark_timestamp is not None:
-            return [
+            filtered = [
                 msg for msg in state_messages
                 if (
                     (timestamp := _message_timestamp_as_float(msg)) is not None
                     and timestamp <= watermark_timestamp
                 )
             ]
-        return state_messages
+        else:
+            filtered = state_messages
+        # Deduplicate true duplicates (same role, content, exact timestamp)
+        # without collapsing legitimately-repeated identical turns (#3346).
+        # Note: rows whose timestamps were mutated by compaction/recovery to
+        # microsecond-different values will not be folded — only byte-identical
+        # timestamps are treated as the same message.  This is intentional;
+        # collapsing same-second distinct turns would be worse than retaining
+        # a compaction-restamped duplicate.
+        seen = set()
+        deduped = []
+        for msg in filtered:
+            key = _session_message_dedup_key(msg)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(msg)
+        return deduped
 
     merged_messages = []
     seen_message_keys = set()
+    seen_dedup_keys = set()
     seen_content_keys = set()
     seen_visible_keys = set()
     sidecar_visible_sequence = []
@@ -3970,6 +4106,7 @@ def merge_session_messages_append_only(
             max_sidecar_timestamp = timestamp if max_sidecar_timestamp is None else max(max_sidecar_timestamp, timestamp)
         key = _session_message_merge_key(msg)
         seen_message_keys.add(key)
+        seen_dedup_keys.add(_session_message_dedup_key(msg))
         seen_content_keys.add(_session_message_content_key(msg))
         visible_key = _session_message_visible_key(msg)
         seen_visible_keys.add(visible_key)
@@ -4002,20 +4139,65 @@ def merge_session_messages_append_only(
                 skipped_state_visible_counts[matched_visible_key] = (
                     skipped_state_visible_counts.get(matched_visible_key, 0) + 1
                 )
+            # Record dedup key so later duplicates of this replayed message
+            # are caught by the dedup guard (#3346).
+            seen_dedup_keys.add(_session_message_dedup_key(msg))
             continue
+        # Skip rows ABOVE the watermark only while the sidecar has NOT advanced
+        # past the watermark. Because Session.save() no longer auto-clears the
+        # watermark, an unconditional `timestamp > watermark` skip would become
+        # permanent and silently drop legitimate future state.db-only recovery
+        # rows once the session moves forward past the edit boundary. Once the
+        # sidecar's own max timestamp is beyond the watermark (the session has
+        # advanced), allow state rows newer than the sidecar tail to merge.
+        sidecar_advanced_past_watermark = (
+            watermark_timestamp is not None
+            and max_sidecar_timestamp is not None
+            and max_sidecar_timestamp > watermark_timestamp
+        )
         if (
             watermark_timestamp is not None
             and timestamp is not None
             and timestamp > watermark_timestamp
             and key not in seen_message_keys
+            and (
+                not sidecar_advanced_past_watermark
+                or (max_sidecar_timestamp is not None and timestamp <= max_sidecar_timestamp)
+            )
         ):
             continue
+        # When a truncation watermark is active, state.db may contain original
+        # messages that were replaced by Edit (old content with old timestamp).
+        # The timestamp-based filter above catches messages AFTER the watermark,
+        # but messages BEFORE it (like the original pre-edit content) slip through.
+        # If a state.db message's content is not present in the sidecar and its
+        # timestamp is before the watermark, it's a replaced/stale row — skip it.
+        if (
+            watermark_timestamp is not None
+            and timestamp is not None
+            and timestamp < watermark_timestamp
+            and key not in seen_message_keys
+            and _session_message_content_key(msg) not in seen_content_keys
+        ):
+            continue
+        # Check for true duplicates using full-precision timestamp (#3346).
+        # Must run before the merge-key guards so that legitimately distinct
+        # sub-second messages with the same second-level merge key are not
+        # collapsed.  The merge key truncates to seconds; the dedup key does
+        # not.
+        dedup_key = _session_message_dedup_key(msg)
+        if dedup_key in seen_dedup_keys:
+            continue
         if max_sidecar_timestamp is not None and timestamp is not None and timestamp <= max_sidecar_timestamp:
-            if key in seen_message_keys:
+            # For message_id keys the merge key is authoritative — skip if
+            # already seen.  For legacy keys the dedup check above already
+            # handled true duplicates; same-second distinct messages must
+            # fall through.
+            if key in seen_message_keys and key[0] == "message_id":
                 continue
             if not (isinstance(key, tuple) and key[:1] == ("message_id",)):
                 continue
-        if key in seen_message_keys:
+        if key in seen_message_keys and key[0] == "message_id":
             continue
         matched_visible_key = _matching_visible_duplicate(
             visible_key,
@@ -4045,8 +4227,8 @@ def merge_session_messages_append_only(
             and timestamp <= max_sidecar_timestamp
         ):
             continue
-        if key[0] == "message_id":
-            seen_message_keys.add(key)
+        seen_message_keys.add(key)
+        seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(_session_message_content_key(msg))
         seen_visible_keys.add(visible_key)
         merged_messages.append(msg)

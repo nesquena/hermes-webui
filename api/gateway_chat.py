@@ -24,7 +24,7 @@ from api.config import (
     update_active_run,
 )
 from api.helpers import _redact_text, redact_session_data
-from api.models import get_session
+from api.models import get_session, merge_session_messages_append_only
 from api.run_journal import RunJournalWriter
 
 logger = logging.getLogger(__name__)
@@ -250,10 +250,29 @@ def _run_gateway_chat_streaming(
                 _load_webui_prefill_context,
                 _prefill_messages_with_webui_context,
                 _public_prefill_context_status,
+                _webui_ephemeral_system_prompt,
             )
 
             prefill_context = _load_webui_prefill_context(cfg)
-            prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
+            # #3324: the WebUI session/delivery context (connected platforms,
+            # home channels, delivery hints, session framing) is now carried in
+            # the ephemeral system prompt rather than a prefill `user` message.
+            # The gateway-backed path must build the SAME system prompt so that
+            # context is not silently dropped on Gateway-routed WebUI chats.
+            _gateway_system_prompt = _webui_ephemeral_system_prompt(
+                None,
+                surface_context={
+                    "source": "webui",
+                    "session_id": session_id,
+                    "profile": getattr(s, "profile", None),
+                    "workspace": s.workspace if s is not None else str(workspace),
+                },
+                config_data=cfg,
+            )
+            prefill_messages = [
+                {"role": "system", "content": _gateway_system_prompt},
+                *_prefill_messages_with_webui_context(prefill_context, cfg),
+            ]
             put_gateway_event("context_status", {
                 "session_id": session_id,
                 "prefill": _public_prefill_context_status(prefill_context),
@@ -380,16 +399,41 @@ def _run_gateway_chat_streaming(
             assistant_msg = {"role": "assistant", "content": assistant_text, "timestamp": assistant_ts}
             previous_context = list(getattr(s, "context_messages", None) or getattr(s, "messages", None) or [])
             s.context_messages = previous_context + [user_msg, assistant_msg]
-            display = list(getattr(s, "messages", None) or [])
-            # Avoid duplicating the eager-save checkpointed user message.
-            if display:
-                latest = display[-1]
-                if isinstance(latest, dict) and latest.get("role") == "user":
-                    latest_text = " ".join(str(latest.get("content") or "").split())
-                    msg_norm = " ".join(str(msg_text or "").split())
-                    if latest_text == msg_norm:
-                        display = display[:-1]
-            s.messages = display + [user_msg, assistant_msg]
+            try:
+                from api.streaming import _is_context_compression_marker
+
+                display_context = [
+                    msg
+                    for msg in previous_context
+                    if not _is_context_compression_marker(msg)
+                ]
+            except Exception:
+                logger.debug("Failed to filter gateway display context markers", exc_info=True)
+                display_context = previous_context
+            display = merge_session_messages_append_only(
+                list(getattr(s, "messages", None) or []),
+                display_context,
+            )
+            try:
+                from api.streaming import _merge_display_messages_after_agent_result
+
+                s.messages = _merge_display_messages_after_agent_result(
+                    display,
+                    previous_context,
+                    s.context_messages,
+                    str(msg_text or ""),
+                )
+            except Exception:
+                logger.debug("Failed to merge gateway display transcript", exc_info=True)
+                # Avoid duplicating the eager-save checkpointed user message.
+                if display:
+                    latest = display[-1]
+                    if isinstance(latest, dict) and latest.get("role") == "user":
+                        latest_text = " ".join(str(latest.get("content") or "").split())
+                        msg_norm = " ".join(str(msg_text or "").split())
+                        if latest_text == msg_norm:
+                            display = display[:-1]
+                s.messages = display + [user_msg, assistant_msg]
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = None

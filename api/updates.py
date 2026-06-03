@@ -1049,10 +1049,37 @@ def _schedule_restart(delay: float = 2.0) -> None:
         with _apply_lock:
             _wait_until_restart_safe()
             try:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                # Re-exec into the just-pulled image.
+                #
+                # sys.argv[0]'s meaning depends on how the server was launched:
+                #
+                #   * Source checkout (`python server.py` via bootstrap.py /
+                #     ctl.sh / start.sh): sys.argv[0] is the SCRIPT path
+                #     (e.g. "/root/hermes-webui/server.py"), sys.executable is
+                #     the interpreter. CPython treats argv[1] as the script to
+                #     run, so we must pass [sys.executable] + sys.argv.
+                #
+                #   * Frozen/packaged build (PyInstaller, embedded zipapp,
+                #     etc.): sys.argv[0] == sys.executable == <binary>. Passing
+                #     [sys.executable] + sys.argv would re-insert the binary as
+                #     argv[1] — the kernel launches it, the interpreter treats
+                #     the binary itself as the "script" to run, and execv
+                #     effectively becomes a recursive no-op that never reaches
+                #     bind(), leaving the WebUI stuck "offline" after every
+                #     self-update. Pass argv as-is instead.
+                #
+                # Distinguish the two cases with sys.frozen (set by
+                # PyInstaller / zipapp / similar). For source checkouts the
+                # `[sys.executable] + sys.argv` form is the canonical CPython
+                # re-exec idiom (same shape Flask/Django reloaders use) and
+                # is the correct path.
+                if getattr(sys, "frozen", False):
+                    os.execv(sys.executable, sys.argv)
+                else:
+                    os.execv(sys.executable, [sys.executable] + sys.argv)
             except Exception:
-                # Last-resort: if execv fails (e.g. frozen binary), just exit
-                # so the process supervisor (start.sh / Docker) restarts us.
+                # Last-resort: if execv fails for any reason, just exit so the
+                # process supervisor (start.sh / Docker) restarts us.
                 os._exit(0)
 
     threading.Thread(target=_do, daemon=True).start()
