@@ -3,6 +3,22 @@
 
 ## [Unreleased]
 
+### Localization
+
+- **Japanese (ja) — 80 missing/untranslated strings translated** (`static/i18n.js`). Previously 83 keys in the `ja` locale block kept their English values; all meaningful ones are now translated:
+  - MCP server enable/disable toggles and status toasts
+  - MCP tools pagination controls (page size label, prev/next buttons, ARIA labels, summary sentences)
+  - `/goal` command strings (status, progress, pause/resume/clear, budget-exhausted messages)
+  - Plugin panel strings (title, meta, empty state, hook labels, enabled/disabled status)
+  - Workspace hidden-file toggle description and option button label
+  - Settings: activity-feed expand default, hide-new-chat-suggestions, ignore-Agent-updates, What's-New AI summary
+  - Kanban status-original hint
+  - Provider OAuth label, model refresh controls
+  - Cron full-output button and completion-status toast
+  - Various onboarding placeholders and external-notes source labels
+  - Keys intentionally kept as-is: `mcp_field_url` ("URL"), `session_toolsets_placeholder` ("tool1, tool2, …"), `yolo_pill_label` ("YOLO")
+
+
 ## [v0.51.230] — 2026-06-03 — Release GX (stage-p14 — extract <think> blocks to m.reasoning + LLM Wiki last-writer)
 
 ### Fixed
