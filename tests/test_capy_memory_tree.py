@@ -15490,3 +15490,282 @@ def test_run_source_refresh_jobs_fail_closes_legacy_github_collaborators_userinf
     assert "api.github.com" not in serialized
     assert "access_token" not in serialized
     assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_ingests_github_teams_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-teams-source-refresh",
+        "title": "GitHub Teams Source Refresh <script>bad()</script>",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/teams?access_token=***#raw-prompt",
+    })
+    github_teams_body = json.dumps([
+        {
+            "id": 301,
+            "name": "Core Maintainers",
+            "slug": "core-maintainers",
+            "privacy": "closed",
+            "permission": "admin",
+            "description": "Maintainer group details omitted from public memory.",
+            "html_url": "https://github.com/orgs/capy/teams/core-maintainers",
+            "url": "https://api.github.com/teams/301",
+            "members_url": "https://api.github.com/teams/301/members{/member}",
+        },
+        {
+            "id": 302,
+            "name": "Release Crew",
+            "slug": "release-crew",
+            "privacy": "secret",
+            "permission": "maintain",
+            "notification_setting": "notifications_enabled",
+            "parent": {"id": 301, "name": "Core Maintainers"},
+        },
+    ]).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_teams_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout, "accept": request.headers.get("Accept")})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-teams-source-refresh.md").read_text(encoding="utf-8").lower()
+    search = search_memory("release crew", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [{
+        "url": "https://api.github.com/repos/capy/spaces/teams",
+        "timeout": 8,
+        "accept": "application/json",
+    }]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    assert result["jobs"][0]["prompt_preflight"]["boundary"] == "auto_fetched_source"
+    assert result["jobs"][0]["prompt_preflight"]["raw_prompt_stored"] is False
+    assert search["results"][0]["source_id"] == "github-teams-source-refresh"
+    assert "origin_uri: github teams capy/spaces" in persisted
+    assert "github teams for capy/spaces" in persisted
+    assert "team count: 2" in persisted
+    assert "team: core maintainers; slug: core-maintainers; id: 301; privacy: closed; permission: admin" in persisted
+    assert "team: release crew; slug: release-crew; id: 302; privacy: private; permission: maintain" in persisted
+    for unsafe in (
+        "description",
+        "html_url",
+        "members_url",
+        "api.github.com/teams",
+        "github.com/orgs",
+        "access_token",
+        "raw-prompt",
+        "<script",
+        "bad()",
+        "renderer",
+        "api_key",
+        "secret_value_do_not_leak",
+    ):
+        assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_teams_feed_bypass(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-teams-feed-bypass",
+        "title": "GitHub Teams Feed Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/teams?access_token=***#raw-prompt",
+    })
+    github_teams_body = json.dumps({
+        "version": "https://jsonfeed.org/version/1.1",
+        "items": [{
+            "title": "Teams feed bypass",
+            "summary": "Safe-looking teams feed summary must not bypass exact teams metadata validation.",
+            "content_text": "SECRET_VALUE_DO_NOT_LEAK raw team body",
+        }],
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/feed+json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_teams_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-teams-feed-bypass.md").exists()
+    assert "safe-looking teams feed summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_teams_malformed_tail_row(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-teams-invalid-tail",
+        "title": "GitHub Teams Invalid Tail",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/teams?access_token=***#raw-prompt",
+    })
+    github_teams_body = json.dumps([
+        {"id": 301, "name": "Core Maintainers", "slug": "core-maintainers", "privacy": "closed", "permission": "admin"},
+        {"id": 302, "name": "Release Crew", "slug": "release-crew", "privacy": "secret", "permission": "maintain"},
+        {"id": 303, "name": "tail-team", "slug": "tail-team", "privacy": "closed", "permission": "admin"},
+        {"id": 304, "name": "docs-team", "slug": "docs-team", "privacy": "closed", "permission": "read"},
+        {"id": 305, "name": "qa-team", "slug": "qa-team", "privacy": "closed", "permission": "triage"},
+        {
+            "id": 306,
+            "name": "Unsafe Team <script>",
+            "slug": "unsafe-team",
+            "privacy": "closed",
+            "permission": "admin",
+            "summary": "Safe-looking teams summary should not bypass exact metadata validation.",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    ]).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_teams_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-teams-invalid-tail.md").exists()
+    assert "safe-looking teams summary" not in serialized
+    assert "unsafe team" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_teams_malformed_path_before_fetch(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-teams-malformed-path",
+        "title": "GitHub Teams Malformed Path",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/teams/active?access_token=***#raw-prompt",
+    })
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return b"Summary: safe-looking teams text should not bypass malformed path"
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert calls == []
+    assert not (root / "vault" / "github-teams-malformed-path.md").exists()
+    assert "safe-looking teams text" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_teams_legacy_userinfo_before_fetch(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-teams-legacy-userinfo",
+        "title": "GitHub Teams Legacy Userinfo",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/teams",
+    })
+    legacy_payload = {
+        "source_id": "github-teams-legacy-userinfo",
+        "origin_uri": "https://octo-capy:SECRET_VALUE_DO_NOT_LEAK@api.github.com/repos/capy/spaces/teams?access_token=***#raw-prompt",
+        "refresh_interval_seconds": 3600,
+    }
+    with capy_memory._connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET payload_json = ?, status = 'pending', attempts = 0 WHERE job_id = ?",
+            (json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")), receipt["job_id"]),
+        )
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("legacy userinfo teams source must fail before fetch")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert calls == []
+    assert not (root / "vault" / "github-teams-legacy-userinfo.md").exists()
+    assert "octo-capy" not in serialized
+    assert "api.github.com" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized

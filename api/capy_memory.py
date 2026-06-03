@@ -494,6 +494,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_collaborators_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_teams_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_teams_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_participation_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_participation_path_repo(origin_uri)
@@ -5092,6 +5097,158 @@ def _github_collaborators_refresh_summary(origin_uri: str, payload: list[Any]) -
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_teams_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _segment_looks_like_teams(raw_segment: str) -> bool:
+        segment = raw_segment.lower()
+        return segment == "teams" or segment.startswith("teams")
+
+    def _matches_teams_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 5 and path[0] == "" and lowered[1] == "repos" and any(
+            _segment_looks_like_teams(segment) for segment in path[4:]
+        )
+
+    return _matches_teams_shape(parts.path) or _matches_teams_shape(unquote(parts.path))
+
+
+def _github_teams_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (parts.hostname or "").strip().lower() != "api.github.com" or parts.scheme != "https" or parts.netloc != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "teams"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_team_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or text != value:
+        return False
+    if _safe_public_text(text, limit=120) != text or _refresh_value_is_blocked(text):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._()+,@/-]{0,119}", text))
+
+
+def _github_team_slug_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    slug = value.strip()
+    if not slug or slug != value:
+        return False
+    if _refresh_value_is_blocked(slug):
+        return False
+    return bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?", slug))
+
+
+def _github_team_id_is_safe(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and 0 < value <= 10_000_000_000
+
+
+def _github_team_privacy_is_safe(value: Any) -> bool:
+    return value in {"closed", "secret"}
+
+
+def _github_team_permission_is_safe(value: Any) -> bool:
+    return value in {"pull", "triage", "push", "maintain", "admin", "read", "write"}
+
+
+def _github_team_ignored_value_is_safe(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str)
+            and not _refresh_value_is_blocked(key)
+            and _github_team_ignored_value_is_safe(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return all(_github_team_ignored_value_is_safe(item) for item in value)
+    return not _refresh_value_is_blocked(value)
+
+
+def _github_team_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    allowed_summary_keys = {"id", "name", "slug", "privacy", "permission"}
+    allowed_ignored_keys = {
+        "description",
+        "html_url",
+        "members_url",
+        "notification_setting",
+        "node_id",
+        "parent",
+        "permission",
+        "privacy",
+        "repositories_url",
+        "slug",
+        "url",
+    }
+    for key, value in row.items():
+        if key in allowed_summary_keys:
+            continue
+        if key not in allowed_ignored_keys or not _github_team_ignored_value_is_safe(value):
+            return False
+    if not _github_team_id_is_safe(row.get("id")):
+        return False
+    if not _github_team_name_is_safe(row.get("name")):
+        return False
+    if not _github_team_slug_is_safe(row.get("slug")):
+        return False
+    if not _github_team_privacy_is_safe(row.get("privacy")):
+        return False
+    if "permission" in row and not _github_team_permission_is_safe(row.get("permission")):
+        return False
+    return True
+
+
+def _json_payload_is_github_teams_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_teams_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_team_row_is_safe(row) for row in payload)
+
+
+def _github_teams_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_teams_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_team_row_is_safe(row)]
+    parts = [f"GitHub teams for {repo}", f"team count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        privacy = _safe_public_text(row.get("privacy"), limit=20)
+        if row.get("privacy") == "secret":
+            privacy = "private"
+        row_parts = [
+            f"team: {_safe_public_text(row.get('name'), limit=120).lower()}",
+            f"slug: {_safe_public_text(row.get('slug'), limit=100)}",
+            f"id: {int(row.get('id'))}",
+            f"privacy: {privacy}",
+        ]
+        if "permission" in row:
+            row_parts.append(f"permission: {_safe_public_text(row.get('permission'), limit=20)}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -5330,6 +5487,20 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
     if _github_collaborators_path_matches(origin_uri):
+        raise ValueError("refresh failed")
+    teams_repo = _github_teams_path_repo(origin_uri)
+    if teams_repo:
+        if not _json_payload_is_github_teams_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub teams {teams_repo}"
+        summary = _github_teams_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": f"github teams {teams_repo}",
+        }
+    if _github_teams_path_matches(origin_uri):
         raise ValueError("refresh failed")
     forks_repo = _github_forks_path_repo(origin_uri)
     if forks_repo:
@@ -5666,6 +5837,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_collaborators_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_collaborators_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_teams_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_teams_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_license_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_license_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -5734,6 +5908,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_collaborators_path_matches(safe_origin_uri):
         if not _github_collaborators_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_teams_path_matches(safe_origin_uri):
+        if not _github_teams_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     request = Request(
@@ -5835,6 +6013,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_collaborators_path_matches(safe_origin_uri) and (
             not _github_collaborators_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_teams_path_matches(safe_origin_uri) and (
+            not _github_teams_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -6460,6 +6643,11 @@ def run_source_refresh_jobs(
         elif _github_collaborators_path_matches(raw_origin_uri) and (
             not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
             or not _github_collaborators_path_repo(raw_origin_uri)
+        ):
+            origin_uri = f"capy-memory://{source_id}"
+        elif _github_teams_path_matches(raw_origin_uri) and (
+            not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
+            or not _github_teams_path_repo(raw_origin_uri)
         ):
             origin_uri = f"capy-memory://{source_id}"
         elif (
