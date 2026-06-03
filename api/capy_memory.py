@@ -3290,6 +3290,113 @@ def _github_participation_refresh_summary(origin_uri: str, payload: dict[str, An
     )
 
 
+def _github_environments_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _segment_looks_like_environments(raw_segment: str) -> bool:
+        segment = raw_segment.lower()
+        return segment == "environments" or segment.startswith("environments")
+
+    def _matches_environments_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 4 and path[0] == "" and lowered[1] == "repos" and any(
+            _segment_looks_like_environments(segment) for segment in path[3:]
+        )
+
+    return _matches_environments_shape(parts.path) or _matches_environments_shape(unquote(parts.path))
+
+
+def _github_environments_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "environments"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_environment_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    name = _safe_public_text(value, limit=200)
+    if not name or name != value.strip():
+        return False
+    if _refresh_value_is_blocked(name) or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(name):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._/#:+@(),-]{0,199}", name))
+
+
+def _github_environment_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    env_id = _safe_optional_nonnegative_int(row.get("id"))
+    if env_id is None or env_id <= 0:
+        return False
+    if not _github_environment_name_is_safe(row.get("name")):
+        return False
+    for field in ("created_at", "updated_at"):
+        raw_timestamp = row.get(field)
+        if raw_timestamp is not None and not _safe_iso_timestamp(raw_timestamp):
+            return False
+    for raw_value in (row.get("id"), row.get("name"), row.get("created_at"), row.get("updated_at")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_environments_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_environments_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if _json_payload_is_feed(payload) or "items" in payload or "version" in payload:
+        return False
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    environments = payload.get("environments")
+    if total_count is None or not isinstance(environments, list):
+        return False
+    if total_count < len(environments):
+        return False
+    return all(_github_environment_row_is_safe(row) for row in environments)
+
+
+def _github_environments_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_environments_path_repo(origin_uri) or "repository"
+    raw_environments = payload.get("environments")
+    environments = raw_environments if isinstance(raw_environments, list) else []
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    parts = [f"GitHub environments for {repo}", f"environment count: {total_count if total_count is not None else len(environments)}"]
+    for row in [row for row in environments if _github_environment_row_is_safe(row)][:5]:
+        env_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        name = _safe_public_text(row.get("name"), limit=200)
+        created = _safe_iso_timestamp(row.get("created_at")) if row.get("created_at") is not None else ""
+        updated = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
+        row_parts = [f"environment #{env_id}: {name}"]
+        if created:
+            row_parts.append(f"created: {created}")
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 _GITHUB_MILESTONE_STATES = {"open", "closed"}
 
 
@@ -5760,6 +5867,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    environments_repo = _github_environments_path_repo(origin_uri)
+    if environments_repo:
+        if not _json_payload_is_github_environments_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub environments {environments_repo}"
+        summary = _github_environments_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
     if _json_payload_is_github_milestones_metadata(origin_uri, payload):
         repo = _github_milestones_path_repo(origin_uri) or source_id
         title = f"GitHub milestones {repo}"
@@ -6027,6 +6146,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_traffic_clones_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_traffic_clones_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_environments_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_environments_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     if not _source_refresh_allowed(safe_origin_uri):
@@ -6070,6 +6192,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_traffic_clones_path_matches(safe_origin_uri):
         if not _github_traffic_clones_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_environments_path_matches(safe_origin_uri):
+        if not _github_environments_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_assignees_path_matches(safe_origin_uri):
@@ -6168,6 +6294,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_traffic_clones_path_matches(safe_origin_uri) and (
             not _github_traffic_clones_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_environments_path_matches(safe_origin_uri) and (
+            not _github_environments_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
