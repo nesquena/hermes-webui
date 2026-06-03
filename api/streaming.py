@@ -4657,6 +4657,8 @@ def _run_agent_streaming(
                                     _slash_provider = _normalize_provider_id(_slash_prefix)
                                     if _slash_provider and _slash_provider != _pp_norm and _pp_norm not in {"openrouter", "custom", ""}:
                                         model = _pp_default
+                                if model != (s.model or ""):
+                                    s.model = model
             except Exception:
                 logger.warning("profile provider read failed", exc_info=True)
 
