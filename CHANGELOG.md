@@ -7,6 +7,10 @@
 
 - Custom logo upload in Settings → Appearance → Logo: users can upload PNG, SVG, or ICO images (max 256×256 px, 200 KB) to replace the titlebar logo, new-chat empty-state icon, and browser favicon, with optional separate light/dark variants that follow the active theme.
 
+### Fixed
+
+- Custom logo replacement now treats the latest upload as authoritative for each light/dark slot: uploading a new logo deletes prior PNG/SVG/ICO variants for that slot before saving the replacement, and Settings returns the current file version so reloads do not briefly reuse an older cached logo.
+
 ## [v0.51.230] — 2026-06-03 — Release GX (stage-p14 — extract <think> blocks to m.reasoning + LLM Wiki last-writer)
 
 ### Fixed

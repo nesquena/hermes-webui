@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from api.branding import _branding_version, _validate_upload
+from api import branding
+from api.branding import (
+    _branding_version,
+    _delete_logo_files_for_mode,
+    _validate_upload,
+    logo_version_for_settings_value,
+)
 
 
 def _png_header(width: int, height: int, payload: bytes = b"") -> bytes:
@@ -60,6 +66,36 @@ def test_branding_version_uses_file_mtime_token(tmp_path):
     assert version.isdigit()
 
 
+def test_logo_replacement_deletes_prior_extension_variants(tmp_path, monkeypatch):
+    monkeypatch.setattr(branding, "BRANDING_DIR", tmp_path)
+    old_png = tmp_path / "logo-light.png"
+    old_svg = tmp_path / "logo-light.svg"
+    dark_png = tmp_path / "logo-dark.png"
+    old_png.write_bytes(_png_header(32, 32))
+    old_svg.write_text("<svg></svg>", encoding="utf-8")
+    dark_png.write_bytes(_png_header(32, 32))
+
+    deleted = _delete_logo_files_for_mode("light")
+
+    assert set(deleted) == {"logo-light.png", "logo-light.svg"}
+    assert not old_png.exists()
+    assert not old_svg.exists()
+    assert dark_png.exists()
+
+
+def test_logo_version_for_settings_value_only_accepts_current_canonical_asset(tmp_path, monkeypatch):
+    monkeypatch.setattr(branding, "BRANDING_DIR", tmp_path)
+    logo = tmp_path / "logo-light.png"
+    logo.write_bytes(_png_header(32, 32))
+
+    version = logo_version_for_settings_value("logo-light.png")
+
+    assert version
+    assert logo_version_for_settings_value("../logo-light.png") == ""
+    assert logo_version_for_settings_value("legacy-light.png") == ""
+    assert logo_version_for_settings_value("logo-light.gif") == ""
+
+
 def test_custom_logo_dom_hooks_exist():
     html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
 
@@ -77,6 +113,9 @@ def test_custom_logo_favicon_uses_resolved_theme_variant():
 
     assert "function customLogoAssetUrl" in js
     assert "window._customLogoThemeVersion" in js
+    assert "s.custom_logo_light_version||''" in js
+    assert "s.custom_logo_dark_version||''" in js
+    assert "settings&&settings.custom_logo_light_version" in js
     assert "typeof event.matches==='boolean'?event.matches" in js
     assert "function _applyCachedCustomLogo" in js
     assert "hermes-custom-logo-state" in js
@@ -98,9 +137,14 @@ def test_custom_logo_upload_cache_busting_contract():
     panels = (root / "static" / "panels.js").read_text(encoding="utf-8")
 
     assert '"version": version' in branding
+    assert '"deleted": deleted' in branding
+    assert "_delete_logo_files_for_mode(mode)" in branding
+    assert "logo_version_for_settings_value" in routes
     assert 'Cache-Control", "no-store, max-age=0"' in routes
     assert "window._customLogoLightVersion=version" in panels
     assert "window._customLogoDarkVersion=version" in panels
+    assert "settings.custom_logo_light_version || ''" in panels
+    assert "settings.custom_logo_dark_version || ''" in panels
     assert '_cacheCustomLogoState==="function"' in panels
     assert "function _setLogoPreviewFile" in panels
     assert "URL.createObjectURL(file)" in panels

@@ -5855,6 +5855,8 @@ function _appearancePayloadFromUi(){
     custom_logo_dark_mode: !!($('settingsCustomLogoDarkMode')||{}).checked,
     custom_logo_light_path: window._customLogoLightPath||'',
     custom_logo_dark_path: window._customLogoDarkPath||'',
+    custom_logo_light_version: window._customLogoLightVersion||'',
+    custom_logo_dark_version: window._customLogoDarkVersion||'',
   };
 }
 function _initLogoUpload(){
@@ -6733,6 +6735,8 @@ async function loadSettingsPanel(){
     window._customLogoDarkMode = !!settings.custom_logo_dark_mode;
     window._customLogoLightPath = settings.custom_logo_light_path || '';
     window._customLogoDarkPath = settings.custom_logo_dark_path || '';
+    window._customLogoLightVersion = settings.custom_logo_light_version || '';
+    window._customLogoDarkVersion = settings.custom_logo_dark_version || '';
     var logoEnabledCb = $('settingsCustomLogoEnabled');
     var logoDarkCb = $('settingsCustomLogoDarkMode');
     if (logoEnabledCb) logoEnabledCb.checked = !!settings.custom_logo_enabled;

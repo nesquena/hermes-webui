@@ -2887,7 +2887,12 @@ from api.workspace import (
     _workspace_blocked_roots,
 )
 from api.upload import handle_upload, handle_upload_extract, handle_transcribe, handle_workspace_upload
-from api.branding import handle_logo_upload, handle_logo_delete, BRANDING_DIR
+from api.branding import (
+    BRANDING_DIR,
+    handle_logo_delete,
+    handle_logo_upload,
+    logo_version_for_settings_value,
+)
 from api.streaming import (
     _sse,
     _run_agent_streaming,
@@ -4889,6 +4894,12 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/settings":
         settings = load_settings()
+        settings["custom_logo_light_version"] = logo_version_for_settings_value(
+            settings.get("custom_logo_light_path", "")
+        )
+        settings["custom_logo_dark_version"] = logo_version_for_settings_value(
+            settings.get("custom_logo_dark_path", "")
+        )
         # Never expose the stored password hash to clients
         settings.pop("password_hash", None)
         # Surface env-var precedence so the UI can disable the password field
@@ -7293,6 +7304,12 @@ def handle_post(handler, parsed) -> bool:
             clear_credentials()
 
         saved = save_settings(body)
+        saved["custom_logo_light_version"] = logo_version_for_settings_value(
+            saved.get("custom_logo_light_path", "")
+        )
+        saved["custom_logo_dark_version"] = logo_version_for_settings_value(
+            saved.get("custom_logo_dark_path", "")
+        )
         saved.pop("password_hash", None)  # never expose hash to client
 
         auth_enabled_after = is_auth_enabled()

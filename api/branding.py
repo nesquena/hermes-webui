@@ -42,6 +42,32 @@ def _resolve_logo_path(mode: str) -> Path:
     return BRANDING_DIR / f"logo-{mode}.png"
 
 
+def _logo_path_from_settings_value(value: str) -> Path | None:
+    """Resolve a stored logo filename if it is one of our canonical assets."""
+    raw = str(value or "").strip()
+    name = Path(raw).name
+    if not name:
+        return None
+    if raw != name:
+        return None
+    if not _re.fullmatch(r"logo-(light|dark)\.(png|svg|ico)", name):
+        return None
+    path = (BRANDING_DIR / name).resolve()
+    try:
+        path.relative_to(BRANDING_DIR.resolve())
+    except ValueError:
+        return None
+    return path
+
+
+def logo_version_for_settings_value(value: str) -> str:
+    """Return the current cache-busting version for a stored logo filename."""
+    path = _logo_path_from_settings_value(value)
+    if not path or not path.exists() or not path.is_file():
+        return ""
+    return _branding_version(path)
+
+
 def _branding_version(path: Path) -> str:
     """Return a stable cache-busting token for a mutable branding file."""
     try:
@@ -153,6 +179,21 @@ def _validate_upload(body: bytes, filename: str = "") -> tuple[bytes, str]:
     raise ValueError(_logo_requirements())
 
 
+def _delete_logo_files_for_mode(mode: str) -> list[str]:
+    """Delete every canonical logo file for a mode, regardless of extension."""
+    deleted: list[str] = []
+    for ext in _ALLOWED_EXTENSIONS:
+        path = BRANDING_DIR / f"logo-{mode}{ext}"
+        try:
+            path.relative_to(BRANDING_DIR)
+        except ValueError:
+            continue
+        if path.exists() and path.is_file():
+            path.unlink()
+            deleted.append(path.name)
+    return deleted
+
+
 def handle_logo_upload(handler) -> bool:
     """POST /api/settings/upload-logo
 
@@ -192,6 +233,7 @@ def handle_logo_upload(handler) -> bool:
     # Convert SVG/ICO to PNG naming for consistency? No — keep original ext
     # but save to the canonical path. For PNG we use .png, SVG .svg, ICO .ico.
     BRANDING_DIR.mkdir(parents=True, exist_ok=True)
+    deleted = _delete_logo_files_for_mode(mode)
     dest = BRANDING_DIR / f"logo-{mode}{ext}"
     dest.write_bytes(validated_data)
 
@@ -203,6 +245,7 @@ def handle_logo_upload(handler) -> bool:
         "path": filename,
         "version": version,
         "size": len(validated_data),
+        "deleted": deleted,
     })
 
 
@@ -226,12 +269,6 @@ def handle_logo_delete(handler) -> bool:
     if mode not in _VALID_MODES:
         return bad(handler, f"Invalid mode '{mode}'. Must be 'light' or 'dark'")
 
-    # Try all allowed extensions
-    deleted = False
-    for ext in _ALLOWED_EXTENSIONS:
-        path = BRANDING_DIR / f"logo-{mode}{ext}"
-        if path.exists():
-            path.unlink()
-            deleted = True
+    deleted = _delete_logo_files_for_mode(mode)
 
-    return j(handler, {"ok": True, "deleted": deleted})
+    return j(handler, {"ok": True, "deleted": bool(deleted)})

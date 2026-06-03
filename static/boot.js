@@ -1487,8 +1487,8 @@ function _customLogoCachePayload(settings){
     darkMode:!!(settings&&settings.custom_logo_dark_mode),
     lightPath:(settings&&settings.custom_logo_light_path)||'',
     darkPath:(settings&&settings.custom_logo_dark_path)||'',
-    lightVersion:window._customLogoLightVersion||'',
-    darkVersion:window._customLogoDarkVersion||'',
+    lightVersion:(settings&&settings.custom_logo_light_version)||window._customLogoLightVersion||'',
+    darkVersion:(settings&&settings.custom_logo_dark_version)||window._customLogoDarkVersion||'',
   };
 }
 
@@ -1853,6 +1853,8 @@ function applyCustomLogo(settings){
     window._customLogoDarkMode=!!s.custom_logo_dark_mode;
     window._customLogoLightPath=s.custom_logo_light_path||'';
     window._customLogoDarkPath=s.custom_logo_dark_path||'';
+    window._customLogoLightVersion=s.custom_logo_light_version||'';
+    window._customLogoDarkVersion=s.custom_logo_dark_version||'';
     window._sendKey=s.send_key||'enter';
     window._showTokenUsage=!!s.show_token_usage;
     window._showQuotaChip=s.show_quota_chip===true;
