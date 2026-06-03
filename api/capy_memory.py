@@ -1337,6 +1337,141 @@ def _github_repository_refresh_summary(payload: dict[str, Any]) -> str:
     return _bounded_refresh_summary("; ".join(parts))
 
 
+_GITHUB_COMMUNITY_PROFILE_FILE_LABELS = {
+    "code_of_conduct": "code of conduct",
+    "contributing": "contributing",
+    "issue_template": "issue template",
+    "license": "license",
+    "pull_request_template": "pull request template",
+    "readme": "readme",
+}
+
+
+def _github_community_profile_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _matches_community_profile_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 6
+            and path[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "community"
+            and any(segment.startswith("profile") for segment in lowered[5:] if segment)
+        )
+
+    return _matches_community_profile_shape(parts.path) or _matches_community_profile_shape(unquote(parts.path))
+
+
+def _github_community_profile_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme.lower() != "https" or (parts.hostname or "").strip().lower() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "community"
+        or path[5] != "profile"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_community_profile_file_label(value: Any, *, kind: str) -> str | None:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return None
+    raw = value.strip()
+    label = _safe_text(raw, limit=200 if kind == "path" else 120)
+    if not label or label != raw or _refresh_value_is_blocked(raw):
+        return None
+    if re.search(r"https?://|www\.|github\.com|api\.github\.com|[?#@]", raw, flags=re.IGNORECASE):
+        return None
+    if kind == "path":
+        if raw.startswith(("/", "\\")) or "\\" in raw or ".." in raw.split("/"):
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9._-][A-Za-z0-9._/-]{0,199}", raw):
+            return None
+    elif not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._()+,@-]{0,119}", raw):
+        return None
+    return label
+
+
+def _github_community_profile_files_are_safe(files: Any) -> bool:
+    if files is None:
+        return True
+    if not isinstance(files, dict):
+        return False
+    for key, value in files.items():
+        if key not in _GITHUB_COMMUNITY_PROFILE_FILE_LABELS:
+            continue
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            return False
+        for field, kind in (("name", "name"), ("path", "path")):
+            if field in value and _github_community_profile_file_label(value.get(field), kind=kind) is None:
+                return False
+    return True
+
+
+def _json_payload_is_github_community_profile_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_community_profile_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if _json_payload_is_feed(payload) or "items" in payload or "version" in payload:
+        return False
+    health_percentage = _safe_optional_nonnegative_int(payload.get("health_percentage"))
+    if health_percentage is None or health_percentage > 100:
+        return False
+    if "content_reports_enabled" in payload and not isinstance(payload.get("content_reports_enabled"), bool):
+        return False
+    raw_updated = payload.get("updated_at")
+    if raw_updated is not None and not _safe_iso_timestamp(raw_updated):
+        return False
+    return _github_community_profile_files_are_safe(payload.get("files"))
+
+
+def _github_community_profile_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_community_profile_path_repo(origin_uri) or "repository"
+    health_percentage = _safe_optional_nonnegative_int(payload.get("health_percentage")) or 0
+    parts = [f"GitHub community profile for {repo}", f"health percentage: {health_percentage}"]
+    if isinstance(payload.get("content_reports_enabled"), bool):
+        parts.append(f"content reports enabled: {str(payload['content_reports_enabled']).lower()}")
+    updated = _safe_iso_timestamp(payload.get("updated_at"))
+    if updated:
+        parts.append(f"updated: {updated}")
+    files = payload.get("files") if isinstance(payload.get("files"), dict) else {}
+    for key, label in _GITHUB_COMMUNITY_PROFILE_FILE_LABELS.items():
+        value = files.get(key) if isinstance(files, dict) else None
+        if not isinstance(value, dict):
+            continue
+        file_parts = [f"{label} present"]
+        name = _github_community_profile_file_label(value.get("name"), kind="name") if "name" in value else ""
+        path = _github_community_profile_file_label(value.get("path"), kind="path") if "path" in value else ""
+        if name:
+            file_parts.append(name)
+        if path:
+            file_parts.append(path)
+        parts.append(": ".join((file_parts[0], ", ".join(file_parts[1:]))) if len(file_parts) > 1 else file_parts[0])
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _json_payload_is_github_release_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -5524,6 +5659,18 @@ def _json_origin_is_github_repo_api(origin_uri: str) -> bool:
 
 
 def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> dict[str, Any]:
+    community_profile_repo = _github_community_profile_path_repo(origin_uri)
+    if community_profile_repo:
+        if not _json_payload_is_github_community_profile_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub community profile {community_profile_repo}",
+            "summary": _github_community_profile_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_community_profile_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     traffic_views_repo = _github_traffic_views_path_repo(origin_uri)
     if traffic_views_repo:
         if not _json_payload_is_github_traffic_views_metadata(origin_uri, payload):
@@ -6104,6 +6251,9 @@ def _refresh_record_from_feed(source_id: str, origin_uri: str, text: str) -> dic
 
 def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[str, Any]:
     raw_origin_uri = str(origin_uri or "").strip()
+    if _github_community_profile_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_community_profile_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_issue_events_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
         raise RuntimeError("refresh fetcher disabled")
     if _github_issue_labels_path_matches(raw_origin_uri):
@@ -6154,6 +6304,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if not _source_refresh_allowed(safe_origin_uri):
         raise RuntimeError("refresh fetcher disabled")
     request_accept = "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8"
+    if _github_community_profile_path_matches(safe_origin_uri):
+        if not _github_community_profile_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_issue_events_path_matches(safe_origin_uri):
         if _github_issue_events_path_info(safe_origin_uri) is None or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -6223,6 +6377,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         content_type = _refresh_content_type(response.headers)
         if content_type not in _REFRESH_ALLOWED_CONTENT_TYPES:
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_community_profile_path_matches(safe_origin_uri) and (
+            not _github_community_profile_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_issue_events_path_matches(safe_origin_uri) and (
             _github_issue_events_path_info(safe_origin_uri) is None
