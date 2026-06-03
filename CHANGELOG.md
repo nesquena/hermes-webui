@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Gateway restart timeout and concurrency fixes.** Fixed a bug where triggering a gateway restart from the WebUI alert banner could result in a false 500 "Internal error" response and prematurely SIGKILL the gateway command mid-drain (which requires up to 185s). The restart handler now uses `subprocess.Popen` with a brief 2s timeout and continues draining output in background threads if it exceeds that duration. Additionally, added a server-side `_RESTART_LOCK` to prevent concurrent restart requests from overlapping and corrupting the gateway's state (returning `429 Too Many Requests`).
+
 ## [v0.51.190] — 2026-05-31 — Release FJ (stage-batch2 — Windows upgrade state-stranding hotfix + gateway banner + quiet tool previews)
 
 ### Fixed
