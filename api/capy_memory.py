@@ -537,6 +537,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or _github_contents_path_info(raw_origin_text) is None
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_rulesets_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_rulesets_path_repo(origin_uri)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     display_name = _safe_public_text(
         record.get("title") or record.get("display_name") or record.get("name"),
         limit=200,
@@ -637,7 +642,7 @@ def _safe_iso_timestamp(value: Any) -> str:
         return ""
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.replace(microsecond=0).isoformat()
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
 _LOCAL_KNOWLEDGE_PATH_RE = re.compile(r"(^~?[/\\])|([A-Za-z]:[/\\])|([/\\][^\s]+)")
@@ -3537,6 +3542,120 @@ def _github_environments_refresh_summary(origin_uri: str, payload: dict[str, Any
     return _bounded_refresh_summary("; ".join(parts))
 
 
+_GITHUB_RULESET_TARGETS = {"branch", "tag", "push"}
+_GITHUB_RULESET_ENFORCEMENT_STATES = {"active", "evaluate", "disabled"}
+_GITHUB_RULESET_SOURCE_TYPES = {"repository", "organization", "enterprise"}
+
+
+def _github_rulesets_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _segment_looks_like_rulesets(raw_segment: str) -> bool:
+        segment = raw_segment.lower()
+        return segment == "rulesets" or segment.startswith("rulesets")
+
+    def _matches_rulesets_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 5 and path[0] == "" and lowered[1] == "repos" and any(
+            _segment_looks_like_rulesets(segment) for segment in path[4:]
+        )
+
+    return _matches_rulesets_shape(parts.path) or _matches_rulesets_shape(unquote(parts.path))
+
+
+def _github_rulesets_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "rulesets"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_ruleset_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    name = _safe_public_text(value, limit=200)
+    if not name or name != value.strip():
+        return False
+    if _refresh_value_is_blocked(name) or _REFRESH_TITLE_BLOCKED_VALUE_RE.search(name):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._/#:+@(),-]{0,199}", name))
+
+
+def _github_ruleset_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    ruleset_id = _safe_optional_nonnegative_int(row.get("id"))
+    if ruleset_id is None or ruleset_id <= 0:
+        return False
+    if not _github_ruleset_name_is_safe(row.get("name")):
+        return False
+    target = _safe_public_text(row.get("target"), limit=40).lower()
+    enforcement = _safe_public_text(row.get("enforcement"), limit=40).lower()
+    source_type = _safe_public_text(row.get("source_type"), limit=40).lower()
+    if target not in _GITHUB_RULESET_TARGETS:
+        return False
+    if enforcement not in _GITHUB_RULESET_ENFORCEMENT_STATES:
+        return False
+    if source_type not in _GITHUB_RULESET_SOURCE_TYPES:
+        return False
+    for field in ("created_at", "updated_at"):
+        raw_timestamp = row.get(field)
+        if raw_timestamp is not None and not _safe_iso_timestamp(raw_timestamp):
+            return False
+    for raw_value in (row.get("id"), row.get("name"), row.get("target"), row.get("enforcement"), row.get("source_type"), row.get("created_at"), row.get("updated_at")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_rulesets_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_rulesets_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_ruleset_row_is_safe(row) for row in payload)
+
+
+def _github_rulesets_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_rulesets_path_repo(origin_uri) or "repository"
+    rulesets = [row for row in payload if _github_ruleset_row_is_safe(row)]
+    parts = [f"GitHub repository rulesets for {repo}", f"ruleset count: {len(payload)}"]
+    for row in rulesets[:5]:
+        ruleset_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        name = _safe_public_text(row.get("name"), limit=200)
+        target = _safe_public_text(row.get("target"), limit=40).lower()
+        enforcement = _safe_public_text(row.get("enforcement"), limit=40).lower()
+        source_type = _safe_public_text(row.get("source_type"), limit=40).lower()
+        row_parts = [f"ruleset #{ruleset_id}: {name}", f"target: {target}", f"enforcement: {enforcement}", f"source type: {source_type}"]
+        created = _safe_iso_timestamp(row.get("created_at")) if row.get("created_at") is not None else ""
+        updated = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
+        if created:
+            row_parts.append(f"created: {created}")
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 _GITHUB_MILESTONE_STATES = {"open", "closed"}
 
 
@@ -6160,6 +6279,20 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    rulesets_repo = _github_rulesets_path_repo(origin_uri)
+    if rulesets_repo:
+        if not _json_payload_is_github_rulesets_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub rulesets {rulesets_repo}"
+        summary = _github_rulesets_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_rulesets_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     if _json_payload_is_github_milestones_metadata(origin_uri, payload):
         repo = _github_milestones_path_repo(origin_uri) or source_id
         title = f"GitHub milestones {repo}"
@@ -6439,6 +6572,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_environments_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_environments_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_rulesets_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_rulesets_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     if not _source_refresh_allowed(safe_origin_uri):
@@ -6492,6 +6628,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_environments_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_rulesets_path_matches(safe_origin_uri):
+        if not _github_rulesets_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_assignees_path_matches(safe_origin_uri):
         if not _github_assignees_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -6520,7 +6660,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     )
     with _refresh_open(request, timeout=_REFRESH_FETCH_TIMEOUT_SECONDS) as response:
         final_url = getattr(response, "geturl", lambda: safe_origin_uri)()
-        if not _source_refresh_allowed(_safe_origin_uri(final_url, source_id=safe_source_id)):
+        safe_final_url = _safe_origin_uri(final_url, source_id=safe_source_id)
+        if not _source_refresh_allowed(safe_final_url):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_rulesets_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_rulesets_path_repo(safe_final_url)
+        ):
             raise RuntimeError("refresh fetcher disabled")
         content_type = _refresh_content_type(response.headers)
         if content_type not in _REFRESH_ALLOWED_CONTENT_TYPES:
@@ -6605,6 +6751,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_environments_path_matches(safe_origin_uri) and (
             not _github_environments_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_rulesets_path_matches(safe_origin_uri) and (
+            not _github_rulesets_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")

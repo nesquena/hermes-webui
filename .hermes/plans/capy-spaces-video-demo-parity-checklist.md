@@ -3,13 +3,15 @@
 Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y
 Transcript duration: 46:51
 Created: 2026-04-27
-Last implementation-status update: 2026-05-31
+Last implementation-status update: 2026-06-03
 
 ## Current parity implementation notes
 
 Capy Spaces now has implemented foundation slices, so this checklist is no longer purely architectural. Keep status conservative: metadata-only demo smokes and UI affordances are useful progress, but they are not full Space Agent video parity until the acceptance criteria below pass end-to-end on Brendan's Mac Studio.
 
 Recent safe adapter progress:
+
+- GitHub repository rulesets source-refresh metadata now has a narrow JSON-only parser for allow-listed `/repos/{owner}/{repo}/rulesets` API payloads, making repository protection-rule freshness visible only from safe repository path, ruleset count, bounded ruleset ids/names/targets/enforcement states/source types, and safe timestamps while failing closed on JSON Feed/text fallback bypasses, malformed tail rows, unsafe authorities, or secret-looking values in persisted/visible output and omitting rule conditions, bypass actors, raw URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, or generated content.
 
 - GitHub PR requested-reviewers source-refresh metadata now has a narrow JSON-only parser for allow-listed `/repos/{owner}/{repo}/pulls/{number}/requested_reviewers` API payloads, making PR review-request freshness visible only from PR number, reviewer/team counts, bounded safe reviewer logins, and bounded safe team slugs while failing closed on JSON Feed/text fallback bypasses, explicit-port authorities, malformed requested-reviewers-shaped paths, non-string reviewer logins, or non-string team slugs and omitting avatar/profile/API URLs, team descriptions, raw prompt/source/renderer/html/script/data fields, API-auth/query/fragment/userinfo markers, tokens, or secret-looking fixture values.
 
