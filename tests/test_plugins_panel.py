@@ -523,3 +523,23 @@ class TestPluginCollisionDetection:
 
         assert "plugins_active_provider:" in i18n
         assert "plugins_provider_no_hooks:" in i18n
+
+
+class TestAutoHidePluginsTab:
+    """Tests for issue #3457: auto-hide Plugins tab when no plugins installed."""
+
+    def test_loadPluginsPanel_hides_tab_when_empty(self):
+        js = read("static/panels.js")
+        segment = js[js.find("async function loadPluginsPanel"):js.find("function _buildPluginCard")]
+
+        assert "data-settings-section=\"plugins\"" in segment
+        assert ".empty" in segment
+        assert "style.display='none'" in segment
+
+    def test_switchSettingsSection_fallback_when_hidden(self):
+        js = read("static/panels.js")
+        segment = js[js.find("function switchSettingsSection"):js.find("function _syncHermesPanelSessionActions")]
+
+        assert "section==='plugins'" in segment
+        assert "display==='none'" in segment
+        assert "section='conversation'" in segment

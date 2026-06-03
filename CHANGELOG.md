@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+## [v0.51.231] — 2026-06-03 — Release GY (stage-q1 — /model extras-tail resolution + plugins-tab auto-hide + search-depth guard + symlink-home suggestions)
+
+### Fixed
+- `/model <name>` can now select a model that lives in the **truncated `extra_models` tail** of a large provider catalog, completing the #3368 fix that v0.51.229 left half-done. On Nous-style catalogs with >25 models the picker renders only a featured subset as `<option>` entries and pushes the rest into `extra_models`; the `/model` resolver previously matched only against the rendered `sel.options`, so a bare model living only in the extras tail (e.g. `xiaomi/mimo-v2.5` alongside the featured `xiaomi/mimo-v2.5-pro`) was un-selectable and produced a misleading "did you mean -pro?" toast. A new `_buildModelCandidates()` (`static/commands.js`) now builds the candidate set from the full `/api/models` catalog (featured `models` + `extra_models`) — the same complete list the CLI and `/model` autocomplete use — and an extras-only winner is injected via `_ensureModelOptionInDropdown()` before selection so the correct `model` + `model_provider` persist end-to-end. The #3437 tier-guard is fully preserved: a genuinely off-catalog versioned name still refuses to snap to a `-pro`/`-flash` tier and shows the suggestion toast (#3368, @nesquena-hermes; with @garyd9, confirmation @yutaotie).
+- The **Plugins** tab in Settings is now auto-hidden when no plugins are installed (`/api/plugins` returns `empty: true`), and deep-linking to the hidden plugins pane falls back to the Conversation section. The tab reappears automatically when plugins are detected (#3457, @pix0127).
+- `GET /api/sessions/search?...&depth=<x>` no longer returns a confusing HTTP 500 on a non-numeric `depth` (e.g. `?depth=deep`) and no longer silently excludes the newest messages on a negative `depth` (which sliced as `messages[:-n]`). `depth` is now parsed defensively and clamped to `>= 0` (0 keeps its existing "search the full transcript" meaning), mirroring the guard sibling handlers already use (#3474, @Mubashirrrr).
+- Workspace path autocomplete now expands `~/` suggestions even when the WebUI process home path is a symlink or alias of the trusted home root, so prefixes like `~/Doc` still list home-directory matches instead of returning an empty dropdown. The typed `~` target is now resolved before the trust comparison (#3433, @sjh9714).
+
 ## [v0.51.230] — 2026-06-03 — Release GX (stage-p14 — extract <think> blocks to m.reasoning + LLM Wiki last-writer)
 
 ### Fixed

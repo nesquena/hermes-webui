@@ -466,7 +466,12 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
     else:
         target = Path.home() / raw
 
-    normalized = str(target)
+    try:
+        match_target = target.expanduser().resolve()
+    except Exception:
+        match_target = target
+
+    normalized = str(match_target)
     normalized_lower = normalized.lower()
     preserve_tilde = raw.startswith("~")
     home_root: Path | None = None

@@ -8188,7 +8188,15 @@ def _handle_sessions_search(handler, parsed):
     qs = parse_qs(parsed.query)
     q = qs.get("q", [""])[0].lower().strip()
     content_search = qs.get("content", ["1"])[0] == "1"
-    depth = int(qs.get("depth", ["5"])[0])
+    # Reject a malformed depth instead of letting int() raise ValueError and
+    # surface as a confusing 500. Clamp to >= 0 so a negative value can't reach
+    # the messages[:depth] slice below — messages[:-n] would silently exclude
+    # the most recent messages from the content search instead of capping it.
+    # (depth == 0 keeps its existing meaning: search the full transcript.)
+    try:
+        depth = max(0, int(qs.get("depth", ["5"])[0]))
+    except (ValueError, TypeError):
+        depth = 5
     if not q:
         safe_sessions = []
         for s in all_sessions():
