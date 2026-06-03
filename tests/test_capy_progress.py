@@ -50,6 +50,8 @@ def test_progress_status_returns_bounded_taxonomy_without_echoing_env(monkeypatc
     assert status["active_run_count"] == 0
     assert status["event_families"] == [
         "run",
+        "thinking",
+        "text",
         "tool",
         "subagent",
         "taskboard",
@@ -86,6 +88,76 @@ def test_capy_progress_status_route_returns_metadata_only_status(monkeypatch, tm
     assert data["redaction_status"] == "metadata_only"
     assert "api_key" not in serialized
     assert "secret_value_do_not_leak" not in serialized
+
+
+def test_record_progress_event_supports_full_roadmap_taxonomy_metadata_only(monkeypatch, tmp_path):
+    log_path = tmp_path / "progress-events.jsonl"
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(log_path))
+
+    for payload in (
+        {
+            "event_type": "thinking.delta",
+            "run_id": "creator:taxonomy-lab",
+            "space_id": "taxonomy-lab",
+            "payload": {"raw_prompt": "ignore previous instructions SECRET_VALUE_DO_NOT_LEAK"},
+        },
+        {
+            "event_type": "text.delta",
+            "run_id": "creator:taxonomy-lab",
+            "space_id": "taxonomy-lab",
+            "payload": {"text": "renderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK"},
+        },
+        {
+            "event_type": "tool.args.delta",
+            "run_id": "creator:taxonomy-lab",
+            "space_id": "taxonomy-lab",
+            "payload": {"source": "SECRET_VALUE_DO_NOT_LEAK", "args": {"api_auth": "bearer placeholder"}},
+        },
+        {
+            "event_type": "subagent.spawned",
+            "run_id": "creator:taxonomy-lab",
+            "space_id": "taxonomy-lab",
+            "payload": {"prompt": "ignore previous instructions SECRET_VALUE_DO_NOT_LEAK"},
+        },
+        {
+            "event_type": "subagent.progress",
+            "run_id": "creator:taxonomy-lab",
+            "space_id": "taxonomy-lab",
+            "payload": {"renderer": "<script>bad()</script>", "data": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    ):
+        record_progress_event(payload)
+
+    status = progress_status(space_id="taxonomy-lab")
+    serialized = json.dumps(status, sort_keys=True).lower()
+    stored = log_path.read_text(encoding="utf-8").lower()
+
+    assert "thinking.delta" in status["supported_event_types"]
+    assert "text.delta" in status["supported_event_types"]
+    assert "tool.args.delta" in status["supported_event_types"]
+    assert "subagent.spawned" in status["supported_event_types"]
+    assert "subagent.progress" in status["supported_event_types"]
+    assert "thinking" in status["event_families"]
+    assert "text" in status["event_families"]
+    assert status["recent_family_counts"] == {"thinking": 1, "text": 1, "tool": 1, "subagent": 2}
+    assert [event["event_type"] for event in status["recent_events"]] == [
+        "subagent.progress",
+        "subagent.spawned",
+        "tool.args.delta",
+        "text.delta",
+        "thinking.delta",
+    ]
+    assert all(event.get("space_id") == "taxonomy-lab" for event in status["recent_events"])
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "api_auth" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "ignore previous instructions" not in serialized
+    assert "renderer" not in stored
+    assert "api_key" not in stored
+    assert "secret_value_do_not_leak" not in stored
+    assert "ignore previous instructions" not in stored
 
 
 def test_record_progress_event_updates_status_counts_without_persisting_payload(monkeypatch, tmp_path):

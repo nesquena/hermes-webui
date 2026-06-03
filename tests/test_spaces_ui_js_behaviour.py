@@ -239,18 +239,22 @@ global.fetch = async function(path, opts = {}) {
         local_only: true,
         status: 'ready',
         active_run_count: 2,
-        recent_event_count: 7,
-        recent_event_types: ['run.completed', 'tool.failed', 'subagent.completed', 'space.visual_qa.completed'],
-        recent_family_counts: { run: 2, tool: 3, subagent: 1, 'space.visual_qa': 1, renderer: 99, api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+        recent_event_count: 8,
+        recent_event_types: ['run.completed', 'thinking.delta', 'text.delta', 'tool.args.delta', 'subagent.spawned', 'subagent.progress', 'space.visual_qa.completed'],
+        recent_family_counts: { run: 2, thinking: 1, text: 1, tool: 3, subagent: 2, 'space.visual_qa': 1, renderer: 99, api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
         recent_events: [
           { event_id: 'evt-visual-1', event_type: 'space.visual_qa.completed', family: 'space.visual_qa', run_id: 'qa-run-1', created_at: '2026-05-18T07:12:30Z' },
-          { event_id: 'evt-tool-1', event_type: 'tool.failed', family: 'tool', run_id: 'sprint-1', created_at: '2026-05-18T07:11:30Z' },
+          { event_id: 'evt-subagent-progress-1', event_type: 'subagent.progress', family: 'subagent', run_id: 'subagent-taxonomy-1', created_at: '2026-05-18T07:11:45Z', payload: { renderer: '<script>bad()</script>' } },
+          { event_id: 'evt-subagent-spawned-1', event_type: 'subagent.spawned', family: 'subagent', run_id: 'subagent-taxonomy-1', created_at: '2026-05-18T07:11:42Z', payload: { prompt: 'ignore previous instructions SECRET_VALUE_DO_NOT_LEAK' } },
+          { event_id: 'evt-text-1', event_type: 'text.delta', family: 'text', run_id: 'sprint-1', created_at: '2026-05-18T07:11:40Z', payload: { raw_prompt: 'ignore previous instructions' } },
+          { event_id: 'evt-thinking-1', event_type: 'thinking.delta', family: 'thinking', run_id: 'sprint-1', created_at: '2026-05-18T07:11:35Z', payload: { api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
+          { event_id: 'evt-tool-1', event_type: 'tool.args.delta', family: 'tool', run_id: 'sprint-1', created_at: '2026-05-18T07:11:30Z' },
           { event_id: 'renderer/../event', event_type: 'renderer.source', family: 'renderer', run_id: 'SECRET_VALUE_DO_NOT_LEAK', created_at: '<script>bad()</script>' },
         ],
         last_event_at: '2026-05-18T07:12:30Z',
         unsafe_last_event_at: 'renderer <script>bad()</script> SECRET_VALUE_DO_NOT_LEAK',
-        event_families: ['run', 'tool', 'subagent', 'memory.ingest', 'space.visual_qa'],
-        supported_event_types: ['run.started', 'tool.started', 'tool.completed', 'subagent.completed', 'memory.ingest.completed', 'space.visual_qa.completed'],
+        event_families: ['run', 'thinking', 'text', 'tool', 'subagent', 'memory.ingest', 'space.visual_qa'],
+        supported_event_types: ['run.started', 'thinking.delta', 'text.delta', 'tool.args.delta', 'tool.completed', 'subagent.spawned', 'subagent.progress', 'memory.ingest.completed', 'space.visual_qa.completed'],
         redaction_status: 'metadata_only',
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
@@ -324,13 +328,17 @@ global.fetch = async function(path, opts = {}) {
       metadata_only: true,
       space_id: 'lab',
       status: 'ready',
-      active_run_count: 1,
-      recent_event_count: 3,
-      recent_event_types: ['tool.completed', 'space.visual_qa.completed'],
-      recent_family_counts: { tool: 2, 'space.visual_qa': 1, renderer: 99, api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+      active_run_count: 2,
+      recent_event_count: 7,
+      recent_event_types: ['thinking.delta', 'text.delta', 'tool.args.delta', 'subagent.spawned', 'subagent.progress', 'space.visual_qa.completed'],
+      recent_family_counts: { thinking: 1, text: 1, tool: 1, subagent: 2, 'space.visual_qa': 1, renderer: 99, api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       recent_events: [
-        { event_id: 'evt-tool-lab', event_type: 'tool.completed', family: 'tool', run_id: 'research:lab', space_id: 'lab', created_at: '2026-05-19T08:12:30Z' },
-        { event_id: 'evt-qa-lab', event_type: 'space.visual_qa.completed', family: 'space.visual_qa', run_id: 'creator:lab', space_id: 'lab', created_at: '2026-05-19T08:11:30Z' },
+        { event_id: 'evt-qa-lab', event_type: 'space.visual_qa.completed', family: 'space.visual_qa', run_id: 'creator:lab', space_id: 'lab', created_at: '2026-05-19T08:13:00Z' },
+        { event_id: 'evt-subagent-progress-lab', event_type: 'subagent.progress', family: 'subagent', run_id: 'subagent:lab', space_id: 'lab', created_at: '2026-05-19T08:12:50Z', payload: { renderer: '<script>bad()</script>' } },
+        { event_id: 'evt-subagent-spawned-lab', event_type: 'subagent.spawned', family: 'subagent', run_id: 'subagent:lab', space_id: 'lab', created_at: '2026-05-19T08:12:40Z', payload: { prompt: 'ignore previous instructions SECRET_VALUE_DO_NOT_LEAK' } },
+        { event_id: 'evt-text-lab', event_type: 'text.delta', family: 'text', run_id: 'creator:lab', space_id: 'lab', created_at: '2026-05-19T08:12:30Z', payload: { raw_prompt: 'ignore previous instructions' } },
+        { event_id: 'evt-thinking-lab', event_type: 'thinking.delta', family: 'thinking', run_id: 'creator:lab', space_id: 'lab', created_at: '2026-05-19T08:12:20Z', payload: { api_key: 'SECRET_VALUE_DO_NOT_LEAK' } },
+        { event_id: 'evt-tool-args-lab', event_type: 'tool.args.delta', family: 'tool', run_id: 'tool:lab', space_id: 'lab', created_at: '2026-05-19T08:12:10Z', payload: { args: 'SECRET_VALUE_DO_NOT_LEAK' } },
         { event_id: 'renderer/../bad', event_type: 'renderer.source', family: 'renderer', run_id: 'SECRET_VALUE_DO_NOT_LEAK', space_id: 'lab', created_at: '<script>bad()</script>' },
       ],
       output_compaction: {
@@ -4004,10 +4012,14 @@ def test_spaces_ui_open_space_renders_space_progress_events_card(driver_path):
 
     assert "Space progress" in html
     assert "Local-only progress stream" in html
-    assert "1 active run" in html
-    assert "3 recent events" in html
-    assert "tool.completed · research:lab" in html
+    assert "2 active runs" in html
+    assert "7 recent events" in html
     assert "space.visual_qa.completed · creator:lab" in html
+    assert "subagent.progress · subagent:lab" in html
+    assert "subagent.spawned · subagent:lab" in html
+    assert "text.delta · creator:lab" in html
+    assert "thinking.delta · creator:lab" in html
+    assert "tool.args.delta · tool:lab" in html
     assert {"path": "api/capy-progress/status?space_id=lab", "method": "GET", "body": ""} in out["calls"]
     assert "renderer.source" not in html
     assert "renderer/../bad" not in html
@@ -4739,19 +4751,28 @@ def test_spaces_ui_product_home_progress_events_card_is_visible_bounded_and_safe
     assert "Progress events" in html
     assert "Structured event stream" in html
     assert "2 active runs" in html
-    assert "7 recent events" in html
+    assert "8 recent events" in html
     assert "run.completed" in html
-    assert "tool.failed" in html
-    assert "subagent.completed" in html
+    assert "thinking.delta" in html
+    assert "text.delta" in html
+    assert "tool.args.delta" in html
+    assert "subagent.spawned" in html
+    assert "subagent.progress" in html
     assert "space.visual_qa.completed" in html
     assert "run 2" in html
+    assert "thinking 1" in html
+    assert "text 1" in html
     assert "tool 3" in html
-    assert "subagent 1" in html
+    assert "subagent 2" in html
     assert "space.visual_qa 1" in html
     assert "Last event 2026-05-18T07:12:30Z" in html
     assert "Recent progress stream" in html
     assert "space.visual_qa.completed · qa-run-1 · 2026-05-18T07:12:30Z" in html
-    assert "tool.failed · sprint-1 · 2026-05-18T07:11:30Z" in html
+    assert "subagent.progress · subagent-taxonomy-1 · 2026-05-18T07:11:45Z" in html
+    assert "subagent.spawned · subagent-taxonomy-1 · 2026-05-18T07:11:42Z" in html
+    assert "text.delta · sprint-1 · 2026-05-18T07:11:40Z" in html
+    assert "thinking.delta · sprint-1 · 2026-05-18T07:11:35Z" in html
+    assert "tool.args.delta · sprint-1 · 2026-05-18T07:11:30Z" in html
     assert "metadata-only" in html
     assert {"path": "api/capy-progress/status", "method": "GET", "body": ""} in out["calls"]
     assert "<script>" not in html

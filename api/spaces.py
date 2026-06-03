@@ -4967,7 +4967,7 @@ def _space_demo_context_status() -> dict[str, Any]:
     raw_family_counts = progress.get("recent_family_counts")
     family_counts = raw_family_counts if isinstance(raw_family_counts, dict) else {}
     safe_family_counts: dict[str, int] = {}
-    for key in ("run", "tool", "subagent", "taskboard", "memory.ingest", "space.visual_qa"):
+    for key in ("run", "thinking", "text", "tool", "subagent", "taskboard", "memory.ingest", "space.visual_qa"):
         try:
             count = int(family_counts.get(key) or 0)
         except (TypeError, ValueError):

@@ -355,7 +355,7 @@
     const redactionStatus = safeProgressRedactionStatus(status && status.redaction_status);
     const summary = unavailable
       ? 'Structured progress events will appear when the local status route is available.'
-      : 'Structured event stream for runs, tools, subagents, memory ingestion, and visual QA.';
+      : 'Structured event stream for runs, thought/text deltas, tools, subagents, memory ingestion, and visual QA.';
     return '<section class="capy-spaces-progress-events" aria-label="Progress events">' +
       '<div><div class="capy-spaces-product-eyebrow">PROGRESS</div><h3>Progress events</h3><p>'+escapeHtml(summary)+'</p></div>' +
       '<div class="capy-spaces-progress-events-stats">' +
@@ -377,10 +377,15 @@
       'run.started': true,
       'run.completed': true,
       'run.failed': true,
+      'thinking.delta': true,
+      'text.delta': true,
       'tool.started': true,
+      'tool.args.delta': true,
       'tool.completed': true,
       'tool.failed': true,
       'subagent.started': true,
+      'subagent.spawned': true,
+      'subagent.progress': true,
       'subagent.completed': true,
       'subagent.failed': true,
       'taskboard.updated': true,
@@ -406,11 +411,11 @@
   }
 
   function safeProgressFamilyCounts(counts){
-    const allowed = ['run', 'tool', 'subagent', 'taskboard', 'memory.ingest', 'space.visual_qa'];
+    const allowed = ['run', 'thinking', 'text', 'tool', 'subagent', 'taskboard', 'memory.ingest', 'space.visual_qa'];
     const source = counts && typeof counts === 'object' && !Array.isArray(counts) ? counts : {};
     return allowed.map(function(family){
       return { family: family, count: safeNonNegativeCount(source[family]) };
-    }).filter(function(item){ return item.count > 0; }).slice(0, 6);
+    }).filter(function(item){ return item.count > 0; }).slice(0, 8);
   }
 
   function safeProgressPublicId(value){
@@ -421,7 +426,7 @@
 
   function safeProgressFamily(value){
     const label = String(value == null ? '' : value).trim().toLowerCase();
-    return ['run', 'tool', 'subagent', 'taskboard', 'memory.ingest', 'space.visual_qa'].indexOf(label) >= 0 ? label : '';
+    return ['run', 'thinking', 'text', 'tool', 'subagent', 'taskboard', 'memory.ingest', 'space.visual_qa'].indexOf(label) >= 0 ? label : '';
   }
 
   function safeProgressRecentEvents(events){
@@ -903,7 +908,7 @@
     const policy = data.policy && typeof data.policy === 'object' && !Array.isArray(data.policy) ? data.policy : {};
     const progress = data.progress && typeof data.progress === 'object' && !Array.isArray(data.progress) ? data.progress : {};
     const families = progress.recent_family_counts && typeof progress.recent_family_counts === 'object' && !Array.isArray(progress.recent_family_counts) ? progress.recent_family_counts : {};
-    const familyOrder = ['run', 'tool', 'subagent', 'taskboard', 'memory.ingest', 'space.visual_qa'];
+    const familyOrder = ['run', 'thinking', 'text', 'tool', 'subagent', 'taskboard', 'memory.ingest', 'space.visual_qa'];
     const familyParts = familyOrder.map(function(name){
       const count = safeNonNegativeCount(families[name]);
       return count ? name+' '+count : '';
@@ -1537,13 +1542,14 @@
   function renderSpaceProgressContext(progressData, expectedSpaceId){
     const safeProgressEventTypes = {
       'run.started': true, 'run.completed': true, 'run.failed': true,
-      'tool.started': true, 'tool.completed': true, 'tool.failed': true,
-      'subagent.started': true, 'subagent.completed': true, 'subagent.failed': true,
+      'thinking.delta': true, 'text.delta': true,
+      'tool.started': true, 'tool.completed': true, 'tool.failed': true, 'tool.args.delta': true,
+      'subagent.started': true, 'subagent.spawned': true, 'subagent.progress': true, 'subagent.completed': true, 'subagent.failed': true,
       'taskboard.updated': true,
       'memory.ingest.started': true, 'memory.ingest.completed': true, 'memory.ingest.failed': true,
       'space.visual_qa.started': true, 'space.visual_qa.completed': true, 'space.visual_qa.failed': true,
     };
-    const safeFamilies = {'run': true, 'tool': true, 'subagent': true, 'taskboard': true, 'memory.ingest': true, 'space.visual_qa': true};
+    const safeFamilies = {'run': true, 'thinking': true, 'text': true, 'tool': true, 'subagent': true, 'taskboard': true, 'memory.ingest': true, 'space.visual_qa': true};
     const expected = safePathIdText(expectedSpaceId || '') || '';
     const returned = safePathIdText(progressData && progressData.space_id ? progressData.space_id : '') || '';
     const scopeInvalid = expected && ((returned && returned !== expected) || (!returned && !progressData.unavailable));

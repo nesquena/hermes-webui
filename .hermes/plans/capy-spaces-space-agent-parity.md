@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-spaces): complete structured progress delta taxonomy`
+  - Progress status now accepts the roadmap's metadata-only non-content delta/event types: `thinking.delta`, `text.delta`, `tool.args.delta`, `subagent.spawned`, and `subagent.progress`.
+  - Product-home Progress events now renders safe thinking/text family chips and recent-stream rows for those types while omitting raw thoughts, text deltas, tool args, prompts, renderer/source fields, API-auth fields, and secret-like fixture values from logs, status JSON, and DOM output.
+
 - `feat(capy-memory): ingest GitHub repository events metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub repository Events API payloads (`/repos/{owner}/{repo}/events`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, event count, type counts, and bounded event id/type/actor/public/timestamp metadata while omitting event payloads, commit messages, repo/actor URLs, raw prompt/source/renderer/html/script/data fields, API-auth/query/fragment/userinfo markers, tokens, and secret-like fixture values from receipts/search/vault output.
