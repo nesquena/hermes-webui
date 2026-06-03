@@ -542,6 +542,10 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_rulesets_path_repo(origin_uri)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_repository_events_path_matches(raw_origin_text) and (
+        not _github_repository_events_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     display_name = _safe_public_text(
         record.get("title") or record.get("display_name") or record.get("name"),
         limit=200,
@@ -4256,6 +4260,122 @@ def _github_issue_events_path_matches(origin_uri: str) -> bool:
     return _matches_issue_events_shape(parts.path) or _matches_issue_events_shape(unquote(parts.path))
 
 
+def _github_repository_events_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "events"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_repository_events_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _matches_repository_events_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 5 and path[0] == "" and lowered[1] == "repos" and lowered[4].startswith("events")
+
+    return _matches_repository_events_shape(parts.path) or _matches_repository_events_shape(unquote(parts.path))
+
+
+_GITHUB_REPOSITORY_EVENT_ALLOWED_KEYS = {"id", "type", "actor", "repo", "payload", "public", "created_at", "org"}
+_GITHUB_REPOSITORY_EVENT_ACTOR_ALLOWED_KEYS = {"id", "login", "url", "avatar_url", "display_login", "gravatar_id"}
+
+
+def _github_repository_event_id_is_safe(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return bool(re.fullmatch(r"[1-9][0-9]{0,31}", str(value)))
+    if isinstance(value, str):
+        return bool(re.fullmatch(r"[1-9][0-9]{0,31}", value.strip()))
+    return False
+
+
+def _github_repository_event_type_is_safe(value: Any) -> bool:
+    event_type = _safe_public_text(value, limit=80)
+    return bool(event_type and re.fullmatch(r"[A-Za-z][A-Za-z0-9]{1,60}Event", event_type))
+
+
+def _github_repository_event_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if set(row) - _GITHUB_REPOSITORY_EVENT_ALLOWED_KEYS:
+        return False
+    if not _github_repository_event_id_is_safe(row.get("id")):
+        return False
+    if not _github_repository_event_type_is_safe(row.get("type")):
+        return False
+    actor = row.get("actor")
+    if actor is not None:
+        if not isinstance(actor, dict) or set(actor) - _GITHUB_REPOSITORY_EVENT_ACTOR_ALLOWED_KEYS:
+            return False
+        raw_login = actor.get("login")
+        if _is_present_public_value(raw_login) and (
+            not isinstance(raw_login, str) or not _github_comment_login_is_safe(raw_login)
+        ):
+            return False
+    raw_public = row.get("public")
+    if raw_public is not None and not isinstance(raw_public, bool):
+        return False
+    raw_created = row.get("created_at")
+    if _is_present_public_value(raw_created) and not _safe_iso_timestamp(raw_created):
+        return False
+    return True
+
+
+def _json_payload_is_github_repository_events_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_repository_events_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_repository_event_row_is_safe(row) for row in payload)
+
+
+def _github_repository_events_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_repository_events_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_repository_event_row_is_safe(row)]
+    type_counts: dict[str, int] = {}
+    row_summaries: list[str] = []
+    for row in safe_rows:
+        event_type = _safe_public_text(row.get("type"), limit=80).lower()
+        type_counts[event_type] = type_counts.get(event_type, 0) + 1
+        event_id = _safe_public_text(row.get("id"), limit=80)
+        actor = row.get("actor") if isinstance(row.get("actor"), dict) else {}
+        login = _safe_public_text(actor.get("login") if isinstance(actor, dict) else "", limit=80)
+        row_parts = [f"event: {event_id}", f"type: {event_type}"]
+        if login:
+            row_parts.append(f"actor: {login}")
+        if isinstance(row.get("public"), bool):
+            row_parts.append(f"public: {str(row.get('public')).lower()}")
+        created = _safe_public_text(row.get("created_at"), limit=80)
+        if created:
+            row_parts.append(f"created: {created}")
+        if len(row_summaries) < 2:
+            row_summaries.append("; ".join(row_parts))
+    parts = [f"GitHub repository events for {repo}", f"event count: {len(payload)}"]
+    if type_counts:
+        parts.append("type counts: " + ", ".join(f"{name}={type_counts[name]}" for name in sorted(type_counts)))
+    parts.extend(row_summaries)
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 _GITHUB_ISSUE_EVENT_UNSAFE_IGNORED_KEYS = _GITHUB_LABEL_UNSAFE_IGNORED_KEYS | {
     "avatar_url",
     "commit_id",
@@ -5947,6 +6067,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_participation_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    repository_events_repo = _github_repository_events_path_repo(origin_uri)
+    if repository_events_repo:
+        if not _json_payload_is_github_repository_events_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub repository events {repository_events_repo}",
+            "summary": _github_repository_events_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_repository_events_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     issue_events_info = _github_issue_events_path_info(origin_uri)
     if issue_events_info is not None:
         if not _json_payload_is_github_issue_events_metadata(origin_uri, payload):
@@ -6575,6 +6707,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_rulesets_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_rulesets_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_repository_events_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_repository_events_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     if not _source_refresh_allowed(safe_origin_uri):
@@ -6632,6 +6767,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_rulesets_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_repository_events_path_matches(safe_origin_uri):
+        if not _github_repository_events_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_assignees_path_matches(safe_origin_uri):
         if not _github_assignees_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -6666,6 +6805,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if _github_rulesets_path_matches(safe_origin_uri) and (
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_rulesets_path_repo(safe_final_url)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_repository_events_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_repository_events_path_repo(final_url)
+            or _github_repository_events_path_repo(final_url) != _github_repository_events_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         content_type = _refresh_content_type(response.headers)
@@ -6756,6 +6901,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_rulesets_path_matches(safe_origin_uri) and (
             not _github_rulesets_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_repository_events_path_matches(safe_origin_uri) and (
+            not _github_repository_events_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -7406,7 +7556,9 @@ def run_source_refresh_jobs(
             payload = {}
         source_id = _safe_public_id(payload.get("source_id"), fallback="source")
         raw_origin_uri = str(payload.get("origin_uri") or "").strip()
-        if _github_issue_labels_path_matches(raw_origin_uri) and not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com"):
+        if _github_repository_events_path_matches(raw_origin_uri) and not _github_repository_events_path_repo(raw_origin_uri):
+            origin_uri = f"capy-memory://{source_id}"
+        elif _github_issue_labels_path_matches(raw_origin_uri) and not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com"):
             origin_uri = f"capy-memory://{source_id}"
         elif _github_collaborators_path_matches(raw_origin_uri) and (
             not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")

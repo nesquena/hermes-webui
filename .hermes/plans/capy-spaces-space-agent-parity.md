@@ -38,6 +38,12 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub repository events metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub repository Events API payloads (`/repos/{owner}/{repo}/events`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from safe repository path, event count, type counts, and bounded event id/type/actor/public/timestamp metadata while omitting event payloads, commit messages, repo/actor URLs, raw prompt/source/renderer/html/script/data fields, API-auth/query/fragment/userinfo markers, tokens, and secret-like fixture values from receipts/search/vault output.
+  - Hardened the slice after review so unexpected raw/non-schema row keys, unsafe event-shaped hosts, legacy queued userinfo payloads, non-HTTPS/userinfo/explicit-port authorities, and cross-repo redirects fail closed before fetch/persistence.
+  - JSON Feed bypass payloads, malformed event rows, and malformed event-shaped paths fail closed without creating vault records or fetching unsafe routes.
+
 - `feat(capy-spaces): show system widget safety receipts`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the trusted system-widget add flow now preserves and renders backend `autonomy_policy`, `progress_event`, and `output_compaction` receipts after the widget manager refresh.
   - Kept the UI receipt metadata-only: hostile fixture renderer/script/API-auth/raw-prompt/secret fields in the route response remain absent from the DOM while the visible card shows action policy, required preflight, model-route hint, system-widget progress, and compaction evidence.
