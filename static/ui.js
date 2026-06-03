@@ -2269,6 +2269,7 @@ let _lastNonMessageScrollIntentMs=-Infinity;
 let _messageUserUnpinned=false;
 let _bottomSettleToken=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
+let _touchStartY=null;
 function _cancelBottomSettle(){ _bottomSettleToken++; }
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
@@ -2281,6 +2282,14 @@ function _recordNonMessageScrollIntent(e){
       _messageUserUnpinned=true;
       _nearBottomCount=0;
       _scrollPinned=false;
+    } else if(e.type==='touchmove'&&_touchStartY!==null&&e.touches&&e.touches[0]){
+      // Detect upward touch intent: finger moving down on screen = scrolling up
+      const dy=e.touches[0].clientY-_touchStartY;
+      if(dy<-8){
+        _messageUserUnpinned=true;
+        _nearBottomCount=0;
+        _scrollPinned=false;
+      }
     }
   }
 }
@@ -2290,6 +2299,11 @@ function _recentNonMessageScrollIntent(){
 if(typeof document!=='undefined'){
   document.addEventListener('wheel',_recordNonMessageScrollIntent,{capture:true,passive:true});
   document.addEventListener('touchmove',_recordNonMessageScrollIntent,{capture:true,passive:true});
+  document.addEventListener('touchstart',function(e){
+    if(e.touches&&e.touches[0]) _touchStartY=e.touches[0].clientY;
+  },{capture:true,passive:true});
+  document.addEventListener('touchend',function(){ _touchStartY=null; },{capture:true,passive:true});
+  document.addEventListener('touchcancel',function(){ _touchStartY=null; },{capture:true,passive:true});
 }
 // Reset hook for session-switch — called from sessions.js loadSession() to
 // prevent the new chat's first scroll comparing against the previous chat's
@@ -2299,6 +2313,7 @@ function _resetScrollDirectionTracker(){
   _messageUserUnpinned=false;
   _scrollPinned=true;
   _nearBottomCount=0;
+  _touchStartY=null;
 }
 function _resetStreamScrollFollow(){
   _messageUserUnpinned=false;
