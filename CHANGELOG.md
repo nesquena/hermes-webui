@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.235] — 2026-06-03 — Release HC (stage-q5 — no duplicate transcript replay on repeated questions after compression)
+
+### Fixed
+- The chat transcript no longer accumulates duplicate messages after multiple context-compression cycles when the user asks similar (or identical) questions across turns. `_find_current_user_turn` (`api/streaming.py`) located the slice point for the current turn's new messages by scanning `result_messages` for the user text — but after compression `result_messages` carries the full conversation history, so a *first*-match scan returned an **older** turn's index, making the merge re-append the entire replayed history from that point (observed: a 137-message session where 89 were duplicate replays, burying the real new messages). It now returns the **last** matching user turn, so the candidate slice begins at the current turn and the replayed history is not re-appended. To stay correct when the agent loop appends synthetic `role:"user"` continuation prompts (e.g. "Continue" / empty-recovery nudges) after the real turn, an exact (strong) match is preferred over a later substring (weak) match — so a synthetic continuation can't anchor the merge past the real turn and drop the assistant/tool output in between. Behavior on the no-match path (fall back to the last user index) is unchanged (#3468, @jasonjcwu). A regression test pins the unit behavior, the strong-beats-later-weak invariant, and the end-to-end no-duplicate-replay invariant (each verified to fail against the pre-fix logic).
+
 ## [v0.51.234] — 2026-06-03 — Release HB (stage-q4 — duplicate-instance startup guard + remote-terminal workspace paths)
 
 ### Fixed

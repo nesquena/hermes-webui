@@ -3022,13 +3022,16 @@ def _compression_summary_from_messages(messages):
 
 def _find_current_user_turn(messages, msg_text):
     needle = " ".join(str(msg_text or '').split())
+    last_strong_match = None  # _looks_like_current_user_turn (high confidence)
+    last_weak_match = None    # needle substring match (lower confidence)
     fallback = None
     for idx, msg in enumerate(messages or []):
         if not isinstance(msg, dict) or msg.get('role') != 'user':
             continue
         fallback = idx
         if _looks_like_current_user_turn(msg, msg_text):
-            return idx
+            last_strong_match = idx
+            continue
         text = " ".join(
             _strip_workspace_prefix(
                 _message_text(msg.get('content', '')),
@@ -3036,7 +3039,24 @@ def _find_current_user_turn(messages, msg_text):
             ).split()
         )
         if needle and (needle in text or text in needle):
-            return idx
+            last_weak_match = idx
+    # Return the LAST matching user turn. After context compression the agent's
+    # result_messages contain the full conversation history; if the user asked a
+    # similar question in an earlier turn, first-match would return that old
+    # index, causing the merge to replay the entire history from that point.
+    # Last-match anchors on the current turn instead.
+    #
+    # Prefer the last STRONG match (an exact `_looks_like_current_user_turn`
+    # hit) over the last WEAK substring match. The agent loop appends synthetic
+    # `role:"user"` continuation prompts (e.g. "Continue", empty-recovery nudges
+    # — see conversation_loop.py) AFTER the real user turn; those can weak-match
+    # `msg_text` and, if weak matches were allowed to win, would anchor the merge
+    # PAST the real turn and drop the assistant/tool output in between. The real
+    # current turn is the last strong match, so it must take priority.
+    if last_strong_match is not None:
+        return last_strong_match
+    if last_weak_match is not None:
+        return last_weak_match
     return fallback
 
 
