@@ -4619,7 +4619,47 @@ def _run_agent_streaming(
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
             patch_skill_home_modules = None
-        
+
+        # Profile-aware provider/model enrichment: when the session belongs
+        # to a profile that specifies model.provider and model.default, use
+        # those to set provider_context and repair stale models.
+        if not provider_context and _profile_home:
+            try:
+                import yaml as _yaml_pp
+                _pp_cfg_path = Path(_profile_home) / "config.yaml"
+                if _pp_cfg_path.is_file():
+                    _pp_cfg = _yaml_pp.safe_load(
+                        _pp_cfg_path.read_text(encoding="utf-8")
+                    ) or {}
+                    if isinstance(_pp_cfg, dict):
+                        _pp = (_pp_cfg.get("model", {}).get("provider") or "").strip()
+                        _pp_default = (_pp_cfg.get("model", {}).get("default") or "").strip()
+                        if _pp:
+                            provider_context = _pp.lower()
+                            s.model_provider = provider_context
+                            # Stale-model repair: if the session model belongs to
+                            # a different provider family, substitute the profile default
+                            if _pp_default:
+                                _m_lower = (model or "").lower()
+                                from api.routes import _normalize_provider_id
+                                _pp_norm = _normalize_provider_id(_pp)
+                                _repaired = False
+                                for _prefix in ("gpt", "claude", "gemini"):
+                                    if _m_lower.startswith(_prefix):
+                                        if _normalize_provider_id(_prefix) != _pp_norm:
+                                            model = _pp_default
+                                            _repaired = True
+                                        break
+                                # Slash-qualified IDs (openai/gpt-5.4-mini) are
+                                # native on openrouter/custom but stale elsewhere
+                                if not _repaired and "/" in _m_lower:
+                                    _slash_prefix = _m_lower.split("/", 1)[0]
+                                    _slash_provider = _normalize_provider_id(_slash_prefix)
+                                    if _slash_provider and _slash_provider != _pp_norm and _pp_norm not in {"openrouter", "custom", ""}:
+                                        model = _pp_default
+            except Exception:
+                logger.warning("profile provider read failed", exc_info=True)
+
         # Capture the resolved profile name now, while profile context is
         # reliable. Used in the compression migration block to stamp s.profile
         # on the continuation session. We resolve it here rather than calling
