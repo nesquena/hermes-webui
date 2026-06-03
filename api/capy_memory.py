@@ -517,11 +517,19 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
     if _github_license_path_matches(raw_origin_text):
         source_refresh_kind = "github_license"
         terminal_refresh_failure = True
-        if not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
+        if _github_contents_path_matches(raw_origin_text):
+            source_refresh_kind = ""
+            terminal_refresh_failure = False
+        elif not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
             origin_uri = f"capy-memory://{source_id}"
-    if _github_readme_path_matches(raw_origin_text) and (
+    if _github_readme_path_matches(raw_origin_text) and not _github_contents_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or not _github_readme_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
+    if _github_contents_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or _github_contents_path_info(raw_origin_text) is None
     ):
         origin_uri = f"capy-memory://{source_id}"
     display_name = _safe_public_text(
@@ -4555,6 +4563,148 @@ def _github_readme_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> 
     return _bounded_refresh_summary("; ".join(parts))
 
 
+_GITHUB_CONTENTS_ITEM_TYPES = {"file", "dir", "symlink", "submodule"}
+_GITHUB_CONTENTS_DISPLAY_LIMIT = 5
+
+
+def _github_contents_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _matches_contents_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 5 and path[0] == "" and lowered[1] == "repos" and lowered[4] == "contents"
+
+    return _matches_contents_shape(parts.path) or _matches_contents_shape(unquote(parts.path))
+
+
+def _github_contents_text_is_safe(value: Any, *, limit: int = 240, allow_slash: bool = True) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = _safe_public_text(value, limit=limit)
+    if not text or text != value.strip() or _refresh_value_is_blocked(text):
+        return False
+    if any(marker in text for marker in (":", "@", "\\", "?", "#", "\x00")):
+        return False
+    if text.startswith("/") or text.endswith("/") or "//" in text:
+        return False
+    segments = text.split("/") if allow_slash else [text]
+    if not segments or any(segment in {"", ".", ".."} for segment in segments):
+        return False
+    if any(segment.startswith(".") or segment.endswith(".") for segment in segments):
+        return False
+    pattern = r"[A-Za-z0-9][A-Za-z0-9 ._()+,-]{0,119}"
+    return all(bool(re.fullmatch(pattern, segment)) for segment in segments)
+
+
+def _github_contents_path_info(origin_uri: str) -> tuple[str, str] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    raw_host = (parts.netloc or "").rsplit("@", 1)[-1]
+    if parts.scheme != "https" or raw_host != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) < 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "contents"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return None
+    content_path = ""
+    if len(path) > 5:
+        content_path = unquote("/".join(path[5:]))
+        if not _github_contents_text_is_safe(content_path, limit=240, allow_slash=True):
+            return None
+    return f"{path[2]}/{path[3]}", content_path
+
+
+def _github_contents_sha_prefix(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    sha = _safe_public_text(value, limit=80)
+    if not re.fullmatch(r"[A-Fa-f0-9]{20,64}", sha):
+        return ""
+    return sha[:12]
+
+
+def _github_contents_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    raw_type = row.get("type")
+    if raw_type not in _GITHUB_CONTENTS_ITEM_TYPES:
+        return False
+    raw_name = row.get("name")
+    raw_path = row.get("path")
+    if not _github_contents_text_is_safe(raw_name, limit=120, allow_slash=False):
+        return False
+    if not _github_contents_text_is_safe(raw_path, limit=240, allow_slash=True):
+        return False
+    if str(raw_path).split("/")[-1] != raw_name:
+        return False
+    if _is_present_public_value(row.get("sha")) and not _github_contents_sha_prefix(row.get("sha")):
+        return False
+    raw_size = row.get("size")
+    if raw_type == "file":
+        if _is_present_public_value(raw_size) and _safe_optional_nonnegative_int(raw_size) is None:
+            return False
+    elif _is_present_public_value(raw_size) and _safe_optional_nonnegative_int(raw_size) is None:
+        return False
+    for field in ("name", "path", "sha", "type"):
+        if _refresh_value_is_blocked(row.get(field)):
+            return False
+    return True
+
+
+def _github_contents_payload_rows(payload: Any) -> list[dict[str, Any]] | None:
+    if isinstance(payload, list):
+        if not all(_github_contents_row_is_safe(row) for row in payload):
+            return None
+        return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, dict) and _github_contents_row_is_safe(payload):
+        return [payload]
+    return None
+
+
+def _json_payload_is_github_contents_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_contents_path_info(origin_uri) is None:
+        return False
+    return _github_contents_payload_rows(payload) is not None
+
+
+def _github_contents_refresh_summary(origin_uri: str, payload: Any) -> str:
+    info = _github_contents_path_info(origin_uri)
+    repo, content_path = info if info is not None else ("repository", "")
+    rows = _github_contents_payload_rows(payload) or []
+    parts = [
+        f"GitHub repository contents for {repo}",
+        f"content path: {content_path or 'root'}",
+        f"item count: {len(rows)}",
+    ]
+    for row in rows[:_GITHUB_CONTENTS_DISPLAY_LIMIT]:
+        item_type = _safe_public_text(row.get("type"), limit=20)
+        name = _safe_public_text(row.get("name"), limit=120)
+        path = _safe_public_text(row.get("path"), limit=240)
+        row_parts = [f"type: {item_type}", f"name: {name}", f"path: {path}"]
+        size = _safe_optional_nonnegative_int(row.get("size"))
+        if item_type == "file" and size is not None:
+            row_parts.append(f"size: {size}")
+        sha_prefix = _github_contents_sha_prefix(row.get("sha"))
+        if sha_prefix:
+            row_parts.append(f"sha: {sha_prefix}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_raw_hostname_is_exact(origin_uri: str, expected_host: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -5514,6 +5664,19 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    contents_info = _github_contents_path_info(origin_uri)
+    if contents_info is not None:
+        if not _json_payload_is_github_contents_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        contents_repo, _content_path = contents_info
+        return {
+            "metadata_only": True,
+            "title": f"GitHub contents {contents_repo}",
+            "summary": _github_contents_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_contents_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     license_repo = _github_license_path_repo(origin_uri)
     if license_repo:
         if not _json_payload_is_github_license_metadata(origin_uri, payload):
@@ -5840,10 +6003,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_teams_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_teams_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
-    if _github_license_path_matches(raw_origin_uri):
+    if _github_contents_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or _github_contents_path_info(raw_origin_uri) is None:
+            raise RuntimeError("refresh fetcher disabled")
+    if _github_license_path_matches(raw_origin_uri) and not _github_contents_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_license_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
-    if _github_readme_path_matches(raw_origin_uri):
+    if _github_readme_path_matches(raw_origin_uri) and not _github_contents_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_readme_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
     if _github_latest_release_path_matches(raw_origin_uri):
@@ -5874,11 +6040,15 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if _github_issue_labels_path_info(safe_origin_uri) is None or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
-    if _github_license_path_matches(safe_origin_uri):
+    if _github_contents_path_matches(safe_origin_uri):
+        if _github_contents_path_info(safe_origin_uri) is None or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_license_path_matches(safe_origin_uri) and not _github_contents_path_matches(safe_origin_uri):
         if not _github_license_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
-    if _github_readme_path_matches(safe_origin_uri):
+    if _github_readme_path_matches(safe_origin_uri) and not _github_contents_path_matches(safe_origin_uri):
         if not _github_readme_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
@@ -5961,12 +6131,17 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or content_type not in {"application/json", "application/feed+json"}
         ):
             raise RuntimeError("refresh fetcher disabled")
-        if _github_license_path_matches(safe_origin_uri) and (
+        if _github_contents_path_matches(safe_origin_uri) and (
+            _github_contents_path_info(safe_origin_uri) is None
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_license_path_matches(safe_origin_uri) and not _github_contents_path_matches(safe_origin_uri) and (
             not _github_license_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
-        if _github_readme_path_matches(safe_origin_uri) and (
+        if _github_readme_path_matches(safe_origin_uri) and not _github_contents_path_matches(safe_origin_uri) and (
             not _github_readme_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
