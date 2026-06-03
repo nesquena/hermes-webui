@@ -2739,7 +2739,7 @@ def get_reasoning_status(
         provider_id=resolve_provider,
         base_url=resolve_base_url,
     )
-    
+
     # Determine if reasoning is explicitly/positively unsupported.
     # 1. ACP subprocess providers never support reasoning effort.
     # 2. Models explicitly flagged as supports_reasoning=False in agent metadata.
@@ -2755,7 +2755,7 @@ def get_reasoning_status(
         if isinstance(model_cfg, dict):
             provider = str(model_cfg.get("provider") or "").strip().lower()
     provider = _resolve_provider_alias(provider)
-    
+
     model_prefix = ""
     if resolve_model and "/" in resolve_model:
         model_prefix = resolve_model.split("/", 1)[0].strip().lower()
@@ -2765,7 +2765,7 @@ def get_reasoning_status(
         or model_prefix in {"cursor-acp", "copilot-acp"}
     ):
         explicitly_unsupported = True
-    elif resolve_model:
+    elif resolve_model and not supported_efforts:
         hinted_model = _strip_provider_hint_for_reasoning(resolve_model)
         metadata_efforts = _models_dev_reasoning_efforts(hinted_model, provider)
         if metadata_efforts == []:

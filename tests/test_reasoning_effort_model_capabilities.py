@@ -191,3 +191,57 @@ def test_get_reasoning_status_explicitly_unsupported_via_metadata(monkeypatch):
     assert status["supports_reasoning_effort"] is False
     assert status["reasoning_default_on"] is False
     assert status["supported_efforts"] == []
+
+
+def test_get_reasoning_status_copilot_disagreement_authoritative(monkeypatch):
+    """Authoritative supported efforts from copilot resolver should not be overridden by standard catalog fallback."""
+    monkeypatch.setattr(
+        cfg,
+        "resolve_model_reasoning_efforts",
+        lambda model_id, provider_id, **k: ["medium", "high"] if provider_id == "copilot" else [],
+    )
+    called_metadata_check = False
+
+    def mock_metadata_efforts(model_id, provider_id):
+        nonlocal called_metadata_check
+        called_metadata_check = True
+        return []
+
+    monkeypatch.setattr(
+        cfg,
+        "_models_dev_reasoning_efforts",
+        mock_metadata_efforts,
+    )
+    status = cfg.get_reasoning_status(
+        model_id="copilot/gpt-4o",
+        provider_id="copilot",
+    )
+    assert status["supports_reasoning_effort"] is True
+    assert status["supported_efforts"] == ["medium", "high"]
+    assert not called_metadata_check, "Should not query models.dev metadata since resolver returned success"
+
+
+def test_models_dev_reasoning_efforts_precedence_loop(monkeypatch):
+    """The bare-model metadata lookup should try standard providers in a deterministic order."""
+    import sys
+    from types import ModuleType
+    called_providers = []
+
+    def mock_get_model_capabilities(provider, model):
+        called_providers.append(provider)
+        return None
+
+    mock_agent = ModuleType("agent")
+    mock_models_dev = ModuleType("agent.models_dev")
+    mock_models_dev.get_model_capabilities = mock_get_model_capabilities
+
+    monkeypatch.setitem(sys.modules, "agent", mock_agent)
+    monkeypatch.setitem(sys.modules, "agent.models_dev", mock_models_dev)
+
+    cfg._models_dev_reasoning_efforts("gpt-4o", "custom-proxy")
+
+    expected_order = [
+        "openai", "anthropic", "gemini", "google", "deepseek",
+        "xai", "mistral", "copilot", "openrouter"
+    ]
+    assert called_providers == ["custom-proxy"] + expected_order
