@@ -3022,13 +3022,15 @@ def _compression_summary_from_messages(messages):
 
 def _find_current_user_turn(messages, msg_text):
     needle = " ".join(str(msg_text or '').split())
+    last_match = None
     fallback = None
     for idx, msg in enumerate(messages or []):
         if not isinstance(msg, dict) or msg.get('role') != 'user':
             continue
         fallback = idx
         if _looks_like_current_user_turn(msg, msg_text):
-            return idx
+            last_match = idx
+            continue
         text = " ".join(
             _strip_workspace_prefix(
                 _message_text(msg.get('content', '')),
@@ -3036,8 +3038,13 @@ def _find_current_user_turn(messages, msg_text):
             ).split()
         )
         if needle and (needle in text or text in needle):
-            return idx
-    return fallback
+            last_match = idx
+    # Return the LAST matching user turn. After context compression the
+    # agent's result_messages contain the full conversation history; if the
+    # user asked a similar question in an earlier turn, first-match would
+    # return that old index, causing the merge to replay the entire history
+    # from that point. Last-match ensures we only append from the current turn.
+    return last_match if last_match is not None else fallback
 
 
 def _drop_checkpointed_current_user_from_context(messages, msg_text):
@@ -3396,6 +3403,20 @@ def _merge_display_messages_after_agent_result(previous_display, previous_contex
             # user turns remain visible.
             continue
         if _is_context_compression_marker(msg) and key is not None and key in seen:
+            continue
+        # General dedup safety net: after context compression, old messages
+        # from prior turns can share the same identity with messages already
+        # in the visible transcript. The three special-case checks above
+        # handle current-user-checkpoint, adjacent-assistant, and compression
+        # markers, but left a gap where non-adjacent duplicates (user turns
+        # from earlier compression cycles, tool messages, etc.) slipped
+        # through. Skip any message whose identity is already tracked unless
+        # it is the current user turn (handled by the checkpoint logic above).
+        if (
+            key is not None
+            and key in seen
+            and not ((key == current_user_key) or is_current_user_turn)
+        ):
             continue
         display_msg = msg
         if (
