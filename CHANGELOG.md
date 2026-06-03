@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.236] — 2026-06-03 — Release HD (stage-q7 — native Windows support for bootstrap and terminal)
+
+### Added
+- Native Windows support for `bootstrap.py` and the embedded terminal (#1952). Hermes WebUI already ran on Windows when invoked as `python server.py` directly; this unblocks the supported `python bootstrap.py` path. `api/terminal.py` no longer hard-imports the POSIX-only `fcntl`/`termios`/`select` at module load — they're guarded behind `_TERMINAL_SUPPORTED = sys.platform != "win32"`, and the embedded-terminal entry points raise `NotImplementedError` (or no-op) on Windows, following the existing optional-feature guard pattern (`api/turn_journal.py`, `api/providers.py`). The bootstrap native-Windows block becomes a warning instead of a hard `RuntimeError`; auto-install (which shells out to `/bin/bash`) still errors clearly on native Windows (WSL is unaffected), and the foreground launch path uses `subprocess.Popen` + exit on Windows (where `os.execv` spawns rather than replaces the process, orphaning it from a supervisor) instead of `os.execv`. POSIX behavior is unchanged on every path (#1952, @rodboev).
+
 ## [v0.51.235] — 2026-06-03 — Release HC (stage-q5 — no duplicate transcript replay on repeated questions after compression)
 
 ### Fixed
