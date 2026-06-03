@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.239] — 2026-06-03 — Release HG (stage-q10 — ignore SIGPIPE so a dropped client can't kill the server)
+
+### Fixed
+- The server no longer dies silently when a client drops the connection mid-response. Python's default action for `SIGPIPE` is `Term`, so a single broken-pipe `socket.send()` in any `ThreadingHTTPServer` worker thread (browser tab closed mid-stream, network drop, mobile backgrounding, a dropped long-poll, an `/api/updates/check` timeout) could terminate the entire WebUI process — no exception, no log, no `/health` response. `server.py` now sets `SIGPIPE` to `SIG_IGN` at import time: the kernel surfaces the broken pipe as a catchable `BrokenPipeError`, the per-request handler unwinds, the connection closes, and the server keeps serving. The handler is `getattr`-guarded so it is a no-op on Windows, where `SIGPIPE` does not exist (preserves native-Windows support, #1952) (salvaged from #3407, @PatrickNoFilter).
+
 ## [v0.51.238] — 2026-06-03 — Release HF (stage-q9 — New Conversation hits the fast path on cold start)
 
 ### Fixed
