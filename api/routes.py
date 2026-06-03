@@ -3445,10 +3445,6 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
 
 def _aggregate_insights_for_home(profile_home: Path, cutoff: float) -> dict:
     """Aggregate session and CLI analytics for a single profile home directory."""
-    import json
-    import sqlite3
-    from contextlib import closing
-
     total_sessions = 0
     total_messages = 0
     total_input_tokens = 0
