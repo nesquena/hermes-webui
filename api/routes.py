@@ -3182,6 +3182,55 @@ def _handle_insights(handler, parsed) -> bool:
             continue
         sessions_data.append(entry)
 
+    # Also surface agent sessions (CLI, Telegram, Discord, ...) recorded in the
+    # Hermes agent state DB (HERMES_HOME/state.db). Without this the dashboard
+    # reads only WebUI chats and shows 0 for users who interact via the gateway.
+    try:
+        import os as _os
+        import sqlite3 as _sqlite3
+        _hermes_home = SESSION_DIR.parent.parent
+        _env_home = _os.getenv("HERMES_HOME")
+        if _env_home:
+            from pathlib import Path as _P
+            _hermes_home = _P(_env_home)
+        _state_db = _hermes_home / "state.db"
+        if _state_db.exists():
+            def _num(_v):
+                try:
+                    return float(_v or 0)
+                except (TypeError, ValueError):
+                    return 0.0
+
+            _conn = _sqlite3.connect(f"file:{_state_db}?mode=ro", uri=True)
+            try:
+                _conn.row_factory = _sqlite3.Row
+                for _r in _conn.execute(
+                    "SELECT source, model, started_at, ended_at, message_count, "
+                    "input_tokens, output_tokens, estimated_cost_usd, actual_cost_usd "
+                    "FROM sessions"
+                ):
+                    _started = _num(_r["started_at"])
+                    _ended = _num(_r["ended_at"]) or _started
+                    _ts = max(_started, _ended)
+                    if _ts and _ts < cutoff:
+                        continue
+                    _cost = _r["actual_cost_usd"]
+                    if _cost is None:
+                        _cost = _r["estimated_cost_usd"]
+                    sessions_data.append({
+                        "created_at": _started,
+                        "updated_at": _ended,
+                        "input_tokens": int(_num(_r["input_tokens"])),
+                        "output_tokens": int(_num(_r["output_tokens"])),
+                        "estimated_cost": _num(_cost),
+                        "message_count": int(_num(_r["message_count"])),
+                        "model": _r["model"] or _r["source"] or "agent",
+                    })
+            finally:
+                _conn.close()
+    except Exception:
+        pass
+
     # Aggregate
     total_sessions = len(sessions_data)
     total_messages = 0
@@ -3880,6 +3929,12 @@ def handle_get(handler, parsed) -> bool:
         from api import dashboard_probe
 
         j(handler, dashboard_probe.get_dashboard_status())
+        return True
+
+    if parsed.path == "/api/agents":
+        from api import agents_probe
+
+        j(handler, agents_probe.get_all_agents())
         return True
 
     if parsed.path == "/api/dashboard/config":

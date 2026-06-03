@@ -16,6 +16,7 @@ const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+function escapeHtml(text){if(!text)return '';return String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 const OFFLINE_RECHECK_MS=2500;
 let _offlineVisible=false;
 let _offlineReason='browser';
@@ -477,6 +478,26 @@ async function saveDashboardSettings(){
     else if(typeof showToast==='function') showToast('Dashboard link settings failed to save.');
   }
 }
+async function loadAgentsList(){
+  const container=$('agentsListContainer');
+  if(!container) return;
+  try{
+    const data=await api('/api/agents');
+    if(!data||!data.local_agents){
+      container.innerHTML='<span style="color:var(--muted)">No agents available.</span>';
+      return;
+    }
+    const agents=data.local_agents.concat(data.hermes_agents||[]);
+    if(agents.length===0){
+      container.innerHTML='<span style="color:var(--muted)">No agents available.</span>';
+      return;
+    }
+    const html=agents.map(agent=>`<div style="padding:4px 0;border-bottom:1px solid var(--border2);"><strong>${escapeHtml(agent.name)}</strong><span style="color:var(--muted);font-size:11px;margin-left:8px">(${escapeHtml(agent.source)})</span></div>`).join('');
+    container.innerHTML=`<div style="font-size:11px">${data.total_count} agent${data.total_count===1?'':'s'}</div>${html}`;
+  }catch(err){
+    container.innerHTML='<span style="color:var(--muted)">Failed to load agents.</span>';
+  }
+}
 function openHermesDashboard(event){
   if(event){event.preventDefault();event.stopPropagation();}
   const btn=event&&event.currentTarget?event.currentTarget:document.querySelector('[data-dashboard-link]');
@@ -487,6 +508,7 @@ function openHermesDashboard(event){
 }
 function _initDashboardLinkProbe(){
   loadDashboardSettings();
+  loadAgentsList();
   refreshDashboardStatus(true);
   setInterval(refreshDashboardStatus,DASHBOARD_STATUS_TTL_MS);
 }
