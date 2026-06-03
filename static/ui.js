@@ -4718,6 +4718,7 @@ const AGENT_HEALTH_INTERVAL_MS=30000;
 const AGENT_HEALTH_DISMISSED_KEY='agent-health-dismissed';
 let _agentHealthTimer=null;
 let _agentHealthLastState='unknown';
+let _lastGatewayRestartTime=0;
 function _agentHealthDismissed(){
   try{return localStorage.getItem(AGENT_HEALTH_DISMISSED_KEY)==='1';}
   catch(_){return false;}
@@ -4760,7 +4761,9 @@ async function restartGatewayService(){
     const res = await api('/api/health/restart', {method: 'POST'});
     if(res && res.ok){
       showToast('Gateway service restarted successfully');
-      await pollAgentHealth();
+      _hideAgentHealthAlert();
+      _lastGatewayRestartTime = Date.now();
+      setTimeout(pollAgentHealth, 15000);
     } else {
       showToast(res && res.error || 'Failed to restart gateway service');
     }
@@ -4774,6 +4777,7 @@ async function restartGatewayService(){
 }
 async function pollAgentHealth(){
   if(document.visibilityState !== 'visible') return;
+  if(Date.now() - _lastGatewayRestartTime < 15000) return;
   try{
     const payload=await api('/api/health/agent',{timeoutToast:false});
     if(payload.alive === true){

@@ -4156,7 +4156,18 @@ def _handle_health_restart(handler) -> bool:
 
             def wait_and_release():
                 try:
-                    proc.wait()
+                    proc.wait(timeout=240.0)
+                except subprocess.TimeoutExpired:
+                    logger.error("Gateway restart process timed out after 240.0s. Terminating process.")
+                    try:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5.0)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
+                    except Exception as e:
+                        logger.exception("Failed to terminate timed out gateway restart process: %s", e)
                 finally:
                     try:
                         _RESTART_LOCK.release()

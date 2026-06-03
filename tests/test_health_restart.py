@@ -13,6 +13,9 @@ class MockPopen:
         self.stderr = io.StringIO("")
         self._should_timeout = False
         self._should_raise = False
+        self._wait_should_timeout = False
+        self.terminated = False
+        self.killed = False
 
     def communicate(self, timeout=None):
         if self._should_raise:
@@ -21,8 +24,16 @@ class MockPopen:
             raise subprocess.TimeoutExpired(self.args, timeout)
         return self.stdout.getvalue(), self.stderr.getvalue()
 
-    def wait(self):
+    def wait(self, timeout=None):
+        if self._wait_should_timeout:
+            raise subprocess.TimeoutExpired(self.args, timeout)
         return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+
+    def kill(self):
+        self.killed = True
 
 
 def test_handle_health_restart_success(monkeypatch):
@@ -182,3 +193,40 @@ def test_handle_health_restart_concurrency(monkeypatch):
     assert responses[0][0]["ok"] is False
     assert "Restart already in progress" in responses[0][0]["error"]
     assert responses[0][1] == 429
+
+
+def test_handle_health_restart_wait_timeout(monkeypatch):
+    import threading
+    import time
+    routes._RESTART_LOCK = threading.Lock()
+    monkeypatch.setattr("api.routes.get_active_hermes_home", lambda: "/mock/hermes/home")
+    monkeypatch.setattr("shutil.which", lambda cmd: "/mock/bin/hermes" if cmd == "hermes" else None)
+
+    mock_instances = []
+    def mock_popen(args, stdout=None, stderr=None, text=True, env=None):
+        mp = MockPopen(args, stdout, stderr, text, env)
+        mp._should_timeout = True
+        mp._wait_should_timeout = True
+        mock_instances.append(mp)
+        return mp
+
+    monkeypatch.setattr(subprocess, "Popen", mock_popen)
+
+    responses = []
+    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append((payload, kw.get("status", 200))) or True)
+
+    handler = types.SimpleNamespace()
+    assert not routes._RESTART_LOCK.locked()
+    
+    result = routes._handle_health_restart(handler)
+    assert result is True
+    assert responses == [({"ok": True, "message": "Gateway service restart initiated (in progress)"}, 200)]
+    
+    # Wait for background thread to run and finish wait_and_release
+    time.sleep(0.5)
+    
+    # The lock should be released even if wait() timed out
+    assert not routes._RESTART_LOCK.locked()
+    assert len(mock_instances) == 1
+    assert mock_instances[0].terminated is True
+    assert mock_instances[0].killed is True
