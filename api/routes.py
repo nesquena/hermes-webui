@@ -6766,7 +6766,19 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
-        keep = int(body["keep_count"])
+        # Validate keep_count before it reaches the destructive `messages[:keep]`
+        # slice. A non-numeric value would raise ValueError and surface as a
+        # confusing 500; a NEGATIVE value slices as `messages[:-N]`, which
+        # silently DELETES the most recent N messages (e.g. keep_count=-5 on a
+        # 3-message session wipes the whole transcript) and then persists it via
+        # save(). Mirror the explicit guard the /api/session/branch handler
+        # already applies to its own keep_count. (Opus pre-release follow-up.)
+        try:
+            keep = int(body["keep_count"])
+        except (ValueError, TypeError):
+            return bad(handler, "keep_count must be an integer")
+        if keep < 0:
+            return bad(handler, "keep_count must be non-negative")
         with _get_session_agent_lock(body["session_id"]):
             old_msg_count = len(s.messages or [])
             old_ctx_count = len(getattr(s, 'context_messages', None) or [])
