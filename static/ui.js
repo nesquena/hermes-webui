@@ -5513,7 +5513,7 @@ function syncTopbar(){
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
   const _topbarMeta=$('topbarMeta');
   if(_topbarMeta){
-    const sourceLabel=(S.session&&S.session.is_cli_session&&(S.session.source_label||S.session.source_tag||S.session.raw_source))||'';
+    const sourceLabel=(S.session&&(S.session.source_label||S.session.source_tag||S.session.raw_source))||'';
     const metaText=t('n_messages',vis.length);
     _topbarMeta.textContent=metaText;
     if(sourceLabel){

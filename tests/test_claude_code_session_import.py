@@ -236,6 +236,9 @@ def test_read_only_source_badge_ui_guards_are_present():
     assert "topbar-source-badge" in ui_js
     assert " · read-only" in ui_js
     assert "topbar-source-badge" in panels_js
+    # Messaging sessions keep source_label but is_cli_session is false (#3338).
+    assert "is_cli_session&&(S.session.source_label" not in ui_js
+    assert "if (S.session.is_cli_session) sourceLabel" not in panels_js
     assert "S.session.read_only || S.session.is_read_only" in panels_js
     assert 'data-source-key="claude_code"' in style_css
     assert ".session-item.cli-session.read-only-session:hover::after" in style_css
