@@ -135,12 +135,13 @@ class TestReasoningChipNoneState:
 
     def test_none_and_default_do_not_hide_reasoning_chip(self):
         fn = self.get_apply_reasoning_chip()
-        assert "wrap.style.display='none'" not in fn, (
-            "_applyReasoningChip must never hide the chip — it is always "
-            "visible regardless of model reasoning support (#3377)"
+        assert "wrap.style.display='none'" in fn, (
+            "_applyReasoningChip must hide the chip when the active model does "
+            "not support reasoning effort controls (#3377)"
         )
         assert "wrap.style.display='';" in fn, (
-            "_applyReasoningChip must unconditionally show the reasoning chip"
+            "_applyReasoningChip must show the reasoning chip when the model "
+            "supports reasoning effort controls"
         )
 
     def test_none_and_default_have_visible_labels(self):

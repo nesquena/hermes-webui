@@ -164,3 +164,30 @@ def test_get_reasoning_status_recognized_model_default_on(monkeypatch):
     )
     assert status["reasoning_default_on"] is True
     assert status["supports_reasoning_effort"] is True
+
+
+def test_get_reasoning_status_cursor_acp_not_supported():
+    """Cursor/Copilot ACP models explicitly return supports_reasoning_effort=False."""
+    status = cfg.get_reasoning_status(
+        model_id="cursor/composer-2.5",
+        provider_id="cursor-acp",
+    )
+    assert status["supports_reasoning_effort"] is False
+    assert status["reasoning_default_on"] is False
+    assert status["supported_efforts"] == []
+
+
+def test_get_reasoning_status_explicitly_unsupported_via_metadata(monkeypatch):
+    """Models explicitly marked unsupported in capabilities dev metadata return supports_reasoning_effort=False."""
+    monkeypatch.setattr(
+        cfg,
+        "_models_dev_reasoning_efforts",
+        lambda *a, **k: [],
+    )
+    status = cfg.get_reasoning_status(
+        model_id="gpt-4o",
+        provider_id="openai",
+    )
+    assert status["supports_reasoning_effort"] is False
+    assert status["reasoning_default_on"] is False
+    assert status["supported_efforts"] == []

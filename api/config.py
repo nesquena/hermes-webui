@@ -2550,10 +2550,32 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
     except Exception:
         return None
 
+    capabilities = None
     try:
         capabilities = get_model_capabilities(provider=provider, model=model)
     except Exception:
-        return None
+        pass
+
+    # If the capability check returned None, and the provider is custom/proxy,
+    # fall back to searching other standard providers for this model's capabilities.
+    if capabilities is None:
+        bare_model = model.rsplit("/", 1)[-1]
+        standard_providers = [
+            "openai", "anthropic", "gemini", "google", "deepseek",
+            "xai", "mistral", "copilot", "openrouter"
+        ]
+        for p in standard_providers:
+            if p == provider:
+                continue
+            try:
+                lookup_model = model if p == "openrouter" else bare_model
+                caps = get_model_capabilities(provider=p, model=lookup_model)
+                if caps is not None:
+                    capabilities = caps
+                    break
+            except Exception:
+                pass
+
     if capabilities is None:
         return None
 
@@ -2717,16 +2739,56 @@ def get_reasoning_status(
         provider_id=resolve_provider,
         base_url=resolve_base_url,
     )
-    model_recognized = bool(supported_efforts)
-    if not supported_efforts:
-        supported_efforts = list(VALID_REASONING_EFFORTS)
+    
+    # Determine if reasoning is explicitly/positively unsupported.
+    # 1. ACP subprocess providers never support reasoning effort.
+    # 2. Models explicitly flagged as supports_reasoning=False in agent metadata.
+    explicitly_unsupported = False
+    provider = str(resolve_provider or "").strip().lower()
+    if not provider and resolve_model:
+        try:
+            _, provider, _ = resolve_model_provider(resolve_model)
+        except Exception:
+            pass
+    if not provider:
+        model_cfg = config_data.get("model") or {}
+        if isinstance(model_cfg, dict):
+            provider = str(model_cfg.get("provider") or "").strip().lower()
+    provider = _resolve_provider_alias(provider)
+    
+    model_prefix = ""
+    if resolve_model and "/" in resolve_model:
+        model_prefix = resolve_model.split("/", 1)[0].strip().lower()
+
+    if (
+        provider in {"cursor-acp", "copilot-acp"}
+        or model_prefix in {"cursor-acp", "copilot-acp"}
+    ):
+        explicitly_unsupported = True
+    elif resolve_model:
+        hinted_model = _strip_provider_hint_for_reasoning(resolve_model)
+        metadata_efforts = _models_dev_reasoning_efforts(hinted_model, provider)
+        if metadata_efforts == []:
+            explicitly_unsupported = True
+
+    if explicitly_unsupported:
+        supported_efforts = []
+        supports_reasoning_effort = False
+        reasoning_default_on = False
+    else:
+        model_recognized = bool(supported_efforts)
+        if not supported_efforts:
+            supported_efforts = list(VALID_REASONING_EFFORTS)
+        supports_reasoning_effort = True
+        reasoning_default_on = model_recognized
+
     return {
         # Match CLI default (True if unset in config.yaml)
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
         "reasoning_effort": str(effort_raw or "").strip().lower(),
         "supported_efforts": supported_efforts,
-        "supports_reasoning_effort": True,
-        "reasoning_default_on": model_recognized,
+        "supports_reasoning_effort": supports_reasoning_effort,
+        "reasoning_default_on": reasoning_default_on,
     }
 
 

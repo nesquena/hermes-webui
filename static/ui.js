@@ -2049,6 +2049,14 @@ function _applyReasoningChip(eff){
   const mobileLabel=$('composerMobileReasoningLabel');
   const mobileAction=$('composerMobileReasoningAction');
   if(!wrap||!label) return;
+  const supports=(meta&&meta.supports_reasoning_effort!==undefined)
+    ?meta.supports_reasoning_effort
+    :true;
+  if(!supports){
+    wrap.style.display='none';
+    if(mobileAction) mobileAction.style.display='none';
+    return;
+  }
   wrap.style.display='';
   if(mobileAction) mobileAction.style.display='';
   const supportedEfforts=(typeof _currentReasoningEffortsSupported==='undefined')
