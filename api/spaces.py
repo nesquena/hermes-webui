@@ -6628,6 +6628,144 @@ def _browser_surface_required_prompt_preflight_receipt(action: str) -> dict[str,
     }
 
 
+def _browser_surface_prompt_preflight_corpus(action: str, payload: dict[str, Any]) -> str:
+    """Build an internal-only prompt-preflight corpus for browser-surface tools.
+
+    Browser tool payloads can carry URLs, typed text, selectors, DOM/source
+    fragments, prompts, and credential-looking adapter fields. The corpus is used
+    only for metadata-only classification/hashing and is never returned in public
+    Spaces receipts.
+    """
+
+    high_risk_keys = {
+        "access_token",
+        "accesstoken",
+        "api_auth",
+        "apiauth",
+        "api_key",
+        "apikey",
+        "auth",
+        "authorization",
+        "body",
+        "content",
+        "data",
+        "dom",
+        "element_ref",
+        "elementref",
+        "history",
+        "href",
+        "html",
+        "inner_html",
+        "innerhtml",
+        "input",
+        "instructions",
+        "key",
+        "message",
+        "messages",
+        "outer_html",
+        "outerhtml",
+        "prompt",
+        "query",
+        "raw_prompt",
+        "rawprompt",
+        "ref",
+        "renderer",
+        "script",
+        "selector",
+        "source",
+        "target",
+        "text",
+        "token",
+        "typed_text",
+        "typedtext",
+        "url",
+        "value",
+    }
+    credential_keys = {"access_token", "accesstoken", "api_auth", "apiauth", "api_key", "apikey", "auth", "authorization", "token"}
+    executable_marker_keys = {"html", "inner_html", "innerhtml", "outer_html", "outerhtml", "raw_prompt", "rawprompt", "renderer", "script"}
+    parts: list[str] = []
+    total_chars = 0
+    max_chars = 24000
+    max_parts = 1000
+    truncated = False
+
+    def normalize_key(key: str) -> str:
+        text = str(key or "").strip()
+        snake = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", text).lower()
+        snake = re.sub(r"[^a-z0-9]+", "_", snake).strip("_")
+        return snake
+
+    def append_part(value: Any, *, limit: int = 2000) -> None:
+        nonlocal total_chars, truncated
+        if len(parts) >= max_parts or total_chars >= max_chars:
+            truncated = True
+            return
+        raw_text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if len(raw_text) > limit:
+            truncated = True
+        text = _context_value(value, limit)
+        if not text:
+            return
+        remaining = max_chars - total_chars
+        if remaining <= 0:
+            truncated = True
+            return
+        if len(text) > remaining:
+            text = text[:remaining]
+            truncated = True
+        parts.append(text)
+        total_chars += len(text)
+
+    append_part(action or "browser.surface.action", limit=120)
+
+    def collect(value: Any, *, key: str = "", depth: int = 0, inherited_high_risk: bool = False) -> None:
+        nonlocal truncated
+        if depth > 8 or len(parts) >= max_parts or total_chars >= max_chars:
+            truncated = True
+            return
+        normalized_key = normalize_key(key)
+        current_high_risk = inherited_high_risk or normalized_key in high_risk_keys
+        if isinstance(value, dict):
+            for child_key, child_value in value.items():
+                child_key_text = str(child_key or "")
+                child_key_normalized = normalize_key(child_key_text)
+                child_high_risk = current_high_risk or child_key_normalized in high_risk_keys
+                if child_high_risk:
+                    if child_key_normalized in credential_keys:
+                        append_part("credential", limit=40)
+                    elif child_key_normalized in executable_marker_keys:
+                        append_part(child_key_normalized, limit=80)
+                if child_high_risk or isinstance(child_value, (dict, list, tuple)):
+                    collect(child_value, key=child_key_text, depth=depth + 1, inherited_high_risk=child_high_risk)
+            return
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                collect(item, key=normalized_key, depth=depth + 1, inherited_high_risk=current_high_risk)
+            return
+        if not current_high_risk:
+            return
+        text = str(value or "")
+        if text.strip():
+            append_part(text, limit=2000)
+
+    collect(payload)
+    if truncated:
+        parts.append("raw_prompt")
+    return "\n".join(parts)
+
+
+def _browser_surface_prompt_preflight_receipt(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from api.capy_policy import prompt_preflight
+
+    try:
+        receipt = prompt_preflight(_browser_surface_prompt_preflight_corpus(action, payload), boundary="browser_surface")
+    except ValueError:
+        return _browser_surface_required_prompt_preflight_receipt(action)
+    receipt["action"] = _context_value(action, 120) or "browser.surface.action"
+    receipt["checks"] = ["browser_control_approval_required", "prompt_injection_preflight_complete"]
+    return receipt
+
+
 def _browser_surface_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None) -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
@@ -6733,7 +6871,7 @@ def _browser_surface_tool_receipt(action: str, payload: dict[str, Any]) -> dict[
         surface["ref_provided"] = bool(str(payload.get("ref") or payload.get("element_ref") or payload.get("elementRef") or "").strip())
     if kind == "type_ref":
         surface["typed_text_stored"] = False
-    preflight = _browser_surface_required_prompt_preflight_receipt(action)
+    preflight = _browser_surface_prompt_preflight_receipt(action, payload)
     policy = _browser_surface_action_policy_receipt(action, preflight)
     progress_event = _record_space_tool_progress_event(space_id, run_prefix=f"browser.{kind}")
     return {

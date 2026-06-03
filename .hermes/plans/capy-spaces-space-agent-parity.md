@@ -38,6 +38,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-spaces): classify browser-surface preflight payloads`
+  - Receipt-only Browser Surface tool actions now run real `browser_surface` prompt-preflight classification over an internal-only corpus of high-risk browser payload fields before returning action-policy evidence.
+  - Hostile URL/prompt/text/DOM/source/renderer/API-auth/token/ref/history payloads, including nested object values and camelCase aliases such as `apiKey`, `accessToken`, `rawPrompt`, `outerHTML`, and `typedText`, block with metadata-only categories; oversized or deeply nested high-risk payloads fail closed while browser execution remains disabled and approval-gated.
+  - Responses, progress events, compaction receipts, and serialized test output still omit raw prompt text, URLs/query strings, DOM/script bodies, renderer/source fields, credentials, refs, typed text, and secret-like fixture values.
+
 - `feat(capy-memory): ingest GitHub contents metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub repository contents API payloads (`/repos/{owner}/{repo}/contents` and `/repos/{owner}/{repo}/contents/{path...}`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, content path, item count, bounded item type/name/path rows, file sizes, and SHA prefixes while omitting raw/encoded file content, download/html/git/API URLs, link maps, API-auth/query/fragment/userinfo markers, prompt/summary/body fields, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
