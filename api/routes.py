@@ -4100,23 +4100,46 @@ def _handle_health_restart(handler) -> bool:
     # 4. Run the restart command
     logger.info("Restarting gateway service via CLI command: %s gateway restart (HERMES_HOME=%s)", hermes_cmd, active_home)
     try:
-        res = subprocess.run(
+        proc = subprocess.Popen(
             [hermes_cmd, "gateway", "restart"],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            env=env,
-            timeout=10.0
+            env=env
         )
-        if res.returncode == 0:
-            logger.info("Gateway service restarted successfully: %s", res.stdout)
-            return j(handler, {"ok": True, "message": "Gateway service restarted successfully"})
-        else:
-            logger.error("Gateway service restart failed with code %d: %s", res.returncode, res.stderr)
-            return j(
-                handler,
-                {"ok": False, "error": f"Restart failed: {res.stderr.strip() or res.stdout.strip()}"},
-                status=500
-            )
+        try:
+            # Wait up to 2.0 seconds for the restart command to complete quickly
+            stdout, stderr = proc.communicate(timeout=2.0)
+            if proc.returncode == 0:
+                logger.info("Gateway service restarted successfully: %s", stdout)
+                return j(handler, {"ok": True, "message": "Gateway service restarted successfully"})
+            else:
+                logger.error("Gateway service restart failed with code %d: %s", proc.returncode, stderr)
+                return j(
+                    handler,
+                    {"ok": False, "error": f"Restart failed: {stderr.strip() or stdout.strip()}"},
+                    status=500
+                )
+        except subprocess.TimeoutExpired:
+            # If the process doesn't finish within 2 seconds, it is likely draining
+            # in-flight agent runs. We let it continue running in the background.
+            logger.info("Gateway restart is taking longer than 2.0s (likely draining in-flight runs). Letting it run in the background.")
+
+            # Start background threads to consume the stdout/stderr streams to prevent
+            # the child process from blocking on pipe buffer limits when printing logs.
+            import threading
+
+            def consume_stream(stream):
+                try:
+                    while stream.read(4096):
+                        pass
+                except Exception:
+                    pass
+
+            threading.Thread(target=consume_stream, args=(proc.stdout,), daemon=True).start()
+            threading.Thread(target=consume_stream, args=(proc.stderr,), daemon=True).start()
+
+            return j(handler, {"ok": True, "message": "Gateway service restart initiated (in progress)"})
     except Exception as exc:
         logger.exception("Failed to run gateway restart command")
         return j(handler, {"ok": False, "error": f"Internal error running restart: {type(exc).__name__}: {exc}"}, status=500)
