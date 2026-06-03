@@ -528,7 +528,7 @@ def verify_hermes_imports() -> tuple:
 
 
 # ── Limits ───────────────────────────────────────────────────────────────────
-MAX_FILE_BYTES = 200_000
+MAX_FILE_BYTES = 400_000
 MAX_UPLOAD_BYTES = _env_mb_bytes("HERMES_WEBUI_MAX_UPLOAD_MB", 20)
 
 # ── File type maps ───────────────────────────────────────────────────────────

@@ -372,7 +372,7 @@ list_dir(workspace, rel='.'):
 
 read_file_content(workspace, rel):
     - Calls safe_resolve
-    - Enforces MAX_FILE_BYTES = 200KB size limit
+    - Enforces MAX_FILE_BYTES = 400KB size limit
     - Reads as UTF-8 with errors='replace' (binary files show replacement chars)
     - Returns {path, content, size, lines}
 
@@ -1306,7 +1306,7 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/session               ?session_id=X -> full session + messages. 400 if no ID.
     /api/sessions              List of all session compact() dicts, sorted by updated_at
     /api/list                  ?session_id=X&path=. -> directory listing for session workspace
-    /api/file                  ?session_id=X&path=rel -> file content (text, 200KB limit)
+    /api/file                  ?session_id=X&path=rel -> file content (text, 400KB limit)
     /api/chat/stream           ?stream_id=X -> SSE stream. Long-lived. Emits token/tool/
                                approval/done/error events.
     /api/chat/stream/status    ?stream_id=X -> {"active": true/false, "stream_id": X}
