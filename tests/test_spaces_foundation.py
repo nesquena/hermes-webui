@@ -2579,10 +2579,26 @@ def test_space_tool_adapter_widget_event_list_returns_required_policy_receipts(m
     assert listed["autonomy_policy"]["prompt_preflight_status"] == "required"
     assert listed["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
     assert listed["autonomy_policy"]["metadata_only"] is True
+    assert listed["progress_event"]["event_type"] == "tool.completed"
+    assert listed["progress_event"]["family"] == "tool"
+    assert listed["progress_event"]["run_id"] == f"widget.events:{created['space_id']}"
+    assert listed["progress_event"]["space_id"] == created["space_id"]
+    assert listed["progress_event"]["redaction_status"] == "metadata_only"
     assert listed["output_compaction"]["command"] == "space.current.widget.events"
     assert listed["output_compaction"]["metadata_only"] is True
+    assert f"progress_run_id: widget.events:{created['space_id']}" in listed["output_compaction"]["text"]
+    assert "progress_status: tool.completed" in listed["output_compaction"]["text"]
     for line in listed["output_compaction"]["text"].splitlines():
-        assert line.startswith(("action: ", "space_id: ", "event_count: ", "widget_id: ", "active_space_id: ", "event_"))
+        assert line.startswith((
+            "action: ",
+            "space_id: ",
+            "event_count: ",
+            "widget_id: ",
+            "active_space_id: ",
+            "progress_run_id: ",
+            "progress_status: ",
+            "event_",
+        ))
     assert "summarize private widget request" not in serialized
     assert "use only metadata receipts" not in serialized
     assert "secret_value_do_not_leak" not in serialized
@@ -10323,6 +10339,8 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
     assert event_list["events"][0]["widget_id"] == "research-card"
     assert event_list["events"][0]["event_name"] == "agent.prompt"
     assert event_list["events"][0]["payload_summary"] == {}
+    assert event_list["progress_event"]["run_id"] == f"widget.events:{created['space_id']}"
+    assert event_list["progress_event"]["redaction_status"] == "metadata_only"
     assert event_list["output_compaction"]["tool"] == "capy-spaces-widget-event"
     assert event_list["output_compaction"]["command"] == "space.widget.events"
     assert event_list["output_compaction"]["metadata_only"] is True
@@ -10330,8 +10348,18 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
     assert f"space_id: {created['space_id']}" in event_list["output_compaction"]["text"]
     assert "widget_id: research-card" in event_list["output_compaction"]["text"]
     assert "event_count: 1" in event_list["output_compaction"]["text"]
+    assert f"progress_run_id: widget.events:{created['space_id']}" in event_list["output_compaction"]["text"]
+    assert "progress_status: tool.completed" in event_list["output_compaction"]["text"]
     assert all(
-        line.startswith(("action: ", "space_id: ", "event_count: ", "widget_id: ", "event_"))
+        line.startswith((
+            "action: ",
+            "space_id: ",
+            "event_count: ",
+            "widget_id: ",
+            "progress_run_id: ",
+            "progress_status: ",
+            "event_",
+        ))
         for line in event_list["output_compaction"]["text"].splitlines()
     )
     assert "raw_prompt" not in event_list["output_compaction"]["text"].lower()
@@ -10386,13 +10414,26 @@ def test_space_tool_adapter_supports_camelcase_current_widget_event_aliases_meta
     assert events["events"][0]["event_name"] == "agent.prompt"
     assert events["events"][0]["payload_summary"] == {}
     assert events["events"][0]["prompt_preview"] == "[REDACTED]"
+    assert events["progress_event"]["run_id"] == f"widget.events:{created['space_id']}"
+    assert events["progress_event"]["redaction_status"] == "metadata_only"
     assert events["output_compaction"]["tool"] == "capy-spaces-widget-event"
     assert events["output_compaction"]["command"] == "space.current.widget.events"
     assert events["output_compaction"]["metadata_only"] is True
     assert f"active_space_id: {created['space_id']}" in events["output_compaction"]["text"]
+    assert f"progress_run_id: widget.events:{created['space_id']}" in events["output_compaction"]["text"]
+    assert "progress_status: tool.completed" in events["output_compaction"]["text"]
     assert "event_count: 1" in events["output_compaction"]["text"]
     assert all(
-        line.startswith(("action: ", "space_id: ", "event_count: ", "widget_id: ", "active_space_id: ", "event_"))
+        line.startswith((
+            "action: ",
+            "space_id: ",
+            "event_count: ",
+            "widget_id: ",
+            "active_space_id: ",
+            "progress_run_id: ",
+            "progress_status: ",
+            "event_",
+        ))
         for line in events["output_compaction"]["text"].splitlines()
     )
     assert "raw_prompt" not in events["output_compaction"]["text"].lower()

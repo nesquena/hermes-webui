@@ -8776,6 +8776,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         events = list_widget_events(space_id, widget_id, data.get("limit", 20))
         prompt_preflight = _widget_reload_required_prompt_preflight_receipt(name)
         autonomy_policy = _widget_reload_action_policy_receipt(name, prompt_preflight)
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="widget.events")
         response = {
             "ok": True,
             "action": name,
@@ -8783,12 +8784,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "events": events,
             "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
             "output_compaction": _widget_events_output_compaction_receipt(
                 action=name,
                 space_id=space_id,
                 widget_id=widget_id,
                 events=events,
                 active_space_id=space_id if is_current_widget_events else None,
+                progress_event=progress_event,
             ),
         }
         return response
@@ -12490,6 +12493,7 @@ def _widget_events_output_compaction_receipt(
     events: list[dict[str, Any]],
     widget_id: str | None = None,
     active_space_id: str | None = None,
+    progress_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return metadata-only compaction evidence for widget event list responses."""
     from api.capy_compaction import compact_output
@@ -12508,6 +12512,13 @@ def _widget_events_output_compaction_receipt(
         lines.append(f"widget_id: {safe_widget_id}")
     if safe_active_space_id:
         lines.append(f"active_space_id: {safe_active_space_id}")
+    if isinstance(progress_event, dict):
+        safe_progress_run_id = _context_value(progress_event.get("run_id"), 160)
+        safe_progress_status = _context_value(progress_event.get("event_type") or progress_event.get("status"), 80)
+        if safe_progress_run_id:
+            lines.append(f"progress_run_id: {safe_progress_run_id}")
+        if safe_progress_status:
+            lines.append(f"progress_status: {safe_progress_status}")
     for index, event in enumerate(safe_events[:20], start=1):
         if not isinstance(event, dict):
             continue
@@ -12926,6 +12937,7 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "template.install",
         "template.reset",
         "widget.delete",
+        "widget.events",
         "widget.patch",
         "widget.blueprint.create",
         "widget.blueprint.define",
