@@ -2861,6 +2861,7 @@ from api.models import (
     get_state_db_session_summary,
     merge_session_messages_append_only,
     _session_message_merge_key,
+    _active_stream_ids,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
@@ -5146,7 +5147,15 @@ def handle_get(handler, parsed) -> bool:
                     )
                 except (TypeError, ValueError):
                     _merged_last_message_at = 0
-            raw = s.compact() | {
+            active_stream_ids = _active_stream_ids()
+            try:
+                compact_session = s.compact(
+                    include_runtime=True,
+                    active_stream_ids=active_stream_ids,
+                )
+            except TypeError:
+                compact_session = s.compact()
+            raw = compact_session | {
                 "messages": _truncated_msgs,
                 "message_count": _merged_message_count,
                 "tool_calls": _session_tool_calls,
@@ -5164,9 +5173,10 @@ def handle_get(handler, parsed) -> bool:
                 except Exception:
                     journal = None
                 if journal:
+                    journal_active = bool(original_stream_id in active_stream_ids)
                     raw["runtime_journal"] = _run_journal_status_payload(
                         journal,
-                        active=bool(getattr(s, "active_stream_id", None)),
+                        active=journal_active,
                     )
             # Cold-load: derive the latest settled todo snapshot from the full
             # merged transcript, not the truncated display window. This keeps

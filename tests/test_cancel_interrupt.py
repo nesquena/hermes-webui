@@ -2,13 +2,12 @@
 Unit tests for cancel/interrupt functionality.
 Tests the integration between cancel_stream() and agent.interrupt().
 """
-import pytest
 import queue
 import threading
 from unittest.mock import Mock
 
 from api.streaming import cancel_stream
-from api.config import AGENT_INSTANCES, STREAMS, CANCEL_FLAGS
+from api.config import AGENT_INSTANCES, STREAMS, CANCEL_FLAGS, ACTIVE_RUNS, SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
 
 
 class TestCancelInterrupt:
@@ -19,12 +18,18 @@ class TestCancelInterrupt:
         AGENT_INSTANCES.clear()
         STREAMS.clear()
         CANCEL_FLAGS.clear()
+        ACTIVE_RUNS.clear()
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE.clear()
 
     def teardown_method(self):
         """Clean up after each test"""
         AGENT_INSTANCES.clear()
         STREAMS.clear()
         CANCEL_FLAGS.clear()
+        ACTIVE_RUNS.clear()
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE.clear()
 
     def test_cancel_calls_agent_interrupt(self):
         """Verify that cancel_stream() calls agent.interrupt() when agent exists"""
@@ -90,6 +95,44 @@ class TestCancelInterrupt:
         """Test cancel for a stream that doesn't exist"""
         result = cancel_stream("nonexistent_stream")
         assert result is False
+
+    def test_cancel_falls_back_to_active_run_registry(self):
+        """Cancel should still work when STREAMS is gone but the worker is alive."""
+        from unittest.mock import patch
+
+        stream_id = "detached_stream_123"
+        session_id = "sess_detached_123"
+        mock_agent = Mock()
+        mock_agent.interrupt = Mock()
+        mock_agent.session_id = session_id
+
+        mock_session = Mock()
+        mock_session.session_id = session_id
+        mock_session.active_stream_id = stream_id
+        mock_session.pending_user_message = "hello"
+        mock_session.pending_attachments = ["file.txt"]
+        mock_session.pending_started_at = 1234567890.0
+        mock_session.messages = []
+        mock_session.save = Mock()
+
+        ACTIVE_RUNS[stream_id] = {
+            "session_id": session_id,
+            "started_at": 1234567890.0,
+            "phase": "running",
+        }
+        with SESSION_AGENT_CACHE_LOCK:
+            SESSION_AGENT_CACHE[session_id] = (mock_agent, "sig")
+
+        with patch("api.streaming.get_session", return_value=mock_session):
+            result = cancel_stream(stream_id)
+
+        assert result is True
+        mock_agent.interrupt.assert_called_once_with("Cancelled by user")
+        assert mock_session.active_stream_id is None
+        assert mock_session.pending_user_message is None
+        assert mock_session.pending_attachments == []
+        assert mock_session.pending_started_at is None
+        mock_session.save.assert_called_once()
 
     def test_cancel_sets_cancel_event(self):
         """Verify that cancel_stream() sets the cancel_event flag"""
