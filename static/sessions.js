@@ -764,14 +764,24 @@ async function loadSession(sid){
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
-        // Option A (#2798): for boot-time stale URL/localStorage session IDs,
-        // always clear persisted session, strip /session/{id} from URL, and
-        // rethrow so boot can deterministically fall through to empty-state.
-        if(!currentSid){
+        // Self-heal (clear saved id + strip /session/<id> URL) only when the
+        // 404'd id is the one we are activating: a boot-time restore
+        // (!currentSid, #2798) or a mid-session reload of the *current* session
+        // whose sidecar was deleted server-side (#2782). A click into a
+        // *different* dead session (currentSid && currentSid!==sid) must not run
+        // it: localStorage and the URL still point at the live session (both are
+        // only updated on a successful load), so wiping them would log the user
+        // out of a healthy session. The URL strip is needed in the self-heal
+        // case because _sessionIdFromLocation() re-injects the id on reload.
+        // Only the rethrow stays gated on !currentSid: boot rethrows to fall
+        // through to empty-state; mid-session there is no boot path to reach.
+        if(!currentSid || currentSid===sid){
           try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
           try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
           if (_loadingSessionId === sid) _loadingSessionId = null;
-          throw e;
+          if(!currentSid){
+            throw e;
+          }
         }
       } else {
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';

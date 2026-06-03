@@ -5233,7 +5233,38 @@ def handle_get(handler, parsed) -> bool:
                 )
             return resp
         except KeyError:
-            # Not a WebUI session -- try CLI store
+            # Not a WebUI session -- try CLI store.
+            # Before synthesising a read-only CLI stub, verify the id was not a
+            # deleted WebUI session. _index.json is the canonical WebUI session
+            # registry; an entry there with a webui, fork, or empty source means the
+            # session once had a sidecar that is now gone. Returning 404 lets the
+            # client self-heal: strip the stale /session/<id> URL and clear
+            # localStorage. Otherwise GET would keep returning 200 from the CLI
+            # stub while POST /api/session/draft and /api/chat/start 404, leaving
+            # the UI bricked (#2782). Genuine CLI-origin sessions (absent from the
+            # index, or tagged with a non-webui source) keep the existing 200 path.
+            _was_webui_session = False
+            if SESSION_INDEX_FILE.exists():
+                try:
+                    _index_entries = json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8"))
+                    for _ie in _index_entries if isinstance(_index_entries, list) else []:
+                        if _ie.get("session_id") == sid:
+                            _src = str(
+                                _ie.get("source_tag")
+                                or _ie.get("raw_source")
+                                or _ie.get("session_source")
+                                or ""
+                            ).strip().lower()
+                            # fork sessions are WebUI-origin (session_source="fork"
+                            # is set by the /api/session/branch handler) and brick
+                            # identically; empty source = native WebUI session.
+                            if not _src or _src in ("webui", "fork"):
+                                _was_webui_session = True
+                            break
+                except Exception:
+                    pass
+            if _was_webui_session:
+                return bad(handler, "Session not found", 404)
             cli_meta = _lookup_cli_session_metadata(sid)
             msgs = get_cli_session_messages(sid)
             if msgs:
