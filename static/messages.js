@@ -215,7 +215,10 @@ async function toggleSavedPromptsPopup(){
       if(typeof showToast==='function') showToast((typeof t==='function'&&t('saved_prompts_empty_input'))||'Type a prompt first',2000,'error');
       return;
     }
-    try{await api('/api/prompts',{method:'POST',body:JSON.stringify({text})});}catch(_e){}
+    try{await api('/api/prompts',{method:'POST',body:JSON.stringify({text})});}catch(_e){
+      if(typeof showToast==='function') showToast(_e&&_e.message||'Failed to save prompt',2000,'error');
+      return;
+    }
     _savedPromptsCache=null;
     popup.style.display='none';
     if(btn)btn.setAttribute('aria-expanded','false');
