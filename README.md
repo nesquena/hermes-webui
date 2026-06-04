@@ -543,7 +543,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 
 **Compatibility policy**
 - WebUI release branches are tested against the matching Hermes Agent release available at that WebUI release time.
-- **Upgrade or pin WebUI and hermes-agent together** (same release train/version/date), especially before enabling production traffic.
+- **Upgrade both together**: upgrade or pin WebUI and hermes-agent together (same release train/version/date), especially before enabling production traffic.
 - Running pinned older/newer combinations is **untested and unsupported** until the stable API boundary work in [#1925](https://github.com/nesquena/hermes-webui/issues/1925) / [#2491](https://github.com/nesquena/hermes-webui/issues/2491) is in place.
 - Record the full `hermes-agent` + `hermes-webui` versions in issue reports when upgrade mismatches are suspected.
 
