@@ -504,6 +504,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_dependabot_alerts_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_code_scanning_alerts_path_matches(raw_origin_text) and (
+        not _github_raw_authority_is_exact(raw_origin_text, "api.github.com")
+        or not _github_code_scanning_alerts_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_pull_requested_reviewers_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or _github_pull_requested_reviewers_path_info(raw_origin_text) is None
@@ -6053,6 +6058,230 @@ def _github_dependabot_alerts_refresh_summary(origin_uri: str, payload: list[Any
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_code_scanning_alerts_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _matches_code_scanning_alerts_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 6
+            and path[0] == ""
+            and lowered[1] == "repos"
+            and any(
+                lowered[index] == "code-scanning" and lowered[index + 1].startswith("alerts")
+                for index in range(4, len(lowered) - 1)
+            )
+        )
+
+    return _matches_code_scanning_alerts_shape(parts.path) or _matches_code_scanning_alerts_shape(unquote(parts.path))
+
+
+def _github_code_scanning_alerts_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or parts.netloc != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "code-scanning"
+        or path[5] != "alerts"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+_GITHUB_CODE_SCANNING_ALERT_STATES = {"dismissed", "fixed", "open"}
+_GITHUB_CODE_SCANNING_ALERT_SEVERITIES = {"none", "note", "warning", "error"}
+_GITHUB_CODE_SCANNING_ALERT_SECURITY_SEVERITIES = {"low", "medium", "high", "critical", "unknown"}
+
+
+def _github_code_scanning_alert_number_is_safe(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and 0 < value <= 10_000_000_000
+
+
+def _github_code_scanning_alert_text_is_safe(value: Any, *, limit: int = 200) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or text != value:
+        return ""
+    if _safe_public_text(text, limit=limit) != text or _refresh_value_is_blocked(text):
+        return ""
+    return text
+
+
+def _github_code_scanning_alert_rule_id_is_safe(value: Any) -> str:
+    text = _github_code_scanning_alert_text_is_safe(value, limit=200)
+    if not text:
+        return ""
+    if _REFRESH_TITLE_BLOCKED_VALUE_RE.search(text):
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}", text):
+        return ""
+    return text
+
+
+def _github_code_scanning_alert_rule_name_is_safe(value: Any) -> str:
+    text = _github_code_scanning_alert_text_is_safe(value, limit=160)
+    if not text:
+        return ""
+    if _REFRESH_TITLE_BLOCKED_VALUE_RE.search(text):
+        return ""
+    return text
+
+
+def _github_code_scanning_alert_rule_info(row: dict[str, Any]) -> tuple[str, str, str, str] | None:
+    rule = row.get("rule")
+    if not isinstance(rule, dict):
+        return None
+    rule_id = _github_code_scanning_alert_rule_id_is_safe(rule.get("id"))
+    rule_name = _github_code_scanning_alert_rule_name_is_safe(rule.get("name") or rule.get("id"))
+    severity = str(rule.get("severity") or "").lower()
+    security_severity = str(rule.get("security_severity_level") or "unknown").lower()
+    if not rule_id or not rule_name:
+        return None
+    if severity not in _GITHUB_CODE_SCANNING_ALERT_SEVERITIES:
+        return None
+    if security_severity not in _GITHUB_CODE_SCANNING_ALERT_SECURITY_SEVERITIES:
+        return None
+    return rule_id, rule_name, severity, security_severity
+
+
+_GITHUB_CODE_SCANNING_UNSAFE_IGNORED_KEY_TOKENS = {
+    "api",
+    "apiauth",
+    "auth",
+    "authorization",
+    "bearer",
+    "body",
+    "code",
+    "credential",
+    "data",
+    "generatedbody",
+    "generatedcode",
+    "html",
+    "password",
+    "rawcontent",
+    "renderer",
+    "rendercode",
+    "script",
+    "secret",
+    "source",
+    "token",
+    "widgetbody",
+}
+
+
+def _github_code_scanning_alert_ignored_key_is_safe(key: str) -> bool:
+    if _refresh_value_is_blocked(key):
+        return False
+    collapsed = re.sub(r"[^a-z0-9]+", "", key.lower())
+    if collapsed in _GITHUB_CODE_SCANNING_UNSAFE_IGNORED_KEY_TOKENS:
+        return False
+    camel_spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", key)
+    camel_spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", camel_spaced)
+    tokens = [token for token in re.split(r"[^a-z0-9]+", camel_spaced.lower()) if token]
+    return not any(token in _GITHUB_CODE_SCANNING_UNSAFE_IGNORED_KEY_TOKENS for token in tokens)
+
+
+def _github_code_scanning_alert_ignored_value_is_safe(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str)
+            and _github_code_scanning_alert_ignored_key_is_safe(key)
+            and _github_code_scanning_alert_ignored_value_is_safe(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return all(_github_code_scanning_alert_ignored_value_is_safe(item) for item in value)
+    if isinstance(value, _PUBLIC_SCALAR_TYPES):
+        text = str(value)
+        return not (
+            _refresh_value_is_blocked(value)
+            or _UNSAFE_VALUE_RE.search(text)
+            or _UNSAFE_PUBLIC_VALUE_RE.search(text)
+        )
+    return not _refresh_value_is_blocked(value)
+
+
+def _github_code_scanning_alert_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    allowed_keys = {
+        "created_at",
+        "dismissed_at",
+        "dismissed_by",
+        "dismissed_comment",
+        "dismissed_reason",
+        "fixed_at",
+        "html_url",
+        "instances_url",
+        "most_recent_instance",
+        "number",
+        "rule",
+        "state",
+        "tool",
+        "url",
+        "updated_at",
+    }
+    if any(key not in allowed_keys for key in row):
+        return False
+    if not all(_github_code_scanning_alert_ignored_value_is_safe(value) for value in row.values()):
+        return False
+    if not _github_code_scanning_alert_number_is_safe(row.get("number")):
+        return False
+    if row.get("state") not in _GITHUB_CODE_SCANNING_ALERT_STATES:
+        return False
+    if _github_code_scanning_alert_rule_info(row) is None:
+        return False
+    for field in ("created_at", "updated_at", "dismissed_at", "fixed_at"):
+        if field in row and row.get(field) is not None and not _safe_iso_timestamp(row.get(field)):
+            return False
+    return True
+
+
+def _json_payload_is_github_code_scanning_alerts_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_code_scanning_alerts_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_code_scanning_alert_row_is_safe(row) for row in payload)
+
+
+def _github_code_scanning_alerts_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_code_scanning_alerts_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_code_scanning_alert_row_is_safe(row)]
+    parts = [f"GitHub security scanning alerts for {repo}", f"alert count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        rule_info = _github_code_scanning_alert_rule_info(row)
+        if rule_info is None:
+            continue
+        rule_id, rule_name, severity, security_severity = rule_info
+        parts.append(
+            "; ".join([
+                f"alert #{int(row.get('number'))}: {_safe_public_text(row.get('state'), limit=40)}",
+                f"rule: {rule_id}",
+                f"name: {rule_name}",
+                f"severity: {severity}",
+                f"security severity: {security_severity}",
+            ])
+        )
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_teams_path_matches(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -6509,6 +6738,20 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_dependabot_alerts_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    code_scanning_alerts_repo = _github_code_scanning_alerts_path_repo(origin_uri)
+    if code_scanning_alerts_repo:
+        if not _json_payload_is_github_code_scanning_alerts_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub code scanning alerts {code_scanning_alerts_repo}"
+        summary = _github_code_scanning_alerts_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": f"github security scanning alerts {code_scanning_alerts_repo}",
+        }
+    if _github_code_scanning_alerts_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     forks_repo = _github_forks_path_repo(origin_uri)
     if forks_repo:
         if not _json_payload_is_github_forks_metadata(origin_uri, payload):
@@ -6892,6 +7135,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_dependabot_alerts_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_dependabot_alerts_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_code_scanning_alerts_path_matches(raw_origin_uri):
+        if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_code_scanning_alerts_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_pull_requested_reviewers_path_matches(raw_origin_uri):
         if (
             not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
@@ -7008,6 +7254,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_dependabot_alerts_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_code_scanning_alerts_path_matches(safe_origin_uri):
+        if not _github_code_scanning_alerts_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_pull_requested_reviewers_path_matches(safe_origin_uri):
         if (
             _github_pull_requested_reviewers_path_info(safe_origin_uri) is None
@@ -7042,6 +7292,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_dependabot_alerts_path_repo(final_url)
             or _github_dependabot_alerts_path_repo(final_url) != _github_dependabot_alerts_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_code_scanning_alerts_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or not _github_code_scanning_alerts_path_repo(final_url)
+            or _github_code_scanning_alerts_path_repo(final_url) != _github_code_scanning_alerts_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         content_type = _refresh_content_type(response.headers)
@@ -7167,6 +7423,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_dependabot_alerts_path_matches(safe_origin_uri) and (
             not _github_dependabot_alerts_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_code_scanning_alerts_path_matches(safe_origin_uri) and (
+            not _github_code_scanning_alerts_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -7810,6 +8071,11 @@ def run_source_refresh_jobs(
         elif _github_dependabot_alerts_path_matches(raw_origin_uri) and (
             not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
             or not _github_dependabot_alerts_path_repo(raw_origin_uri)
+        ):
+            origin_uri = f"capy-memory://{source_id}"
+        elif _github_code_scanning_alerts_path_matches(raw_origin_uri) and (
+            not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com")
+            or not _github_code_scanning_alerts_path_repo(raw_origin_uri)
         ):
             origin_uri = f"capy-memory://{source_id}"
         elif (
