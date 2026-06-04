@@ -5961,6 +5961,8 @@ function _preferencesPayloadFromUi(){
   if(fadeTextCb) payload.fade_text_effect=fadeTextCb.checked;
   const simplifiedToolCb=$('settingsSimplifiedToolCalling');
   if(simplifiedToolCb) payload.simplified_tool_calling=simplifiedToolCb.checked;
+  const interleavedBubblesCb=$('settingsInterleavedTranscriptBubbles');
+  if(interleavedBubblesCb) payload.interleaved_transcript_bubbles=interleavedBubblesCb.checked;
   const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
   if(terminalAutoExpandCb) payload.terminal_auto_expand_on_output=terminalAutoExpandCb.checked;
   const apiRedactCb=$('settingsApiRedact');
@@ -6034,6 +6036,11 @@ async function _autosavePreferencesSettings(payload){
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
     if(payload&&payload.simplified_tool_calling!==undefined){
       window._simplifiedToolCalling=(saved&&saved.simplified_tool_calling!==false);
+      if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+      if(typeof renderMessages==='function') renderMessages();
+    }
+    if(payload&&payload.interleaved_transcript_bubbles!==undefined){
+      window._interleavedTranscriptBubbles=!!(saved&&saved.interleaved_transcript_bubbles);
       if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
       if(typeof renderMessages==='function') renderMessages();
     }
@@ -6270,6 +6277,8 @@ async function loadSettingsPanel(){
     if(fadeTextCb){fadeTextCb.checked=!!settings.fade_text_effect;window._fadeTextEffect=fadeTextCb.checked;fadeTextCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const simplifiedToolCb=$('settingsSimplifiedToolCalling');
     if(simplifiedToolCb){simplifiedToolCb.checked=settings.simplified_tool_calling!==false;simplifiedToolCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const interleavedBubblesCb=$('settingsInterleavedTranscriptBubbles');
+    if(interleavedBubblesCb){interleavedBubblesCb.checked=!!settings.interleaved_transcript_bubbles;window._interleavedTranscriptBubbles=interleavedBubblesCb.checked;interleavedBubblesCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
     if(terminalAutoExpandCb){terminalAutoExpandCb.checked=!!settings.terminal_auto_expand_on_output;window._terminalAutoExpandOnOutput=terminalAutoExpandCb.checked;terminalAutoExpandCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const apiRedactCb=$('settingsApiRedact');
@@ -7683,6 +7692,7 @@ async function saveSettings(andClose){
   body.rtl=!!($('settingsRtl')||{}).checked;
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
   body.show_thinking=window._showThinking!==false;
+  body.interleaved_transcript_bubbles=!!window._interleavedTranscriptBubbles;
   body.sidebar_density=sidebarDensity;
   body.busy_input_mode=busyInputMode;
   body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
