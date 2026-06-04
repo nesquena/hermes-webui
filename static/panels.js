@@ -3581,10 +3581,10 @@ function renderSkills(skills) {
 
   // Modified sort: flat list, no categories
   if (_skillsSort === 'modified') {
-    const sorted = [...filtered].sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
     const box = $('skillsList');
     box.innerHTML = '';
     if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
+    const sorted = [...filtered].sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
     for (const skill of sorted) {
       const el = document.createElement('div');
       el.className = 'skill-item' + (skill.disabled ? ' disabled' : '');
