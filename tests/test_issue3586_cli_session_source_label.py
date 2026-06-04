@@ -5,7 +5,6 @@ every state.db row. Sessions from Discord, Telegram, Slack, and cron must have
 is_cli_session == False; only rows whose source normalises to 'cli' should be True.
 """
 
-import pathlib
 import sqlite3
 import time
 import unittest.mock
