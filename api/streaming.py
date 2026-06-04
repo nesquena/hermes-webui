@@ -6201,7 +6201,6 @@ def _run_agent_streaming(
                                 _rm['reasoning'] = _merged_reasoning
                         elif _existing_reasoning:
                             _rm['reasoning'] = _existing_reasoning
-                        _asst_count += 1
                 try:
                     _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
                 except Exception:

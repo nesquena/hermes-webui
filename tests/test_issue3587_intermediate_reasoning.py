@@ -265,3 +265,28 @@ class TestToolCallBoundary:
             "on_reasoning must reset _tool_boundary_advanced so the next "
             "tool-call batch can advance the reasoning index"
         )
+
+
+# ── 7. Settlement counter increments exactly once per assistant message ────
+
+
+class TestSettlementCounterSingleIncrement:
+    """_asst_count must increment exactly once per assistant message in the
+    settlement loop. A double increment causes every message after the first
+    to look up a segment index that doesn't exist, silently discarding its
+    reasoning (the exact data-loss scenario the refactor was meant to fix)."""
+
+    def _settlement_block(self):
+        src = read('api/streaming.py')
+        start = src.find('# #3587: use per-message segments')
+        assert start >= 0
+        return src[start:start + 1500]
+
+    def test_single_increment_per_iteration(self):
+        block = self._settlement_block()
+        count = block.count('_asst_count += 1')
+        assert count == 1, (
+            f"_asst_count must be incremented exactly once per loop iteration, "
+            f"found {count} increments. A double increment causes segment index "
+            f"doubling: message N looks up segment 2*N instead of N."
+        )
