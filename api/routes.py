@@ -6786,6 +6786,9 @@ def handle_post(handler, parsed) -> bool:
             event_profile = getattr(get_session(sid, metadata_only=True), "profile", None)
         except KeyError:
             event_profile = None
+        except Exception:
+            logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
+            event_profile = None
         # Delete from WebUI session store
         with LOCK:
             SESSIONS.pop(sid, None)

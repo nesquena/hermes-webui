@@ -42,6 +42,7 @@ def test_session_events_publish_for_minimal_sidebar_mutations():
     assert 'publish_session_list_changed("session_rename", profile=getattr(s, "profile", None))' in ROUTES
     assert 'publish_session_list_changed("session_title_regenerate", profile=getattr(s, "profile", None))' in ROUTES
     assert 'event_profile = getattr(get_session(sid, metadata_only=True), "profile", None)' in ROUTES
+    assert "Failed to resolve profile for deleted session" in ROUTES
     assert '_publish_session_list_changed("session_delete", profile=event_profile)' in ROUTES
     assert 'publish_session_list_changed("session_branch", profile=getattr(branch, "profile", None))' in ROUTES
     assert 'publish_session_list_changed("session_pin", profile=getattr(s, "profile", None))' in ROUTES
