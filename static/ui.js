@@ -6611,7 +6611,8 @@ function renderMessages(options){
     if(m.role==='assistant'){
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      if(hasTc||hasTu||_messageHasReasoningPayload(m)) return true;
+      const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+      if(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)) return true;
       if(_assistantMessageHasVisibleContent(m)) return true;
     }
     return m._statusCard||msgContent(m)||m.attachments?.length;
@@ -6642,7 +6643,8 @@ function renderMessages(options){
       if(_isRecoveryControlMessage(m)){ri++;continue;}
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) rebuilt.push({m,rawIdx:ri});
+      const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) rebuilt.push({m,rawIdx:ri});
       ri++;
     }
     _visWithIdxCache=rebuilt;
@@ -7018,7 +7020,8 @@ function renderMessages(options){
       if(m.role==='assistant'){
         const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
         const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
-        if(hasTopLevelToolCalls||hasContentToolUse) fallbackToolSources.push({m,rawIdx});
+        const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+        if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});
       }
     });
     const derived=[];
@@ -7054,6 +7057,31 @@ function renderMessages(options){
           const tid=p.id||'';
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
           const resultSnippet=resultsByTid[tid]||'';
+          const argsSnap={};
+          if(args && typeof args==='object'){
+            Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
+          }
+          derived.push({
+            name,
+            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+            tid,
+            assistant_msg_idx:rawIdx,
+            args:argsSnap,
+            done:true,
+          });
+        });
+      }
+      // WebUI-internal partial tool calls captured on cancel/stop
+      // (private shape: name/args/done/preview/snippet, no OpenAI envelope).
+      if(Array.isArray(m._partial_tool_calls)){
+        m._partial_tool_calls.forEach(tc=>{
+          if(!tc||typeof tc!=='object') return;
+          const name=tc.name||'tool';
+          const args=tc.args||{};
+          const tid=tc.id||tc.call_id||tc.tool_call_id||tc.tid||'';
+          const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+          const resultSnippet=_cliToolResultSnippet(tc.snippet||tc.result||tc.output||tc.preview||'');
           const argsSnap={};
           if(args && typeof args==='object'){
             Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });

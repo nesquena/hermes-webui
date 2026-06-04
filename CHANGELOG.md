@@ -2,6 +2,8 @@
 # Hermes Web UI -- Changelog
 
 ## [Unreleased]
+### Fixed
+- Client rendering no longer drops assistant-only partial-tool-call rows (`_partial_tool_calls`) from the visible transcript or fallback tool-card reconstruction after cancellation. This keeps interrupted turns visible and ensures interrupted tool calls still render as settled tool cards in history. (#3528, @franksong2702)
 
 ## [v0.51.252] — 2026-06-03 — Release HT (stage-q24 — selection-bleed fix + compatibility docs)
 
