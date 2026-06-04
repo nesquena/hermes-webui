@@ -333,6 +333,77 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     }) in events
 
 
+def test_gateway_chat_worker_normalizes_prefill_slice_before_system_prefix(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    prefill_raw = [
+        {"role": "assistant", "content": "prefill summary"},
+        {"role": "user", "content": "first terminal user"},
+        {"role": "user", "content": "second terminal user"},
+    ]
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse()
+
+    original_normalizer = streaming._normalize_prefill_messages_before_user_turn
+
+    def recording_normalizer(messages):
+        captured["normalizer_input"] = list(messages)
+        return original_normalizer(messages)
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
+        "status": "loaded",
+        "source": "test",
+        "label": "test",
+        "message_count": len(prefill_raw),
+        "messages": prefill_raw,
+    })
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: list(ctx["messages"]))
+    monkeypatch.setattr(streaming, "_normalize_prefill_messages_before_user_turn", recording_normalizer)
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    s = new_session()
+    stream_id = "stream-gateway-prefill-slice-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    assert captured["normalizer_input"] == prefill_raw
+    payload_messages = captured["body"]["messages"]
+    assert [m["role"] for m in payload_messages] == ["system", "assistant", "user"]
+    assert [m["content"] for m in payload_messages[1:]] == ["prefill summary", "Say hello"]
+
+
 def test_gateway_chat_worker_backfills_context_only_turns_into_display(tmp_path, monkeypatch):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()

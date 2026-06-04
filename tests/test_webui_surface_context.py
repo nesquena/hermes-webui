@@ -99,6 +99,13 @@ def test_prefill_boundary_normalizer_removes_terminal_user_tail():
         {"role": "user", "content": "legacy user"},
         {"role": "assistant", "content": "assistant follow-up"},
     ]
+    assert _normalize_prefill_messages_before_user_turn([
+        {"role": "assistant", "content": "tail",},
+        {"role": "user", "content": "first"},
+        {"role": "user", "content": "second"},
+    ]) == [
+        {"role": "assistant", "content": "tail",},
+    ]
     assert _normalize_prefill_messages_before_user_turn([]) == []
     assert _normalize_prefill_messages_before_user_turn([{"role": "user", "content": "only user"}]) == []
 

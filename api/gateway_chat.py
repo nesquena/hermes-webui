@@ -270,11 +270,12 @@ def _run_gateway_chat_streaming(
                 },
                 config_data=cfg,
             )
+            prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
+            prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
             prefill_messages = [
                 {"role": "system", "content": _gateway_system_prompt},
-                *_prefill_messages_with_webui_context(prefill_context, cfg),
+                *prefill_messages,
             ]
-            prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
             put_gateway_event("context_status", {
                 "session_id": session_id,
                 "prefill": _public_prefill_context_status(prefill_context),
