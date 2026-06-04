@@ -3546,6 +3546,15 @@ async function loadSkills() {
 }
 
 let _collapsedCats = new Set(); // persisted collapsed state across re-renders
+let _skillsSort = 'name'; // 'name' | 'modified'
+
+function setSkillsSort(mode) {
+  _skillsSort = mode;
+  document.querySelectorAll('.skills-sort-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.sort === mode);
+  });
+  if (_skillsData) renderSkills(_skillsData);
+}
 
 function _toggleCatCollapse(cat) {
   if (_collapsedCats.has(cat)) _collapsedCats.delete(cat);
@@ -3569,7 +3578,35 @@ function renderSkills(skills) {
     (s.description||'').toLowerCase().includes(query) ||
     (s.category||'').toLowerCase().includes(query)
   ) : skills;
-  // Group by category
+
+  // Modified sort: flat list, no categories
+  if (_skillsSort === 'modified') {
+    const sorted = [...filtered].sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+    const box = $('skillsList');
+    box.innerHTML = '';
+    if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
+    for (const skill of sorted) {
+      const el = document.createElement('div');
+      el.className = 'skill-item' + (skill.disabled ? ' disabled' : '');
+      const isDisabled = skill.disabled || false;
+      const toggle = document.createElement('span');
+      toggle.className = 'skill-toggle' + (isDisabled ? '' : ' enabled');
+      toggle.title = isDisabled ? t('skill_disabled') : t('skill_enabled');
+      toggle.addEventListener('click', (ev) => { ev.stopPropagation(); toggleSkill(skill.name, !isDisabled); });
+      const nameEl = document.createElement('span');
+      nameEl.className = 'skill-name';
+      nameEl.textContent = skill.name;
+      const descEl = document.createElement('span');
+      descEl.className = 'skill-desc';
+      descEl.textContent = skill.description || '';
+      el.append(toggle, nameEl, descEl);
+      el.onclick = () => openSkill(skill.name, el);
+      box.appendChild(el);
+    }
+    return;
+  }
+
+  // Name sort: group by category
   const cats = {};
   for (const s of filtered) {
     const cat = s.category || '(general)';

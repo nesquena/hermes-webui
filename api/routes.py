@@ -371,12 +371,17 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
                 if len(description) > MAX_DESCRIPTION_LENGTH:
                     description = description[: MAX_DESCRIPTION_LENGTH - 3] + "..."
                 seen_names.add(name)
+                try:
+                    mtime = skill_md.stat().st_mtime
+                except OSError:
+                    mtime = 0
                 all_skills.append(
                     {
                         "name": name,
                         "description": description,
                         "category": _skill_category_from_path(skill_md, search_dirs),
                         "disabled": name in disabled,
+                        "mtime": mtime,
                     }
                 )
             except (UnicodeDecodeError, PermissionError) as e:
