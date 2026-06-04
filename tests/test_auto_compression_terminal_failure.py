@@ -1,5 +1,6 @@
 """Regression coverage for compression-exhausted stream finalization."""
 
+import copy
 import json
 import queue
 import sys
@@ -284,7 +285,157 @@ def test_compression_exhausted_apperror_clears_reference_ui_and_labels_error():
     assert "isCompressionExhausted?'Context compression exhausted'" in block
     assert "if(typeof clearCompressionUi==='function') clearCompressionUi();" in block
     assert "window._compressionUi=null;" in block
-    assert "const eventSid=d.old_session_id||d.session_id||activeSid;" in block
+    assert "const eventSid=d.old_session_id||d.session_id||'';" in block
     assert "const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';" in block
     assert "if(d.session&&typeof d.session==='object')" in block
     assert "S.session=d.session;" in block
+
+
+def test_apperror_matches_only_current_or_continuation_session_for_background_errors():
+    src = _read("static/messages.js")
+    start = src.find("source.addEventListener('apperror'")
+    assert start != -1, "apperror listener not found"
+    end = src.find("source.addEventListener('warning'", start)
+    assert end != -1, "warning listener after apperror not found"
+    block = src[start:end]
+
+    assert "const eventSid=d.old_session_id||d.session_id||'';" in block
+    assert "const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';" in block
+    assert "const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||continuationSid===currentSid));" in block
+
+
+def test_apperror_payload_enriched_before_enqueue(tmp_path, monkeypatch):
+    class _CaptureQueue:
+        def __init__(self):
+            self.events = []
+
+        def put_nowait(self, item):
+            event, payload = item
+            self.events.append((event, payload, copy.deepcopy(payload)))
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    models.SESSIONS.clear()
+    streaming.SESSIONS.clear()
+    streaming.STREAMS.clear()
+    streaming.AGENT_INSTANCES.clear()
+    streaming.SESSION_AGENT_LOCKS.clear()
+
+    old_sid = "old_sid_capture"
+    new_sid = "new_sid_capture"
+    stream_id = "stream-compression-exhausted-capture"
+    session = models.Session(
+        session_id=old_sid,
+        title="Compression test",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        messages=[],
+        context_messages=[],
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Do the long task."
+    session.pending_started_at = 1.0
+    session.save()
+    models.SESSIONS[old_sid] = session
+    streaming.SESSIONS[old_sid] = session
+    captured = _CaptureQueue()
+    streaming.STREAMS[stream_id] = captured
+
+    class FakeAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            api_key=None,
+            platform=None,
+            quiet_mode=False,
+            enabled_toolsets=None,
+            fallback_model=None,
+            session_id=None,
+            session_db=None,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            tool_progress_callback=None,
+            interim_assistant_callback=None,
+            clarify_callback=None,
+            **kwargs,
+        ):
+            self.session_id = session_id
+            self.stream_delta_callback = stream_delta_callback
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = "Context length exceeded: cannot compress further."
+
+        def run_conversation(self, **kwargs):
+            if self.stream_delta_callback:
+                self.stream_delta_callback("I am still working through the files.")
+            self.session_id = new_sid
+            return {
+                "failed": True,
+                "partial": True,
+                "compression_exhausted": True,
+                "error": "Context length exceeded: cannot compress further.",
+                "messages": [
+                    {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                    {"role": "assistant", "content": "I am still working through the files."},
+                    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+                    {"role": "tool", "tool_call_id": "call_1", "content": "large output"},
+                ],
+            }
+
+        def interrupt(self, _message):
+            return None
+
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.SessionDB = lambda *_args, **_kwargs: object()
+
+    with monkeypatch.context() as m:
+        m.setattr(streaming, "get_session", lambda _sid: session)
+        m.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+        m.setattr(streaming, "resolve_model_provider", lambda *_args, **_kwargs: ("gpt-4o", "openai", None))
+        m.setitem(sys.modules, "hermes_state", fake_hermes_state)
+        m.setattr("api.config.get_config", lambda *_args, **_kwargs: {})
+        m.setattr("api.config._resolve_cli_toolsets", lambda *_args, **_kwargs: [])
+        m.setattr(streaming, "redact_session_data", lambda s: s)
+
+        streaming._run_agent_streaming(
+            session_id=old_sid,
+            msg_text="Do the long task.",
+            model="gpt-4o",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        )
+
+    apperror_payloads = [
+        (payload, payload_before)
+        for event, payload, payload_before in captured.events
+        if event == "apperror"
+    ]
+    assert apperror_payloads, "expected apperror SSE payload"
+    payload_after, payload_before = apperror_payloads[-1]
+    assert payload_after == payload_before, "apperror payload changed after enqueue"
+    assert payload_after["session_id"] == new_sid
+    assert payload_after["old_session_id"] == old_sid
+    assert payload_after["new_session_id"] == new_sid
+
+
+def test_exception_apperror_payload_includes_session_id_before_enqueue():
+    src = _read("api/streaming.py")
+    start = src.find("_error_payload = _provider_error_payload(err_str, _exc_type, _exc_hint)")
+    assert start != -1, "exception apperror payload path not found"
+    end = src.find("put('apperror', _error_payload)", start)
+    assert end != -1, "exception apperror enqueue not found"
+    block = src[start:end]
+
+    assert "_error_payload['session_id']" in block
+    assert "_error_payload['old_session_id']" in block

@@ -2271,9 +2271,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
       const currentSid=S.session&&S.session.session_id;
-      const eventSid=d.old_session_id||d.session_id||activeSid;
+      const eventSid=d.old_session_id||d.session_id||'';
       const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';
-      const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||continuationSid===currentSid||eventSid===activeSid||continuationSid===activeSid));
+      const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||continuationSid===currentSid));
       if(S.session&&eventMatchesCurrent){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();

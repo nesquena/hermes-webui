@@ -5951,7 +5951,6 @@ def _run_agent_streaming(
                             _err_type,
                             _err_hint,
                         )
-                        put('apperror', _error_payload)
                         # Clear stream/pending state so the session does not appear
                         # "agent_running" on reload after a silent failure.
                         # Persist the error so it survives page reload.
@@ -5987,6 +5986,7 @@ def _run_agent_streaming(
                         if _compression_continuation_session_id is not None:
                             _error_payload['new_session_id'] = _compression_continuation_session_id
                             _error_payload['continuation_session_id'] = _compression_continuation_session_id
+                        put('apperror', _error_payload)
                         # Legacy #373 source tests and clients look for the
                         # no_response type; #1765 keeps that type but improves
                         # the catch-all label, hint, and provider details.
@@ -6940,6 +6940,8 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append interrupted turn journal event", exc_info=True)
+            _error_payload['session_id'] = getattr(s, 'session_id', session_id)
+            _error_payload['old_session_id'] = getattr(s, 'session_id', session_id)
         put('apperror', _error_payload)
     finally:
         # Stop the periodic checkpoint thread before the final recovery path.
