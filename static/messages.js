@@ -714,7 +714,7 @@ document.addEventListener('click',(e)=>{
 },{capture:false});
 function _addNamedContextBlock(text){
   const id='ctx-'+(++_selectionIdCounter);
-  const name='Context '+_selectionIdCounter;
+  const name=(_selectedTextReplyT('context_block_name_default','Context'))+' '+_selectionIdCounter;
   _pendingSelections.push({id, name, text});
   _renderSelectionChips();
   return id;
@@ -749,9 +749,11 @@ function _editSelectionChipName(id,chip){
   inp.type='text';inp.value=s.name;inp.className='selection-chip-edit';
   nameEl.replaceWith(inp);
   inp.focus();inp.select();
-  const commit=()=>{ s.name=inp.value.trim()||s.name; _renderSelectionChips(); };
+  let done=false;
+  const commit=()=>{ if(done)return; done=true; s.name=inp.value.trim()||s.name; _renderSelectionChips(); };
+  const cancel=()=>{ if(done)return; done=true; _renderSelectionChips(); };
   inp.addEventListener('blur',commit);
-  inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();commit();} if(e.key==='Escape'){_renderSelectionChips();} });
+  inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();commit();} if(e.key==='Escape'){cancel();} });
 }
 
 function _flushSelectionBlocksToComposer(){

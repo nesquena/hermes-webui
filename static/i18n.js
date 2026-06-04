@@ -53,7 +53,6 @@ const LOCALES = {
     saved_prompts_saved: 'Prompt saved',
     saved_prompts_delete: 'Delete prompt',
     saved_prompts_empty_input: 'Type a prompt to save first',
-    context_block_added: 'Context block added',
     context_block_name_default: 'Context',
     context_block_flush_aria: 'Context blocks will be included when you send',
 
@@ -1542,7 +1541,6 @@ const LOCALES = {
     saved_prompts_saved: 'Prompt salvato',
     saved_prompts_delete: 'Elimina prompt',
     saved_prompts_empty_input: 'Digita un prompt da salvare prima',
-    context_block_added: 'Blocco di contesto aggiunto',
     context_block_name_default: 'Contesto',
     context_block_flush_aria: 'I blocchi di contesto verranno inclusi quando invii',
 
@@ -3022,7 +3020,6 @@ const LOCALES = {
     saved_prompts_saved: 'プロンプトを保存しました',
     saved_prompts_delete: 'プロンプトを削除',
     saved_prompts_empty_input: '保存するプロンプトを先に入力してください',
-    context_block_added: 'コンテキストブロックを追加しました',
     context_block_name_default: 'コンテキスト',
     context_block_flush_aria: '送信時にコンテキストブロックが含まれます',
 
@@ -4504,7 +4501,6 @@ const LOCALES = {
     saved_prompts_saved: 'Подсказка сохранена',
     saved_prompts_delete: 'Удалить подсказку',
     saved_prompts_empty_input: 'Сначала введите подсказку для сохранения',
-    context_block_added: 'Блок контекста добавлен',
     context_block_name_default: 'Контекст',
     context_block_flush_aria: 'Блоки контекста будут включены при отправке',
 
@@ -5916,7 +5912,6 @@ const LOCALES = {
     saved_prompts_saved: 'Indicación guardada',
     saved_prompts_delete: 'Eliminar indicación',
     saved_prompts_empty_input: 'Escribe una indicación para guardar primero',
-    context_block_added: 'Bloque de contexto añadido',
     context_block_name_default: 'Contexto',
     context_block_flush_aria: 'Los bloques de contexto se incluirán al enviar',
 
@@ -7332,7 +7327,6 @@ const LOCALES = {
     saved_prompts_saved: 'Eingabeaufforderung gespeichert',
     saved_prompts_delete: 'Eingabeaufforderung löschen',
     saved_prompts_empty_input: 'Gib zuerst eine Eingabeaufforderung ein',
-    context_block_added: 'Kontextblock hinzugefügt',
     context_block_name_default: 'Kontext',
     context_block_flush_aria: 'Kontextblöcke werden beim Senden eingefügt',
 
@@ -8752,7 +8746,6 @@ const LOCALES = {
     saved_prompts_saved: '提示已保存',
     saved_prompts_delete: '删除提示',
     saved_prompts_empty_input: '请先输入要保存的提示',
-    context_block_added: '已添加上下文块',
     context_block_name_default: '上下文',
     context_block_flush_aria: '发送时将包含上下文块',
 
@@ -10180,7 +10173,6 @@ const LOCALES = {
     saved_prompts_saved: '提示已儲存',
     saved_prompts_delete: '刪除提示',
     saved_prompts_empty_input: '請先輸入要儲存的提示',
-    context_block_added: '已新增上下文區塊',
     context_block_name_default: '上下文',
     context_block_flush_aria: '傳送時將包含上下文區塊',
 
@@ -11649,7 +11641,6 @@ const LOCALES = {
     saved_prompts_saved: 'Prompt salvo',
     saved_prompts_delete: 'Excluir prompt',
     saved_prompts_empty_input: 'Digite um prompt para salvar primeiro',
-    context_block_added: 'Bloco de contexto adicionado',
     context_block_name_default: 'Contexto',
     context_block_flush_aria: 'Os blocos de contexto serão incluídos ao enviar',
     you: 'Você',
@@ -12945,7 +12936,6 @@ const LOCALES = {
     saved_prompts_saved: '프롬프트가 저장되었습니다',
     saved_prompts_delete: '프롬프트 삭제',
     saved_prompts_empty_input: '먼저 저장할 프롬프트를 입력하세요',
-    context_block_added: '컨텍스트 블록이 추가되었습니다',
     context_block_name_default: '컨텍스트',
     context_block_flush_aria: '전송 시 컨텍스트 블록이 포함됩니다',
 
@@ -14424,7 +14414,6 @@ const LOCALES = {
     saved_prompts_saved: 'Invite sauvegardée',
     saved_prompts_delete: 'Supprimer l\'invite',
     saved_prompts_empty_input: 'Tapez d\'abord une invite à sauvegarder',
-    context_block_added: 'Bloc de contexte ajouté',
     context_block_name_default: 'Contexte',
     context_block_flush_aria: 'Les blocs de contexte seront inclus lors de l\'envoi',
     diff_loading: 'Chargement des différences',
@@ -15840,7 +15829,6 @@ const LOCALES = {
     saved_prompts_saved: 'İstem kaydedildi',
     saved_prompts_delete: 'İstemi sil',
     saved_prompts_empty_input: 'Önce kaydedilecek bir istem girin',
-    context_block_added: 'Bağlam bloğu eklendi',
     context_block_name_default: 'Bağlam',
     context_block_flush_aria: 'Bağlam blokları gönderildiğinde dahil edilecek',
 
