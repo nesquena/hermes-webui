@@ -12350,6 +12350,48 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_milestones_feed_
     assert "raw-prompt" not in serialized
 
 
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_milestones_text_fallback(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-milestones-text-fallback",
+        "title": "GitHub Milestones Text Fallback",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/milestones?access_token=***#raw-prompt",
+    })
+    github_milestones_body = (
+        "Summary: Safe-looking milestone summary must not bypass exact milestones metadata validation.\n"
+        "SECRET_VALUE_DO_NOT_LEAK raw milestone body\n"
+    ).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_milestones_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"result": result, "jobs": list_source_refresh_jobs(limit=5)}, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-milestones-text-fallback.md").exists()
+    assert "safe-looking milestone summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_run_source_refresh_jobs_default_fetcher_rejects_github_milestones_malformed_tail_row(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))

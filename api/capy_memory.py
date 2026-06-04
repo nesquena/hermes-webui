@@ -3699,6 +3699,32 @@ def _github_milestones_path_repo(origin_uri: str) -> str:
     return f"{path[2]}/{path[3]}"
 
 
+def _github_milestones_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 5
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4].startswith("milestones")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return any(segment.lower().startswith("milestones%") for segment in raw_path)
+
+
 def _github_milestone_title_is_safe(value: Any) -> bool:
     if not isinstance(value, str):
         return False
@@ -7236,6 +7262,8 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    if _github_milestones_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     topics_repo = _github_topics_path_repo(origin_uri)
     if topics_repo:
         if not _json_payload_is_github_topics_metadata(origin_uri, payload):
@@ -7526,6 +7554,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_rulesets_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_rulesets_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_milestones_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_milestones_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_repository_events_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_repository_events_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -7587,6 +7618,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_rulesets_path_matches(safe_origin_uri):
         if not _github_rulesets_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_milestones_path_matches(safe_origin_uri):
+        if not _github_milestones_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_repository_events_path_matches(safe_origin_uri):
@@ -7758,6 +7793,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_rulesets_path_matches(safe_origin_uri) and (
             not _github_rulesets_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_milestones_path_matches(safe_origin_uri) and (
+            not _github_milestones_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
