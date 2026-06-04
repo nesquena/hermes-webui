@@ -21,7 +21,7 @@ Preview is instant — the UI updates as you click.
 **Slash command:** Type `/theme <name>` in the composer. The command accepts
 both theme names (`system`, `dark`, `light`) and skin names (`default`, `ares`,
 `mono`, `slate`, `poseidon`, `sisyphus`, `charizard`, `sienna`,
-`catppuccin`, `nous`, `geist-contrast`). It updates the matching axis and leaves the other one
+`catppuccin`, `nous`, `geist-contrast`, `zeus`). It updates the matching axis and leaves the other one
 alone.
 
 **Persistence:** Both choices are stored in `localStorage` for flicker-free
@@ -58,6 +58,7 @@ absent for light. System mode tracks the OS preference at runtime.
 | **Catppuccin** | Catppuccin Latte/Mocha palette with Mauve accent. |
 | **Nous** | Steel-blue accent with dashed technical surfaces. |
 | **Geist Contrast** (`geist-contrast`) | Geist-inspired monochrome surfaces with a restrained dark-mode `#FFF175` accent. |
+| **Zeus** | OLED-near-black dark surfaces that keep the default gold accent. Dark-focused; falls back to the default light palette in light mode. |
 
 Each skin defines paired light + dark variants so it reads cleanly on either
 theme. The skin is applied as `data-skin="<name>"` on `<html>` (the default

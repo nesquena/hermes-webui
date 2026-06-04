@@ -27,6 +27,10 @@ does not change runtime behavior, maintainer policy, bot behavior, or CI gates.
   model-context reconstruction, compression, UI scene/cache, and sidebar metadata
   repairs. Start here for narrow fixes that keep the existing WebUI execution
   path.
+- [`docs/rfcs/live-to-final-assistant-replies.md`](rfcs/live-to-final-assistant-replies.md):
+  proposed product model for long-running assistant replies, live process text,
+  tool activity, recovery, terminal outcomes, and final-answer boundaries. Start
+  here for UI/UX changes to running-session assistant reply rendering.
 - [`docs/rfcs/canonical-session-resolution.md`](rfcs/canonical-session-resolution.md):
   proposed contract for resolving URL routes, query parameters, localStorage,
   sidebar rows, and compression-lineage IDs to one canonical visible session

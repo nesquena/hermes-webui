@@ -111,6 +111,66 @@ def best_driver(tmp_path_factory):
     return str(p)
 
 
+# ── driver for _buildModelCandidates + _bestModelMatch over the FULL catalog ──
+# This is the layer the reporter's case actually needed: on large provider
+# catalogs the bare model lives in `extra_models` (not a rendered <option>), so
+# /model must resolve against featured `models` PLUS `extra_models`. (#3368)
+
+_CATALOG_DRIVER = r"""
+const fs = require('fs');
+const cmds = fs.readFileSync(process.argv[2], 'utf8');
+function extractFunc(src, name){
+  const re = new RegExp('function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start); let depth = 1; i++;
+  while (depth > 0 && i < src.length){ if(src[i]==='{')depth++; else if(src[i]==='}')depth--; i++; }
+  return src.slice(start, i);
+}
+eval(extractFunc(cmds, '_buildModelCandidates'));
+eval(extractFunc(cmds, '_looksLikeVersionedModel'));
+eval(extractFunc(cmds, '_bestModelMatch'));
+eval(extractFunc(cmds, '_nearestModelSuggestion'));
+const args = JSON.parse(process.argv[3]);
+// args.groups: [{provider_id, models:[{id,label}], extra_models:[{id,label}]}]
+// args.selOptions: ids rendered as <option> (the featured subset)
+const sel = { options: (args.selOptions||[]).map(v => ({value: v, textContent: v})) };
+const { options: candidates, providerMap } = _buildModelCandidates(sel, args.groups);
+// Mirror cmdModel's fallback chain for a query (skipping _findModelInDropdown,
+// which is exercised by the find_driver tests and returns null for these cases).
+let q = String(args.query||'').toLowerCase();
+let match = _bestModelMatch(candidates, q);
+if(!match && q.includes('/')){
+  const bare = q.slice(q.lastIndexOf('/')+1);
+  match = _bestModelMatch(candidates, bare);
+}
+process.stdout.write(JSON.stringify({
+  candidateCount: candidates.length,
+  match,
+  provider: match ? (providerMap[match]||null) : null,
+  suggestion: _nearestModelSuggestion(candidates, q),
+}));
+"""
+
+
+@pytest.fixture(scope="module")
+def catalog_driver(tmp_path_factory):
+    p = tmp_path_factory.mktemp("catalog3368") / "driver.js"
+    p.write_text(_CATALOG_DRIVER, encoding="utf-8")
+    return str(p)
+
+
+def _resolve(driver, query, groups, sel_options):
+    r = subprocess.run(
+        [NODE, driver, str(COMMANDS_JS_PATH),
+         json.dumps({"query": query, "groups": groups, "selOptions": sel_options})],
+        capture_output=True, text=True, timeout=10,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"node driver failed: {r.stderr}")
+    return json.loads(r.stdout)
+
+
 def _find(driver, model_id, options, preferred=None):
     r = subprocess.run(
         [NODE, driver, str(UI_JS_PATH),
@@ -300,3 +360,139 @@ class TestSlashQualifiedVersionedNoSnap:
             "the /api/session/update cross-provider fallback must be gated on "
             "!versionedNoSnap so a versioned tier-variant near-miss doesn't silently persist"
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FULL-CATALOG resolution — garyd9's actual case (#3368 reopened correction)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# garyd9 (Nous Portal subscriber) confirmed `xiaomi/mimo-v2.5` is a REAL,
+# distinct, separately-selectable model — selectable in the TUI and CLI. His
+# Nous catalog (>25 models) gets truncated by _build_nous_featured_set
+# (api/config.py): the curated flagship set carries mimo-v2.5-PRO so that's a
+# rendered <option>, while the bare mimo-v2.5 lands in `extra_models` and is
+# NOT a <select> option. The pre-fix /model resolved only against sel.options,
+# so the bare model was unreachable and the #3437 tier-guard fired a misleading
+# "did you mean mimo-v2.5-pro?" toast on a model that actually exists.
+#
+# The fix: /model resolves against the FULL catalog (featured `models` +
+# `extra_models`) — the same complete list the CLI and autocomplete use. With
+# the bare model in the candidate set, exact/shortest-match wins and lands on
+# mimo-v2.5, while mimo-v2.5-pro stays reachable by its full name.
+
+
+class TestFullCatalogResolution:
+    """The bare model lives in extra_models (truncated catalog tail). /model must
+    still resolve to it end-to-end — this is garyd9's exact reported case."""
+
+    # A realistic truncated Nous catalog: -pro is featured (rendered <option>),
+    # bare mimo-v2.5 is in the extras tail (absent from sel.options).
+    GROUPS = [{
+        "provider": "Nous Portal (3 of 6)",
+        "provider_id": "nous",
+        "models": [
+            {"id": "@nous:anthropic/claude-opus-4.8", "label": "Claude Opus 4.8 (via Nous)"},
+            {"id": "@nous:openai/gpt-5.5", "label": "GPT-5.5 (via Nous)"},
+            {"id": "@nous:xiaomi/mimo-v2.5-pro", "label": "Mimo V2.5 Pro (via Nous)"},
+        ],
+        "extra_models": [
+            {"id": "@nous:xiaomi/mimo-v2.5", "label": "Mimo V2.5 (via Nous)"},
+            {"id": "@nous:xiaomi/mimo-v2-pro", "label": "Mimo V2 Pro (via Nous)"},
+            {"id": "@nous:deepseek/deepseek-v4-flash", "label": "DeepSeek V4 Flash (via Nous)"},
+        ],
+    }]
+    # What the picker actually renders (featured only).
+    SEL = [
+        "@nous:anthropic/claude-opus-4.8",
+        "@nous:openai/gpt-5.5",
+        "@nous:xiaomi/mimo-v2.5-pro",
+    ]
+
+    def test_candidate_set_includes_extras(self, catalog_driver):
+        out = _resolve(catalog_driver, "mimo-v2.5", self.GROUPS, self.SEL)
+        # 3 featured + 3 extras = 6; the bare model must be reachable.
+        assert out["candidateCount"] == 6
+
+    def test_bare_mimo_v25_resolves_from_extras(self, catalog_driver):
+        """garyd9's exact case: /model mimo-v2.5 lands on the bare model, NOT -pro."""
+        out = _resolve(catalog_driver, "mimo-v2.5", self.GROUPS, self.SEL)
+        assert out["match"] == "@nous:xiaomi/mimo-v2.5", (
+            f"bare mimo-v2.5 must resolve to itself from the extras tail, got {out['match']!r}"
+        )
+        assert out["provider"] == "nous", "resolved model must carry its provider for routing"
+
+    def test_qualified_bare_resolves_from_extras(self, catalog_driver):
+        out = _resolve(catalog_driver, "xiaomi/mimo-v2.5", self.GROUPS, self.SEL)
+        assert out["match"] == "@nous:xiaomi/mimo-v2.5"
+        assert out["provider"] == "nous"
+
+    def test_pro_still_reachable_by_full_name(self, catalog_driver):
+        out = _resolve(catalog_driver, "mimo-v2.5-pro", self.GROUPS, self.SEL)
+        assert out["match"] == "@nous:xiaomi/mimo-v2.5-pro"
+
+    def test_qualified_pro_still_reachable(self, catalog_driver):
+        out = _resolve(catalog_driver, "xiaomi/mimo-v2.5-pro", self.GROUPS, self.SEL)
+        assert out["match"] == "@nous:xiaomi/mimo-v2.5-pro"
+
+    def test_extras_only_model_reachable(self, catalog_driver):
+        """A non-versioned extras-only model (deepseek-v4-flash) is also reachable."""
+        out = _resolve(catalog_driver, "deepseek-v4-flash", self.GROUPS, self.SEL)
+        assert out["match"] == "@nous:deepseek/deepseek-v4-flash"
+
+    def test_incomplete_version_continues_to_longer(self, catalog_driver):
+        """mimo-v2 is an incomplete version; resolving to the shortest continuation
+        (bare mimo-v2.5) is correct now that it's in the catalog."""
+        out = _resolve(catalog_driver, "mimo-v2", self.GROUPS, self.SEL)
+        assert out["match"] == "@nous:xiaomi/mimo-v2.5"
+
+    def test_truly_absent_bare_still_no_snap_and_suggests(self, catalog_driver):
+        """When the bare model is genuinely absent (only -pro in BOTH featured and
+        extras), the tier-guard still fires: no snap, and -pro is suggested."""
+        groups = [{
+            "provider": "Nous Portal",
+            "provider_id": "nous",
+            "models": [{"id": "@nous:xiaomi/mimo-v2.5-pro", "label": "Mimo V2.5 Pro"}],
+            "extra_models": [],
+        }]
+        out = _resolve(catalog_driver, "mimo-v2.5", groups, ["@nous:xiaomi/mimo-v2.5-pro"])
+        assert out["match"] is None, "must not snap to -pro when bare model truly absent"
+        assert out["suggestion"] == "@nous:xiaomi/mimo-v2.5-pro"
+
+    def test_falls_back_to_sel_options_when_no_groups(self, catalog_driver):
+        """If the /api/models fetch failed (no groups), candidates fall back to the
+        live <select> options so /model still works in a degraded state."""
+        out = _resolve(catalog_driver, "gpt-5.5", None, self.SEL)
+        assert out["candidateCount"] == 3
+        assert out["match"] == "@nous:openai/gpt-5.5"
+
+
+class TestCmdModelFullCatalogWiring:
+    """Source-level guards: cmdModel must build candidates from the catalog and
+    inject the option before selecting, so an extras-only winner is honored."""
+
+    @pytest.fixture(scope="class")
+    def commands_src(self):
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parents[1]
+        return (root / "static" / "commands.js").read_text(encoding="utf-8")
+
+    def test_builds_candidates_from_catalog_groups(self, commands_src):
+        assert "_buildModelCandidates(sel,modelsData&&modelsData.groups)" in commands_src
+
+    def test_helper_reads_models_and_extra_models(self, commands_src):
+        idx = commands_src.find("function _buildModelCandidates")
+        assert idx != -1
+        window = commands_src[idx:idx + 900]
+        assert "g.models" in window and "g.extra_models" in window, (
+            "the candidate builder must read both featured models and the extras tail"
+        )
+
+    def test_resolves_against_candidates_not_sel_options(self, commands_src):
+        # The fuzzy fallbacks must run over the full candidate set, not sel.options.
+        assert "_bestModelMatch(candidates,q)" in commands_src
+        assert "_bestModelMatch(sel.options,q)" not in commands_src
+
+    def test_injects_option_for_extras_only_winner(self, commands_src):
+        # An extras-only match isn't a rendered <option>; cmdModel must inject it
+        # (with provider) before selecting, or sel.value=match silently no-ops.
+        assert "_ensureModelOptionInDropdown(match,sel,providerMap[match]||null)" in commands_src

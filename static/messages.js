@@ -594,6 +594,33 @@ async function send(){
     }
   }catch(e){
     const errMsg=String((e&&e.message)||'');
+    // If /api/chat/start returns 404, the session was deleted server-side
+    // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
+    // the stale /session/<id> URL and clear localStorage so a reload does not
+    // re-inject the dead id via _sessionIdFromLocation(), then reset to the
+    // empty state instead of pushing a confusing error bubble into the chat.
+    if(e&&e.status===404){
+      try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
+      try{
+        if(typeof _appRootPath==='function') history.replaceState(null,'',_appRootPath());
+        else history.replaceState(null,'',window.location.pathname.replace(/\/session\/[^/]+/,'')+window.location.search);
+      }catch(_){ }
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      stopApprovalPolling();
+      stopClarifyPolling();
+      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
+      if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+      removeThinking();
+      S.session=null;S.messages=[];
+      setBusy(false);setComposerStatus('');
+      if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      if(typeof renderMessages==='function') renderMessages();
+      if($('emptyState')) $('emptyState').style.display='';
+      if($('msgInner')) $('msgInner').innerHTML='';
+      if(typeof renderSessionList==='function') void renderSessionList();
+      return;
+    }
     const conflictActiveStream=/session already has an active stream/i.test(errMsg);
     if(conflictActiveStream){
       delete INFLIGHT[activeSid];

@@ -80,7 +80,7 @@ def test_models_dev_false_suppresses_prefix_heuristic(monkeypatch):
     ) == []
 
 
-def test_codex_gpt55_uses_models_dev_including_xhigh(monkeypatch):
+def test_codex_gpt55_uses_models_dev_excluding_unsupported_max(monkeypatch):
     _install_fake_models_dev(
         monkeypatch,
         lambda provider, model: SimpleNamespace(supports_reasoning=True),
@@ -91,8 +91,8 @@ def test_codex_gpt55_uses_models_dev_including_xhigh(monkeypatch):
     result = cfg.resolve_model_reasoning_efforts(
         "gpt-5.5", provider_id="openai-codex"
     )
-    assert result == list(cfg.VALID_REASONING_EFFORTS)
     assert "xhigh" in result
+    assert "max" not in result
 
 
 def test_codex_metadata_false_returns_empty(monkeypatch):

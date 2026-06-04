@@ -2234,6 +2234,28 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
     return False
 
 
+def _filter_reasoning_efforts_for_provider(
+    efforts: list[str],
+    model_id: str,
+    provider_id: str,
+) -> list[str]:
+    """Apply provider/model quirks to otherwise valid reasoning effort levels."""
+    normalized = [
+        str(eff).strip().lower()
+        for eff in efforts
+        if str(eff).strip().lower() in VALID_REASONING_EFFORTS
+    ]
+    normalized = list(dict.fromkeys(normalized))
+    provider = _resolve_provider_alias(str(provider_id or "").strip().lower())
+    bare = _strip_provider_hint_for_reasoning(model_id).lower().rsplit("/", 1)[-1]
+    if provider == "openai-codex":
+        if bare.startswith(("o1", "o3", "o4")):
+            return [eff for eff in normalized if eff in {"low", "medium", "high"}]
+        if bare.startswith("gpt-5"):
+            return [eff for eff in normalized if eff != "max"]
+    return normalized
+
+
 def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     """Fallback when hermes_cli is unavailable."""
     model = _strip_provider_hint_for_reasoning(model_id).lower()
@@ -2244,7 +2266,9 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
     if provider == "openai-codex" and bare.startswith(("gpt-5", "o1", "o3", "o4")):
         if bare.startswith(("o1", "o3", "o4")):
             return ["low", "medium", "high"]
-        return list(VALID_REASONING_EFFORTS)
+        return _filter_reasoning_efforts_for_provider(
+            list(VALID_REASONING_EFFORTS), model, provider
+        )
     if provider in {"copilot", "github-copilot"}:
         if bare.startswith(("gpt-5", "o1", "o3", "o4")):
             if bare.startswith(("o1", "o3", "o4")):
@@ -2298,7 +2322,9 @@ def _models_dev_reasoning_efforts(model_id: str, provider_id: str) -> list[str] 
 
     supports_reasoning = getattr(capabilities, "supports_reasoning", None)
     if supports_reasoning is True:
-        return list(VALID_REASONING_EFFORTS)
+        return _filter_reasoning_efforts_for_provider(
+            list(VALID_REASONING_EFFORTS), model, provider
+        )
     if supports_reasoning is False:
         return []
     return None
@@ -2338,7 +2364,9 @@ def resolve_model_reasoning_efforts(
             return _heuristic_reasoning_efforts(hinted_model, provider)
     else:
         if provider in {"copilot", "github-copilot"}:
-            return github_model_reasoning_efforts(hinted_model)
+            return _filter_reasoning_efforts_for_provider(
+                github_model_reasoning_efforts(hinted_model), hinted_model, provider
+            )
 
         if provider == "lmstudio":
             probe_base = resolved_base_url or _get_provider_base_url(provider)
@@ -2348,16 +2376,72 @@ def resolve_model_reasoning_efforts(
                 return []
             level_opts = [opt for opt in normalized if opt in VALID_REASONING_EFFORTS]
             if level_opts:
-                return list(dict.fromkeys(level_opts))
+                return _filter_reasoning_efforts_for_provider(
+                    level_opts, hinted_model, provider
+                )
             if set(normalized).issubset({"off", "on"}):
                 return []
             return []
 
+    # _models_dev_reasoning_efforts already applies the provider/model filter
+    # internally, so it is returned as-is here (filtering again would be
+    # redundant — the filter is idempotent but the double pass obscures flow).
     metadata_efforts = _models_dev_reasoning_efforts(hinted_model, provider)
     if metadata_efforts is not None:
         return metadata_efforts
 
     return _heuristic_reasoning_efforts(hinted_model, provider)
+
+
+def coerce_reasoning_effort_for_model(
+    effort: str | None,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Return the closest supported effort for the target model/provider."""
+    raw = str(effort or "").strip().lower()
+    if not raw:
+        return ""
+    if raw == "none":
+        return "none"
+    if raw not in VALID_REASONING_EFFORTS:
+        return ""
+    supported = resolve_model_reasoning_efforts(
+        model_id,
+        provider_id=provider_id,
+        base_url=base_url,
+    )
+    # An empty list is ambiguous: resolve_model_reasoning_efforts() returns []
+    # both for models KNOWN not to support reasoning AND for models we simply
+    # don't recognize (custom providers, aggregator-rewritten ids, brand-new
+    # releases). Coercion exists to avoid sending a level a KNOWN-incompatible
+    # model rejects (e.g. openai-codex gpt-5 'max', o1/o3/o4 above 'high') —
+    # those paths return a NON-empty clamped set, so the degrade ladder below
+    # still applies. When the set is empty we can't tell "unsupported" from
+    # "unknown", so preserve the user's configured effort verbatim (the prior
+    # behavior) rather than silently disabling reasoning — the provider stays
+    # the final authority. Worst case is the same rejected request that master
+    # already produces, i.e. no regression. (#3505 review)
+    if not supported:
+        return raw
+    if raw in supported:
+        return raw
+    # Degrade to the closest *lower* supported level instead of silently
+    # disabling reasoning. e.g. max -> xhigh -> high, or xhigh -> high when the
+    # target model caps below the configured effort. Never escalate.
+    ladder = list(VALID_REASONING_EFFORTS)  # ascending: minimal..max
+    try:
+        raw_idx = ladder.index(raw)
+    except ValueError:
+        return raw
+    for level in reversed(ladder[:raw_idx]):  # strictly lower, highest first
+        if level in supported:
+            return level
+    # raw is below every supported level (shouldn't happen for a non-empty set
+    # that excludes raw, but be safe): preserve the configured effort rather
+    # than blank it.
+    return raw
 
 
 def get_reasoning_status(
@@ -4945,7 +5029,7 @@ _SETTINGS_DEFAULTS = {
     "ignore_agent_updates": False,  # keep WebUI update notices but suppress Agent update checks
     "whats_new_summary_enabled": False,  # show an LLM-written What's New summary before diff links
     "theme": "dark",  # light | dark | system
-    "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
+    "skin": "default",  # accent color skin: default | ares | mono | graphite | slate | poseidon | sisyphus | charizard | sienna | catppuccin | nous
     "font_size": "default",  # small | default | large | xlarge
     "session_jump_buttons": False,  # show Start/End transcript jump pills
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
@@ -4966,6 +5050,7 @@ _SETTINGS_DEFAULTS = {
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "simplified_tool_calling": True,  # render tools/thinking as compact inline timeline activity
+    "terminal_auto_expand_on_output": False,  # auto-expand terminal panel when output arrives while collapsed
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
     "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
     "sidebar_density": "compact",  # compact | detailed
@@ -4983,6 +5068,7 @@ _SETTINGS_SKIN_VALUES = {
     "default",
     "ares",
     "mono",
+    "graphite",
     "slate",
     "poseidon",
     "sisyphus",
@@ -4991,6 +5077,7 @@ _SETTINGS_SKIN_VALUES = {
     "catppuccin",
     "nous",
     "geist-contrast",
+    "zeus",
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.
@@ -5115,6 +5202,7 @@ _SETTINGS_BOOL_KEYS = {
     "notifications_enabled",
     "show_thinking",
     "simplified_tool_calling",
+    "terminal_auto_expand_on_output",
     "api_redact_enabled",
     "session_jump_buttons",
     "session_endless_scroll",

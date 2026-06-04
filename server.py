@@ -6,12 +6,33 @@ All business logic lives in api/*.
 import logging
 import os
 import re
+import signal
 import socket
 import sys
 import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# ── SIGPIPE handling ────────────────────────────────────────────────────────
+# Ignore SIGPIPE so a client closing the connection mid-response (browser tab
+# close, network drop, mobile backgrounding, a dropped long-poll, an
+# `/api/updates/check` timeout, etc.) does not terminate the whole server
+# process. Python's default action for SIGPIPE is `Term`, so a single dropped
+# `socket.send()` in any request thread could kill the entire WebUI silently —
+# no exception, no log, no `/health` response. With SIG_IGN the kernel still
+# returns EPIPE to the offending write (surfaced as `BrokenPipeError`); the
+# per-request handler unwinds and the connection just closes, while the server
+# keeps serving. Set at import time so it is in effect before any
+# ThreadingHTTPServer worker thread writes its first response. (Salvaged from
+# #3407 @PatrickNoFilter — reproduced in production 2026-06-02.)
+#
+# SIGPIPE is POSIX-only; it does not exist on Windows (where there is no
+# broken-pipe signal and writes to a dead socket raise an OSError directly), so
+# guard with getattr to keep native-Windows support (#1952) working.
+_SIGPIPE = getattr(signal, "SIGPIPE", None)
+if _SIGPIPE is not None:
+    signal.signal(_SIGPIPE, signal.SIG_IGN)
 
 # ── Test-mode network isolation ─────────────────────────────────────────────
 # When `HERMES_WEBUI_TEST_NETWORK_BLOCK=1` is set in the environment, refuse
@@ -183,6 +204,13 @@ class QuietHTTPServer(ThreadingHTTPServer):
         super().__init__(*args, **kwargs)
         self.accept_loop_requests_total = 0
         self.accept_loop_last_request_at = 0.0
+
+    def server_bind(self):
+        if sys.platform == 'win32':
+            self.allow_reuse_address = False
+            SO_EXCLUSIVEADDRUSE = getattr(socket, 'SO_EXCLUSIVEADDRUSE', -5)
+            self.socket.setsockopt(socket.SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     def _handle_request_noblock(self):
         """Record accept-loop progress before dispatching a request handler.
@@ -477,6 +505,25 @@ def _log_shutdown_audit(reason: str = "serve_forever_exit") -> None:
     )
 
 
+def _abort_if_already_serving(host: str, port: int) -> None:
+    """Refuse to start if a live HTTP server is already responding on this port."""
+    probe_host = '127.0.0.1' if host in ('0.0.0.0', '', '::') else host
+    try:
+        with socket.create_connection((probe_host, port), timeout=2) as s:
+            s.sendall(b'GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n')
+            s.settimeout(2)
+            data = s.recv(512)
+            if data:
+                print(
+                    f'[!!] FATAL: Another server is already responding on'
+                    f' {probe_host}:{port}. Stop the existing instance first.',
+                    flush=True,
+                )
+                sys.exit(1)
+    except (ConnectionRefusedError, ConnectionResetError, OSError, socket.timeout):
+        pass
+
+
 def main() -> None:
     from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
 
@@ -572,6 +619,7 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
 
+    _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 
     # ── TLS/HTTPS setup (optional) ─────────────────────────────────────────
@@ -597,6 +645,7 @@ def main() -> None:
     try:
         httpd.serve_forever()
     finally:
+        httpd.server_close()
         _log_shutdown_audit()
         # Stop the gateway watcher on shutdown
         try:
