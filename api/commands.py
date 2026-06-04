@@ -6,6 +6,7 @@ so the frontend can still load with WEBUI_ONLY commands.
 """
 from __future__ import annotations
 import logging
+import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ _AGENT_COMMAND_ALIASES = {
     'reload_mcp': 'reload-mcp',
 }
 _ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp'})
+_RELOAD_MCP_LOCK = threading.Lock()
 
 
 def _normalize_agent_command_name(command: str) -> str:
@@ -115,25 +117,25 @@ def execute_agent_command(command: str) -> str:
 
 def _run_reload_mcp_command() -> str:
     """Execute the MCP reconnect path and return a short user-facing summary."""
+    with _RELOAD_MCP_LOCK:
+        try:
+            from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
+        except Exception as exc:
+            logger.warning("Failed to import MCP runtime for /reload-mcp", exc_info=True)
+            raise RuntimeError("MCP runtime unavailable") from exc
 
-    try:
-        from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
-    except Exception as exc:
-        logger.warning("Failed to import MCP runtime for /reload-mcp", exc_info=exc)
-        raise RuntimeError("MCP runtime unavailable") from exc
+        try:
+            with _lock:
+                old_servers = set(_servers.keys())
 
-    try:
-        with _lock:
-            old_servers = set(_servers.keys())
+            shutdown_mcp_servers()
+            new_tools = discover_mcp_tools()
 
-        shutdown_mcp_servers()
-        new_tools = discover_mcp_tools()
-
-        with _lock:
-            connected_servers = set(_servers.keys())
-    except Exception as exc:
-        logger.warning("/reload-mcp failed", exc_info=exc)
-        raise RuntimeError(f"/reload-mcp failed: {exc}") from exc
+            with _lock:
+                connected_servers = set(_servers.keys())
+        except Exception as exc:
+            logger.warning("Failed to reload MCP servers", exc_info=True)
+            raise RuntimeError("Failed to reload MCP servers") from exc
 
     added = connected_servers - old_servers
     removed = old_servers - connected_servers
@@ -183,12 +185,14 @@ def execute_plugin_command(command: str) -> str:
             resolve_plugin_command_result,
         )
     except ImportError as exc:
+        logger.warning("Plugin command runtime unavailable", exc_info=True)
         raise RuntimeError("plugin command runtime unavailable") from exc
 
     try:
         handler = get_plugin_command_handler(cmd_base)
     except Exception as exc:
-        raise RuntimeError(f"plugin command lookup failed: {exc}") from exc
+        logger.warning("Plugin command lookup failed for %r", cmd_base, exc_info=True)
+        raise RuntimeError("plugin command lookup failed") from exc
 
     if not handler:
         raise KeyError(cmd_base)
@@ -200,5 +204,5 @@ def execute_plugin_command(command: str) -> str:
         # Don't leak raw exception str (paths, env, internal state) to the
         # user-facing chat. Type name is enough for the user to know what
         # class of failure occurred; full traceback lives in the server log.
-        logger.warning("Plugin command %r failed", cmd_base, exc_info=exc)
+        logger.warning("Plugin command %r execution failed", cmd_base, exc_info=True)
         return f"Plugin command error: {type(exc).__name__}"

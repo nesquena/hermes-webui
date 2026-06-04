@@ -2,10 +2,27 @@
 import json
 import urllib.error
 import urllib.request
+import threading
+import time
+from types import ModuleType
 
 import pytest
 
 from tests.conftest import TEST_BASE, requires_agent_modules
+
+
+def _install_fake_mcp_tool(monkeypatch, shutdown, discover, servers=None, lock=None):
+    import sys
+    tools_pkg = ModuleType("tools")
+    tools_pkg.__path__ = []
+    mcp_tool = ModuleType("tools.mcp_tool")
+    mcp_tool.shutdown_mcp_servers = shutdown
+    mcp_tool.discover_mcp_tools = discover
+    mcp_tool._servers = servers if servers is not None else {}
+    mcp_tool._lock = lock if lock is not None else threading.Lock()
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.mcp_tool", mcp_tool)
+    return mcp_tool
 
 
 def _get(path):
@@ -99,6 +116,105 @@ def test_commands_exec_runs_reload_mcp_alias():
     assert status == 200
     assert 'output' in body
     assert isinstance(body['output'], str)
+
+
+def test_reload_mcp_error_is_generic(monkeypatch):
+    """`/reload-mcp` errors must return a generic message, not raw internals."""
+    calls = []
+
+    def shutdown():
+        calls.append("shutdown")
+        raise RuntimeError("db_dsn=postgresql://user:pass@localhost/secret")
+
+    def discover():
+        calls.append("discover")
+        return []
+
+    _install_fake_mcp_tool(
+        monkeypatch,
+        shutdown=shutdown,
+        discover=discover,
+        servers={"old": object()},
+    )
+
+    from api.commands import execute_agent_command
+
+    with pytest.raises(RuntimeError) as exc:
+        execute_agent_command('/reload-mcp')
+
+    assert str(exc.value) == "Failed to reload MCP servers"
+    assert 'postgresql://user:pass' not in str(exc.value)
+    assert 'pass@' not in str(exc.value)
+    assert calls == ["shutdown"]
+
+
+def test_concurrent_reload_mcp_calls_are_serialized(monkeypatch):
+    """Concurrent `/reload-mcp` calls cannot run shutdown/discover interleaved."""
+    state = {"active": 0, "max_active": 0}
+    lock = threading.Lock()
+    ready = threading.Event()
+
+    def _track():
+        with lock:
+            state["active"] += 1
+            if state["active"] > state["max_active"]:
+                state["max_active"] = state["active"]
+        time.sleep(0.12)
+        with lock:
+            state["active"] -= 1
+
+    def shutdown():
+        ready.set()
+        _track()
+
+    def discover():
+        _track()
+        return ["tool-a", "tool-b"]
+
+    _install_fake_mcp_tool(
+        monkeypatch,
+        shutdown=shutdown,
+        discover=discover,
+        servers={"old": object()},
+        lock=threading.Lock(),
+    )
+
+    from api.commands import execute_agent_command
+
+    errors = []
+    t2_started = threading.Event()
+
+    def _call():
+        try:
+            execute_agent_command('/reload-mcp')
+        except Exception as exc:
+            errors.append(exc)
+
+    def _call2():
+        t2_started.set()
+        try:
+            execute_agent_command('/reload-mcp')
+        except Exception as exc:
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_call, name="reload-1")
+    t2 = threading.Thread(target=_call2, name="reload-2")
+
+    t1.start()
+    assert ready.wait(1), "first reload did not start"
+
+    t2.start()
+    assert t2_started.wait(1), "second reload did not start"
+    time.sleep(0.05)
+
+    with lock:
+        observed_max = state["max_active"]
+    assert observed_max == 1
+
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not t1.is_alive() and not t2.is_alive()
+    assert not errors
 
 
 @requires_agent_modules

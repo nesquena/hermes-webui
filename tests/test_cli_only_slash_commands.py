@@ -61,7 +61,10 @@ def test_frontend_matches_agent_command_aliases():
 
 def test_frontend_can_execute_agent_commands_via_api_endpoint():
     assert "async function executeAgentCommand" in COMMANDS_JS
+    assert "async function executeAgentPluginCommand" in COMMANDS_JS
+    assert "async function _runAgentCommandTransport" in COMMANDS_JS
     assert "api('/api/commands/exec'" in COMMANDS_JS
+    assert COMMANDS_JS.count("api('/api/commands/exec'") == 1
 
 
 def test_cli_only_response_mentions_webui_and_cli_scope():

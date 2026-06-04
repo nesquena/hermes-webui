@@ -244,16 +244,14 @@ function cliOnlyCommandResponse(cmdName, meta){
 }
 
 async function executeAgentCommand(text,_meta){
-  const command=String(text||'').trim();
-  if(!command) throw new Error('command is required');
-  const data=await api('/api/commands/exec',{
-    method:'POST',
-    body:JSON.stringify({command})
-  });
-  return String(data&&data.output||'(no output)');
+  return _runAgentCommandTransport(text,_meta);
 }
 
 async function executeAgentPluginCommand(text,_meta){
+  return _runAgentCommandTransport(text,_meta);
+}
+
+async function _runAgentCommandTransport(text,_meta){
   const command=String(text||'').trim();
   if(!command) throw new Error('command is required');
   const data=await api('/api/commands/exec',{
