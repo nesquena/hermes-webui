@@ -5,10 +5,13 @@ from pathlib import Path
 from api import routes
 
 
-def test_aggregate_insights_for_home_empty(tmp_path):
+def test_aggregate_insights_for_home_empty(monkeypatch, tmp_path):
     # Test _aggregate_insights_for_home with empty directories
+    sess_dir = tmp_path / "sessions"
+    sess_dir.mkdir(parents=True)
+    monkeypatch.setattr(routes, "SESSION_DIR", sess_dir)
     cutoff = 1000.0
-    result = routes._aggregate_insights_for_home(tmp_path, cutoff)
+    result = routes._aggregate_insights_for_home("default", tmp_path, cutoff)
 
     assert result == {
         "sessions": 0,
@@ -20,12 +23,13 @@ def test_aggregate_insights_for_home_empty(tmp_path):
     }
 
 
-def test_aggregate_insights_for_home_with_data(tmp_path):
+def test_aggregate_insights_for_home_with_data(monkeypatch, tmp_path):
     cutoff = 1000.0
     
     # 1. Create WebUI session index
     sess_dir = tmp_path / "sessions"
     sess_dir.mkdir(parents=True)
+    monkeypatch.setattr(routes, "SESSION_DIR", sess_dir)
     
     # Add sessions: one within cutoff, one outside cutoff
     idx_content = [
@@ -76,7 +80,7 @@ def test_aggregate_insights_for_home_with_data(tmp_path):
     conn.commit()
     conn.close()
 
-    result = routes._aggregate_insights_for_home(tmp_path, cutoff)
+    result = routes._aggregate_insights_for_home("default", tmp_path, cutoff)
 
     # Expected: WebUI session 1 (1200.0) + CLI session 1 (1100.0)
     # Total sessions: 2
@@ -145,7 +149,8 @@ def test_handle_insights_comparative_flow(monkeypatch, tmp_path):
             "input_tokens": 50,
             "output_tokens": 20,
             "estimated_cost": 0.02,
-            "model": "gpt-4"
+            "model": "gpt-4",
+            "profile": "default"
         },
         # Previous period (e.g. ts = 100000)
         {
@@ -155,7 +160,19 @@ def test_handle_insights_comparative_flow(monkeypatch, tmp_path):
             "input_tokens": 30,
             "output_tokens": 10,
             "estimated_cost": 0.01,
-            "model": "gpt-4"
+            "model": "gpt-4",
+            "profile": "default"
+        },
+        # Work profile session in current period (ts = 190000)
+        {
+            "created_at": 190000.0,
+            "updated_at": 190000.0,
+            "message_count": 10,
+            "input_tokens": 200,
+            "output_tokens": 100,
+            "estimated_cost": 0.10,
+            "model": "gpt-4",
+            "profile": "work"
         }
     ]
     (sess_dir / "_index.json").write_text(json.dumps(idx_content), encoding="utf-8")
@@ -169,20 +186,9 @@ def test_handle_insights_comparative_flow(monkeypatch, tmp_path):
     # We will define two profiles: default and work
     work_dir = tmp_path / "profiles" / "work"
     work_dir.mkdir(parents=True)
-    # Put some data in work profile sessions to verify rollup aggregation
+    # Create empty sessions directory for work profile
     work_sess_dir = work_dir / "sessions"
     work_sess_dir.mkdir(parents=True)
-    work_idx = [
-        {
-            "created_at": 190000.0,
-            "updated_at": 190000.0,
-            "message_count": 10,
-            "input_tokens": 200,
-            "output_tokens": 100,
-            "estimated_cost": 0.10
-        }
-    ]
-    (work_sess_dir / "_index.json").write_text(json.dumps(work_idx), encoding="utf-8")
 
     monkeypatch.setattr("api.profiles.list_profiles_api", lambda: [
         {"name": "default", "path": str(tmp_path), "is_active": True},

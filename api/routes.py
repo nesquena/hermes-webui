@@ -3443,7 +3443,7 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
     return True
 
 
-def _aggregate_insights_for_home(profile_home: Path, cutoff: float) -> dict:
+def _aggregate_insights_for_home(profile_name: str, profile_home: Path, cutoff: float) -> dict:
     """Aggregate session and CLI analytics for a single profile home directory."""
     total_sessions = 0
     total_messages = 0
@@ -3469,8 +3469,8 @@ def _aggregate_insights_for_home(profile_home: Path, cutoff: float) -> dict:
         except (TypeError, ValueError):
             return 0.0
 
-    # 1. Walk WebUI session index
-    idx_path = profile_home / "sessions" / "_index.json"
+    # 1. Walk global WebUI session index and filter by profile_name
+    idx_path = SESSION_DIR / "_index.json"
     sessions_data = []
     if idx_path.exists():
         try:
@@ -3481,6 +3481,8 @@ def _aggregate_insights_for_home(profile_home: Path, cutoff: float) -> dict:
             idx = []
 
         for entry in idx:
+            if not _profiles_match(entry.get("profile"), profile_name):
+                continue
             created = entry.get("created_at", 0) or 0
             updated = entry.get("updated_at", 0) or 0
             if max(created, updated) < cutoff:
@@ -3530,6 +3532,10 @@ def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
     import time as _time
+    from api.profiles import get_active_profile_name
+
+    active_profile = get_active_profile_name()
+    all_profiles = _all_profiles_query_flag(parsed)
 
     query = parse_qs(parsed.query)
     try:
@@ -3579,6 +3585,8 @@ def _handle_insights(handler, parsed) -> bool:
         idx = []
 
     for entry in idx:
+        if not all_profiles and not _profiles_match(entry.get("profile"), active_profile):
+            continue
         created = entry.get("created_at", 0) or 0
         updated = entry.get("updated_at", 0) or 0
         ts = max(created, updated)
@@ -3657,9 +3665,21 @@ def _handle_insights(handler, parsed) -> bool:
 
     # Also include CLI sessions from Hermes state.db
     try:
+        from api.profiles import list_profiles_api
         from api.models import _active_state_db_path
-        db_path = _active_state_db_path()
-        if db_path and db_path.exists():
+        db_paths = []
+        if all_profiles:
+            for p in list_profiles_api():
+                p_path = Path(p.get('path'))
+                db_p = p_path / "state.db"
+                if db_p.exists() and db_p not in db_paths:
+                    db_paths.append(db_p)
+        else:
+            db_path = _active_state_db_path()
+            if db_path and db_path.exists():
+                db_paths.append(db_path)
+
+        for db_path in db_paths:
             with closing(sqlite3.connect(str(db_path))) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
@@ -3772,7 +3792,7 @@ def _handle_insights(handler, parsed) -> bool:
         for p in profiles:
             p_name = p.get('name')
             p_path = Path(p.get('path'))
-            p_stats = _aggregate_insights_for_home(p_path, cutoff)
+            p_stats = _aggregate_insights_for_home(p_name, p_path, cutoff)
             profile_breakdown.append({
                 "name": p_name,
                 "sessions": p_stats["sessions"],
