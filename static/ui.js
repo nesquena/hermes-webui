@@ -4885,6 +4885,7 @@ function _playAudioBuf(arrayBuffer, btn, label){
       _ttsSpeaking=false;
       if(btn)btn.dataset.speaking='0';
       showToast(label+' error: '+(e&&e.message||e));
+      resolve(); // prevent permanently pending Promise on decode failure
     });
   });
 }

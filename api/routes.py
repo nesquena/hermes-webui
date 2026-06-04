@@ -9748,6 +9748,11 @@ def _handle_tts(handler, parsed):
         except Exception:
             pass  # fall back to defaults
 
+        # Validate voice_id is a safe path segment (no traversal)
+        if not re.match(r'^[A-Za-z0-9_-]+$', voice_id):
+            from api.helpers import bad as _bad
+            return _bad(handler, "invalid voice_id in config", 400)
+
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream?output_format=mp3_44100_128"
         req_body = json.dumps({
             "text": text,

@@ -994,6 +994,7 @@ window._micPendingSend=window._micPendingSend||false;
     if(!clean){ _startListening(); return; }
     const engine=localStorage.getItem("hermes-tts-engine")||"browser";
     if(engine==="elevenlabs"){
+      _ttsSpeaking=true;
       fetch(new URL('api/tts', document.baseURI || location.href).href, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1022,6 +1023,7 @@ window._micPendingSend=window._micPendingSend||false;
         audio.play().catch(e => {
           _ttsSpeaking=false;
           if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
           if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
         });
       })
