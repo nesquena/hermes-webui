@@ -8929,9 +8929,11 @@ def _handle_tts(handler, parsed):
     only its own thread during Microsoft network I/O + streaming; other clients
     are unaffected. Combined with early auth, a strict per-client 2 s rate
     limit, 5000-char cap, and voice allowlist, the blocking cost is bounded and
-    intentional. Streaming chunks directly via stream_sync() keeps memory
-    usage low. A cross-thread pool + queue would add complexity and wfile
-    thread-safety issues with no practical gain under the current model.
+    intentional. All audio chunks are buffered before sending so that a
+    Content-Length header can be included. The 5000-char cap bounds audio to
+    roughly 1-5 MB, making full buffering safe. Without Content-Length the
+    HTTP/1.0 server leaves the response open until a ~31 s timeout fires, and
+    the browser cannot play the blob mid-stream.
     If the HTTP layer ever moves to asyncio we can adopt edge_tts's native
     async API at that time.
     """
@@ -9037,17 +9039,27 @@ def _handle_tts(handler, parsed):
 
         comm = edge_tts.Communicate(text, voice, **kwargs)
 
-        handler.send_response(200)
-        handler.send_header("Content-Type", "audio/mpeg")
-        handler.send_header("Cache-Control", "no-store")
-        handler.end_headers()
-
+        # Buffer all audio chunks before responding so Content-Length is known.
+        # Without it the HTTP/1.0 server holds the connection open until a ~31 s
+        # timeout fires and the browser cannot play the resulting blob.
+        audio_buf = bytearray()
         for chunk in comm.stream_sync():
             if chunk.get("type") == "audio" and chunk.get("data"):
-                try:
-                    handler.wfile.write(chunk["data"])
-                except (BrokenPipeError, ConnectionResetError):
-                    return True
+                audio_buf.extend(chunk["data"])
+
+        if not audio_buf:
+            from api.helpers import bad as _bad
+            return _bad(handler, "TTS produced no audio", 500)
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/mpeg")
+        handler.send_header("Content-Length", str(len(audio_buf)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        try:
+            handler.wfile.write(audio_buf)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         return True
 
     except BrokenPipeError:
