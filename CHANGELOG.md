@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Thinking cards no longer show duplicated fragments of the final assistant answer when a provider emits a late reasoning delta that repeats the visible response prefix; already-saved affected sessions are also cleaned when rendered.
 - Expanded delegation cards now stay open during live sub-agent progress updates instead of collapsing every time the running card refreshes.
 - WebUI session storage now follows `HERMES_WEBUI_STATE_DIR/sessions` again instead of the agent-wide `~/.hermes/sessions` path, keeping session sidecars/indexes aligned with WebUI projects, read/unread state, attachments, and settings after restarts.
 - Restart-killed sessions no longer stay stuck as active/pending in `/api/sessions` after stale pending-state repair, and deep-linked WebUI sessions now reset a persisted CLI-session sidebar filter so old CLI/cron rows do not flood the sidebar on reload.

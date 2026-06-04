@@ -4,8 +4,10 @@ These tests intentionally follow the repo's existing pytest style: read static
 source files, isolate the relevant function/rule, and assert implementation
 invariants before changing the UI.
 """
+import json
 import pathlib
 import re
+import subprocess
 
 REPO = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
@@ -259,6 +261,38 @@ class TestToolCallGroupingStatic:
         assert "out.split(snippet).join('')" in helper, (
             "Thinking echo suppression should remove exact visible assistant snippets from reasoning display."
         )
+        assert "visibleFragments" in helper and "slice(0,len)" in helper, (
+            "Thinking echo suppression should also remove long visible-answer prefixes, "
+            "including truncated final-answer fragments persisted in old sessions."
+        )
+
+    def test_settled_thinking_echo_cleanup_removes_long_prefix_before_paragraphs(self):
+        helper = _function_body(UI_JS, "_stripVisibleAssistantEchoFromThinking")
+        visible = (
+            "Done.\n\n"
+            "## What changed\n\n"
+            "Fixed the live delegation card collapse bug:\n\n"
+            "- `static/ui.js`\n"
+            "  - added disclosure-state preservation around live tool-card row replacement\n"
+            "  - preserves the main delegation card `.open` state\n\n"
+            "## Test Plan\n\n"
+            "- pytest tests/test_new_chat_and_delegation_ux.py\n\n"
+            "## Notes\n\n"
+            + "Padding keeps this visible answer long enough for prefix heuristics. " * 12
+        )
+        thinking = "**Earlier private reasoning**\n\n" + visible[:500]
+        script = "\n".join([
+            f"function _stripVisibleAssistantEchoFromThinking(thinkingText, visibleText){{{helper}}}",
+            f"const result = _stripVisibleAssistantEchoFromThinking({json.dumps(thinking)}, {json.dumps(visible)});",
+            "console.log(JSON.stringify(result));",
+        ])
+        result = subprocess.run(["node", "-e", script], check=True, text=True, capture_output=True)
+        cleaned = json.loads(result.stdout)
+        assert "**Earlier private reasoning**" in cleaned
+        assert "Done." not in cleaned
+        assert "## What changed" not in cleaned
+        assert "static/ui.js" not in cleaned
+        assert "CHANGE" not in cleaned
 
     def test_compact_activity_keeps_thinking_cards_after_session_switch(self):
         ui_min = re.sub(r"\s+", "", UI_JS)

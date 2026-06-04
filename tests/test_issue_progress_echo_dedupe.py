@@ -175,3 +175,182 @@ def test_visible_progress_token_reasoning_and_interim_are_deduped(cleanup_test_s
     assert not [payload for event, payload in events if event == "reasoning" and payload.get("text") == progress]
     interim = [payload for event, payload in events if event == "interim_assistant"]
     assert interim == [{"text": progress, "already_streamed": True}]
+
+
+def test_late_reasoning_prefix_of_visible_answer_is_deduped(cleanup_test_sessions):
+    """A late reasoning event can repeat the start of already-streamed final text.
+
+    The old echo guard only compared the candidate against the *tail* of visible
+    output, so a provider/runtime that emitted the beginning of the final answer
+    as a final reasoning delta leaked that prefix into the saved Thinking card.
+    """
+    import api.streaming as streaming
+
+    visible_answer = (
+        "Done.\n\n"
+        "## What changed\n\n"
+        "Fixed the live delegation card collapse bug:\n\n"
+        "- `static/ui.js`\n"
+        "  - added disclosure-state preservation around live tool-card row replacement\n"
+        "  - preserves the main delegation card `.open` state\n\n"
+        "## Test Plan\n\n"
+        "- pytest tests/test_new_chat_and_delegation_ux.py\n\n"
+        "## Notes\n\n"
+        + "This deliberately pads the answer so the duplicate prefix is no longer "
+          "inside the visible-output tail used by the historical echo guard. " * 16
+    )
+    duplicate_prefix = visible_answer[:500]
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "issue_late_reasoning_prefix_echo"
+            self.title = "Late reasoning prefix echo"
+            self.workspace = "/tmp"
+            self.model = "gpt-test"
+            self.model_provider = None
+            self.profile = None
+            self.personality = None
+            self.messages = []
+            self.context_messages = []
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.estimated_cost = 0
+            self.cache_read_tokens = 0
+            self.cache_write_tokens = 0
+            self.tool_calls = []
+            self.gateway_routing = None
+            self.gateway_routing_history = []
+            self.active_stream_id = ""
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.context_length = 0
+            self.threshold_tokens = 0
+            self.last_prompt_tokens = 0
+            self.llm_title_generated = True
+
+        def save(self, *args, **kwargs):
+            pass
+
+        def compact(self):
+            return {
+                "session_id": self.session_id,
+                "title": self.title,
+                "workspace": self.workspace,
+                "model": self.model,
+                "created_at": 0,
+                "updated_at": 0,
+                "pinned": False,
+                "archived": False,
+                "project_id": None,
+                "profile": self.profile,
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "estimated_cost": self.estimated_cost,
+                "cache_read_tokens": self.cache_read_tokens,
+                "cache_write_tokens": self.cache_write_tokens,
+                "personality": self.personality,
+            }
+
+    class LatePrefixEchoAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            platform=None,
+            quiet_mode=False,
+            enabled_toolsets=None,
+            fallback_model=None,
+            session_id=None,
+            session_db=None,
+            prefill_messages=None,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            tool_progress_callback=None,
+            clarify_callback=None,
+            interim_assistant_callback=None,
+            **_kwargs,
+        ):
+            self.stream_delta_callback = cast(Callable[[str], None], stream_delta_callback)
+            self.reasoning_callback = cast(Callable[[str], None], reasoning_callback)
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            self.stream_delta_callback(visible_answer)
+            self.reasoning_callback(duplicate_prefix)
+            history = kwargs.get("conversation_history", [])
+            return {"messages": history + [
+                {"role": "user", "content": kwargs["persist_user_message"]},
+                {"role": "assistant", "content": visible_answer},
+            ]}
+
+        def interrupt(self, _message):
+            pass
+
+    fake_session = FakeSession()
+    fake_stream_id = "stream_issue_late_reasoning_prefix_echo"
+    fake_session.active_stream_id = fake_stream_id
+    fake_queue = queue.Queue()
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    runtime_payload = {
+        "provider": "openai",
+        "base_url": None,
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    }
+    runtime_payload["api_" + "key"] = "***"
+    setattr(fake_runtime_module, "resolve_runtime_provider", mock.Mock(return_value=runtime_payload))
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_module)
+    fake_hermes_state = types.ModuleType("hermes_state")
+    setattr(fake_hermes_state, "SessionDB", mock.Mock(return_value=None))
+    injected = {
+        "hermes_cli": fake_hermes_cli,
+        "hermes_cli.runtime_provider": fake_runtime_module,
+        "hermes_state": fake_hermes_state,
+    }
+    saved = {k: sys.modules.get(k, _MISSING) for k in injected}
+    sys.modules.update(injected)
+    try:
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
+             mock.patch.object(streaming, "_get_ai_agent", return_value=LatePrefixEchoAgent), \
+             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-test", "openai", None)), \
+             mock.patch("api.config.get_config", return_value={}), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]):
+            streaming.STREAMS[fake_stream_id] = fake_queue
+            streaming._run_agent_streaming(
+                session_id=fake_session.session_id,
+                msg_text="fix it",
+                model="gpt-test",
+                workspace="/tmp",
+                stream_id=fake_stream_id,
+            )
+    finally:
+        streaming.STREAMS.pop(fake_stream_id, None)
+        for k, prev in saved.items():
+            if prev is _MISSING:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = cast(types.ModuleType, prev)
+
+    events = list(fake_queue.queue)
+    assert [(event, payload) for event, payload in events if event == "token"] == [
+        ("token", {"text": visible_answer})
+    ]
+    assert not [
+        payload for event, payload in events
+        if event == "reasoning" and payload.get("text") == duplicate_prefix
+    ]
+    assert fake_session.messages[-1]["content"] == visible_answer
+    assert duplicate_prefix not in str(fake_session.messages[-1].get("reasoning") or "")

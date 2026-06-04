@@ -3147,7 +3147,21 @@ function _stripVisibleAssistantEchoFromThinking(thinkingText, visibleText){
   let out=String(thinkingText||'');
   const visible=String(visibleText||'');
   if(!out||!visible) return out.trim();
-  visible.split(/\n{2,}/).map(s=>s.trim()).filter(s=>s.length>=20).forEach(snippet=>{
+  const visibleClean=visible.trim();
+  const visibleFragments=[];
+  // Whole visible paragraphs catch most interim/final answer echoes.  Long
+  // prefixes catch already-persisted sessions where a provider emitted only
+  // the beginning of the final answer as a truncated reasoning delta.
+  visible.split(/\n{2,}/).map(s=>s.trim()).filter(s=>s.length>=20).forEach(snippet=>visibleFragments.push(snippet));
+  // Remove long prefixes first; otherwise paragraph removal can fragment a
+  // cross-paragraph prefix and leave the truncated tail visible.  The lengths
+  // cover common saved-answer leak sizes down to the 80-char minimum used to
+  // avoid over-stripping short genuine reasoning phrases.
+  [1200,1000,750,500,300,160,80].forEach(len=>{
+    const prefix=visibleClean.slice(0,len).trim();
+    if(prefix.length>=80) visibleFragments.push(prefix);
+  });
+  [...new Set(visibleFragments)].sort((a,b)=>b.length-a.length).forEach(snippet=>{
     out=out.split(snippet).join('');
   });
   return out.trim();

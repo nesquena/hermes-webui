@@ -4541,14 +4541,26 @@ def _run_agent_streaming(
             def _compact_for_echo_compare(value: str) -> str:
                 return re.sub(r'\s+', ' ', str(value or '')).strip()
 
+            visible_echo_min_chars = 80
+
             def _is_visible_output_echo(text: str) -> bool:
                 candidate = _compact_for_echo_compare(text)
                 if not candidate:
                     return False
+                visible_output = str(STREAM_PARTIAL_TEXT.get(stream_id, '') or '')
                 visible_tail = _compact_for_echo_compare(
-                    STREAM_PARTIAL_TEXT.get(stream_id, '')[-max(len(str(text)) * 2, 512):]
+                    visible_output[-max(len(str(text)) * 2, 512):]
                 )
-                return bool(visible_tail and visible_tail.endswith(candidate))
+                if visible_tail and visible_tail.endswith(candidate):
+                    return True
+                # Some runtimes emit the start of the final visible answer as a
+                # late reasoning delta just before done.  The suffix-only guard
+                # above misses that because the duplicate is a prefix/middle of
+                # the already-streamed answer, not the tail.  Keep this limited
+                # to long normalized chunks so normal short reasoning phrases
+                # are not stripped accidentally.
+                visible = _compact_for_echo_compare(visible_output)
+                return bool(len(candidate) >= visible_echo_min_chars and visible and candidate in visible)
 
             def on_token(text):
                 nonlocal _token_sent
