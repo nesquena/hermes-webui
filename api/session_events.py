@@ -8,7 +8,10 @@ _SESSION_EVENTS_SUBSCRIBERS: set[queue.Queue] = set()
 _SESSION_EVENTS_VERSION = 0
 
 
-def publish_session_list_changed(reason: str = "session_changed") -> None:
+def publish_session_list_changed(
+    reason: str = "session_changed",
+    profile: str | None = None,
+) -> None:
     """Notify connected browsers that the session sidebar may be stale."""
     global _SESSION_EVENTS_VERSION
     with _SESSION_EVENTS_LOCK:
@@ -18,6 +21,8 @@ def publish_session_list_changed(reason: str = "session_changed") -> None:
             "version": _SESSION_EVENTS_VERSION,
             "reason": reason,
         }
+        if profile:
+            payload["profile"] = profile
         subscribers = list(_SESSION_EVENTS_SUBSCRIBERS)
     for q in subscribers:
         try:

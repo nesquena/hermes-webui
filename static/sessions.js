@@ -3041,7 +3041,18 @@ function ensureSessionEventsSSE(){
       _sessionEventsNeedsRefreshOnOpen = false;
       void refreshSessionList('reconnect');
     };
-    _sessionEventsSSE.addEventListener('sessions_changed', () => {
+    _sessionEventsSSE.addEventListener('sessions_changed', (ev) => {
+      const activeProfile = S.activeProfile || 'default';
+      try {
+        const payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};
+        const eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';
+        if (eventProfile && eventProfile !== activeProfile) {
+          return;
+        }
+      } catch (_err) {
+        // Non-JSON payload (or transient malformed event). Keep legacy behavior:
+        // refresh once event was seen.
+      }
       _scheduleSessionEventsRefresh('event');
     });
     _sessionEventsSSE.onerror = () => {

@@ -880,7 +880,12 @@ def _run_cron_job_in_profile_subprocess(job, execution_profile_home):
     raise RuntimeError(message)
 
 
-def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
+def _run_cron_tracked(
+    job,
+    profile_home=None,
+    execution_profile_home=None,
+    event_profile=None,
+):
     """Wrapper that tracks running state around cron.scheduler.run_job.
 
     ``profile_home`` is the cron store that owns the job row/output metadata.
@@ -961,7 +966,7 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
             logger.debug("Failed to mark manual cron run failure for %s", job_id)
     finally:
         _mark_cron_done(job_id)
-        publish_session_list_changed("cron_complete")
+        publish_session_list_changed("cron_complete", profile=event_profile)
 
 _PROVIDER_ALIASES = {
     "claude": "anthropic",
@@ -6282,7 +6287,7 @@ def handle_post(handler, parsed) -> bool:
             worktree_info=worktree_info,
         )
         if worktree_info:
-            publish_session_list_changed("session_new")
+            publish_session_list_changed("session_new", profile=getattr(s, "profile", None))
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
     if parsed.path == "/api/session/duplicate":
@@ -6363,7 +6368,7 @@ def handle_post(handler, parsed) -> bool:
             # Without this explicit save, the duplicate is in-memory only — if the user
             # refreshes before sending a turn, the duplicate vanishes.
             copied_session.save()
-            publish_session_list_changed("session_duplicate")
+            publish_session_list_changed("session_duplicate", profile=getattr(copied_session, "profile", None))
 
             return j(handler, {"session": copied_session.compact() | {"messages": copied_session.messages}})
         except Exception as e:
@@ -6506,7 +6511,7 @@ def handle_post(handler, parsed) -> bool:
             s.title = str(body["title"]).strip()[:80] or "Untitled"
             s.save()
         _sync_session_title_to_insights(s)
-        publish_session_list_changed("session_rename")
+        publish_session_list_changed("session_rename", profile=getattr(s, "profile", None))
         return j(handler, {"session": s.compact()})
 
 
@@ -6532,7 +6537,7 @@ def handle_post(handler, parsed) -> bool:
             s.llm_title_generated = True
             s.save(touch_updated_at=False)
         _sync_session_title_to_insights(s)
-        publish_session_list_changed("session_title_regenerate")
+        publish_session_list_changed("session_title_regenerate", profile=getattr(s, "profile", None))
         return j(handler, {
             "session": s.compact(),
             "title": s.title,
@@ -6806,7 +6811,7 @@ def handle_post(handler, parsed) -> bool:
                 delete_cli_session(sid)
             except Exception:
                 logger.debug("Failed to delete CLI session %s", sid)
-        publish_session_list_changed("session_delete")
+        publish_session_list_changed("session_delete", profile=getattr(s, "profile", None))
         return j(handler, {"ok": True, **worktree_retained})
 
     if parsed.path == "/api/session/clear":
@@ -6977,7 +6982,7 @@ def handle_post(handler, parsed) -> bool:
         # Persist only if there are messages (matches new_session pattern)
         if forked_messages:
             branch.save()
-            publish_session_list_changed("session_branch")
+            publish_session_list_changed("session_branch", profile=getattr(branch, "profile", None))
 
         return j(handler, {
             "session_id": branch.session_id,
@@ -7568,7 +7573,7 @@ def handle_post(handler, parsed) -> bool:
             with _get_session_agent_lock(body["session_id"]):
                 s.pinned = pin_requested
                 s.save()
-        publish_session_list_changed("session_pin")
+        publish_session_list_changed("session_pin", profile=getattr(s, "profile", None))
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Session archive (POST) ──
@@ -7645,7 +7650,7 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
-        publish_session_list_changed("session_archive")
+        publish_session_list_changed("session_archive", profile=getattr(s, "profile", None))
         return j(handler, {"ok": True, "session": s.compact(), **_worktree_retained_payload(s)})
 
     # ── Session move to project (POST) ──
@@ -7680,7 +7685,7 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(body["session_id"]):
             s.project_id = target_pid
             s.save()
-        publish_session_list_changed("session_move")
+        publish_session_list_changed("session_move", profile=getattr(s, "profile", None))
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Project CRUD (POST) ──
@@ -10804,7 +10809,7 @@ def _start_chat_stream_for_session(
             stream_id=stream_id,
         )
     if was_hidden_empty_session:
-        publish_session_list_changed("session_new")
+        publish_session_list_changed("session_new", profile=getattr(s, "profile", None))
     diag.stage("turn_journal_submitted") if diag else None
     journal_event = {}
     try:
@@ -11518,10 +11523,16 @@ def _handle_cron_run(handler, body):
     # rather let any unexpected exception 500 the request than corrupt
     # cross-profile state.
     from api.profiles import get_active_hermes_home
+    from api.profiles import get_active_profile_name
 
     _profile_home = get_active_hermes_home()
     _execution_profile_home = _profile_home_for_cron_job(job)
-    threading.Thread(target=_run_cron_tracked, args=(job, _profile_home, _execution_profile_home), daemon=True).start()
+    _event_profile = get_active_profile_name()
+    threading.Thread(
+        target=_run_cron_tracked,
+        args=(job, _profile_home, _execution_profile_home, _event_profile),
+        daemon=True,
+    ).start()
     return j(handler, {"ok": True, "job_id": job_id, "status": "running"})
 
 
@@ -14075,7 +14086,10 @@ def _handle_session_import_cli(handler, body):
                     changed = True
         if changed:
             existing.save(touch_updated_at=False)
-            publish_session_list_changed("session_import_cli")
+            publish_session_list_changed(
+                "session_import_cli",
+                profile=getattr(existing, "profile", None),
+            )
         return j(
             handler,
             {
@@ -14192,7 +14206,10 @@ def _handle_session_import_cli(handler, body):
     s.platform = cli_platform
     s._cli_origin = sid
     s.save(touch_updated_at=False)
-    publish_session_list_changed("session_import_cli")
+    publish_session_list_changed(
+        "session_import_cli",
+        profile=getattr(s, "profile", None),
+    )
     return j(
         handler,
         {

@@ -47,6 +47,11 @@ def test_session_list_external_refresh_uses_sse_invalidation_not_polling():
     ensure_fn = SESSIONS_JS[SESSIONS_JS.find("function ensureSessionEventsSSE()") :]
     assert ensure_fn.find("document._hermesSessionEventsVisibilityHook") < ensure_fn.find("document.hidden) return")
     assert "_sessionListExternalRefreshMs" not in SESSIONS_JS
+    assert "addEventListener('sessions_changed', (ev) => {" in ensure_fn
+    assert "const activeProfile = S.activeProfile || 'default';" in ensure_fn
+    assert "const payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};" in ensure_fn
+    assert "const eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';" in ensure_fn
+    assert "if (eventProfile && eventProfile !== activeProfile) {" in ensure_fn
 
 
 def test_pwa_pull_to_refresh_refreshes_session_list_not_page_when_available():

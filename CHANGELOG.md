@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Fixed
+- Session sidebar refresh notifications now include optional `profile` identity in `sessions_changed` payloads (where available), and frontend SSE consumers ignore cross-profile events before scheduling a sidebar refresh.
+  This prevents activity from one profile (for example cron jobs in profile B) from invalidating tabs opened in profile A. (#2660)
+
 ## [v0.51.262] — 2026-06-04 — Release ID (stage-r12 — zh localization + Docker reveal-path + recall-prefill role fix)
 
 ### Fixed
@@ -77,7 +81,6 @@
 
 ### Docs
 - Documented an explicit WebUI–Agent compatibility policy: separate the displayed WebUI runtime version from the tested/pinned pair compatibility contract, and clarified Docker upgrade pinning guidance to keep releases aligned until the stable boundary work in #1925/#2491 lands. (#3232, @franksong2702)
-
 ## [v0.51.252] — 2026-06-03 — Release HT (stage-q24 — selection-bleed fix + compatibility docs)
 
 ### Fixed

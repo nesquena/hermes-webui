@@ -425,7 +425,7 @@ def install_cron_scheduler_profile_isolation() -> None:
             with cron_profile_context_for_home(_home_for_scheduled_cron_job(job)):
                 return original(job, *args, **kwargs)
         finally:
-            publish_session_list_changed("cron_complete")
+            publish_session_list_changed("cron_complete", profile=str((job or {}).get("profile") or "").strip() or None)
 
     _webui_profile_isolated_run_job._webui_profile_isolated = True
     _webui_profile_isolated_run_job._webui_original_run_job = original
