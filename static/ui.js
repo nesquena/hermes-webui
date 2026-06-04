@@ -3914,10 +3914,10 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    const _dcompr=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
     if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
-    else if(_dcompr) _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
+  }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
+    _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
   }else{
     const _tmap={send:'Send message',queue:'Queue message',interrupt:'Interrupt and send',steer:'Steer current response',stop:'Stop generation'};
     _btnTitle=_tt('composer_'+action,_tmap[action]||'Send message');
