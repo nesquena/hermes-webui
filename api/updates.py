@@ -1259,7 +1259,6 @@ def _apply_update_inner(target):
         _, pop_ok = _run_git(['stash', 'pop'], path)
         if not pop_ok:
             _, reset_ok = _run_git(['reset', '--merge'], path)
-            _run_git(['stash', 'drop'], path)
             if not reset_ok:
                 return {
                     'ok': False,
@@ -1271,6 +1270,7 @@ def _apply_update_inner(target):
                     ),
                     'stash_conflict': True,
                 }
+            _run_git(['stash', 'drop'], path)
             stash_conflict = True
 
     # Invalidate cache

@@ -6,8 +6,6 @@ import api.updates as updates
 
 def test_stash_pop_conflict_recovers_cleanly(tmp_path):
     """On stash-pop failure, conflict is reset, stash dropped, restart still scheduled."""
-    (tmp_path / '.git').mkdir()
-
     call_log = []
 
     def fake_git(args, path, timeout=10):
@@ -55,9 +53,10 @@ def test_stash_pop_conflict_recovers_cleanly(tmp_path):
 
 def test_stash_pop_reset_failure_returns_error(tmp_path):
     """If reset --merge also fails, return ok=False so the app does not restart into a broken tree."""
-    (tmp_path / '.git').mkdir()
+    call_log = []
 
     def fake_git(args, path, timeout=10):
+        call_log.append(args)
         if args[:2] == ['fetch', 'origin']:
             return '', True
         if args == ['status', '--porcelain', '--untracked-files=no']:
@@ -87,3 +86,4 @@ def test_stash_pop_reset_failure_returns_error(tmp_path):
     assert result['stash_conflict'] is True
     assert 'Manual intervention' in result['message']
     assert len(restart_calls) == 0
+    assert ['stash', 'drop'] not in call_log
