@@ -14,8 +14,6 @@ Covers:
 import http.cookies
 import io
 
-import pytest
-
 from api.auth import _is_loopback, _is_secure_context, set_auth_cookie, COOKIE_NAME
 
 
