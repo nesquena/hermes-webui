@@ -269,7 +269,7 @@ def test_webui_state_db_session_without_sidecar_appears_when_agent_sessions_enab
             "should be surfaced through the agent-session bridge for recovery."
         )
         assert recovered[0].get('source_tag') == 'webui'
-        assert recovered[0].get('is_cli_session') is True
+        assert recovered[0].get('is_cli_session') is False
     finally:
         try:
             _remove_test_sessions(conn, sid)
@@ -780,7 +780,7 @@ def test_gateway_session_has_correct_metadata():
         assert gw.get('raw_source') == 'telegram'
         assert gw.get('session_source') == 'messaging'
         assert gw.get('source_label') == 'Telegram'
-        assert gw.get('is_cli_session') is True, "is_cli_session should be True for agent sessions"
+        assert gw.get('is_cli_session') is False, "is_cli_session should be False for messaging (telegram) sessions"
         assert gw.get('title') == 'Meta Test'
     finally:
         try:
