@@ -129,6 +129,24 @@ def _raise_logo_requirement_error(issues: list[str]) -> None:
     raise ValueError(_logo_requirements() + suffix)
 
 
+def _validate_svg_logo(body: bytes) -> bytes:
+    """Reject SVG features that can execute active content when directly opened."""
+    text = body.decode("utf-8", errors="replace")
+    if "<svg" not in text[:4096] and "<SVG" not in text[:4096]:
+        raise ValueError("Invalid SVG: missing <svg> element")
+
+    active_patterns = (
+        r"<\s*script\b",
+        r"<\s*foreignObject\b",
+        r"\bon[a-z0-9_-]+\s*=",
+        r"\b(?:href|xlink:href|src)\s*=\s*['\"]?\s*javascript:",
+    )
+    for pattern in active_patterns:
+        if _re.search(pattern, text, flags=_re.IGNORECASE):
+            raise ValueError("Invalid SVG: active content is not allowed")
+    return body
+
+
 def _validate_upload(body: bytes, filename: str = "") -> tuple[bytes, str]:
     """Validate uploaded logo data by detecting format from magic bytes.
 
@@ -177,17 +195,16 @@ def _validate_upload(body: bytes, filename: str = "") -> tuple[bytes, str]:
     if text and ("<svg" in text[:200] or "<SVG" in text[:200]):
         if size_issue:
             _raise_logo_requirement_error([size_issue])
+        _validate_svg_logo(body)
         return body, ".svg"
 
     # Fallback: detect by filename extension
     ext = Path(filename).suffix.lower() if filename else ""
     if ext in _ALLOWED_EXTENSIONS:
         if ext == ".svg":
-            text = body.decode("utf-8", errors="replace")[:4096]
-            if "<svg" not in text and "<SVG" not in text:
-                raise ValueError("Invalid SVG: missing <svg> element")
             if size_issue:
                 _raise_logo_requirement_error([size_issue])
+            _validate_svg_logo(body)
             return body, ".svg"
         if ext == ".png":
             try:

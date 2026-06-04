@@ -10,6 +10,7 @@
 ### Fixed
 
 - Custom logo replacement now treats the latest upload as authoritative for each light/dark slot: uploading a new logo deletes prior PNG/SVG/ICO variants for that slot before saving the replacement, and Settings returns the current file version so reloads do not briefly reuse an older cached logo.
+- Custom SVG logo uploads now reject active SVG content such as scripts, event handlers, JavaScript links, and foreignObject markup before writing the file, while served SVG branding assets remain sandboxed.
 
 ## [v0.51.252] — 2026-06-03 — Release HT (stage-q24 — selection-bleed fix + compatibility docs)
 

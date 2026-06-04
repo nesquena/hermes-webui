@@ -2,10 +2,12 @@
 
 import struct
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from api import branding
+from api import routes
 from api.branding import (
     _branding_version,
     _delete_logo_files_for_mode,
@@ -89,6 +91,31 @@ def test_logo_upload_accepts_small_ico():
     assert data == body
     assert ext == ".ico"
     assert _ico_dimensions(body) == (64, 64)
+
+
+@pytest.mark.parametrize(
+    "svg",
+    [
+        b"<svg><script>alert(1)</script></svg>",
+        b'<svg onload="alert(1)"></svg>',
+        b'<svg><a href="javascript:alert(1)">x</a></svg>',
+        b"<svg><foreignObject><body></body></foreignObject></svg>",
+    ],
+)
+def test_logo_upload_rejects_active_svg_content(svg):
+    with pytest.raises(ValueError) as exc:
+        _validate_upload(svg, "logo.svg")
+
+    assert "Invalid SVG: active content is not allowed" in str(exc.value)
+
+
+def test_logo_upload_accepts_inert_svg():
+    body = b'<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>'
+
+    data, ext = _validate_upload(body, "logo.svg")
+
+    assert data == body
+    assert ext == ".svg"
 
 
 def test_branding_version_uses_file_mtime_token(tmp_path):
@@ -190,3 +217,42 @@ def test_custom_logo_upload_cache_busting_contract():
     assert "URL.createObjectURL(file)" in panels
     assert "_setLogoPreviewFile(preview,file);" in panels
     assert "_restoreLogoPreview(preview,previousPath,mode);" in panels
+
+
+def test_branding_svg_response_is_sandboxed(tmp_path, monkeypatch):
+    monkeypatch.setattr(routes, "BRANDING_DIR", tmp_path)
+    logo = tmp_path / "logo-light.svg"
+    logo.write_text("<svg></svg>", encoding="utf-8")
+
+    class Handler:
+        def __init__(self):
+            self.headers = {}
+            self.sent_headers = {}
+            self.status = None
+            self.body = bytearray()
+
+            class Writer:
+                def __init__(self, outer):
+                    self.outer = outer
+
+                def write(self, data):
+                    self.outer.body.extend(data)
+
+            self.wfile = Writer(self)
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.sent_headers[key] = value
+
+        def end_headers(self):
+            pass
+
+    handler = Handler()
+
+    assert routes._serve_branding(handler, SimpleNamespace(path="/branding/logo-light.svg"))
+    assert handler.status == 200
+    assert handler.sent_headers["Content-Type"] == "image/svg+xml; charset=utf-8"
+    assert handler.sent_headers["Content-Security-Policy"] == "sandbox"
+    assert handler.sent_headers["X-Content-Type-Options"] == "nosniff"
