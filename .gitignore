@@ -8,6 +8,7 @@ __pycache__/
 *.bak
 *.swp
 *.swo
+.tmp_*.sh
 
 # Archive directory (pre-git backups, kept on disk but not tracked)
 archive/

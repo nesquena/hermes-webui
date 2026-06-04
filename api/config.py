@@ -61,10 +61,13 @@ STATE_DIR = (
     .resolve()
 )
 
-# Use agent's session directory so UI and agent share the same storage.
-# This fixes the session desync bug where agent writes to ~/.hermes/sessions
-# but UI was reading from ~/.hermes/webui/sessions.
-SESSION_DIR = HOME / ".hermes" / "sessions"
+# WebUI-owned sessions live inside the WebUI state directory. Keep this coupled
+# to STATE_DIR so projects.json, session_read_state.json, attachments, and the
+# session sidecars/index all move together when HERMES_WEBUI_STATE_DIR changes.
+# Do not point this at the agent-wide ~/.hermes/sessions store: that splits
+# WebUI project/read metadata from WebUI transcripts and makes existing sessions
+# appear missing after restart.
+SESSION_DIR = STATE_DIR / "sessions"
 WORKSPACES_FILE = STATE_DIR / "workspaces.json"
 SESSION_INDEX_FILE = SESSION_DIR / "_index.json"
 SETTINGS_FILE = STATE_DIR / "settings.json"

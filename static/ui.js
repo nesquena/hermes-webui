@@ -6446,6 +6446,149 @@ function _cliToolCardHasDiffSnippet(resultSnippet, patchSnippet){
   return !!patchSnippet || _cliLooksLikePatchDiff(resultSnippet);
 }
 
+function _toolCallRenderKey(tc){
+  if(!tc||typeof tc!=='object') return '';
+  const tid=tc.tid||tc.id||tc.call_id||tc.tool_call_id||'';
+  if(tid) return `tid:${tid}`;
+  return `idx:${tc.assistant_msg_idx==null?'-1':tc.assistant_msg_idx}:name:${tc.name||'tool'}`;
+}
+function _toolArgsForDisplay(name,args){
+  if(!args||typeof args!=='object') return {};
+  // delegate_task cards need the full parsed tasks array so the Request section
+  // can show real goals instead of a truncated "tasks: [...]" raw string.
+  if(String(name||'')==='delegate_task') return args;
+  const argsSnap={};
+  Object.keys(args).slice(0,4).forEach(k=>{
+    const v=String(args[k]);
+    argsSnap[k]=v.slice(0,120)+(v.length>120?'...':'');
+  });
+  return argsSnap;
+}
+function _messageToolResultsByTid(messages){
+  const resultsByTid={};
+  const rawResultsByTid={};
+  const remember=(tid,raw)=>{
+    if(!tid) return;
+    const text=String(raw||'');
+    rawResultsByTid[tid]=text;
+    resultsByTid[tid]=_cliToolResultSnippet(text);
+  };
+  (messages||[]).forEach(m=>{
+    if(!m) return;
+    if(m.role==='tool'){
+      remember(m.tool_call_id||m.tool_use_id||'', m.content);
+      return;
+    }
+    if(Array.isArray(m.content)){
+      m.content.forEach(p=>{
+        if(!p||typeof p!=='object'||p.type!=='tool_result') return;
+        const tid=p.tool_use_id||'';
+        const raw=typeof p.content==='string'?p.content
+                 :Array.isArray(p.content)?p.content.map(c=>c&&c.text?c.text:'').join('')
+                 :'';
+        remember(tid,raw);
+      });
+    }
+  });
+  return {resultsByTid,rawResultsByTid};
+}
+function _deriveToolCallsFromMessages(messages){
+  const {resultsByTid,rawResultsByTid}=_messageToolResultsByTid(messages);
+  const derived=[];
+  (messages||[]).forEach((m,rawIdx)=>{
+    if(!m||m.role!=='assistant') return;
+    (m.tool_calls||[]).forEach(tc=>{
+      if(!tc||typeof tc!=='object') return;
+      const fn=tc.function||{};
+      const name=fn.name||tc.name||'tool';
+      let args={};
+      try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){}
+      const tid=tc.id||tc.call_id||'';
+      const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+      const resultSnippet=resultsByTid[tid]||'';
+      derived.push({
+        name,
+        snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+        is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+        tid,
+        assistant_msg_idx:rawIdx,
+        args:_toolArgsForDisplay(name,args),
+        done:true,
+        raw_result:name==='delegate_task'?(rawResultsByTid[tid]||''):'',
+        _derived_from_message_tool_calls:true,
+      });
+    });
+    if(Array.isArray(m.content)){
+      m.content.forEach(p=>{
+        if(!p||typeof p!=='object'||p.type!=='tool_use') return;
+        const name=p.name||'tool';
+        const args=p.input||{};
+        const tid=p.id||'';
+        const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+        const resultSnippet=resultsByTid[tid]||'';
+        derived.push({
+          name,
+          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+          tid,
+          assistant_msg_idx:rawIdx,
+          args:_toolArgsForDisplay(name,args),
+          done:true,
+          raw_result:name==='delegate_task'?(rawResultsByTid[tid]||''):'',
+          _derived_from_message_tool_calls:true,
+        });
+      });
+    }
+    (m._partial_tool_calls||[]).forEach(tc=>{
+      if(!tc||typeof tc!=='object') return;
+      const name=tc.name||'tool';
+      const args=(tc.args&&typeof tc.args==='object')?tc.args:{};
+      const tid=tc.tid||tc.id||'';
+      const patchSnippet=_cliPatchSnippetFromArgs(name,args);
+      const resultSnippet=String(tc.snippet||tc.preview||'');
+      derived.push({
+        name,
+        snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+        is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+        tid,
+        assistant_msg_idx:rawIdx,
+        args:_toolArgsForDisplay(name,args),
+        done:tc.done!==false,
+        raw_result:name==='delegate_task'?(rawResultsByTid[tid]||''):'',
+        _derived_from_message_tool_calls:true,
+      });
+    });
+  });
+  return derived;
+}
+function _settledToolCallsForRender(sessionToolCalls,messages){
+  const base=(sessionToolCalls||[]).filter(Boolean).map(tc=>({...tc,done:tc.done!==false}));
+  const derived=_deriveToolCallsFromMessages(messages);
+  if(!derived.length) return base;
+  const byKey=new Map();
+  base.forEach(tc=>{
+    const key=_toolCallRenderKey(tc);
+    if(key) byKey.set(key,tc);
+  });
+  derived.forEach(tc=>{
+    const key=_toolCallRenderKey(tc);
+    if(!key){ base.push(tc); return; }
+    const existing=byKey.get(key);
+    if(!existing){ byKey.set(key,tc); base.push(tc); return; }
+    // Prefer adjacent role=tool result snippets over session-level summaries so
+    // specialized cards (notably delegate_task) can parse full child results.
+    if(tc.snippet && (!existing.snippet || (existing.name==='delegate_task' && String(existing.snippet||'').trim()[0]!=='{'))){
+      existing.snippet=tc.snippet;
+      existing.is_diff=tc.is_diff;
+    }
+    if(existing.name==='delegate_task' && tc.raw_result) existing.raw_result=tc.raw_result;
+    if(existing.name==='delegate_task' && tc.args && typeof tc.args==='object') existing.args=tc.args;
+    if(existing.assistant_msg_idx===undefined && tc.assistant_msg_idx!==undefined) existing.assistant_msg_idx=tc.assistant_msg_idx;
+    existing.done=existing.done!==false && tc.done!==false;
+  });
+  return base;
+}
+
 function _captureMessageScrollSnapshot(){
   const el=$('messages');
   if(!el) return null;
@@ -6907,120 +7050,20 @@ function renderMessages(options){
   }
   renderCompressionUi();
   // Insert settled tool call cards (history view only).
-  // During live streaming, tool cards are rendered in #liveToolCards by the
-  // tool SSE handler and never mixed into the message list until done fires.
-  //
-  // Fallback: if S.toolCalls is empty (sessions that predate session-level tool
-  // tracking, or runs that didn't go through the normal streaming path), build
-  // a display list from per-message tool_calls (OpenAI format) stored in each
-  // assistant message. This covers the reload case described in issue #140.
-  if(!S.busy && (!S.toolCalls||!S.toolCalls.length)){
-    // Index tool outputs by tool_call_id / tool_use_id so the
-    // fallback-built cards carry their result snippet (not just the command).
-    // Without this step CLI-origin sessions reload with empty tool cards.
-    const resultsByTid={};
-    const fallbackToolSources=[];
-    S.messages.forEach((m,rawIdx)=>{
-      if(!m) return;
-      // OpenAI / Hermes CLI format: role=tool with tool_call_id
-      if(m.role==='tool'){
-        const tid=m.tool_call_id||m.tool_use_id||'';
-        if(tid) resultsByTid[tid]=_cliToolResultSnippet(m.content);
-        return;
-      }
-      // Anthropic format: tool_result blocks inside a user message content array
-      if(Array.isArray(m.content)){
-        m.content.forEach(p=>{
-          if(!p||typeof p!=='object'||p.type!=='tool_result') return;
-          const tid=p.tool_use_id||'';
-          if(!tid) return;
-          const raw=typeof p.content==='string'?p.content
-                   :Array.isArray(p.content)?p.content.map(c=>c&&c.text?c.text:'').join('')
-                   :'';
-          resultsByTid[tid]=_cliToolResultSnippet(raw);
-        });
-      }
-      if(m.role==='assistant'){
-        const hasTopLevelToolCalls=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-        const hasContentToolUse=Array.isArray(m.content)&&m.content.some(p=>p&&typeof p==='object'&&p.type==='tool_use');
-        const hasPartialToolCalls=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-        if(hasTopLevelToolCalls||hasContentToolUse||hasPartialToolCalls) fallbackToolSources.push({m,rawIdx});
-      }
-    });
-    const derived=[];
-    fallbackToolSources.forEach(({m,rawIdx})=>{
-      // OpenAI format: top-level tool_calls field on the assistant message
-      (m.tool_calls||[]).forEach(tc=>{
-        if(!tc||typeof tc!=='object') return;
-        const fn=tc.function||{};
-        const name=fn.name||tc.name||'tool';
-        let args={};
-        try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){}
-        const tid=tc.id||tc.call_id||'';
-        const patchSnippet=_cliPatchSnippetFromArgs(name,args);
-        const resultSnippet=resultsByTid[tid]||'';
-        let argsSnap={};
-        Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-        derived.push({
-          name,
-          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
-          tid,
-          assistant_msg_idx:rawIdx,
-          args:argsSnap,
-          done:true,
-        });
-      });
-      // Anthropic format: tool_use blocks inside assistant content array
-      if(Array.isArray(m.content)){
-        m.content.forEach(p=>{
-          if(!p||typeof p!=='object'||p.type!=='tool_use') return;
-          const name=p.name||'tool';
-          const args=p.input||{};
-          const tid=p.id||'';
-          const patchSnippet=_cliPatchSnippetFromArgs(name,args);
-          const resultSnippet=resultsByTid[tid]||'';
-          const argsSnap={};
-          if(args && typeof args==='object'){
-            Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-          }
-          derived.push({
-            name,
-            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
-            tid,
-            assistant_msg_idx:rawIdx,
-            args:argsSnap,
-            done:true,
-          });
-        });
-      }
-      (m._partial_tool_calls||[]).forEach(tc=>{
-        if(!tc||typeof tc!=='object') return;
-        const name=tc.name||'tool';
-        const args=(tc.args&&typeof tc.args==='object')?tc.args:{};
-        const tid=tc.tid||tc.id||'';
-        const patchSnippet=_cliPatchSnippetFromArgs(name,args);
-        const resultSnippet=String(tc.snippet||tc.preview||'');
-        const argsSnap={};
-        Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-        derived.push({
-          name,
-          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
-          tid,
-          assistant_msg_idx:rawIdx,
-          args:argsSnap,
-          done:tc.done!==false,
-        });
-      });
-    });
-    if(derived.length) S.toolCalls=derived;
+  // During live streaming, tool cards are rendered via the tool SSE handler and
+  // never mixed into the message list until done fires.  For settled/reloaded
+  // sessions, merge session-level summaries with adjacent role=tool messages so
+  // cards keep their full result payloads (delegate_task child rows, diffs, etc.).
+  const settledToolCallsForRender = !S.busy
+    ? _settledToolCallsForRender(S.toolCalls||[], S.messages||[])
+    : (S.toolCalls||[]);
+  if(!S.busy && (!S.toolCalls||!S.toolCalls.length) && settledToolCallsForRender.length){
+    S.toolCalls=settledToolCallsForRender;
   }
   if(!S.busy){
     inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card]),.agent-activity-thinking:not([data-live-thinking="1"])').forEach(el=>el.remove());
     const byAssistant = {};
-    for(const tc of (S.toolCalls||[])){
+    for(const tc of (settledToolCallsForRender||[])){
       const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;
       if(!byAssistant[key]) byAssistant[key] = [];
       byAssistant[key].push(tc);
@@ -7055,7 +7098,7 @@ function renderMessages(options){
         _syncToolCallGroupSummary(group);
         if(anchorRow) anchorInsertAfter.set(anchorRow, group);
       }
-    }else if(S.toolCalls && S.toolCalls.length){
+    }else if(settledToolCallsForRender && settledToolCallsForRender.length){
       for(const [key, cards] of Object.entries(byAssistant)){
         const aIdx = parseInt(key);
         let anchorRow=assistantSegments.get(aIdx)||null;
@@ -7222,11 +7265,243 @@ function toolIcon(name){
   return icons[name]||li('wrench');
 }
 
+function _formatDelegateTaskDuration(seconds){
+  const value=Number(seconds||0);
+  if(!Number.isFinite(value)||value<=0) return '';
+  if(value<60) return `${value.toFixed(1)}s`;
+  const minutes=Math.floor(value/60);
+  const remainder=Math.floor(value%60);
+  return remainder?`${minutes}m ${remainder}s`:`${minutes}m`;
+}
+function _delegateTaskPayloadFromCard(tc){
+  const candidates=[tc&&tc.raw_result,tc&&tc.snippet,tc&&tc.preview];
+  for(const candidate of candidates){
+    if(!candidate||typeof candidate!=='string') continue;
+    const trimmed=candidate.trim();
+    if(!trimmed||trimmed[0]!=='{') continue;
+    try{
+      const data=JSON.parse(trimmed);
+      if(data&&Array.isArray(data.results)) return data;
+    }catch(_){}
+  }
+  return null;
+}
+function _delegateStatusKind(status){
+  const s=String(status||'').toLowerCase();
+  if(['completed','success','succeeded','done','ok'].includes(s)) return 'success';
+  if(['failed','error','errored','timeout'].includes(s)) return 'error';
+  if(['interrupted','cancelled','canceled','blocked'].includes(s)) return 'warn';
+  if(['running','started','pending','in_progress','working'].includes(s)) return 'running';
+  return 'neutral';
+}
+function _delegateStatusLabel(status){
+  const s=String(status||'unknown').replace(/[_-]+/g,' ').trim();
+  return s?s.replace(/\b\w/g,c=>c.toUpperCase()):'Unknown';
+}
+function _delegateShortText(value,maxLen=220){
+  const text=String(value||'').replace(/\s+/g,' ').trim();
+  if(text.length<=maxLen) return text;
+  return `${text.slice(0,Math.max(0,maxLen-1)).trim()}…`;
+}
+function _delegatePreviewText(value,maxLen=520){
+  const text=String(value||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n').replace(/\n{3,}/g,'\n\n').trim();
+  if(text.length<=maxLen) return text;
+  return `${text.slice(0,Math.max(0,maxLen-1)).trimEnd()}…`;
+}
+function _delegateSummaryMarkup(value,maxLen=520){
+  const preview=_delegatePreviewText(value,maxLen);
+  if(!preview) return '';
+  try{return renderMd(preview);}
+  catch(_){return esc(preview);}
+}
+function _delegateFormatBytes(value){
+  const n=Number(value||0);
+  if(!Number.isFinite(n)||n<=0) return '';
+  if(n<1024) return `${Math.round(n)} B`;
+  if(n<1024*1024) return `${(n/1024).toFixed(n>=10*1024?0:1)} KB`;
+  return `${(n/1024/1024).toFixed(n>=10*1024*1024?0:1)} MB`;
+}
+function _delegateNormalizeText(value){
+  return String(value||'').replace(/\s+/g,' ').trim();
+}
+function _delegateArgsSummary(tc){
+  const args=(tc&&tc.args&&typeof tc.args==='object')?tc.args:{};
+  let goal=_delegateShortText(args.goal||args.prompt||args.task||'',260);
+  if(!goal&&Array.isArray(args.tasks)&&args.tasks.length){
+    const first=args.tasks.find(t=>t&&typeof t==='object'&&(t.goal||t.context))||args.tasks[0];
+    if(first&&typeof first==='object'){
+      const total=args.tasks.length;
+      const firstGoal=first.goal||first.context||'';
+      goal=_delegateShortText(`${total} delegated task${total===1?'':'s'} · ${firstGoal}`,260);
+    }
+  }
+  const toolsets=Array.isArray(args.toolsets)?args.toolsets.join(', '):String(args.toolsets||'').trim();
+  return {goal,toolsets};
+}
+function _delegateTaskCardSummary(tc){
+  const data=_delegateTaskPayloadFromCard(tc);
+  const request=_delegateArgsSummary(tc);
+  const rawResults=data&&Array.isArray(data.results)?data.results:[];
+  const results=rawResults.filter(r=>r&&typeof r==='object').map((result,idx)=>{
+    const duration=Number(result.duration_seconds||0);
+    const calls=Number(result.api_calls||0);
+    const summary=String(result.summary||result.error||'').trim();
+    const status=String(result.status||'unknown');
+    const trace=Array.isArray(result.tool_trace)?result.tool_trace.filter(t=>t&&typeof t==='object').map((traceItem,traceIdx)=>{
+      const argsBytes=_delegateFormatBytes(traceItem.args_bytes);
+      const resultBytes=_delegateFormatBytes(traceItem.result_bytes);
+      const statusText=String(traceItem.status||'unknown').trim();
+      return {
+        idx:traceIdx+1,
+        tool:String(traceItem.tool||traceItem.name||'tool').trim()||'tool',
+        status:statusText,
+        statusKind:_delegateStatusKind(statusText),
+        argsBytes,
+        resultBytes,
+      };
+    }):[];
+    return {
+      idx:idx+1,
+      status,
+      statusLabel:_delegateStatusLabel(status),
+      statusKind:_delegateStatusKind(status),
+      duration:Number.isFinite(duration)&&duration>0?duration:0,
+      durationText:_formatDelegateTaskDuration(duration),
+      apiCalls:Number.isFinite(calls)&&calls>0?calls:0,
+      exitReason:String(result.exit_reason||'').trim(),
+      summary,
+      summaryShort:_delegatePreviewText(summary,520),
+      toolTrace:trace,
+    };
+  });
+  const total=results.length;
+  const completed=results.filter(r=>r.statusKind==='success').length;
+  const failed=results.filter(r=>r.statusKind==='error').length;
+  const warned=results.filter(r=>r.statusKind==='warn').length;
+  const running=results.filter(r=>r.statusKind==='running').length;
+  const apiCalls=results.reduce((sum,r)=>sum+r.apiCalls,0);
+  const maxDuration=results.reduce((max,r)=>Math.max(max,r.duration),0);
+  const durationText=_formatDelegateTaskDuration(maxDuration);
+  let statusKind='neutral';
+  if(failed) statusKind='error';
+  else if(warned) statusKind='warn';
+  else if(running) statusKind='running';
+  else if(total&&completed===total) statusKind='success';
+  const statusText=total===1
+    ? (results[0].statusLabel||'Completed')
+    : `${completed}/${total} completed${failed?`, ${failed} failed`:warned?`, ${warned} interrupted`:running?`, ${running} running`:''}`;
+  const previewParts=[statusText];
+  if(total) previewParts.push(`${total} sub-agent${total===1?'':'s'}`);
+  if(durationText) previewParts.push(durationText);
+  if(apiCalls) previewParts.push(`${apiCalls} call${apiCalls===1?'':'s'}`);
+  const fallbackText=String(tc&&((tc.snippet&&tc.snippet[0]!=='{'&&tc.snippet)||tc.preview)||'').trim();
+  const resultText=results.map(r=>r.summary).filter(Boolean).join('\n\n') || fallbackText;
+  const hideDuplicateSingleResult=total===1 && _delegateNormalizeText(resultText) && _delegateNormalizeText(resultText)===_delegateNormalizeText(results[0].summary);
+  return {
+    hasStructuredResults:!!total,
+    statusText,
+    statusKind,
+    preview:previewParts.join(' · ') || _delegateShortText(fallbackText,220) || 'Delegation result',
+    total,
+    completed,
+    failed,
+    warned,
+    running,
+    apiCalls,
+    durationText,
+    results,
+    request,
+    resultText,
+    resultShort:_delegatePreviewText(resultText,620),
+    showResult:!!resultText&&!hideDuplicateSingleResult,
+  };
+}
+function _delegateTaskCardHtml(tc,summary){
+  const hasArgs=!!(tc.args&&Object.keys(tc.args).length>0);
+  const hasRaw=hasArgs||!!tc.snippet||!!tc.raw_result;
+  const request=summary.request||{};
+  const statusClass=`delegation-status-${summary.statusKind||'neutral'}`;
+  const meta=[];
+  if(summary.total) meta.push(`${summary.total} sub-agent${summary.total===1?'':'s'}`);
+  if(summary.durationText) meta.push(summary.durationText);
+  if(summary.apiCalls) meta.push(`${summary.apiCalls} call${summary.apiCalls===1?'':'s'}`);
+  const childRows=(summary.results||[]).map(result=>{
+    const bits=[];
+    if(result.durationText) bits.push(result.durationText);
+    if(result.apiCalls) bits.push(`${result.apiCalls} API call${result.apiCalls===1?'':'s'}`);
+    if(result.exitReason) bits.push(`exit: ${result.exitReason}`);
+    const traceRows=(result.toolTrace||[]).map(trace=>{
+      const traceBits=[];
+      if(trace.argsBytes) traceBits.push(`args ${trace.argsBytes}`);
+      if(trace.resultBytes) traceBits.push(`output ${trace.resultBytes}`);
+      const traceStatus=trace.status?` · ${trace.status}`:'';
+      return `<div class="delegation-trace-row delegation-trace-${esc(trace.statusKind)}">
+        <span class="delegation-trace-index">${esc(String(trace.idx))}</span>
+        <span class="delegation-trace-tool">${esc(trace.tool)}</span>
+        <span class="delegation-trace-status ${esc(`delegation-status-${trace.statusKind}`)}">${esc(traceStatus.replace(/^ · /,''))}</span>
+        ${traceBits.length?`<span class="delegation-trace-meta">${esc(traceBits.join(' · '))}</span>`:''}
+      </div>`;
+    }).join('');
+    return `<div class="delegation-child-row delegation-child-${esc(result.statusKind)}">
+      <div class="delegation-child-main">
+        <span class="delegation-child-index">${esc(`Sub-agent ${result.idx}`)}</span>
+        <span class="delegation-status-pill ${esc(`delegation-status-${result.statusKind}`)}">${esc(result.statusLabel)}</span>
+        ${bits.length?`<span class="delegation-child-meta">${esc(bits.join(' · '))}</span>`:''}
+      </div>
+      ${result.summaryShort?`<div class="delegation-child-summary md-delegation-summary">${_delegateSummaryMarkup(result.summaryShort,520)}</div>`:''}
+      ${traceRows?`<details class="delegation-tool-trace"><summary>Tool trace · ${(result.toolTrace||[]).length} call${(result.toolTrace||[]).length===1?'':'s'}</summary><div class="delegation-trace-list">${traceRows}</div></details>`:''}
+    </div>`;
+  }).join('');
+  const rawArgs=hasArgs?Object.entries(tc.args).map(([k,v])=>`<div><span class="tool-arg-key">${esc(k)}</span> <span class="tool-arg-val">${esc(String(v))}</span></div>`).join(''):'';
+  const rawOutput=tc.raw_result||tc.snippet||'';
+  return `
+    <div class="tool-card tool-card-delegation delegation-run-card ${statusClass}">
+      <div class="tool-card-header delegation-run-header" onclick="this.closest('.tool-card').classList.toggle('open')">
+        <span class="tool-card-icon">${toolIcon('delegate_task')}</span>
+        <span class="tool-card-badge delegation-badge">Delegation</span>
+        <span class="tool-card-name delegation-run-title">Delegation run</span>
+        <span class="delegation-status-pill ${statusClass}">${esc(summary.statusText||'Status')}</span>
+        ${meta.length?`<span class="tool-card-preview delegation-run-meta">${esc(meta.join(' · '))}</span>`:''}
+        <span class="tool-card-toggle">${li('chevron-right',12)}</span>
+      </div>
+      <div class="tool-card-detail delegation-run-detail">
+        ${request.goal?`<section class="delegation-section"><div class="delegation-section-label">Request</div><div class="delegation-request-text">${esc(request.goal)}</div>${request.toolsets?`<div class="delegation-request-tools">Tools: ${esc(request.toolsets)}</div>`:''}</section>`:''}
+        ${childRows?`<section class="delegation-section"><div class="delegation-section-label">Sub-agents</div><div class="delegation-child-list">${childRows}</div></section>`:''}
+        ${summary.showResult&&summary.resultShort?`<section class="delegation-section"><div class="delegation-section-label">Result</div><div class="delegation-result-text md-delegation-summary">${_delegateSummaryMarkup(summary.resultShort,620)}</div></section>`:''}
+        ${hasRaw?`<details class="delegation-raw"><summary>Raw request / output</summary>${rawArgs?`<div class="tool-card-args">${rawArgs}</div>`:''}${rawOutput?`<div class="tool-card-result"><pre>${esc(rawOutput)}</pre></div>`:''}</details>`:''}
+      </div>
+    </div>`;
+}
+function _subagentProgressCardHtml(tc){
+  const preview=_delegateShortText((tc&&tc.preview)||'',260)||'Working';
+  const done=tc&&tc.done!==false;
+  const statusClass=done?'delegation-status-success':'delegation-status-running';
+  return `
+    <div class="tool-card tool-card-subagent subagent-progress-card ${done?'':'tool-card-running'} ${statusClass}">
+      <div class="tool-card-header subagent-progress-header">
+        ${done?'':'<span class="tool-card-running-dot"></span>'}
+        <span class="tool-card-icon">${toolIcon('subagent_progress')}</span>
+        <span class="tool-card-badge delegation-badge">Sub-agent</span>
+        <span class="tool-card-name">Progress</span>
+        <span class="tool-card-preview">${esc(preview)}</span>
+      </div>
+    </div>`;
+}
+
 function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='tool-card-row';
   const icon=toolIcon(tc.name);
-  const hasDetail=(tc.snippet&&tc.snippet!==tc.preview)||(tc.args&&Object.keys(tc.args).length>0);
+  const isSubagent=tc.name==='subagent_progress';
+  const isDelegation=tc.name==='delegate_task';
+  if(isDelegation){
+    row.innerHTML=_delegateTaskCardHtml(tc,_delegateTaskCardSummary(tc));
+    return row;
+  }
+  if(isSubagent){
+    row.innerHTML=_subagentProgressCardHtml(tc);
+    return row;
+  }
   let displaySnippet='';
   if(tc.snippet){
     const s=tc.snippet;
@@ -7237,17 +7512,22 @@ function buildToolCard(tc){
       displaySnippet=lastBreak>80?s.slice(0,lastBreak+1):cutoff;
     }
   }
-  const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
+  const delegateSummary=isDelegation?_delegateTaskCardSummary(tc):null;
+  // Clean up legacy subagent prefixes since the Lucide icon already shows it.
+  let displayName=_toolDisplayName(tc);
+  let previewText=tc.preview||displaySnippet||'';
+  if(delegateSummary){
+    previewText=delegateSummary.preview||previewText;
+    if(delegateSummary.detail) displaySnippet=delegateSummary.detail;
+  }
+  if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
+  const hasMore=tc.snippet&&!delegateSummary&&tc.snippet.length>displaySnippet.length;
   const moreLabel=tc.is_diff?'Show diff':'Show more';
   const lessLabel=tc.is_diff?'Hide diff':'Show less';
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
-  const isSubagent=tc.name==='subagent_progress';
-  const isDelegation=tc.name==='delegate_task';
-  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
-  // Clean up legacy subagent prefixes since the Lucide icon already shows it
-  let displayName=_toolDisplayName(tc);
-  let previewText=tc.preview||displaySnippet||'';
-  if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
+  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'')+(isDelegation?' tool-card-delegation':'');
+  const hasArgs=!!(tc.args&&Object.keys(tc.args).length>0);
+  const hasDetail=!!((displaySnippet&&displaySnippet!==previewText)||hasArgs);
   row.innerHTML=`
     <div class="${cardClass}">
       <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
@@ -7259,7 +7539,7 @@ function buildToolCard(tc){
         ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       </div>
       ${hasDetail?`<div class="tool-card-detail">
-        ${tc.args&&Object.keys(tc.args).length?`<div class="tool-card-args">${
+        ${hasArgs?`<div class="tool-card-args">${
           Object.entries(tc.args).map(([k,v])=>`<div><span class="tool-arg-key">${esc(k)}</span> <span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">

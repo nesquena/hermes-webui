@@ -930,7 +930,13 @@ window._micPendingSend=window._micPendingSend||false;
   window._voiceModeImmediateSend=_voiceModeSend;
 })();
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
-$('btnNewChat').onclick=async()=>{
+$('btnNewChat').onclick=async(e)=>{
+  if(e&&(e.ctrlKey||e.metaKey)){
+    e.preventDefault();
+    e.stopPropagation();
+    await openNewSessionInNewTab();
+    return;
+  }
   // If the current session has no messages AND nothing is in flight, just focus
   // the composer rather than creating another empty session that will clutter the
   // sidebar list (#1171).
@@ -950,6 +956,12 @@ $('btnNewChat').onclick=async()=>{
     $('msg').focus();closeMobileSidebar();return;
   }
   await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+};
+$('btnNewChat').onauxclick=async(e)=>{
+  if(e.button!==1) return;
+  e.preventDefault();
+  e.stopPropagation();
+  await openNewSessionInNewTab();
 };
 $('btnDownload').onclick=()=>{
   if(!S.session)return;

@@ -91,7 +91,8 @@ actions. The topbar remains focused on conversation context and the workspace/fi
 State directory (runtime data, separate from source):
 
     ~/.hermes/webui/
-    sessions/          One JSON file per session: {session_id}.json
+    sessions/          WebUI-owned session sidecars and _index.json
+                       (do not use agent-wide ~/.hermes/sessions here)
     workspaces.json    Registered workspaces list
     last_workspace.txt Last-used workspace path
     settings.json      User settings (default model, workspace, send key, password hash)
@@ -117,7 +118,9 @@ Environment variables controlling behavior:
     HERMES_WEBUI_HOST              Bind address (default: 127.0.0.1)
     HERMES_WEBUI_PORT              Port (default: 8787)
     HERMES_WEBUI_DEFAULT_WORKSPACE Default workspace path for new sessions
-    HERMES_WEBUI_STATE_DIR         Where sessions/ folder lives
+    HERMES_WEBUI_STATE_DIR         Where the WebUI state root lives; session
+                                   sidecars/index must live under
+                                   $HERMES_WEBUI_STATE_DIR/sessions
     HERMES_CONFIG_PATH             Path to ~/.hermes/config.yaml
     HERMES_WEBUI_DEFAULT_MODEL     Optional model override; unset means provider default
     HERMES_WEBUI_PASSWORD          Optional: enable password auth (off by default)

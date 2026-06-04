@@ -534,6 +534,82 @@ function _setNewSessionPending(pending){
   }
 }
 
+function _newSessionRequestBody(options={}){
+  // One-shot profile-switch workspace: applied to the first new session after a profile
+  // switch, then cleared.  Use a dedicated flag so S._profileDefaultWorkspace (the
+  // persistent boot/settings default) is not consumed and remains available for the
+  // blank-page display on all subsequent returns to the empty state (#823).
+  const switchWs=S._profileSwitchWorkspace;
+  S._profileSwitchWorkspace=null;
+  const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
+  const reqBody={
+    workspace:inheritWs,
+    profile:S.activeProfile||'default',
+  };
+  if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
+  if(options&&options.worktree) reqBody.worktree=true;
+  if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
+  // Carry the visible picker selection into the new session. Without this,
+  // /api/session/new falls back to config.yaml defaults (e.g. gpt-5.5) even
+  // when the user already chose cursor/composer-2.5 in the composer chip.
+  const modelSelForNew=$('modelSelect');
+  let newModelState=null;
+  if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
+    newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
+  }else if(typeof _readPersistedModelState==='function'){
+    newModelState=_readPersistedModelState();
+  }
+  if(newModelState&&newModelState.model){
+    reqBody.model=newModelState.model;
+    reqBody.model_provider=newModelState.model_provider||null;
+  }
+  return reqBody;
+}
+
+async function openNewSessionInNewTab(options={}){
+  if(_newSessionInFlight){
+    if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
+    return _newSessionInFlight;
+  }
+  let newTab=null;
+  try{
+    // Open synchronously while the aux/modifier click still has a user gesture.
+    // The final /session/<sid> URL is filled in after /api/session/new returns.
+    newTab=window.open('about:blank','_blank');
+    if(newTab){
+      try{newTab.opener=null;}catch(_){}
+      try{
+        newTab.document.write('<!doctype html><title>Creating conversation…</title><body style="font-family:system-ui,sans-serif;background:#0a0908;color:#eae0d5;padding:24px">Creating conversation…</body>');
+        newTab.document.close();
+      }catch(_){}
+    }
+  }catch(_){}
+  _setNewSessionPending(true);
+  _newSessionInFlight=(async()=>{
+    const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(_newSessionRequestBody(options))});
+    const sid=data&&data.session&&data.session.session_id;
+    if(sid){
+      const url=_sessionUrlForSid(sid);
+      if(newTab&&!newTab.closed){
+        try{newTab.location.href=url;}
+        catch(_){_openSessionInNewTab(sid);}
+      }else{
+        _openSessionInNewTab(sid);
+      }
+      void renderSessionList({deferWhileInteracting:false});
+      return data.session;
+    }
+    if(newTab&&!newTab.closed){try{newTab.close();}catch(_){}}
+    return null;
+  })();
+  try{
+    return await _newSessionInFlight;
+  }finally{
+    _newSessionInFlight=null;
+    _setNewSessionPending(false);
+  }
+}
+
 async function newSession(flash, options={}){
   if(_newSessionInFlight){
     if(typeof showToast==='function') showToast(_newSessionPendingText(),1500);
@@ -546,35 +622,7 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
-    // One-shot profile-switch workspace: applied to the first new session after a profile
-    // switch, then cleared.  Use a dedicated flag so S._profileDefaultWorkspace (the
-    // persistent boot/settings default) is not consumed and remains available for the
-    // blank-page display on all subsequent returns to the empty state (#823).
-    const switchWs=S._profileSwitchWorkspace;
-    S._profileSwitchWorkspace=null;
-    const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
-    const reqBody={
-      workspace:inheritWs,
-      profile:S.activeProfile||'default',
-    };
-    if(S.session&&S.session.session_id) reqBody.prev_session_id=S.session.session_id;
-    if(options&&options.worktree) reqBody.worktree=true;
-    if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
-    // Carry the visible picker selection into the new session. Without this,
-    // /api/session/new falls back to config.yaml defaults (e.g. gpt-5.5) even
-    // when the user already chose cursor/composer-2.5 in the composer chip.
-    const modelSelForNew=$('modelSelect');
-    let newModelState=null;
-    if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
-      newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
-    }else if(typeof _readPersistedModelState==='function'){
-      newModelState=_readPersistedModelState();
-    }
-    if(newModelState&&newModelState.model){
-      reqBody.model=newModelState.model;
-      reqBody.model_provider=newModelState.model_provider||null;
-    }
-    const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
+    const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(_newSessionRequestBody(options))});
     S.session=data.session;S.messages=data.session.messages||[];
     S.lastUsage={...(data.session.last_usage||{})};
     if(flash)S.session._flash=true;
@@ -1011,6 +1059,7 @@ function _sessionSourceLabel(filter, count) {
 function _setSessionSourceFilter(filter) {
   const next = filter === 'cli' ? 'cli' : 'webui';
   if (_sessionSourceFilter === next) return;
+  _sessionSourceFilterRestoredFromStorage = false;
   _sessionSourceFilter = next;
   _activeProject = null;
   _selectedSessions.clear();
@@ -1022,7 +1071,10 @@ function _setSessionSourceFilter(filter) {
 function _restoreSessionSourceFilter() {
   try {
     const raw = localStorage.getItem('hermes-session-source-filter');
-    if (raw === 'cli' || raw === 'webui') _sessionSourceFilter = raw;
+    if (raw === 'cli' || raw === 'webui') {
+      _sessionSourceFilter = raw;
+      _sessionSourceFilterRestoredFromStorage = true;
+    }
   } catch (_e) {}
 }
 
@@ -1690,6 +1742,7 @@ let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FI
 let _showAllProfiles = false;  // false = filter to active profile only
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
+let _sessionSourceFilterRestoredFromStorage = false;
 _restoreSessionSourceFilter();
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
@@ -3632,6 +3685,14 @@ function renderSessionListFromCache(){
   );
   const webuiSessionCount = withMessages.filter(s=>!_isCliSession(s)).length;
   const cliSessionCount = withMessages.filter(s=>_isCliSession(s)).length;
+  const activeSessionRow = activeSidForSidebar
+    ? withMessages.find(s=>s&&_sessionLineageContainsSession(s,activeSidForSidebar))
+    : null;
+  if(_sessionSourceFilter==='cli'&&_sessionSourceFilterRestoredFromStorage&&activeSessionRow&&!_isCliSession(activeSessionRow)){
+    _sessionSourceFilter='webui';
+    _sessionSourceFilterRestoredFromStorage=false;
+    try{localStorage.setItem('hermes-session-source-filter','webui');}catch(_e){}
+  }
   if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
     _sessionSourceFilter='webui';
   }
