@@ -8174,6 +8174,9 @@ def _serve_branding(handler, parsed):
     handler.send_header("Content-Type", ct_header)
     handler.send_header("Content-Length", str(len(raw)))
     handler.send_header("Cache-Control", "no-store, max-age=0")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    if ct == "image/svg+xml":
+        handler.send_header("Content-Security-Policy", "sandbox")
     handler.end_headers()
     handler.wfile.write(raw)
     return True

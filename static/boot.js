@@ -1617,9 +1617,27 @@ function _syncSystemThemeFromMedia(){
   }
 }
 
+function _customLogoNeedsSystemPoll(){
+  return !!(
+    window._customLogoEnabled &&
+    window._customLogoDarkMode &&
+    window._customLogoLightPath &&
+    window._customLogoDarkPath
+  );
+}
+
+function _refreshSystemThemePoll(){
+  if(_systemThemePollTimer){
+    clearInterval(_systemThemePollTimer);
+    _systemThemePollTimer=null;
+  }
+  if(_systemThemeMq&&_customLogoNeedsSystemPoll()){
+    _systemThemePollTimer=setInterval(_syncSystemThemeFromMedia,250);
+  }
+}
+
 function _installSystemThemeFallbacks(){
-  if(_systemThemePollTimer) clearInterval(_systemThemePollTimer);
-  _systemThemePollTimer=setInterval(_syncSystemThemeFromMedia,250);
+  _refreshSystemThemePoll();
   window.addEventListener('focus',_syncSystemThemeFromMedia);
   document.addEventListener('visibilitychange',_syncSystemThemeFromMedia);
   window.addEventListener(_SYSTEM_THEME_PAGESHOW_EVENT,_syncSystemThemeFromMedia);
@@ -1635,12 +1653,29 @@ function _removeSystemThemeFallbacks(){
   window.removeEventListener(_SYSTEM_THEME_PAGESHOW_EVENT,_syncSystemThemeFromMedia);
 }
 
+function _addSystemThemeListener(){
+  if(!_systemThemeMq||!_onSystemThemeChange) return;
+  if(typeof _systemThemeMq.addEventListener==='function'){
+    _systemThemeMq.addEventListener('change',_onSystemThemeChange);
+  }else if(typeof _systemThemeMq.addListener==='function'){
+    _systemThemeMq.addListener(_onSystemThemeChange);
+  }
+}
+
+function _removeSystemThemeListener(){
+  if(!_systemThemeMq||!_onSystemThemeChange) return;
+  if(typeof _systemThemeMq.removeEventListener==='function'){
+    _systemThemeMq.removeEventListener('change',_onSystemThemeChange);
+  }else if(typeof _systemThemeMq.removeListener==='function'){
+    _systemThemeMq.removeListener(_onSystemThemeChange);
+  }
+}
+
 function _applyTheme(name){
   const normalized=_normalizeAppearance(name,'default');
   delete document.documentElement.dataset.theme;
   if(_systemThemeMq&&_onSystemThemeChange){
-    try{_systemThemeMq.removeEventListener('change',_onSystemThemeChange);}catch(_){}
-    try{_systemThemeMq.removeListener(_onSystemThemeChange);}catch(_){}
+    try{_removeSystemThemeListener();}catch(_){}
     _systemThemeMq=null;
     _onSystemThemeChange=null;
   }
@@ -1652,8 +1687,7 @@ function _applyTheme(name){
       _setResolvedTheme(matches);
     };
     _setResolvedTheme(_systemThemeMq.matches);
-    try{_systemThemeMq.addEventListener('change',_onSystemThemeChange);}catch(_){}
-    try{_systemThemeMq.addListener(_onSystemThemeChange);}catch(_){}
+    try{_addSystemThemeListener();}catch(_){}
     _installSystemThemeFallbacks();
     return;
   }
@@ -1793,6 +1827,11 @@ function applyCustomLogo(settings){
   var darkMode=settings.custom_logo_dark_mode;
   var lightPath=settings.custom_logo_light_path||'';
   var darkPath=settings.custom_logo_dark_path||'';
+  window._customLogoEnabled=!!enabled;
+  window._customLogoDarkMode=!!darkMode;
+  window._customLogoLightPath=lightPath;
+  window._customLogoDarkPath=darkPath;
+  _refreshSystemThemePoll();
 
   if(!enabled||!lightPath){
     _setCustomLogoSrc('');

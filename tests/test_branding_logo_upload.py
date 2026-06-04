@@ -123,8 +123,10 @@ def test_custom_logo_favicon_uses_resolved_theme_variant():
     assert "document.getElementById('settingsCustomLogoDarkMode')" not in js
     assert "window.matchMedia('(prefers-color-scheme:dark)').matches" in js
     assert "dataset.customLogoMode" in js
-    assert "setInterval(_syncSystemThemeFromMedia,250)" in js
-    assert "addListener(_onSystemThemeChange)" in js
+    assert "function _customLogoNeedsSystemPoll" in js
+    assert "if(_systemThemeMq&&_customLogoNeedsSystemPoll())" in js
+    assert "if(typeof _systemThemeMq.addEventListener==='function')" in js
+    assert "else if(typeof _systemThemeMq.addListener==='function')" in js
     assert "_setFavicon(src);" in js
     assert "_setFavicon(lightSrc);" not in js
     assert "window._customLogoDarkMode" in js
@@ -141,6 +143,8 @@ def test_custom_logo_upload_cache_busting_contract():
     assert "_delete_logo_files_for_mode(mode)" in branding
     assert "logo_version_for_settings_value" in routes
     assert 'Cache-Control", "no-store, max-age=0"' in routes
+    assert 'X-Content-Type-Options", "nosniff"' in routes
+    assert 'Content-Security-Policy", "sandbox"' in routes
     assert "window._customLogoLightVersion=version" in panels
     assert "window._customLogoDarkVersion=version" in panels
     assert "settings.custom_logo_light_version || ''" in panels
