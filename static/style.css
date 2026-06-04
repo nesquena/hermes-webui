@@ -1683,10 +1683,10 @@
   .composer-todo-strip-header{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:8px;}
   .composer-todo-toggle-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--muted);}
   .composer-todo-strip.is-collapsed .composer-todo-strip-header{margin-bottom:0;}
-  .composer-todo-list{display:flex;flex-direction:column;gap:6px;}
-  .composer-todo-item{display:flex;align-items:flex-start;gap:10px;padding:2px 0;min-width:0;}
+  .composer-todo-list{display:flex;flex-direction:column;gap:6px;max-height:144px;overflow-y:auto;padding-right:4px;scrollbar-gutter:stable;}
+  .composer-todo-item{display:flex;align-items:flex-start;gap:10px;padding:2px 0;min-width:0;min-height:30px;}
   .composer-todo-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px;}
-  .composer-todo-text{font-size:13px;line-height:1.4;color:var(--text);min-width:0;overflow-wrap:anywhere;}
+  .composer-todo-text{font-size:13px;line-height:1.4;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .composer-todo-item.is-completed .composer-todo-text{color:var(--muted);text-decoration:line-through;opacity:.72;}
   .composer-todo-item.is-cancelled .composer-todo-text{color:var(--muted);opacity:.72;}
   .composer-box{max-width:clamp(780px,60vw,1100px);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}

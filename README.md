@@ -359,7 +359,7 @@ Full list of environment variables:
 | `HERMES_WEBUI_PYTHON` | auto-discovered | Python executable |
 | `HERMES_WEBUI_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for all IPv4, `::` for all IPv6, `::1` for IPv6 loopback) |
 | `HERMES_WEBUI_PORT` | `8787` | Port |
-| `HERMES_WEBUI_STATE_DIR` | `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) | Where sessions and state are stored |
+| `HERMES_WEBUI_STATE_DIR` | `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) | Where WebUI-owned sessions and state are stored; session sidecars/index live at `<state-dir>/sessions`, not the agent-wide `~/.hermes/sessions` store |
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | *(provider default)* | Optional model override; leave unset to use the active Hermes provider default |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
@@ -642,6 +642,10 @@ docker-compose.yml      Compose with named volume and optional auth
 
 State lives outside the repo at `~/.hermes/webui/` by default
 (sessions, workspaces, settings, projects, last_workspace). Override with `HERMES_WEBUI_STATE_DIR`.
+WebUI session sidecars and `_index.json` are part of that WebUI state and must stay under
+`<HERMES_WEBUI_STATE_DIR>/sessions` (for example `~/.hermes/webui/sessions`); do not point
+the WebUI runtime at the agent-wide `~/.hermes/sessions` directory, because project
+assignments, read/unread cursors, attachments, and settings are scoped to the WebUI state dir.
 
 ---
 

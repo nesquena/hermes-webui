@@ -277,6 +277,10 @@ def test_refresh_handler_does_not_drop_tool_messages_needed_by_todos(cleanup_tes
         "panels.js must expose shared current-session todo resolution"
     assert "function renderComposerTodos()" in panels_src, \
         "panels.js must render the composer todo strip from shared todo state"
+    assert "function _getActiveComposerTodos(todos)" in panels_src, \
+        "composer todo strip should derive an active-only working set for ongoing tasks"
+    assert "const visibleTodos = hasActive ? activeTodos : todos;" in panels_src, \
+        "composer todo strip should show active tasks during ongoing work and fall back to the full settled list once work is done"
     assert "function toggleComposerTodosCollapsed()" in panels_src, \
         "panels.js must expose a manual collapse toggle for the composer todo strip"
     assert "function _composerTodosStateKey()" in panels_src and "localStorage.setItem(key, JSON.stringify(state || {}));" in panels_src, \
@@ -289,6 +293,9 @@ def test_refresh_handler_does_not_drop_tool_messages_needed_by_todos(cleanup_tes
         "todo renderers must still fall back to raw S.session.messages so legacy todo state survives reloads"
     assert "id=\"composerTodoStrip\"" in index_src and "id=\"composerTodoList\"" in index_src and "id=\"composerTodoToggle\"" in index_src, \
         "index.html must include composer todo strip markup and collapse toggle above the message prompt"
+    style_src = (REPO_ROOT / "static/style.css").read_text()
+    assert "max-height:144px" in style_src and "overflow-y:auto" in style_src, \
+        "composer todo list should cap visible rows and scroll internally"
     assert "if(typeof renderComposerTodos==='function') renderComposerTodos();" in ui_src, \
         "ui.js must refresh the composer todo strip when messages render"
 

@@ -1011,6 +1011,7 @@ function _sessionSourceLabel(filter, count) {
 function _setSessionSourceFilter(filter) {
   const next = filter === 'cli' ? 'cli' : 'webui';
   if (_sessionSourceFilter === next) return;
+  _sessionSourceFilterRestoredFromStorage = false;
   _sessionSourceFilter = next;
   _activeProject = null;
   _selectedSessions.clear();
@@ -1022,7 +1023,10 @@ function _setSessionSourceFilter(filter) {
 function _restoreSessionSourceFilter() {
   try {
     const raw = localStorage.getItem('hermes-session-source-filter');
-    if (raw === 'cli' || raw === 'webui') _sessionSourceFilter = raw;
+    if (raw === 'cli' || raw === 'webui') {
+      _sessionSourceFilter = raw;
+      _sessionSourceFilterRestoredFromStorage = true;
+    }
   } catch (_e) {}
 }
 
@@ -1690,6 +1694,7 @@ let _activeProject = null;  // project_id filter (null = show all, NO_PROJECT_FI
 let _showAllProfiles = false;  // false = filter to active profile only
 let _otherProfileCount = 0;       // count of sessions from other profiles (server-reported)
 let _sessionSourceFilter = 'webui';  // 'webui' keeps WebUI chats separate from read-only CLI sessions
+let _sessionSourceFilterRestoredFromStorage = false;
 _restoreSessionSourceFilter();
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
@@ -3632,6 +3637,14 @@ function renderSessionListFromCache(){
   );
   const webuiSessionCount = withMessages.filter(s=>!_isCliSession(s)).length;
   const cliSessionCount = withMessages.filter(s=>_isCliSession(s)).length;
+  const activeSessionRow = activeSidForSidebar
+    ? withMessages.find(s=>s&&_sessionLineageContainsSession(s,activeSidForSidebar))
+    : null;
+  if(_sessionSourceFilter==='cli'&&_sessionSourceFilterRestoredFromStorage&&activeSessionRow&&!_isCliSession(activeSessionRow)){
+    _sessionSourceFilter='webui';
+    _sessionSourceFilterRestoredFromStorage=false;
+    try{localStorage.setItem('hermes-session-source-filter','webui');}catch(_e){}
+  }
   if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
     _sessionSourceFilter='webui';
   }

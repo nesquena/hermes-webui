@@ -67,6 +67,35 @@ def test_stale_stream_cleanup_does_not_refresh_sidebar_timestamp():
     assert session.saved_touch_updated_at == [False]
 
 
+def test_sessions_list_reconcile_reports_full_load_repair(monkeypatch):
+    """If get_session() repairs stale pending state while loading, list rows must refresh.
+
+    Metadata-only sidebar rows can carry a stale active_stream_id after a restart.
+    Loading the full session may clear that state before _clear_stale_stream_state()
+    sees it. The /api/sessions caller still needs a truthy reconcile result and
+    an updated row so it does not serialize the stale pre-repair snapshot.
+    """
+    session = _FakeSession()
+    setattr(session, "active_stream_id", None)
+    setattr(session, "pending_user_message", None)
+    session.pending_attachments = []
+    setattr(session, "pending_started_at", None)
+    row = {
+        "session_id": session.session_id,
+        "active_stream_id": "stale-stream",
+        "pending_user_message": "old prompt",
+        "has_pending_user_message": True,
+        "is_streaming": False,
+    }
+
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=True: session)
+
+    assert routes._reconcile_stale_stream_state_for_session_rows([row]) is True
+    assert row["active_stream_id"] is None
+    assert row["pending_user_message"] is None
+    assert row["has_pending_user_message"] is False
+
+
 def test_session_load_clears_stale_stream_before_response():
     load_pos = ROUTES_SRC.index("s = get_session(sid, metadata_only=(not load_messages))")
     cleanup_pos = ROUTES_SRC.index("_clear_stale_stream_state(s)", load_pos)

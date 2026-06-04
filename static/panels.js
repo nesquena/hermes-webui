@@ -2738,6 +2738,13 @@ function _hasActiveComposerTodos(todos) {
   });
 }
 
+function _getActiveComposerTodos(todos) {
+  return Array.isArray(todos) ? todos.filter(t => {
+    const status = String(t && t.status || '').trim().toLowerCase();
+    return status === 'pending' || status === 'in_progress';
+  }) : [];
+}
+
 function _setComposerTodosCollapsed(collapsed, opts) {
   const wrap = $('composerTodoStrip');
   const list = $('composerTodoList');
@@ -2782,7 +2789,9 @@ function renderComposerTodos() {
   }
   const signature = _composerTodosSignature(todos);
   const saved = _readComposerTodosUiState();
-  const hasActive = _hasActiveComposerTodos(todos);
+  const activeTodos = _getActiveComposerTodos(todos);
+  const hasActive = activeTodos.length > 0;
+  const visibleTodos = hasActive ? activeTodos : todos;
   let collapsed;
   if (!saved || saved.signature !== signature) {
     collapsed = !hasActive;
@@ -2791,7 +2800,7 @@ function renderComposerTodos() {
     collapsed = !!saved.collapsed;
   }
   wrap.hidden = false;
-  list.innerHTML = _renderTodoItemsHtml(todos, { compact: true });
+  list.innerHTML = _renderTodoItemsHtml(visibleTodos, { compact: true });
   _setComposerTodosCollapsed(collapsed, { persist: false, signature });
 }
 

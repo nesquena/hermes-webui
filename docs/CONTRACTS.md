@@ -48,6 +48,15 @@ read the relevant RFC before editing. In the PR description, name the state laye
 or event/control surface affected and include a regression test or manual
 verification for the relevant invariant.
 
+WebUI-owned session sidecars and the session `_index.json` are part of the
+`HERMES_WEBUI_STATE_DIR` state layer. The runtime contract is:
+`SESSION_DIR == Path(HERMES_WEBUI_STATE_DIR) / "sessions"` (default
+`~/.hermes/webui/sessions`). Do not repoint WebUI at the agent-wide
+`~/.hermes/sessions` directory unless the project metadata/read-state/attachment
+contract is explicitly redesigned at the same time, because `projects.json`,
+`session_read_state.json`, attachments, settings, and workspace metadata remain
+scoped to the WebUI state directory.
+
 Proposed RFCs are review guardrails, not implementation authorization. Do not
 implement RFC fragments unless the task or tracking issue explicitly asks for
 that slice.

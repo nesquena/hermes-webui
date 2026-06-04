@@ -1323,7 +1323,23 @@ def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
             continue
         if session is None:
             continue
-        changed = _clear_stale_stream_state(session) or changed
+        # get_session(..., metadata_only=True) can return a cached/full session
+        # whose stale-pending repair already ran during load. In that case
+        # _clear_stale_stream_state() correctly returns False because there is
+        # no active stream left to clear, but /api/sessions still holds the
+        # pre-repair row snapshot and must refresh/patch it before serializing.
+        was_stale_row = bool(row.get("active_stream_id"))
+        cleared_during_load = was_stale_row and not getattr(session, "active_stream_id", None)
+        cleared_by_helper = _clear_stale_stream_state(session)
+        if cleared_during_load or cleared_by_helper:
+            row["active_stream_id"] = getattr(session, "active_stream_id", None)
+            row["pending_user_message"] = getattr(session, "pending_user_message", None)
+            row["has_pending_user_message"] = bool(getattr(session, "pending_user_message", None))
+            row["pending_attachments"] = list(getattr(session, "pending_attachments", []) or [])
+            row["pending_started_at"] = getattr(session, "pending_started_at", None)
+            if not row.get("active_stream_id"):
+                row["is_streaming"] = False
+            changed = True
     return changed
 
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────

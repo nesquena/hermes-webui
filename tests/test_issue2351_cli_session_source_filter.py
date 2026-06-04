@@ -24,6 +24,13 @@ def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
     assert ": withMessages.filter(s=>!_isCliSession(s))" in src
 
 
+def test_deeplinked_webui_session_resets_persisted_cli_source_filter():
+    src = SESSIONS_JS.read_text(encoding="utf-8")
+    assert "const activeSessionRow = activeSidForSidebar" in src
+    assert "if(_sessionSourceFilter==='cli'&&_sessionSourceFilterRestoredFromStorage&&activeSessionRow&&!_isCliSession(activeSessionRow))" in src
+    assert "localStorage.setItem('hermes-session-source-filter','webui')" in src
+
+
 def test_session_source_tabs_have_dedicated_sidebar_styles():
     css = STYLE_CSS.read_text(encoding="utf-8")
     assert ".session-source-tabs" in css

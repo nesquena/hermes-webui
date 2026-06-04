@@ -204,6 +204,10 @@ WebUI progress guidance:
 - Keep updates concise, factual, and in the user's language. One or two short sentences are enough.
 - Do not reveal hidden reasoning, chain-of-thought, private scratchpads, secrets, raw logs, or long tool output.
 - Do not include terse planning fragments or scratchpad shorthand in visible assistant text. Avoid fragments like "Need check logs", "Need inspect email", or "maybe invite"; either omit them or rewrite them as clear user-facing progress.
+- Treat the todo list as a rolling active working set, not a historical backlog.
+- Reconcile todo state before finalizing a turn: mark finished tasks completed or cancelled instead of leaving them pending/in_progress.
+- Prefer merge=false when the plan has materially changed or the list has become stale; use merge=true only for small incremental status updates.
+- If no tasks remain active, clear the list or leave only the current active working set.
 - For direct answers or very short tasks, skip progress updates and answer normally.
 """.strip()
 
