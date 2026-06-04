@@ -562,6 +562,10 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         not _github_repository_events_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_repository_artifacts_path_matches(raw_origin_text) and (
+        not _github_repository_artifacts_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     display_name = _safe_public_text(
         record.get("title") or record.get("display_name") or record.get("name"),
         limit=200,
@@ -2274,6 +2278,51 @@ def _github_workflow_jobs_refresh_summary(origin_uri: str, payload: dict[str, An
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_repository_artifacts_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if (
+        parts.scheme != "https"
+        or (parts.hostname or "").strip().lower() != "api.github.com"
+        or parts.username
+        or parts.password
+        or "@" in parts.netloc
+    ):
+        return ""
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or lowered[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or lowered[4] != "actions"
+        or lowered[5] != "artifacts"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_repository_artifacts_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    path = parts.path.split("/")
+    lowered = [segment.lower() for segment in path]
+    return (
+        (parts.hostname or "").strip().lower() == "api.github.com"
+        and len(path) >= 6
+        and path[0] == ""
+        and lowered[1] == "repos"
+        and lowered[4] == "actions"
+        and lowered[5] == "artifacts"
+    )
+
+
 def _github_workflow_artifacts_path_run_id(origin_uri: str) -> int | None:
     try:
         parts = urlsplit(origin_uri)
@@ -2346,6 +2395,51 @@ def _github_workflow_artifact_is_safe(artifact: Any) -> bool:
         if _refresh_value_is_blocked(artifact.get(field)):
             return False
     return True
+
+
+def _json_payload_is_github_repository_artifacts_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_repository_artifacts_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if _json_payload_is_feed(payload) or any(key in payload for key in ("version", "items")):
+        return False
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    if total_count is None:
+        return False
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list):
+        return False
+    if not artifacts:
+        return total_count == 0
+    return all(_github_workflow_artifact_is_safe(artifact) for artifact in artifacts)
+
+
+def _github_repository_artifacts_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_repository_artifacts_path_repo(origin_uri) or "repository"
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    parts = [f"GitHub repository {repo} artifacts", f"artifact count: {total_count if total_count is not None else 0}"]
+    raw_artifacts = payload.get("artifacts")
+    artifacts = raw_artifacts if isinstance(raw_artifacts, list) else []
+    for artifact in artifacts[:5]:
+        if not _github_workflow_artifact_is_safe(artifact):
+            continue
+        name = _safe_public_text(artifact.get("name"), limit=200)
+        artifact_id = _safe_optional_nonnegative_int(artifact.get("id"))
+        size = _safe_optional_nonnegative_int(artifact.get("size_in_bytes"))
+        artifact_parts = [f"artifact: {name}"]
+        if artifact_id is not None:
+            artifact_parts.append(f"id: {artifact_id}")
+        if size is not None:
+            artifact_parts.append(f"size bytes: {size}")
+        if isinstance(artifact.get("expired"), bool):
+            artifact_parts.append(f"expired: {str(artifact['expired']).lower()}")
+        for field, label in (("created_at", "created"), ("updated_at", "updated"), ("expires_at", "expires")):
+            timestamp = _safe_public_text(artifact.get(field), limit=80)
+            if timestamp:
+                artifact_parts.append(f"{label}: {timestamp}")
+        parts.append("; ".join(artifact_parts))
+    return _bounded_refresh_summary("; ".join(parts))
 
 
 def _json_payload_is_github_workflow_artifacts_metadata(origin_uri: str, payload: Any) -> bool:
@@ -7179,6 +7273,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "summary": summary,
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
+    if _json_payload_is_github_repository_artifacts_metadata(origin_uri, payload):
+        repo = _github_repository_artifacts_path_repo(origin_uri) or source_id
+        title = f"GitHub repository artifacts {repo}"
+        summary = _github_repository_artifacts_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_repository_artifacts_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     if _json_payload_is_github_workflow_artifacts_metadata(origin_uri, payload):
         title = f"GitHub workflow run {_github_workflow_artifacts_path_run_id(origin_uri) or 0} artifacts"
         summary = _github_workflow_artifacts_refresh_summary(origin_uri, payload)
@@ -7560,6 +7666,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_repository_events_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_repository_events_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_repository_artifacts_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_repository_artifacts_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     secret_scanning_safe_origin = _github_secret_scanning_alerts_safe_origin(raw_origin_uri)
@@ -7628,6 +7737,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_repository_events_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_repository_artifacts_path_matches(safe_origin_uri):
+        if not _github_repository_artifacts_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_assignees_path_matches(safe_origin_uri):
         if not _github_assignees_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -7685,6 +7798,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_repository_events_path_repo(final_url)
             or _github_repository_events_path_repo(final_url) != _github_repository_events_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_repository_artifacts_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_repository_artifacts_path_repo(final_url)
+            or _github_repository_artifacts_path_repo(final_url) != _github_repository_artifacts_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_dependabot_alerts_path_matches(safe_origin_uri) and (
@@ -7803,6 +7922,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_repository_events_path_matches(safe_origin_uri) and (
             not _github_repository_events_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_repository_artifacts_path_matches(safe_origin_uri) and (
+            not _github_repository_artifacts_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
