@@ -2871,7 +2871,11 @@ function _messageBottomDistance(){
   return el.scrollHeight-el.scrollTop-el.clientHeight;
 }
 function _shouldFollowMessagesOnDomReplace(){
-  return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(1200));
+  // Final stream settlement replaces the live DOM with persisted messages. Keep
+  // following only for users who are still pinned or effectively at the tail.
+  // A broad near-bottom window causes long answers/mobile readers who scroll up
+  // a little to read mid-stream to get snapped back to the bottom on completion.
+  return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(120));
 }
 function _settleMessageScrollToBottom(force){
   // Markdown post-processing (Prism, tables, Mermaid/KaTeX/PDF placeholders)
