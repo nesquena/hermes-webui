@@ -430,17 +430,34 @@ function _cronDiagnostics(job) {
   return JSON.stringify(fields, null, 2);
 }
 
+function _gatewayStatusReason(status) {
+  const health = status && typeof status.health === 'object' ? status.health : null;
+  if (!health) return '';
+  return typeof health.reason === 'string' ? health.reason.trim() : '';
+}
+
 function _cronGatewayNoticeHtml(status) {
   if (!status || (status.configured && status.running)) return '';
+  const reason = _gatewayStatusReason(status);
+  const isStaleMetadata = reason === 'gateway_stale_running_state';
+  const isRemoteUnreachable = reason === 'remote_gateway_unreachable';
   const notConfigured = !status.configured;
   const title = notConfigured
     ? 'Gateway not configured'
-    : 'Gateway not running';
+    : isStaleMetadata
+      ? 'Gateway metadata stale'
+      : isRemoteUnreachable
+        ? 'Gateway endpoint not reachable'
+        : 'Gateway not running';
   const body = notConfigured
     ? 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon. If this is a single-container Docker install, jobs can be created and run manually here, but scheduled ticks need a gateway container or `hermes gateway` running outside the WebUI.'
-    : 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon to be running. Start the gateway container or `hermes gateway` before relying on offline scheduled runs.';
+    : isStaleMetadata
+      ? 'The gateway is marked as configured, but its health metadata has gone stale. In Docker, scheduled jobs require a live gateway daemon that refreshes runtime metadata while ticking cron.'
+      : isRemoteUnreachable
+        ? 'The gateway health endpoint is not reachable from WebUI. Verify `HERMES_WEBUI_GATEWAY_BASE_URL` points to a reachable gateway service and network path before relying on cron ticking.'
+        : 'In Hermes WebUI, scheduled jobs require the Hermes gateway daemon to be running. Start the gateway container or `hermes gateway` before relying on offline scheduled runs.';
   const docsHref = 'https://github.com/nesquena/hermes-webui/blob/master/docs/docker.md#scheduled-jobs-and-the-gateway-daemon';
-  const helpLink = notConfigured
+  const helpLink = notConfigured || isRemoteUnreachable || isStaleMetadata
     ? `<p><a href="${docsHref}" target="_blank" rel="noopener">How to enable scheduled jobs in Docker ↗</a></p>`
     : '';
   return `
@@ -8080,7 +8097,13 @@ function loadGatewayStatus(){
       return;
     }
     if(!r.running){
-      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>Gateway not running</div>`;
+      const reason = _gatewayStatusReason(r);
+      const statusLabel = reason === 'gateway_stale_running_state'
+        ? 'Gateway metadata stale'
+        : reason === 'remote_gateway_unreachable'
+          ? 'Gateway endpoint not reachable'
+          : 'Gateway not running';
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>${esc(statusLabel)}</div>`;
       return;
     }
     const platformIcons={telegram:'💬',discord:'🎮',slack:'📝',web:'🌐',api:'🔌'};

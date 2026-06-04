@@ -200,6 +200,26 @@ def test_gateway_health_url_with_health_suffix_is_normalized(monkeypatch):
     assert payload["details"].get("gateway_state") == "running"
 
 
+def test_gateway_webui_base_url_env_is_used_for_remote_probe(monkeypatch):
+    """`HERMES_WEBUI_GATEWAY_BASE_URL` should be treated like a gateway health base URL."""
+    monkeypatch.delenv("HERMES_API_URL", raising=False)
+    monkeypatch.delenv("HERMES_GATEWAY_HEALTH_URL", raising=False)
+    monkeypatch.delenv("GATEWAY_HEALTH_URL", raising=False)
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://container-gw:8642")
+    seen = []
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(req.full_url)
+        return _FakeResp(200, body=b'{"gateway_state":"running"}')
+
+    with mock.patch.object(agent_health.urllib_request, "urlopen", fake_urlopen):
+        payload = agent_health.build_agent_health_payload()
+
+    assert payload["alive"] is True
+    assert payload["details"]["reason"] == "remote_gateway"
+    assert seen[0].startswith("http://container-gw:8642/")
+
+
 def test_oversized_remote_body_does_not_hang_and_skips_parse(monkeypatch):
     """A 2xx response with a huge body must be capped (not read unbounded) and
     still report the gateway alive, just without a parsed gateway_state."""

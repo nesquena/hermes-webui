@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- Gateway diagnostic details now distinguish "not configured" from "gateway metadata stale" and remote health failures for Docker gateway-backed setups. The Tasks/Cron and System Settings health copy now reflects the underlying `reason` from the gateway health payload (for example, stale running metadata vs endpoint unreachable) and avoids conflating them with true `Gateway not configured` states. Closes #2785.
+
+### Docs
+- Updated Docker guidance for scheduled jobs to reflect gateway daemon + remote gateway-base URL requirements, and added concrete checks for gateway health reachability (`health/detailed`) and service verification. (#2785)
+
 ## [v0.51.258] — 2026-06-04 — Release HZ (stage-r6 — update banner from any panel + inline thinking on settlement)
 
 ### Fixed
@@ -47,7 +53,6 @@
 
 ### Docs
 - Documented an explicit WebUI–Agent compatibility policy: separate the displayed WebUI runtime version from the tested/pinned pair compatibility contract, and clarified Docker upgrade pinning guidance to keep releases aligned until the stable boundary work in #1925/#2491 lands. (#3232, @franksong2702)
-
 ## [v0.51.252] — 2026-06-03 — Release HT (stage-q24 — selection-bleed fix + compatibility docs)
 
 ### Fixed

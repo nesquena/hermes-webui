@@ -34,4 +34,6 @@ def test_docker_docs_explain_single_container_cron_gateway_boundary():
     assert "single-container setup runs the WebUI only" in docs
     assert "scheduled jobs require the Hermes gateway daemon" in docs
     assert "Gateway not configured" in docs
+    assert "`gateway_state.json` can become stale" in docs
+    assert "HERMES_WEBUI_GATEWAY_BASE_URL" in docs
     assert "docker-compose.two-container.yml" in docs

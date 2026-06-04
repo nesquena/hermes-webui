@@ -68,9 +68,14 @@ isolated Hermes home and follow
 
 ## Scheduled jobs and the gateway daemon
 
-**Symptom**: Cron jobs created in the Tasks panel never fire. System Settings shows the orange "Gateway not configured" pill, and the Tasks panel shows the same banner above the job list.
+**Symptom**: Cron jobs created in the Tasks panel never fire. System Settings or Tasks shows:
+
+- Orange "Gateway not configured", or
+- Red "Gateway not running" with stale metadata text.
 
 **Cause**: Scheduled cron ticks are not driven by the WebUI itself. The gateway daemon ticks the scheduler every 60 seconds; without one running, scheduled jobs sit idle. "Run now" / "Trigger" buttons still work because the WebUI handles those in-process.
+
+In older gateway builds, or when the daemon runs in a separate container, `gateway_state.json` can become stale and WebUI may lose confidence even if the daemon is up. This is especially visible if only base URLs are configured (e.g. `HERMES_WEBUI_GATEWAY_BASE_URL`) and local daemon state files are not being refreshed.
 
 **Fix**: Run a gateway container alongside the WebUI. The two-container compose file is the recommended path:
 
@@ -84,10 +89,13 @@ The three-container layout adds the dashboard but is otherwise the same shape. I
 **Verify**: Once the gateway is up, the System Settings pill should turn green and the Tasks banner disappear. From the host:
 
 ```bash
+export GATEWAY_BASE_URL="${HERMES_API_URL:-${HERMES_WEBUI_GATEWAY_BASE_URL:-http://hermes:8642}}"
 docker compose -f docker-compose.two-container.yml exec hermes-agent hermes gateway status
+curl -sS "${GATEWAY_BASE_URL%/}/health/detailed" | jq '.gateway_state, .state'
 ```
 
 If the service name differs in your compose file, `docker compose -f docker-compose.two-container.yml ps` lists the running services.
+For container-to-container diagnostics, set one of `HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` in the WebUI environment when using gateway chat mode (`HERMES_WEBUI_CHAT_BACKEND=gateway`), then restart WebUI.
 
 Refs #2785.
 
