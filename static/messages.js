@@ -602,7 +602,7 @@ async function toggleSavedPromptsPopup(){
     for(const p of prompts){
       const row=document.createElement('div');
       row.className='saved-prompt-row';
-      row.setAttribute('role','option');
+      row.setAttribute('role','menuitem');
       const label=document.createElement('span');
       label.className='saved-prompt-label';
       label.textContent=p.label||p.text;
