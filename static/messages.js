@@ -150,6 +150,8 @@ if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window 
 
 let _selectedTextReplyBtn=null;
 let _selectedTextReplyText='';
+let _pendingSelections=[];  // [{id, name, text}] — named context blocks
+let _selectionIdCounter=0;
 let _selectedTextReplyRaf=0;
 const _persistentStateToastSeen=new Set();
 const _thinkPairs=[
@@ -710,6 +712,62 @@ document.addEventListener('click',(e)=>{
     if(btn)btn.setAttribute('aria-expanded','false');
   }
 },{capture:false});
+function _addNamedContextBlock(text){
+  const id='ctx-'+(++_selectionIdCounter);
+  const name='Context '+_selectionIdCounter;
+  _pendingSelections.push({id, name, text});
+  _renderSelectionChips();
+  return id;
+}
+
+function _removeNamedContextBlock(id){
+  _pendingSelections=_pendingSelections.filter(s=>s.id!==id);
+  _renderSelectionChips();
+}
+
+function _renderSelectionChips(){
+  const wrap=document.getElementById('composerSelectionChips');
+  if(!wrap)return;
+  wrap.innerHTML='';
+  wrap.hidden=!_pendingSelections.length;
+  _pendingSelections.forEach(s=>{
+    const chip=document.createElement('span');
+    chip.className='chip selection-chip';
+    chip.dataset.selectionId=s.id;
+    chip.innerHTML=`<span class="selection-chip-name" title="${esc(s.text)}">${esc(s.name)}</span>`+
+      `<button type="button" class="selection-chip-remove" aria-label="Remove context block" onclick="_removeNamedContextBlock('${s.id}')">&#x2715;</button>`;
+    chip.addEventListener('dblclick',()=>_editSelectionChipName(s.id,chip));
+    wrap.appendChild(chip);
+  });
+}
+
+function _editSelectionChipName(id,chip){
+  const s=_pendingSelections.find(x=>x.id===id);
+  if(!s)return;
+  const nameEl=chip.querySelector('.selection-chip-name');
+  const inp=document.createElement('input');
+  inp.type='text';inp.value=s.name;inp.className='selection-chip-edit';
+  nameEl.replaceWith(inp);
+  inp.focus();inp.select();
+  const commit=()=>{ s.name=inp.value.trim()||s.name; _renderSelectionChips(); };
+  inp.addEventListener('blur',commit);
+  inp.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();commit();} if(e.key==='Escape'){_renderSelectionChips();} });
+}
+
+function _flushSelectionBlocksToComposer(){
+  if(!_pendingSelections.length)return;
+  const composer=(typeof $==='function'&&$('msg'))||document.getElementById('msg');
+  if(!composer)return;
+  const blocks=_pendingSelections.map(s=>`**${s.name}:**\n${_formatSelectedTextReplyQuote(s.text)}`).join('\n\n');
+  const current=String(composer.value||'');
+  composer.value=current.trim()?`${current.replace(/\s+$/,'')}\n\n${blocks}\n\n`:`${blocks}\n\n`;
+  _pendingSelections=[];
+  _renderSelectionChips();
+  composer.focus();
+  try{ composer.setSelectionRange(composer.value.length, composer.value.length); }catch(_e){}
+  composer.dispatchEvent(new Event('input',{bubbles:true}));
+  if(typeof autoResize==='function') autoResize();
+}
 
 function _selectedTextReplyButton(){
   if(_selectedTextReplyBtn)return _selectedTextReplyBtn;
@@ -726,7 +784,8 @@ function _selectedTextReplyButton(){
   btn.addEventListener('mousedown', e=>e.preventDefault());
   btn.addEventListener('click', e=>{
     e.preventDefault();
-    if(_appendSelectedTextReplyToComposer(_selectedTextReplyText)){
+    if(_selectedTextReplyText){
+      _addNamedContextBlock(_selectedTextReplyText);
       _hideSelectedTextReplyButton();
       const selection=window.getSelection&&window.getSelection();
       if(selection&&selection.removeAllRanges)selection.removeAllRanges();
@@ -872,6 +931,7 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 }
 
 async function send(){
+  _flushSelectionBlocksToComposer();
   // Reject concurrent invocations early — before any await yields control.
   // If a send is already in-flight (e.g. queue drain), re-queue the message
   // instead of silently dropping it.
