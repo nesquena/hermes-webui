@@ -175,3 +175,93 @@ class TestSettlementLoopForward:
             "Settlement loop must read from _reasoning_segments.get(idx) "
             "to retrieve the per-message reasoning trace"
         )
+
+
+# ── 5. Multi-turn offset prevents cross-turn reasoning clobber ──────────────
+
+
+class TestMultiTurnOffset:
+    """The settlement loop must skip prior-turn assistant messages so that
+    _reasoning_segments (indexed from 0 for this turn only) doesn't overwrite
+    reasoning stored on earlier turns."""
+
+    def _settlement_block(self):
+        src = read('api/streaming.py')
+        start = src.find('# #3587: use per-message segments')
+        assert start >= 0, 'Settlement block not found'
+        return src[start:start + 1500]
+
+    def test_settlement_computes_prev_asst_offset(self):
+        block = self._settlement_block()
+        assert '_prev_asst' in block, (
+            "Settlement loop must compute _prev_asst (count of assistant "
+            "messages in _previous_messages) to offset the segment index"
+        )
+
+    def test_settlement_skips_prior_turn_messages(self):
+        block = self._settlement_block()
+        assert re.search(r'if\s+_turn_idx\s*<\s*_prev_asst\s*:', block), (
+            "Settlement loop must skip prior-turn messages with "
+            "if _turn_idx < _prev_asst: continue"
+        )
+
+    def test_segment_index_subtracts_offset(self):
+        block = self._settlement_block()
+        assert re.search(r'_turn_idx\s*-\s*_prev_asst', block), (
+            "Segment index must subtract _prev_asst offset so indexing "
+            "starts at 0 for this turn's first assistant message"
+        )
+
+
+# ── 6. Tool-call boundary advances reasoning index ────────────────────────────
+
+
+class TestToolCallBoundary:
+    """on_interim_assistant is suppressed for contentless tool-call assistant
+    messages (run_agent.py:3834 early-returns when content is empty). The
+    reasoning index must advance at tool-call boundaries instead, so reasoning
+    accumulated before a tool-call-only assistant message gets its own segment."""
+
+    def _on_tool_body(self):
+        src = read('api/streaming.py')
+        m = re.search(
+            r'def on_tool\(\*cb_args.*?\):\s*\n(.*?)(?=\n\s{12}def |\n\s{8}def )',
+            src, re.DOTALL,
+        )
+        assert m, "on_tool function not found in api/streaming.py"
+        return m.group(1)
+
+    def test_on_tool_advances_reasoning_idx(self):
+        body = self._on_tool_body()
+        assert '_current_reasoning_idx' in body, (
+            "on_tool must reference _current_reasoning_idx to advance the "
+            "reasoning segment at tool-call boundaries (#3587)"
+        )
+
+    def test_tool_boundary_guard_prevents_double_advance(self):
+        body = self._on_tool_body()
+        assert '_tool_boundary_advanced' in body, (
+            "on_tool must use a _tool_boundary_advanced guard so multiple "
+            "tool calls in one assistant message only advance the index once"
+        )
+
+    def test_tool_boundary_flag_declared(self):
+        src = read('api/streaming.py')
+        assert '_tool_boundary_advanced' in src, (
+            "_tool_boundary_advanced flag must be declared in streaming.py"
+        )
+
+    def test_reasoning_resets_tool_boundary_flag(self):
+        """New reasoning arriving after a tool boundary must reset the guard
+        so the next tool-call batch can advance the index again."""
+        src = read('api/streaming.py')
+        m = re.search(
+            r'def on_reasoning\(text\):\s*\n(.*?)(?=\n\s{12}def |\n\s{8}def )',
+            src, re.DOTALL,
+        )
+        assert m, "on_reasoning function not found"
+        body = m.group(1)
+        assert '_tool_boundary_advanced' in body, (
+            "on_reasoning must reset _tool_boundary_advanced so the next "
+            "tool-call batch can advance the reasoning index"
+        )

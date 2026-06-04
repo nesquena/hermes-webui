@@ -4644,6 +4644,7 @@ def _run_agent_streaming(
             # assistant turn (before tool calls) keeps its own reasoning segment.
             _reasoning_segments: dict = {}
             _current_reasoning_idx = 0
+            _tool_boundary_advanced = False
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
 
             # Throttle: emit metering events at most every 100 ms so the per-message
@@ -4693,9 +4694,10 @@ def _run_agent_streaming(
                 _emit_metering()
 
             def on_reasoning(text):
-                nonlocal _reasoning_segments, _current_reasoning_idx
+                nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
                 if text is None:
                     return
+                _tool_boundary_advanced = False
                 reasoning_delta = str(text)
                 # Some runtimes mirror user-visible progress text through the
                 # reasoning channel after it already streamed as normal assistant
@@ -4783,7 +4785,7 @@ def _run_agent_streaming(
                 return True
 
             def on_tool(*cb_args, **cb_kwargs):
-                nonlocal _reasoning_segments
+                nonlocal _reasoning_segments, _current_reasoning_idx, _tool_boundary_advanced
                 event_type = None
                 name = None
                 preview = None
@@ -4821,6 +4823,15 @@ def _run_agent_streaming(
                         meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
                         _emit_metering()
                     return
+
+                # (#3587) Advance reasoning index at tool-call boundaries.
+                # on_interim_assistant is suppressed for contentless tool-call
+                # messages (run_agent.py:3834), so the index never advances
+                # there. The first tool.started event after reasoning indicates
+                # a new assistant message boundary.
+                if not _tool_boundary_advanced and _current_reasoning_idx in _reasoning_segments:
+                    _current_reasoning_idx += 1
+                    _tool_boundary_advanced = True
 
                 args_snap = _tool_args_snapshot(args)
 
@@ -6163,12 +6174,22 @@ def _run_agent_streaming(
                 # #3587: use per-message segments so intermediate assistant turns
                 # (before tool calls) each receive their own reasoning trace rather
                 # than all reasoning being written only to the last assistant message.
+                # Scope the walk to this turn's newly-appended assistant messages
+                # to prevent cross-turn reasoning clobber (multi-turn off-by-N).
                 if s.messages:
+                    _prev_asst = sum(
+                        1 for m in (_previous_messages or [])
+                        if isinstance(m, dict) and m.get('role') == 'assistant'
+                    )
                     _asst_count = 0
                     for _rm in s.messages:
                         if not (isinstance(_rm, dict) and _rm.get('role') == 'assistant'):
                             continue
-                        _seg_reasoning = _reasoning_segments.get(_asst_count, '')
+                        _turn_idx = _asst_count
+                        _asst_count += 1
+                        if _turn_idx < _prev_asst:
+                            continue  # prior-turn message — never touch its reasoning
+                        _seg_reasoning = _reasoning_segments.get(_turn_idx - _prev_asst, '')
                         _existing_reasoning = _seg_reasoning or _rm.get('reasoning') or ''
                         _content = _rm.get('content')
                         if isinstance(_content, str) and _content:
