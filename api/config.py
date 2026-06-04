@@ -3319,10 +3319,11 @@ def _models_from_live_provider_ids(provider_id: str, live_ids: list[str]) -> lis
 def _read_visible_codex_cache_model_ids() -> list[str]:
     """Return visible model slugs from Codex's local models_cache.json.
 
-    The agent's provider_model_ids('openai-codex') intentionally filters IDs
-    with ``supported_in_api: false``. Codex CLI still lists some of those models
-    in its picker (notably ``gpt-5.3-codex-spark`` from #1680), so the WebUI
-    merges this visible local catalog to stay in sync with Codex itself.
+    This is a **fallback** source only. Hermes Agent's
+    ``provider_model_ids('openai-codex')`` is the authoritative catalog; this
+    function is used when Agent returns an empty list or raises an exception.
+    It is NOT merged over a non-empty Agent result — doing so would reintroduce
+    stale/dead models that Agent no longer advertises.
     """
     codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
     cache_path = codex_home / "models_cache.json"
@@ -4331,11 +4332,13 @@ def get_available_models() -> dict:
                         )
                 elif pid == "openai-codex":
                     # Codex account catalogs drift faster than WebUI releases
-                    # (for example gpt-5.3-codex-spark in #1680). Ask the
-                    # agent's Codex resolver first so /api/models inherits the
-                    # live Codex API / local ~/.codex cache / static fallback
-                    # chain instead of freezing the picker to WebUI's curated
-                    # _PROVIDER_MODELS snapshot.
+                    # (for example gpt-5.3-codex-spark in #1680).  Hermes Agent
+                    # is the authoritative source: when it returns a non-empty
+                    # list, use it exactly — do NOT merge local Codex cache
+                    # entries on top, as that can reintroduce stale/dead models
+                    # that Agent no longer advertises.  The local Codex cache
+                    # and static fallback are only used when Agent returns
+                    # nothing or raises.
                     raw_models = []
                     codex_ids = []
                     try:
@@ -4345,9 +4348,8 @@ def get_available_models() -> dict:
                     except Exception:
                         logger.warning("Failed to load OpenAI Codex models from hermes_cli")
 
-                    for mid in _read_visible_codex_cache_model_ids():
-                        if mid not in codex_ids:
-                            codex_ids.append(mid)
+                    if not codex_ids:
+                        codex_ids = _read_visible_codex_cache_model_ids()
 
                     raw_models = [
                         {"id": mid, "label": _get_label_for_model(mid, [])}
