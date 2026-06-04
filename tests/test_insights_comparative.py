@@ -315,3 +315,39 @@ def test_insights_cli_session_boundary(monkeypatch, tmp_path):
     assert resp["total_cost"] == 0.05
     assert resp["prev_total_sessions"] == 0
 
+
+def test_insights_profile_missing_path_or_name(monkeypatch, tmp_path):
+    # 1. Create empty WebUI index
+    sess_dir = tmp_path / "sessions"
+    sess_dir.mkdir(parents=True)
+    monkeypatch.setattr(routes, "SESSION_DIR", sess_dir)
+    (sess_dir / "_index.json").write_text("[]", encoding="utf-8")
+
+    # 2. Mock list_profiles_api to return a list with some invalid entries (None path/name)
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "default")
+    monkeypatch.setattr("api.profiles.list_profiles_api", lambda: [
+        {"name": "default", "path": str(tmp_path), "is_active": True},
+        {"name": "missing-path", "path": None, "is_active": False},
+        {"name": None, "path": "/some/path", "is_active": False},
+        {"name": "missing-key-path", "is_active": False}
+    ])
+    monkeypatch.setattr("api.models._active_state_db_path", lambda: None)
+
+    responses = []
+    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append(payload) or True)
+
+    handler = types.SimpleNamespace()
+    parsed = types.SimpleNamespace(query="days=1")
+
+    # Should run successfully without raising TypeError
+    result = routes._handle_insights(handler, parsed)
+    assert result is True
+    assert len(responses) == 1
+    resp = responses[0]
+
+    # Only default profile is active and valid, others skipped, so profile_breakdown has length 1
+    profiles = resp["profiles"]
+    assert len(profiles) == 1
+    assert profiles[0]["name"] == "default"
+
+

@@ -3670,7 +3670,10 @@ def _handle_insights(handler, parsed) -> bool:
         db_paths = []
         if all_profiles:
             for p in list_profiles_api():
-                p_path = Path(p.get('path'))
+                p_path_str = p.get('path')
+                if not p_path_str:
+                    continue
+                p_path = Path(p_path_str)
                 db_p = p_path / "state.db"
                 if db_p.exists() and db_p not in db_paths:
                     db_paths.append(db_p)
@@ -3791,7 +3794,10 @@ def _handle_insights(handler, parsed) -> bool:
         active_name = get_active_profile_name()
         for p in profiles:
             p_name = p.get('name')
-            p_path = Path(p.get('path'))
+            p_path_str = p.get('path')
+            if not p_path_str or not p_name:
+                continue
+            p_path = Path(p_path_str)
             p_stats = _aggregate_insights_for_home(p_name, p_path, cutoff)
             profile_breakdown.append({
                 "name": p_name,
