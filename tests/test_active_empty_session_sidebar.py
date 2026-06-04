@@ -16,9 +16,9 @@ def test_active_empty_session_is_injected_into_sidebar_rows():
     assert "rows.some(s=>s&&s.session_id===sid)" in helper
 
 
-def test_new_session_switches_sidebar_back_to_webui_source():
-    new_session = SESSIONS_JS[SESSIONS_JS.index("async function newSession"):SESSIONS_JS.index("async function loadSession")]
-    assert "if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';" in new_session
+def test_new_session_uses_set_based_origin_filter():
+    # _activeOriginFilters always contains 'webui'; no reset needed on new session
+    assert "_activeOriginFilters = new Set(['webui'])" in SESSIONS_JS
 
 
 def test_sidebar_search_uses_active_ephemeral_rows_before_filtering():

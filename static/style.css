@@ -4148,7 +4148,19 @@ main.main > #mainPlugin{display:none;}
 .mermaid-rendered{background:transparent;padding:8px 0;}
 .mermaid-rendered svg{max-width:100%;height:auto;}
 
-/* ── Session projects ── */
+/* ── Session origin filter (funnel popover) ── */
+.session-filter-bar{display:flex;align-items:center;padding:4px 12px;position:relative;}
+.session-filter-funnel{background:none;border:1px solid var(--border);border-radius:6px;padding:4px 8px;cursor:pointer;color:var(--muted);display:inline-flex;align-items:center;gap:4px;font-size:12px;position:relative;}
+.session-filter-funnel:hover{color:var(--text);border-color:var(--text);}
+.session-filter-badge{background:var(--accent);color:#fff;border-radius:8px;padding:0 5px;font-size:10px;line-height:16px;margin-left:4px;}
+.session-origin-popover{position:absolute;top:100%;left:12px;z-index:200;background:var(--sidebar-bg);border:1px solid var(--border);border-radius:8px;padding:8px 0;min-width:180px;box-shadow:0 4px 12px rgba(0,0,0,.15);}
+.session-origin-popover[hidden]{display:none;}
+.session-origin-row{display:flex;align-items:center;gap:8px;padding:6px 12px;cursor:pointer;font-size:13px;color:var(--text);}
+.session-origin-row:hover{background:var(--hover-bg);}
+.session-origin-checkbox{width:14px;height:14px;accent-color:var(--accent);}
+.session-origin-label{flex:1;}
+.session-origin-count{color:var(--muted);font-size:11px;}
+/* deprecated: session-source-tabs replaced by session-filter-bar; kept for cache-busted clients */
 .session-source-tabs{display:flex;gap:4px;padding:4px 10px 8px;flex-shrink:0;}
 .session-source-tab{flex:1;min-width:0;border:1px solid var(--border2);border-radius:10px;background:var(--input-bg);color:var(--muted);font-size:10px;font-weight:700;line-height:1.2;padding:5px 6px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .15s,color .15s,border-color .15s;}
 .session-source-tab:hover{background:rgba(255,255,255,.08);color:var(--text);}

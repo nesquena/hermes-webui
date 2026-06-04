@@ -6,29 +6,27 @@ SESSIONS_JS = ROOT / "static" / "sessions.js"
 STYLE_CSS = ROOT / "static" / "style.css"
 
 
-def test_sidebar_has_separate_webui_and_cli_session_source_tabs():
+def test_sidebar_has_multi_select_origin_filter():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    assert "let _sessionSourceFilter = 'webui'" in src
-    assert "hermes-session-source-filter" in src
-    assert "session-source-tabs" in src
-    assert "WebUI sessions" in src
-    assert "CLI sessions" in src
-    assert "_sessionSourceFilter==='cli'" in src
+    assert "let _activeOriginFilters = new Set(['webui'])" in src
+    assert "hermes-origin-filters" in src
+    assert "session-filter-bar" in src
+    assert "session-origin-popover" in src
+    assert "_toggleOriginFilter" in src
+    assert "_restoreOriginFilters" in src
 
 
 def test_cli_filter_keeps_cli_rows_out_of_default_webui_list():
     src = SESSIONS_JS.read_text(encoding="utf-8")
-    assert "function _partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in src
-    assert "webuiSessionCount" in src
-    assert "cliSessionCount" in src
-    assert "const showCliOnly=_sessionSourceFilter==='cli';" in src
-    assert "if(showCliOnly ? !isCli : isCli) continue;" in src
+    assert "const webuiSessionCount = withMessages.filter(s=>!_isCliSession(s)).length" in src
+    assert "const cliSessionCount = withMessages.filter(s=>_isCliSession(s)).length" in src
+    assert "_activeOriginFilters.has(origin)" in src
 
 
-def test_session_source_tabs_have_dedicated_sidebar_styles():
+def test_session_origin_filter_has_dedicated_sidebar_styles():
     css = STYLE_CSS.read_text(encoding="utf-8")
-    assert ".session-source-tabs" in css
-    assert ".session-source-tab.active" in css
+    assert ".session-filter-bar" in css
+    assert ".session-origin-popover" in css
     assert ".session-empty-note" in css
 
 
