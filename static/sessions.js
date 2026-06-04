@@ -1512,8 +1512,12 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   const hasMessageToolMetadata=msgs.some(m=>{
     if(!m) return false;
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+    // `_partial_tool_calls` are emitted by interrupted/partial turns and must also
+    // anchor rendering to the owning assistant message, so we can reconstruct
+    // settled tool cards from the message history when available.
+    const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    return hasTc||hasTu;
+    return hasTc||hasPartialTc||hasTu;
   });
   if(!hasMessageToolMetadata&&Array.isArray(sessionToolCalls)&&sessionToolCalls.length){
     S.toolCalls=sessionToolCalls.map(tc=>({...tc,done:true}));
