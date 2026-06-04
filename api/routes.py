@@ -3696,7 +3696,7 @@ def _handle_insights(handler, parsed) -> bool:
                     _cost = _safe_cost_float(row["estimated_cost_usd"])
                     _msgs = _safe_usage_int(row["message_count"])
                     
-                    _ts = row["started_at"] or row["ended_at"] or 0
+                    _ts = max(row["started_at"] or 0.0, row["ended_at"] or 0.0)
                     if _ts >= cutoff:
                         total_sessions += 1
                         total_messages += _msgs

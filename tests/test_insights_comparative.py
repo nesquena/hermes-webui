@@ -243,3 +243,75 @@ def test_handle_insights_comparative_flow(monkeypatch, tmp_path):
     assert profiles[1]["total_tokens"] == 70
     assert profiles[1]["cost"] == 0.02
     assert profiles[1]["is_active"] is True
+
+
+def test_insights_cli_session_boundary(monkeypatch, tmp_path):
+    cutoff = 1000.0
+
+    # 1. Create empty WebUI index (to isolate CLI results)
+    sess_dir = tmp_path / "sessions"
+    sess_dir.mkdir(parents=True)
+    monkeypatch.setattr(routes, "SESSION_DIR", sess_dir)
+    (sess_dir / "_index.json").write_text("[]", encoding="utf-8")
+
+    # 2. Create state.db with a CLI session straddling the boundary:
+    # started_at = 990.0 (< cutoff)
+    # ended_at = 1010.0 (>= cutoff)
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            model TEXT,
+            message_count INTEGER,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            estimated_cost_usd REAL,
+            started_at REAL,
+            ended_at REAL,
+            source TEXT
+        )
+    """)
+    cur.execute("""
+        INSERT INTO sessions (id, model, message_count, input_tokens, output_tokens, estimated_cost_usd, started_at, ended_at, source)
+        VALUES ('cli-boundary', 'gpt-4', 5, 100, 50, 0.05, 990.0, 1010.0, 'cli')
+    """)
+    conn.commit()
+    conn.close()
+
+    # 3. Test _aggregate_insights_for_home
+    agg_result = routes._aggregate_insights_for_home("default", tmp_path, cutoff)
+    assert agg_result["sessions"] == 1
+    assert agg_result["messages"] == 5
+    assert agg_result["total_tokens"] == 150
+    assert agg_result["cost"] == 0.05
+
+    # 4. Test _handle_insights
+    monkeypatch.setattr("time.time", lambda: 1010.0)
+    monkeypatch.setattr("time.mktime", lambda t: 1000.0)
+    
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "default")
+    monkeypatch.setattr("api.profiles.list_profiles_api", lambda: [
+        {"name": "default", "path": str(tmp_path), "is_active": True}
+    ])
+    monkeypatch.setattr("api.models._active_state_db_path", lambda: db_path)
+
+    responses = []
+    monkeypatch.setattr(routes, "j", lambda handler, payload, **kw: responses.append(payload) or True)
+
+    handler = types.SimpleNamespace()
+    parsed = types.SimpleNamespace(query="days=1")
+
+    result = routes._handle_insights(handler, parsed)
+    assert result is True
+    assert len(responses) == 1
+    resp = responses[0]
+
+    # CLI session should be in current period
+    assert resp["total_sessions"] == 1
+    assert resp["total_messages"] == 5
+    assert resp["total_tokens"] == 150
+    assert resp["total_cost"] == 0.05
+    assert resp["prev_total_sessions"] == 0
+
