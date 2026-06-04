@@ -58,7 +58,9 @@ function syncAppTitlebar() {
     mainText = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
     const vis = Array.isArray(S.messages) ? S.messages.filter(m => m && m.role && m.role !== 'tool') : [];
     if (typeof t === 'function') subText = t('n_messages', vis.length);
-    if (S.session.is_cli_session) sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
+    sourceLabel = S.session.source_label || S.session.source_tag || S.session.raw_source || '';
+    // Recovered sidecars stamp source_label 'WebUI' (api/session_recovery.py); don't badge a native session as its own source (#3338).
+    if (/^webui$/i.test(sourceLabel)) sourceLabel = '';
   } else {
     const key = APP_TITLEBAR_KEYS[panel];
     mainText = key && typeof t === 'function' ? t(key) : (panel.charAt(0).toUpperCase() + panel.slice(1));
@@ -5594,7 +5596,18 @@ async function loadMemory(force) {
 // Drag and drop
 const wrap=$('composerWrap');let dragCounter=0;
 document.addEventListener('dragover',e=>e.preventDefault());
-document.addEventListener('dragenter',e=>{e.preventDefault();if(e.dataTransfer.types.includes('Files')||e.dataTransfer.types.includes('application/ws-path')){dragCounter++;wrap.classList.add('drag-over');}});
+document.addEventListener('dragenter',e=>{e.preventDefault();
+  const isWsPath=e.dataTransfer.types.includes('application/ws-path');
+  const isFiles=e.dataTransfer.types.includes('Files');
+  if(isFiles||isWsPath){
+    dragCounter++;
+    // Context-aware hint: a workspace-file drag inserts an @path reference;
+    // an OS-file drag attaches the file to the message.
+    const hint=$('dropHintText');
+    if(hint) hint.textContent=isWsPath?'Drop to insert workspace reference':'Drop files to attach';
+    wrap.classList.add('drag-over');
+  }
+});
 document.addEventListener('dragleave',e=>{dragCounter--;if(dragCounter<=0){dragCounter=0;wrap.classList.remove('drag-over');}});
 document.addEventListener('drop',e=>{
   e.preventDefault();dragCounter=0;wrap.classList.remove('drag-over');
@@ -5948,6 +5961,8 @@ function _preferencesPayloadFromUi(){
   if(fadeTextCb) payload.fade_text_effect=fadeTextCb.checked;
   const simplifiedToolCb=$('settingsSimplifiedToolCalling');
   if(simplifiedToolCb) payload.simplified_tool_calling=simplifiedToolCb.checked;
+  const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
+  if(terminalAutoExpandCb) payload.terminal_auto_expand_on_output=terminalAutoExpandCb.checked;
   const apiRedactCb=$('settingsApiRedact');
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
   const showCliCb=$('settingsShowCliSessions');
@@ -6021,6 +6036,9 @@ async function _autosavePreferencesSettings(payload){
       window._simplifiedToolCalling=(saved&&saved.simplified_tool_calling!==false);
       if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
       if(typeof renderMessages==='function') renderMessages();
+    }
+    if(payload&&payload.terminal_auto_expand_on_output!==undefined){
+      window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
     if(payload&&Object.prototype.hasOwnProperty.call(payload,'fade_text_effect')) window._fadeTextEffect=!!payload.fade_text_effect;
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'pinned_sessions_limit')) window._pinnedSessionsLimit=parseInt(saved.pinned_sessions_limit,10)||3;
@@ -6252,6 +6270,8 @@ async function loadSettingsPanel(){
     if(fadeTextCb){fadeTextCb.checked=!!settings.fade_text_effect;window._fadeTextEffect=fadeTextCb.checked;fadeTextCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const simplifiedToolCb=$('settingsSimplifiedToolCalling');
     if(simplifiedToolCb){simplifiedToolCb.checked=settings.simplified_tool_calling!==false;simplifiedToolCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
+    if(terminalAutoExpandCb){terminalAutoExpandCb.checked=!!settings.terminal_auto_expand_on_output;window._terminalAutoExpandOnOutput=terminalAutoExpandCb.checked;terminalAutoExpandCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const apiRedactCb=$('settingsApiRedact');
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
@@ -7309,6 +7329,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._whatsNewSummaryEnabled=!!body.whats_new_summary_enabled;
   window._showThinking=body.show_thinking!==false;
   window._simplifiedToolCalling=body.simplified_tool_calling!==false;
+  window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
@@ -7649,6 +7670,7 @@ async function saveSettings(andClose){
   body.show_tps=showTps;
   body.fade_text_effect=fadeTextEffect;
   body.simplified_tool_calling=!!($('settingsSimplifiedToolCalling')||{}).checked;
+  body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;

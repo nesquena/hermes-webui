@@ -36,6 +36,8 @@ from api.config import (
     resolve_custom_provider_connection,
     model_with_provider_context,
     load_settings,
+    parse_reasoning_effort,
+    coerce_reasoning_effort_for_model,
 )
 from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
@@ -5099,10 +5101,15 @@ def _run_agent_streaming(
             # `/reasoning <level>`) and hand the parsed dict to AIAgent.  When
             # the key is absent or invalid, pass None → agent uses its default.
             try:
-                from api.config import parse_reasoning_effort as _parse_reff
                 _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
                 _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
-                _reasoning_config = _parse_reff(_effort_raw)
+                _effort = coerce_reasoning_effort_for_model(
+                    _effort_raw,
+                    resolved_model,
+                    provider_id=resolved_provider,
+                    base_url=resolved_base_url,
+                )
+                _reasoning_config = parse_reasoning_effort(_effort)
             except Exception:
                 _reasoning_config = None
 

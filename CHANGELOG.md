@@ -6,6 +6,67 @@
 ### Fixed
 - **Gateway restart timeout and concurrency fixes.** Fixed a bug where triggering a gateway restart from the WebUI alert banner could result in a false 500 "Internal error" response and prematurely SIGKILL the gateway command mid-drain (which requires up to 185s). The restart handler now uses `subprocess.Popen` with a brief 2s timeout and continues draining output in background threads if it exceeds that duration. Additionally, added a server-side `_RESTART_LOCK` to prevent concurrent restart requests from overlapping and corrupting the gateway's state (returning `429 Too Many Requests`).
 
+## [v0.51.252] — 2026-06-03 — Release HT (stage-q24 — selection-bleed fix + compatibility docs)
+
+### Fixed
+- The floating "selected-text reply" button no longer lets its own label get caught in a text selection (`user-select:none`), so dragging a selection near the button doesn't bleed into it. (#2481, @rodboev)
+
+### Docs
+- README now has a **Compatibility** section documenting that the WebUI is tested against the matching hermes-agent release and that both should be upgraded together (until the stable agent API #2491 lands). (@rodboev)
+
+## [v0.51.251] — 2026-06-03 — Release HS (stage-q23 — composer ~/ path autocomplete)
+
+### Fixed
+- Typing a `~/` path token in the composer (e.g. `check this file ~/`) now opens a home-directory path-suggestion dropdown, matching the TUI's path completion. It reuses the existing slash-command dropdown (positioning + keyboard nav) and the server's trusted `/api/workspaces/suggest` endpoint, and only replaces the matched path token on selection (surrounding message text is preserved). Slash-command autocomplete still takes precedence for `/`-prefixed input. (#3433, @puneetdixit200)
+
+## [v0.51.250] — 2026-06-03 — Release HR (stage-q22 — Zeus appearance skin)
+
+### Added
+- New **Zeus** appearance skin (Settings → Appearance, or `/theme skin zeus`) — OLED-near-black dark surfaces that keep the default gold accent, for a high-contrast "gold on black" look that no existing skin offered. All visual changes are scoped to `data-skin="zeus"`; it's dark-focused and falls back to the default light palette in light mode. (#3328, @heagandev)
+
+## [v0.51.249] — 2026-06-03 — Release HQ (stage-q21 — auto-expand terminal on output toggle)
+
+### Added
+- New **"Auto-expand terminal on output"** preference (Settings → Preferences, **off by default**). When enabled, the collapsed embedded terminal panel surfaces itself automatically the first time a running command emits output, so long-running command output isn't silently collected behind a collapsed panel. The auto-expand does not steal focus from the composer, and fires once per stream (not per output chunk). Mirrors the existing `simplified_tool_calling` setting pattern; default-off means no behavior change on upgrade. (#2974, @rodboev)
+
+## [v0.51.248] — 2026-06-03 — Release HP (stage-q20 — self-heal deleted WebUI sessions instead of bricking the chat)
+
+### Fixed
+- A WebUI session whose sidecar was deleted server-side (e.g. after `docker compose --force-recreate`) but whose messages still live in `state.db` no longer **bricks the chat** — it looked alive (`GET /api/session` returned 200 from a synthesized CLI stub) while every action failed (`POST /api/session/draft` and `/api/chat/start` returned 404). Now the GET handler consults `_index.json` (the canonical WebUI session registry): if the id was a WebUI-origin session (empty/`webui`/`fork` source) whose sidecar is gone, it returns 404 so the client can self-heal — clearing the saved session id and stripping the stale `/session/<id>` URL — and falls through to the welcome screen. Genuine CLI-origin sessions keep their existing read-only stub. The client self-heal now also covers the mid-session case (the current session's sidecar disappearing), not just boot. (#2782, @rodboev)
+
+## [v0.51.247] — 2026-06-03 — Release HO (stage-q19 — coerce reasoning effort to model-supported levels)
+
+### Fixed
+- A globally-configured reasoning effort (`agent.reasoning_effort`) is now **coerced to the closest level the active model/provider actually supports** before each request, instead of being sent verbatim and rejected. For example `openai-codex` `gpt-5` rejects `max` (now degraded to `xhigh`) and `o1`/`o3`/`o4` only accept `low`/`medium`/`high` (so `max`/`xhigh` degrade to `high`). Coercion only ever steps *down* to a supported level (never escalates), and `none`/unset are preserved. The model/provider effort-capability filter is applied consistently across the heuristic, models.dev metadata, GitHub Copilot, and LM Studio detection paths. (#3505, @franksong2702)
+
+## [v0.51.246] — 2026-06-03 — Release HN (stage-q18 — WebUI rename syncs to agent state.db)
+
+### Fixed
+- Renaming a session in the WebUI now writes the new title through to the agent's `state.db`, so the TUI and CLI no longer keep showing the old name. The `/api/session/rename` handler now calls `_sync_session_title_to_insights()` (gated on the `sync_to_insights` setting) — exactly like the sibling `/api/session/title/regenerate` handler already did. (#3225, @rodboev)
+
+## [v0.51.245] — 2026-06-03 — Release HM (stage-q17 — messaging source badge in chat topbar)
+
+### Fixed
+- Messaging sessions (Telegram, Discord, WeChat, etc.) now show their platform source badge in the **chat-pane topbar**, not just the sidebar. The topbar badge was gated on `is_cli_session`, which is intentionally `false` for messaging sources, so the badge silently disappeared once you opened the session. The gate is removed; a recovered native session whose sidecar stamps `source_label: "WebUI"` is still left un-badged (it isn't a foreign source). (#3338, @rodboev)
+
+## [v0.51.244] — 2026-06-03 — Release HL (stage-q16 — workspace OS-import drop + composer drop-zone polish)
+
+### Added
+- **Drop OS files/folders onto a specific workspace folder row or breadcrumb segment** to upload into that directory (not only the current directory). OS folder drops are traversed via `webkitGetAsEntry`/`readEntries` and their nested structure is preserved on upload. Composer `@path` drags (#1097), the internal tree-move (#3402), and OS-drop isolation (#3411) are all preserved. (#3402, #3424, @pamnard)
+
+### Fixed
+- The composer drop-zone overlay no longer looks garbled when you drag a workspace file (or OS file) over the footer. Previously the translucent overlay let the textarea, attach/mic icons, and model/profile chips bleed through and collide with the hint text. The overlay is now a clean, fully-opaque box with a single centered, context-aware label — **"Drop to insert workspace reference"** when dragging a workspace file (which inserts an `@path` reference) vs **"Drop files to attach"** for an OS file (which attaches it to the message).
+
+## [v0.51.243] — 2026-06-03 — Release HK (stage-q15 — drag-to-move files within the workspace)
+
+### Added
+- You can now **drag a file or folder in the workspace tree onto another folder row (or a breadcrumb segment) to move it** within the workspace. A new `POST /api/file/move` performs the move server-side, confined to the workspace root (`safe_resolve` on both source and destination, rejects `..` destinations, and refuses to move a folder into itself or a descendant). Name collisions and no-op moves are handled, and the drop handlers use `stopPropagation` so the existing composer `@path` drag (#1097) and OS-file upload-on-drop (#3411) are unchanged. (#3402, #3422, @pamnard)
+
+## [v0.51.242] — 2026-06-03 — Release HJ (stage-q14 — Graphite skin)
+
+### Added
+- New **Graphite** appearance skin — a quiet, neutral-gray "workbench" alternative to the default gold/cream, selectable from Settings → Appearance (and `/theme skin graphite`). All visual changes are scoped to `data-skin="graphite"` so the default appearance is unchanged; the skin ships both light and dark palettes built on the existing CSS-variable token system (no new dependency or build step). Tightens typography, shadows, active-sidebar spacing, and code-block framing, and uses a neutral gray palette rather than an olive-tinted one. (#3440, @t3chn0pr13st)
+
 ## [v0.51.241] — 2026-06-03 — Release HI (stage-q13 — New Chat returns to your unsent draft after visiting history)
 
 ### Fixed

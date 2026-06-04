@@ -114,9 +114,13 @@ class TestScrollPinningFix:
 
     def test_scroll_to_bottom_button_is_overlayed(self):
         """Scroll-to-bottom button stays visible as an overlay outside transcript layout (#677)."""
-        btn_css_pos = STYLE_CSS.find(".scroll-to-bottom-btn")
-        assert btn_css_pos != -1
-        btn_css = STYLE_CSS[btn_css_pos:btn_css_pos + 300]
+        # Anchor on the canonical unscoped `.scroll-to-bottom-btn{` declaration,
+        # not a skin-scoped variant (e.g. a `:root[data-skin="graphite"] ...
+        # .scroll-to-bottom-btn,` grouped selector that may precede it).
+        import re as _re
+        m = _re.search(r"(?m)^\s*\.scroll-to-bottom-btn\{", STYLE_CSS)
+        assert m, "canonical unscoped .scroll-to-bottom-btn{ rule not found"
+        btn_css = STYLE_CSS[m.start():m.start() + 300]
         assert "position:absolute" in btn_css, (
             ".scroll-to-bottom-btn must be an overlay so it stays visible without "
             "participating in transcript scroll layout (#677)"

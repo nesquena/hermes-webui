@@ -1209,6 +1209,13 @@ $('msg').addEventListener('input',()=>{
       if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
     }
     if(typeof ensureSkillCommandsLoadedForAutocomplete==='function') ensureSkillCommandsLoadedForAutocomplete();
+  } else if(typeof getComposerPathAutocompleteMatches==='function'){
+    const cursor=$('msg').selectionStart;
+    getComposerPathAutocompleteMatches(text,cursor).then(matches=>{
+      const ta=$('msg');
+      if(!ta||ta.value!==text||ta.selectionStart!==cursor) return;
+      if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+    }).catch(()=>hideCmdDropdown());
   } else {
     hideCmdDropdown();
   }
@@ -1459,6 +1466,7 @@ const _SKINS=[
   {name:'Default',  colors:['#FFD700','#FFBF00','#CD7F32']},
   {name:'Ares',     colors:['#FF4444','#CC3333','#992222']},
   {name:'Mono',     colors:['#CCCCCC','#999999','#666666']},
+  {name:'Graphite', colors:['#FFFFFF','#D6D6D6','#242424']},
   {name:'Slate',    colors:['#334155','#475569','#64748b']},
   {name:'Poseidon', colors:['#0EA5E9','#0284C7','#0369A1']},
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
@@ -1469,6 +1477,7 @@ const _SKINS=[
   {name:'Nous',     colors:['#4682B4','#3A6E9A','#2C5F88']},
   {name:'Neon',     colors:['#B347FF','#C76BFF','#00DDFF']},
   {name:'Geist Contrast', value:'geist-contrast', colors:['#000000','#ffffff','#FFF175']},
+  {name:'Zeus',     colors:['#FFD700','#FFBF00','#1A1A00']},
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
 const _VALID_SKINS=new Set((_SKINS||[]).map(s=>(s.value||s.name).toLowerCase()));
@@ -1686,6 +1695,7 @@ function applyBotName(){
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
+    window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._activityFeedExpandedDefault=!!s.activity_feed_expanded_default;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
@@ -1783,6 +1793,7 @@ function applyBotName(){
     window._whatsNewSummaryEnabled=false;
     window._showThinking=true;
     window._simplifiedToolCalling=true;
+    window._terminalAutoExpandOnOutput=false;
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
