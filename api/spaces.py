@@ -3595,9 +3595,18 @@ def list_spaces() -> list[dict[str, Any]]:
     return spaces
 
 
-def create_space(payload: dict[str, Any]) -> dict[str, Any]:
+def create_space(
+    payload: dict[str, Any],
+    *,
+    include_safety_receipts: bool = False,
+    action: str = "space.create",
+    preflight_agent_instructions: bool = False,
+) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
+    prompt_preflight = (
+        _space_create_prompt_preflight_receipt(payload) if (preflight_agent_instructions or include_safety_receipts) else None
+    )
     with _SPACE_MANIFEST_LOCK:
         _ensure_dirs()
         name = str(payload.get("name") or "Untitled Space").strip() or "Untitled Space"
@@ -3623,7 +3632,31 @@ def create_space(payload: dict[str, Any]) -> dict[str, Any]:
             "revision_event_id": None,
         }
         saved = _write_manifest(space, "space.created", {"name": name})
-        return read_space_detail(saved["space_id"])
+        detail = read_space_detail(saved["space_id"])
+    if not include_safety_receipts:
+        return detail
+
+    receipt_space = dict(detail)
+    receipt_space["widget_count"] = len(receipt_space.get("widgets") or [])
+    if prompt_preflight is not None:
+        receipt_space["agent_instructions"] = "[metadata-only instructions stored after prompt preflight]"
+    progress_event = _record_space_tool_progress_event(detail["space_id"], run_prefix="space.create")
+    autonomy_policy = _space_create_action_policy_receipt(action, prompt_preflight)
+    response: dict[str, Any] = {
+        "space": receipt_space,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "output_compaction": _space_create_output_compaction_receipt(
+            action=action,
+            raw_payload=payload,
+            space=receipt_space,
+            autonomy_policy=autonomy_policy,
+            progress_event=progress_event,
+        ),
+    }
+    if prompt_preflight is not None:
+        response["prompt_preflight"] = prompt_preflight
+    return response
 
 
 def _safe_session_title_for_space(title: Any) -> str:

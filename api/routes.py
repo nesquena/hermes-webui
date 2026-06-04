@@ -5374,7 +5374,16 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/spaces/create":
         from api import spaces as capy_spaces
         try:
-            return j(handler, {"space": capy_spaces.create_space(body)})
+            include_safety_receipts = _route_bool_value("include_safety_receipts", "includeSafetyReceipts")
+            result = capy_spaces.create_space(
+                body,
+                include_safety_receipts=include_safety_receipts,
+                action="space.create",
+                preflight_agent_instructions=True,
+            )
+            if include_safety_receipts and isinstance(result, dict) and "space" in result:
+                return j(handler, result)
+            return j(handler, {"space": result})
         except RuntimeError as e:
             return bad(handler, str(e), 403)
         except (ValueError, FileExistsError) as e:
