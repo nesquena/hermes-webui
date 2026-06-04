@@ -4727,7 +4727,10 @@ def _handle_health_restart(handler) -> bool:
                             proc.wait(timeout=5.0)
                         except subprocess.TimeoutExpired:
                             proc.kill()
-                            proc.wait()
+                            try:
+                                proc.wait(timeout=5.0)
+                            except subprocess.TimeoutExpired:
+                                logger.error("Gateway restart process refused to die even after SIGKILL.")
                     except Exception as e:
                         logger.exception("Failed to terminate timed out gateway restart process: %s", e)
                 finally:
