@@ -4662,6 +4662,30 @@ def _serve_manifest(handler) -> bool:
     return j(handler, {"error": "not found"}, status=404)
 
 
+def _saved_prompts_path() -> "Path":
+    try:
+        from api.profiles import get_active_hermes_home
+        return Path(get_active_hermes_home()).expanduser() / "webui" / "saved_prompts.json"
+    except Exception:
+        return Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser() / "webui" / "saved_prompts.json"
+
+
+def _load_saved_prompts() -> list:
+    p = _saved_prompts_path()
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def _save_saved_prompts(prompts: list) -> None:
+    p = _saved_prompts_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
@@ -5518,6 +5542,9 @@ def handle_get(handler, parsed) -> bool:
             "other_profile_count": len(all_projects) - len(scoped),
         })
 
+    if parsed.path == "/api/prompts":
+        return j(handler, {"prompts": _load_saved_prompts()})
+
     if parsed.path == "/api/session/export":
         return _handle_session_export(handler, parsed)
 
@@ -6221,6 +6248,17 @@ def handle_post(handler, parsed) -> bool:
             logger.exception("dashboard config save failed")
             bad(handler, str(exc), status=500)
         return True
+
+    if parsed.path == "/api/prompts":
+        text = str(body.get("text") or "").strip()
+        label = str(body.get("label") or "").strip()
+        if not text:
+            return bad(handler, "text is required")
+        prompts = _load_saved_prompts()
+        new_prompt = {"id": uuid.uuid4().hex[:12], "label": label or text[:60], "text": text, "created_at": time.time()}
+        prompts.append(new_prompt)
+        _save_saved_prompts(prompts)
+        return j(handler, {"ok": True, "prompt": new_prompt})
 
     if parsed.path == "/api/session/new":
         try:
@@ -8062,6 +8100,14 @@ def handle_delete(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
+    if parsed.path == "/api/prompts":
+        pid = str(body.get("id") or "").strip()
+        if not pid:
+            return bad(handler, "id is required")
+        prompts = [p for p in _load_saved_prompts() if p.get("id") != pid]
+        _save_saved_prompts(prompts)
+        return j(handler, {"ok": True})
+
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_delete
 
