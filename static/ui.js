@@ -6924,7 +6924,7 @@ function renderMessages(options){
           const html=renderMd(part.content);
           bubble.insertAdjacentHTML('beforeend',`<div class="msg-body">${html}</div>`);
         } else if(part.type==='thinking'){
-          bubble.insertAdjacentHTML('beforeend', _thinkingCardHtml(part.content));
+          if(window._showThinking!==false) bubble.insertAdjacentHTML('beforeend', _thinkingCardHtml(part.content));
         } else if(part.type==='cli-action'){
           const name=(part.content&&(part.content.name||(part.content.function&&part.content.function.name)))||'tool';
           bubble.insertAdjacentHTML('beforeend',`<div class="interleaved-action-label">${esc(name)}</div>`);
