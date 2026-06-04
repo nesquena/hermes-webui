@@ -5184,13 +5184,13 @@ function _updateBusyHintBar(){
 }
 
 function _handleBusyHintPill(action){
-  const msg=$('msg');
-  if(!msg) return;
   if(action==='new_chat'){
     const btn=$('btnNewChat');
     if(btn) btn.click();
     return;
   }
+  const msg=$('msg');
+  if(!msg) return;
   if(!msg.value.trim()){
     msg.value='/'+action+' ';
     msg.dispatchEvent(new Event('input',{bubbles:true}));
