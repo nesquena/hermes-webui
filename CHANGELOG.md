@@ -8,6 +8,11 @@
 - Streaming finalization now treats compression-exhausted or tool-tail agent results as errors instead of completed turns, so long tool-heavy sessions do not appear done when Hermes Agent failed before writing a final assistant answer. When Hermes Agent rotated the session id during automatic compression before that terminal failure, WebUI now preserves the pre-compression snapshot, migrates continuation state first, and persists the final error on the continuation session instead of the stale parent row.
 - Completed transcripts no longer render internal `[CONTEXT COMPACTION — REFERENCE ONLY]` reference cards; compression-exhausted runs now surface as explicit errors instead.
 
+## [v0.51.251] — 2026-06-03 — Release HS (stage-q23 — composer ~/ path autocomplete)
+
+### Fixed
+- Typing a `~/` path token in the composer (e.g. `check this file ~/`) now opens a home-directory path-suggestion dropdown, matching the TUI's path completion. It reuses the existing slash-command dropdown (positioning + keyboard nav) and the server's trusted `/api/workspaces/suggest` endpoint, and only replaces the matched path token on selection (surrounding message text is preserved). Slash-command autocomplete still takes precedence for `/`-prefixed input. (#3433, @puneetdixit200)
+
 ## [v0.51.250] — 2026-06-03 — Release HR (stage-q22 — Zeus appearance skin)
 
 ### Added
