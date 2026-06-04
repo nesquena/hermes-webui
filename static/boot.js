@@ -1209,6 +1209,13 @@ $('msg').addEventListener('input',()=>{
       if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
     }
     if(typeof ensureSkillCommandsLoadedForAutocomplete==='function') ensureSkillCommandsLoadedForAutocomplete();
+  } else if(typeof getComposerPathAutocompleteMatches==='function'){
+    const cursor=$('msg').selectionStart;
+    getComposerPathAutocompleteMatches(text,cursor).then(matches=>{
+      const ta=$('msg');
+      if(!ta||ta.value!==text||ta.selectionStart!==cursor) return;
+      if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+    }).catch(()=>hideCmdDropdown());
   } else {
     hideCmdDropdown();
   }
