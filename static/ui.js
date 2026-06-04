@@ -5730,7 +5730,7 @@ function isInterleavedTranscriptBubbles(){
  */
 function* walkMessageParts(m, toolResultsByTid){
   if(!m||m.role!=='assistant') return;
-  const thinking=m.reasoning||m.thinking||m._reasoning||'';
+  const thinking=m.reasoning_content||m.reasoning||m.thinking||m._reasoning||'';
   if(thinking) yield {type:'thinking', content:thinking};
   // Anthropic content-array format
   if(Array.isArray(m.content)){
