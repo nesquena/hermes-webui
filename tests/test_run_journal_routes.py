@@ -24,7 +24,7 @@ def test_dead_stream_sse_replays_journal_before_404_fallback():
     assert "find_run_summary(stream_id)" in block
     assert "stream not found" in block
     assert "_replay_run_journal" in block
-    assert "_parse_run_journal_after_seq" in block
+    assert "_parse_run_journal_after_seq(qs, stream_id)" in block
     assert 'Content-Type", "text/event-stream; charset=utf-8"' in block
 
 
@@ -41,6 +41,8 @@ def test_session_payload_exposes_runtime_journal_for_stale_streams():
     assert "original_stream_id = getattr(s, \"active_stream_id\", None)" in ROUTES_SRC
     assert '"runtime_journal"' in ROUTES_SRC
     assert 'terminal_state = "lost-worker-bookkeeping"' in ROUTES_SRC
+    assert "active=journal_active" in ROUTES_SRC
+    assert "journal_active = bool(original_stream_id in active_stream_ids)" in ROUTES_SRC
 
 
 def test_status_payload_marks_non_terminal_dead_journal_as_stale():
@@ -160,3 +162,24 @@ def test_replay_run_journal_honors_after_seq_cursor(monkeypatch):
     body = handler.wfile.getvalue().decode("utf-8")
     assert "id: run_1:4\n" in body
     assert "event: done\n" in body
+
+
+def test_parse_run_journal_after_seq_is_run_aware():
+    import api.routes as routes
+
+    assert routes._parse_run_journal_after_seq(
+        {"after_event_id": ["new-run:7"], "after_seq": ["7"]},
+        "new-run",
+    ) == 7
+    assert routes._parse_run_journal_after_seq(
+        {"after_event_id": ["old-run:7"], "after_seq": ["7"]},
+        "new-run",
+    ) is None
+    assert routes._parse_run_journal_after_seq({"after_seq": ["3"]}, "new-run") == 3
+
+
+def test_frontend_sends_run_aware_replay_cursor():
+    messages_src = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+    assert "let _lastRunJournalEventId=''" in messages_src
+    assert "_lastRunJournalEventId=raw" in messages_src
+    assert "after_event_id=${encodeURIComponent(_lastRunJournalEventId||'')}" in messages_src

@@ -150,11 +150,15 @@ def _resolve_base_hermes_home() -> Path:
         # If HERMES_HOME points to a profiles/ subdir, walk up two levels to the base
         return _unwrap_profile_home_to_base(p)
 
-    if os.name == 'nt':
-        local_app_data = os.getenv('LOCALAPPDATA', '').strip()
-        if local_app_data:
-            return Path(local_app_data) / 'hermes'
-    return Path.home() / '.hermes'
+    # Platform default. On Windows this includes the #2905 migration-safety
+    # fallback (prefer the populated legacy %USERPROFILE%\.hermes over an
+    # empty %LOCALAPPDATA%\hermes). Import the shared path helper directly
+    # instead of importing api.config here; api.config imports profiles during
+    # startup, so going through config creates a partial-module circular import
+    # when api.profiles is imported first.
+    from api.paths import _platform_default_hermes_home
+
+    return _platform_default_hermes_home()
 
 _DEFAULT_HERMES_HOME = _resolve_base_hermes_home()
 
@@ -887,6 +891,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
             raise ValueError(f"Profile '{name}' does not exist.")
 
     with _profile_lock:
+        _SKILLS_STATS_CACHE.clear()
         if process_wide:
             global _active_profile
             _active_profile = name
@@ -985,6 +990,81 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     }
 
 
+_SKILLS_STATS_CACHE: dict[Path, tuple[int, int, float]] = {}
+_SKILLS_STATS_CACHE_TTL = 8.0  # seconds
+
+
+def _get_profile_skills_stats(profile_dir: Path) -> tuple[int, int]:
+    """Calculate (enabled_count, compatible_count) for a profile directory."""
+    import time
+    profile_dir = Path(profile_dir).resolve()
+    now = time.time()
+    # Read via .get() (not membership-check + index) so a concurrent
+    # _SKILLS_STATS_CACHE.clear() on another thread can't raise KeyError
+    # between the `in` test and the lookup.
+    cached = _SKILLS_STATS_CACHE.get(profile_dir)
+    if cached is not None:
+        enabled, compat, expiry = cached
+        if now < expiry:
+            return enabled, compat
+
+    skills_dir = profile_dir / "skills"
+    if not skills_dir.is_dir():
+        res = (0, 0)
+        _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
+        return res
+
+    disabled = set()
+    config_path = profile_dir / "config.yaml"
+    if config_path.exists():
+        try:
+            import yaml as _yaml
+            cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if isinstance(cfg, dict):
+                skills_cfg = cfg.get("skills")
+                if isinstance(skills_cfg, dict):
+                    # Align with get_disabled_skill_names(platform="webui") behavior:
+                    platform_disabled = (skills_cfg.get("platform_disabled") or {}).get("webui")
+                    if platform_disabled is not None:
+                        disabled_val = platform_disabled
+                    else:
+                        disabled_val = skills_cfg.get("disabled")
+                    
+                    if disabled_val is not None:
+                        if isinstance(disabled_val, str):
+                            disabled_val = [disabled_val]
+                        disabled = {str(v).strip() for v in disabled_val if str(v).strip()}
+        except Exception:
+            pass
+
+    from agent.skill_utils import iter_skill_index_files, parse_frontmatter, skill_matches_platform
+    
+    seen_names = set()
+    enabled_count = 0
+    compatible_count = 0
+    
+    for skill_md in iter_skill_index_files(skills_dir, "SKILL.md"):
+        try:
+            content = skill_md.read_text(encoding="utf-8")[:4000]
+            frontmatter, _ = parse_frontmatter(content)
+            if not skill_matches_platform(frontmatter):
+                continue
+            name = frontmatter.get("name", skill_md.parent.name)[:64]
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            
+            compatible_count += 1
+            if name not in disabled:
+                enabled_count += 1
+        except Exception:
+            pass
+            
+    res = (enabled_count, compatible_count)
+    _SKILLS_STATS_CACHE[profile_dir] = (res[0], res[1], now + _SKILLS_STATS_CACHE_TTL)
+    return res
+
+
 def list_profiles_api() -> list:
     """List all profiles with metadata, serialized for JSON response."""
     try:
@@ -997,6 +1077,7 @@ def list_profiles_api() -> list:
     active = get_active_profile_name()
     result = []
     for p in infos:
+        enabled_count, total_count = _get_profile_skills_stats(p.path)
         result.append({
             'name': p.name,
             'path': str(p.path),
@@ -1006,13 +1087,16 @@ def list_profiles_api() -> list:
             'model': p.model,
             'provider': p.provider,
             'has_env': p.has_env,
-            'skill_count': p.skill_count,
+            'skill_count': enabled_count,
+            'enabled_skills': enabled_count,
+            'total_skills': total_count,
         })
     return result
 
 
 def _default_profile_dict() -> dict:
     """Fallback profile dict when hermes_cli is not importable."""
+    enabled_count, compatible_count = _get_profile_skills_stats(_DEFAULT_HERMES_HOME)
     return {
         'name': 'default',
         'path': str(_DEFAULT_HERMES_HOME),
@@ -1022,7 +1106,9 @@ def _default_profile_dict() -> dict:
         'model': None,
         'provider': None,
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
-        'skill_count': 0,
+        'skill_count': enabled_count,
+        'enabled_skills': enabled_count,
+        'total_skills': compatible_count,
     }
 
 
@@ -1083,9 +1169,117 @@ def _create_profile_fallback(name: str, clone_from: str = None,
     return profile_dir
 
 
+# Provider → .env variable name mapping.
+# When a user supplies an API key during profile creation in the WebUI,
+# the key must be written to the profile's .env file so that Hermes Agent's
+# provider layer can read it — config.yaml model.api_key is not consumed.
+_PROVIDER_ENV_MAP: dict[str, str] = {
+    "kimi-coding": "KIMI_API_KEY",
+    "kimi-coding-cn": "KIMI_CN_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "google": "GEMINI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "xai": "XAI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
+    "minimax-cn": "MINIMAX_CN_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "zai": "ZAI_API_KEY",
+    "dashscope": "DASHSCOPE_API_KEY",
+    "kilocode": "KILOCODE_API_KEY",
+    "cerebras": "CEREBRAS_API_KEY",
+    "github-copilot": "COPILOT_GITHUB_TOKEN",
+    "nous": "NOUS_API_KEY",
+}
+
+
+def _resolve_env_var_for_provider(provider: Optional[str]) -> Optional[str]:
+    """Return the .env variable name for *provider*, or the generic fallback."""
+    if not provider:
+        return None
+    return _PROVIDER_ENV_MAP.get(str(provider).strip().lower())
+
+
+def _upsert_dotenv_line(env_path: Path, key: str, value: str) -> None:
+    """Write or replace a KEY=value line in a dotenv file.
+
+    Reads existing lines; if *key* already exists its value is replaced.
+    Otherwise a new line is appended.  The file (and parent dirs) are created
+    when they do not exist yet.
+    """
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    except Exception:
+        lines = []
+
+    new_line = f"{key}={value}"
+    found = False
+    new_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k, _ = stripped.split("=", 1)
+            if k.strip() == key:
+                new_lines.append(new_line)
+                found = True
+                continue
+        new_lines.append(line)
+
+    if not found:
+        new_lines.append(new_line)
+
+    try:
+        env_path.write_text("\n".join(new_lines).rstrip("\n") + "\n", encoding="utf-8")
+    except Exception as exc:
+        logger.error("Failed to write %s to %s: %s", key, env_path, exc)
+        raise
+
+
+def _write_api_key_to_dotenv(
+    profile_dir: Path,
+    api_key: str,
+    model_provider: Optional[str] = None,
+) -> None:
+    """Write *api_key* to the profile's .env under the correct variable name.
+
+    If *model_provider* is known, the key is stored under the provider-specific
+    env var (e.g. ``KIMI_API_KEY``); otherwise it falls back to a generic
+    ``HERMES_API_KEY`` that the user can rename later.
+    """
+    env_var = _resolve_env_var_for_provider(model_provider)
+    if not env_var:
+        env_var = "HERMES_API_KEY"
+        logger.info(
+            "No provider→env mapping for %r; writing API key as %s",
+            model_provider,
+            env_var,
+        )
+
+    env_path = profile_dir / ".env"
+    _upsert_dotenv_line(env_path, env_var, api_key)
+
+    # Tighten permissions so the key isn't world-readable.
+    try:
+        env_path.chmod(0o600)
+    except Exception:
+        logger.debug("Failed to chmod 0o600 on %s", env_path)
+
+
 def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: str = None) -> None:
-    """Write custom endpoint fields into config.yaml for a profile."""
-    if not base_url and not api_key:
+    """Write base_url into config.yaml for a profile.
+
+    API keys are intentionally NOT written to config.yaml — they belong in
+    the profile's .env file instead (see ``_write_api_key_to_dotenv``).
+    The *api_key* parameter is accepted for backward compatibility with
+    callers that still pass it; it is silently dropped here (the caller
+    should have already called ``_write_api_key_to_dotenv``).
+    """
+    if not base_url:
         return
     config_path = profile_dir / 'config.yaml'
     try:
@@ -1105,8 +1299,6 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
         model_section = {}
     if base_url:
         model_section['base_url'] = base_url
-    if api_key:
-        model_section['api_key'] = api_key
     cfg['model'] = model_section
     config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
 
@@ -1312,7 +1504,13 @@ def create_profile_api(name: str, clone_from: str = None,
                 exc_info=True,
             )
 
-    _write_endpoint_to_config(profile_path, base_url=base_url, api_key=api_key)
+    _write_endpoint_to_config(profile_path, base_url=base_url)
+    if api_key:
+        _write_api_key_to_dotenv(
+            profile_path,
+            api_key=api_key,
+            model_provider=model_provider,
+        )
     _write_model_defaults_to_config(
         profile_path,
         default_model=default_model,
@@ -1321,6 +1519,7 @@ def create_profile_api(name: str, clone_from: str = None,
 
     # Invalidate cached root-profile-name lookup; create_profile may have added
     # a new profile that flips is_default semantics on the agent side (#1612).
+    _SKILLS_STATS_CACHE.clear()
     _invalidate_root_profile_cache()
 
     # Find and return the newly created profile info.
@@ -1340,6 +1539,8 @@ def create_profile_api(name: str, clone_from: str = None,
         'provider': None,
         'has_env': (profile_path / '.env').exists(),
         'skill_count': 0,
+        'enabled_skills': 0,
+        'total_skills': 0,
     }
 
 
@@ -1372,5 +1573,6 @@ def delete_profile_api(name: str) -> dict:
             raise ValueError(f"Profile '{name}' does not exist.")
 
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
+    _SKILLS_STATS_CACHE.clear()
     _invalidate_root_profile_cache()
     return {'ok': True, 'name': name}

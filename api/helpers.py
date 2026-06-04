@@ -4,8 +4,21 @@ Hermes Web UI -- HTTP helper functions.
 import json as _json
 import os
 import re as _re
+import ssl
 from pathlib import Path
 from api.config import IMAGE_EXTS, MD_EXTS
+
+
+# Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
+# connections often end this way when a browser tab sleeps, a phone switches
+# networks, or Tailscale leaves the socket half-closed.
+_CLIENT_DISCONNECT_ERRORS = (
+    BrokenPipeError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    TimeoutError,
+    ssl.SSLError,
+)
 
 
 def require(body: dict, *fields) -> None:
@@ -46,7 +59,7 @@ def _security_headers(handler):
         "default-src 'self' https://*.cloudflareaccess.com; "
         "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-        "img-src 'self' data: https: blob:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; connect-src 'self' https://cdn.jsdelivr.net; "
+        "img-src 'self' data: https: blob:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://cdn.jsdelivr.net; "
         "manifest-src 'self' https://*.cloudflareaccess.com; "
         "base-uri 'self'; form-action 'self'"
     )
@@ -63,6 +76,25 @@ def _accepts_gzip(handler) -> bool:
         return False
     ae = headers.get('Accept-Encoding', '')
     return 'gzip' in ae
+
+
+def _safe_write(handler, body: bytes) -> None:
+    """Write response body, ignoring expected client disconnect errors.
+
+    Logs disconnects at debug level so they are observable without
+    polluting stdout/stderr during normal operation (SSE reconnects,
+    tab closes, mobile network switches, etc.).
+    """
+    try:
+        handler.end_headers()
+        handler.wfile.write(body)
+    except _CLIENT_DISCONNECT_ERRORS as exc:
+        import logging
+        logging.getLogger("hermes.webui").debug(
+            "Client disconnected mid-response (%s): %s",
+            type(exc).__name__,
+            getattr(handler, "path", "?"),
+        )
 
 
 def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
@@ -89,8 +121,7 @@ def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
     if extra_headers:
         for k, v in extra_headers.items():
             handler.send_header(k, v)
-    handler.end_headers()
-    handler.wfile.write(body)
+    _safe_write(handler, body)
 
 
 def t(handler, payload, status: int=200, content_type: str='text/plain; charset=utf-8') -> None:
@@ -101,8 +132,7 @@ def t(handler, payload, status: int=200, content_type: str='text/plain; charset=
     handler.send_header('Content-Length', str(len(body)))
     handler.send_header('Cache-Control', 'no-store')
     _security_headers(handler)
-    handler.end_headers()
-    handler.wfile.write(body)
+    _safe_write(handler, body)
 
 
 MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
@@ -337,9 +367,9 @@ def _redact_value(v, *, _enabled: bool | None = None):
 
 
 def redact_session_data(session_dict: dict) -> dict:
-    """Redact credentials from message content and tool_call data before API response.
+    """Redact credentials from message content, tool data, and session sidecars.
 
-    Applies to: messages[], tool_calls[], and title.
+    Applies to: messages[], tool_calls[], todo_state, and title.
     The underlying session file is not modified; redaction is response-layer only.
 
     Reads the ``api_redact_enabled`` setting ONCE for the entire response and
@@ -357,13 +387,33 @@ def redact_session_data(session_dict: dict) -> dict:
         result['messages'] = _redact_value(result['messages'], _enabled=_enabled)
     if 'tool_calls' in result:
         result['tool_calls'] = _redact_value(result['tool_calls'], _enabled=_enabled)
+    if 'todo_state' in result:
+        result['todo_state'] = _redact_value(result['todo_state'], _enabled=_enabled)
     return result
 
 
 def read_body(handler) -> dict:
     """Read and JSON-parse a POST request body (capped at 20MB)."""
-    length = int(handler.headers.get('Content-Length', 0))
+    raw_length = handler.headers.get('Content-Length', 0)
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError):
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f'Invalid Content-Length: {raw_length!r}')
+    if length < 0:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
+        raise ValueError(f'Invalid Content-Length: {length}')
     if length > MAX_BODY_BYTES:
+        try:
+            handler.close_connection = True
+        except Exception:
+            pass
         raise ValueError(f'Request body too large ({length} bytes, max {MAX_BODY_BYTES})')
     raw = handler.rfile.read(length) if length else b'{}'
     try:

@@ -25,7 +25,9 @@ def test_load_session_inflight_reattach_merges_pending_user_message_before_rende
     block = _load_session_inflight_branch()
 
     merge_pos = block.find("_mergePendingSessionMessage")
-    render_pos = block.find("renderMessages();")
+    # #3326 added an optional {preserveScroll} arg to the INFLIGHT-branch render
+    # call; match the call form rather than the bare `renderMessages();`.
+    render_pos = block.find("renderMessages(")
 
     assert merge_pos != -1, (
         "loadSession's INFLIGHT reattach branch must merge pending_user_message "

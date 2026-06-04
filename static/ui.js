@@ -265,9 +265,45 @@ function _statusCardHtml(card){
 const MESSAGE_RENDER_WINDOW_DEFAULT=50;
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+// Cached visWithIdx array — invalidated when S.messages.length changes.
+let _visWithIdxCache=null;
+let _visWithIdxCacheLen=0;
+function clearVisibleMessageRowCache(){
+  _visWithIdxCache=null;
+  _visWithIdxCacheLen=0;
+}
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
   _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+  _clearRenderCache();
+  clearVisibleMessageRowCache();
+}
+
+// ── renderMd / _renderUserFencedBlocks cache ──────────────────────────────
+// Long sessions re-render the same messages on every renderMessages() call.
+// Cache the rendered HTML so unchanged messages skip the expensive regex
+// pipeline entirely.  ~95% of messages are identical between renders.
+const _renderCache = new Map();
+const _renderCacheMax = 300;
+function _clearRenderCache(){ _renderCache.clear(); }
+function _renderCacheKey(text, isUser){
+  const p = isUser ? 'u' : 'a';
+  // Short content: use the full string as key (cheap Map lookup).
+  // Long content: length + prefix + suffix is good enough — collisions on
+  // 20-char prefix+suffix are vanishingly rare for chat messages.
+  if(text.length <= 500) return p + ':' + text;
+  return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
+}
+function _getCachedRender(text, isUser){
+  const key = _renderCacheKey(text, isUser);
+  const hit = _renderCache.get(key);
+  if(hit !== undefined) return hit;
+  const rendered = isUser
+    ? _renderUserFencedBlocks(text)
+    : renderMd(_stripXmlToolCallsDisplay(String(text)));
+  if(_renderCache.size > _renderCacheMax) _renderCache.clear();
+  _renderCache.set(key, rendered);
+  return rendered;
 }
 function _currentMessageRenderWindowSize(){
   return Math.max(
@@ -442,7 +478,7 @@ async function refreshDashboardStatus(force=false){
     return _dashboardStatusCache;
   }
   try{
-    const status=await api('/api/dashboard/status');
+    const status=await api('/api/dashboard/status',{timeoutToast:false});
     _dashboardStatusCache=status||{running:false};
   }catch(_){
     _dashboardStatusCache={running:false};
@@ -497,7 +533,31 @@ if(document.readyState==='complete'){
 }
 
 /* ── Image lightbox — click any .msg-media-img to enlarge ─────────────────── */
-function _openImgLightbox(src, alt) {
+function _openImgLightbox(imgEl) {
+  if(!imgEl || !imgEl.src) return;
+  const src=imgEl.src, alt=imgEl.alt||'';
+  // Find sibling images in the same message for prev/next navigation.
+  // Walk up from the clicked image to find the message container, then
+  // collect all .msg-media-img within it.
+  // Composer attach-tray chips bypass sibling detection — each chip click
+  // opens a single-image lightbox (no navigation between staged uploads).
+  let allImages = [];
+  let startIndex = 0;
+  if(!imgEl.closest('.attach-tray')){
+    let container = imgEl.closest('.msg-row, .assistant-turn-blocks, .assistant-turn, .user-turn');
+    if(!container) container = imgEl.parentElement;
+    if(container){
+      const siblings = container.querySelectorAll('.msg-media-img');
+      if(siblings.length>1){
+        allImages = Array.from(siblings);
+        startIndex = allImages.indexOf(imgEl);
+        if(startIndex===-1) startIndex=0;
+      }
+    }
+  }
+  _openImgLightboxWithNav(src, alt, allImages, startIndex);
+}
+function _openImgLightboxWithNav(src, alt, images, index) {
   const lb = document.createElement('div');
   lb.className = 'img-lightbox';
   lb.setAttribute('role', 'dialog');
@@ -513,31 +573,94 @@ function _openImgLightbox(src, alt) {
   cls.onclick = () => _closeImgLightbox(lb);
   lb.appendChild(img);
   lb.appendChild(cls);
+  // Prev/Next navigation — store index and images on lb so a single set of
+  // handlers reads live values without closure churn on every nav.
+  lb._navIndex = index;
+  lb._navImages = (images && images.length>1) ? images : null;
+  if(lb._navImages){
+    const prevBtn = document.createElement('button');
+    prevBtn.className = 'img-lightbox-nav img-lightbox-nav-prev';
+    prevBtn.setAttribute('aria-label', 'Previous image');
+    prevBtn.innerHTML = '‹';
+    prevBtn.onclick = e => { e.stopPropagation(); _navigateLightbox(lb, -1); };
+    lb.appendChild(prevBtn);
+    const nextBtn = document.createElement('button');
+    nextBtn.className = 'img-lightbox-nav img-lightbox-nav-next';
+    nextBtn.setAttribute('aria-label', 'Next image');
+    nextBtn.innerHTML = '›';
+    nextBtn.onclick = e => { e.stopPropagation(); _navigateLightbox(lb, 1); };
+    lb.appendChild(nextBtn);
+    lb._counterEl = document.createElement('div');
+    lb._counterEl.className = 'img-lightbox-counter';
+    lb.appendChild(lb._counterEl);
+    lb._counterEl.textContent = (index+1) + ' / ' + images.length;
+  }
   lb.onclick = () => _closeImgLightbox(lb);
   document.body.appendChild(lb);
-  // Close on Escape
-  lb._escHandler = e => { if(e.key==='Escape') _closeImgLightbox(lb); };
-  document.addEventListener('keydown', lb._escHandler);
+  // Single keyboard handler — reads lb._navX live, no remove/add churn.
+  lb._keyHandler = e => {
+    if(e.key==='Escape'){ _closeImgLightbox(lb); return; }
+    if(lb._navImages){
+      if(e.key==='ArrowLeft'){ e.preventDefault(); _navigateLightbox(lb, -1); }
+      if(e.key==='ArrowRight'){ e.preventDefault(); _navigateLightbox(lb, 1); }
+    }
+  };
+  document.addEventListener('keydown', lb._keyHandler);
+}
+function _navigateLightbox(lb, direction) {
+  const images = lb._navImages;
+  if(!images) return;
+  const newIndex = lb._navIndex + direction;
+  if(newIndex<0 || newIndex>=images.length) return;
+  lb._navIndex = newIndex;
+  const nextImg = images[newIndex];
+  const lbImg = lb.querySelector('img');
+  if(!lbImg) return;
+  lbImg.src = nextImg.src;
+  lbImg.alt = nextImg.alt || '';
+  lb.setAttribute('aria-label', nextImg.alt || 'Image');
+  // Update counter via stored reference — no DOM query.
+  if(lb._counterEl) lb._counterEl.textContent = (newIndex+1) + ' / ' + images.length;
 }
 function _closeImgLightbox(lb) {
   if(!lb || !lb.parentNode) return;
-  document.removeEventListener('keydown', lb._escHandler);
+  document.removeEventListener('keydown', lb._keyHandler);
   lb.style.animation = 'lb-in .12s ease reverse';
   setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
 }
 
 document.addEventListener('click', e => {
   if(!e.target || !e.target.closest) return;
+  const sessionLink=e.target.closest('a.session-link[href]');
+  if(sessionLink){
+    const href=sessionLink.getAttribute('href')||'';
+    const m=href.match(/(?:^|\/)session\/([^?#]+)/i);
+    if(m&&typeof loadSession==='function'){
+      e.preventDefault();
+      try{loadSession(decodeURIComponent(m[1]));}catch(_){loadSession(m[1]);}
+    }
+    return;
+  }
+  const workspaceLink=e.target.closest('a[href^="#workspace="]');
+  if(workspaceLink){
+    e.preventDefault();
+    const href=workspaceLink.getAttribute('href')||'';
+    try{
+      const rel=decodeURIComponent(href.slice('#workspace='.length));
+      if(rel && typeof openArtifactPath==='function') openArtifactPath(rel);
+    }catch(_){}
+    return;
+  }
   // Message-attached images (already wired since v0.50.x).
   let img = e.target.closest('.msg-media-img');
-  if(img){ _openImgLightbox(img.src, img.alt); return; }
+  if(img){ _openImgLightbox(img); return; }
   // Composer attach-tray image thumbnails — click any pasted/dropped image
   // chip to lightbox-zoom it before sending. Excludes audio/video chips,
   // which keep their inline media controls. SVG thumbnails (.attach-thumb--svg)
   // are still images visually, so they qualify.
   img = e.target.closest('.attach-thumb');
   if(img && img.tagName === 'IMG'){
-    _openImgLightbox(img.src, img.alt || img.title || 'Attached image');
+    _openImgLightbox(img);
     return;
   }
 });
@@ -787,6 +910,34 @@ function _captureModelDropdownSelection(sel){
   }catch(_){}
   return {model:String(sel.value||''),model_provider:null};
 }
+function _modelProviderForSend(modelId){
+  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
+  if(sessionProvider) return sessionProvider;
+  const model=String(modelId||'').trim();
+  if(!model) return null;
+  const explicitProvider=typeof _providerFromModelValue==='function'
+    ? _providerFromModelValue(model)
+    : '';
+  if(explicitProvider) return explicitProvider;
+  const sel=typeof $==='function' ? $('modelSelect') : null;
+  if(sel&&String(sel.value||'').trim()===model&&typeof _modelStateForSelect==='function'){
+    try{
+      const dropdownState=_modelStateForSelect(sel,sel.value);
+      if(dropdownState&&String(dropdownState.model||'').trim()===model){
+        return dropdownState.model_provider||null;
+      }
+    }catch(_){}
+  }
+  if(typeof _readPersistedModelState==='function'){
+    try{
+      const persisted=_readPersistedModelState();
+      if(persisted&&String(persisted.model||'').trim()===model){
+        return persisted.model_provider||null;
+      }
+    }catch(_){}
+  }
+  return null;
+}
 function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   if(!sel) return null;
   const activeSession=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
@@ -912,6 +1063,20 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   const options=Array.from(sel.options);
   const opts=options.map(o=>o.value);
+  // 0. Exact match — highest priority when it doesn't conflict with a
+  // cross-provider preference (#3360, guarded for #1228/#1313).
+  // When all models share the same provider (e.g. a custom proxy),
+  // normalization can collapse distinct multi-slash IDs to the same key
+  // and options.find() returns whichever appears first in the DOM instead
+  // of the exact value.  But when the exact option belongs to a *different*
+  // provider than the preferred one, we must fall through to the provider-
+  // aware match so rehydration doesn't snap to the wrong provider row.
+  if(opts.includes(modelId)){
+    const exactOpt=options.find(o=>o.value===modelId);
+    const exactProv=exactOpt?_getOptionProviderId(exactOpt).toLowerCase():'';
+    const pref=String(preferredProviderId||'').toLowerCase();
+    if(!pref || !exactProv || exactProv===pref) return modelId;
+  }
   // 1. Normalize: lowercase, strip namespace prefix, replace hyphens→dots.
   // Also strip @provider: prefix from deduplicated model IDs (#1228, #1313).
   const norm=s=>s.toLowerCase().replace(/^[^/]+\//,'').replace(/^@([^:]+:)+/,'').replace(/-/g,'.');
@@ -926,10 +1091,16 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     const providerMatch=options.find(o=>norm(o.value)===target && _getOptionProviderId(o).toLowerCase()===preferred);
     if(providerMatch) return providerMatch.value;
   }
-  // 2. Exact match
-  if(opts.includes(modelId)) return modelId;
+  // 2. Normalized match
   const exact=opts.find(o=>norm(o)===target);
   if(exact) return exact;
+  // If the request is provider-qualified (either explicit @provider:model or
+  // a slash-qualified vendor/model id), do NOT fuzzy-match a sibling model
+  // once exact/provider-aware lookup failed. Returning null lets the caller
+  // preserve the raw typed value instead of snapping to the closest catalog
+  // entry. This keeps uncatalogued models routable instead of silently turning
+  // them into a nearby curated sibling.
+  if(rawModel.startsWith('@')||rawModel.includes('/')) return null;
   // 3. Prefix/substring: require the candidate to start with the FULL normalized target
   // (not a truncated base). This avoids false matches like gpt.5.5 → gpt.5.4.mini (#1188).
   // Only fall back to the shorter base form if target itself is very short (a bare root
@@ -937,7 +1108,25 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
   const base=target.replace(/\.\d+$/,'');  // strip trailing version number
   const useBase=base.length<=4||base===target; // bare root — stripping changed nothing meaningful
   const prefixTarget=useBase?base:target;
-  const partial=opts.find(o=>norm(o).startsWith(prefixTarget));
+  // When the typed target is a COMPLETE versioned name (ends in a digit, e.g.
+  // "mimo-v2.5" → norm "mimo.v2.5"), a prefix hit on a longer option is only
+  // legitimate if the extra text continues the VERSION ("." + digit, e.g.
+  // mimo.v2 → mimo.v2.5...). If the extra text is a variant/tier suffix
+  // ("." + non-digit, e.g. mimo.v2.5.pro from "mimo-v2.5-pro"), the user asked
+  // for the base model that simply isn't in the catalog — do NOT silently snap
+  // them to the -pro/-flash tier (and a different price tier). Let resolution
+  // fall through to null so the caller reports no-match instead. (#3368)
+  const targetEndsInVersion=/\d$/.test(target);
+  const partial=opts.find(o=>{
+    const no=norm(o);
+    if(!no.startsWith(prefixTarget)) return false;
+    if(targetEndsInVersion && no!==target){
+      const rest=no.slice(target.length);
+      // reject "." + non-digit (variant/tier suffix); allow "" or "." + digit (version continuation)
+      if(rest && !/^\.\d/.test(rest)) return false;
+    }
+    return true;
+  });
   return partial||null;
 }
 
@@ -967,11 +1156,14 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
   if(!modelId||!sel) return null;
   const applied=_applyModelToDropdown(modelId,sel,preferredProviderId);
   if(applied) return applied;
+  const value=modelId;
   const opt=document.createElement('option');
   opt.value=modelId;
   opt.textContent=typeof getModelLabel==='function'?getModelLabel(modelId):modelId;
   opt.dataset.custom='1';
-  const provider=preferredProviderId||_providerFromModelValue(modelId)||'';
+  const badge=(window._configuredModelBadges||{})[value];
+  if(badge&&badge.provider) opt.dataset.provider=badge.provider;
+  const provider=preferredProviderId||(badge&&badge.provider)||_providerFromModelValue(modelId)||'';
   if(provider) opt.dataset.provider=provider;
   sel.appendChild(opt);
   sel.value=modelId;
@@ -1260,7 +1452,26 @@ function _normalizeConfiguredModelKey(modelId){
   // Defensive: trailing-colon / trailing-slash falls back to the original key
   // so malformed configs don't collapse distinct ids to '' (matches backend _norm_model_id).
   if(s.startsWith('@')&&s.includes(':')){const last=s.split(':').pop();s=last||s;}
-  if(s.includes('/')){const last=s.split('/').pop();s=last||s;}
+  // Skip slash-based stripping for URI-scheme IDs (e.g. gpt://folder/model)
+  // whose slashes are path separators, not provider delimiters (#3429).
+  const _hasScheme=/^[a-z][a-z0-9+.-]*:\/\//i.test(s);
+  if(!_hasScheme){
+    // Strip provider-qualified prefixes that contain colons before the first
+    // slash (e.g. 'custom:llm-proxy/model' → 'model').  Without this, badge-
+    // key variants like 'custom:llm-proxy/opencode_go/deepseek-v4-pro' and the
+    // bare 'opencode_go/deepseek-v4-pro' produce different normalized keys and
+    // aren't deduped in the configured section (#3360).
+    if(s.includes('/')&&s.indexOf(':')!==-1&&s.indexOf(':')<s.indexOf('/')){
+      s=s.slice(s.indexOf('/')+1)||s;
+    }
+    // Strip only the first slash-segment (provider prefix), preserving any
+    // remaining vendor hierarchy. Using split('/').pop() here previously
+    // discarded ALL segments except the last, collapsing distinct multi-slash
+    // IDs like 'vendor_a/deepseek-v4-pro' and 'vendor_b/deepseek/deepseek-v4-pro'
+    // to the same key, causing badge misattribution and configured-entry
+    // suppression (#3360).
+    if(s.includes('/')) s=s.replace(/^[^/]+\//, '')||s;
+  }
   return s.replace(/-/g,'.');
 }
 
@@ -1478,7 +1689,7 @@ function renderModelDropdown(){
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
         row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-        row.onclick=()=>selectModelFromDropdown(m.value);
+        row.onclick=()=>selectModelFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
     }
@@ -1517,7 +1728,7 @@ function renderModelDropdown(){
       // Inline provider chip on every row that has a group (#1425)
       const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
       row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
-      row.onclick=()=>selectModelFromDropdown(m.value);
+      row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
       dd.appendChild(row);
     }
     // Show "No results" if filtered and nothing matched
@@ -1555,22 +1766,23 @@ function renderModelDropdown(){
 }
 
 async function selectModelFromDropdown(value){
+  const preferredProviderId=arguments[1];
   const sel=$('modelSelect');
-  if(!sel||sel.value===value) { closeModelDropdown(); return; }
-  // If the value isn't in the option list (custom model ID), add a temporary option
-  // so sel.value assignment succeeds and the model chip shows the custom ID.
-  if(!Array.from(sel.options).some(o=>o.value===value)){
-    const opt=document.createElement('option');
-    opt.value=value;
-    opt.textContent=getModelLabel(value);
-    opt.dataset.custom='1';
-    const badge=(window._configuredModelBadges||{})[value];
-    if(badge&&badge.provider) opt.dataset.provider=badge.provider;
-    // Remove any previous custom option before adding new one
-    sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
-    sel.appendChild(opt);
+  if(!sel) { closeModelDropdown(); return; }
+  const provider=String(preferredProviderId||'').trim()||null;
+  const currentState=(typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel, sel.value)
+    : {model:sel.value,model_provider:null};
+  const sameModel=String(currentState.model||'')===String(value||'');
+  const sameProvider=String(currentState.model_provider||'')===String(provider||'');
+  if(sameModel&&sameProvider){ closeModelDropdown(); return; }
+  // Resolve the provider-specific option so duplicate bare IDs (e.g. gpt-5.5
+  // under OpenAI Codex vs OpenRouter) update session model_provider correctly.
+  if(typeof _ensureModelOptionInDropdown==='function'){
+    _ensureModelOptionInDropdown(value, sel, provider);
+  }else{
+    sel.value=value;
   }
-  sel.value=value;
   syncModelChip();
   closeModelDropdown();
   if(typeof sel.onchange==='function') await sel.onchange();
@@ -1629,6 +1841,7 @@ window.addEventListener('resize',()=>{
 
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
+let _currentReasoningEffortsSupported=null;
 
 function _normalizeReasoningEffort(eff){
   return String(eff||'').trim().toLowerCase();
@@ -1640,17 +1853,65 @@ function _formatReasoningEffortLabel(effort){
   return effort;
 }
 
+function _reasoningEffortQuery(){
+  const sel=$('modelSelect');
+  const model=(S&&S.session&&S.session.model)||(sel&&sel.value)||'';
+  let provider=(S&&S.session&&S.session.model_provider)||'';
+  if(!provider&&sel&&model&&typeof _modelStateForSelect==='function'){
+    provider=_modelStateForSelect(sel, model).model_provider||'';
+  }
+  const params=new URLSearchParams();
+  if(model) params.set('model', model);
+  if(provider) params.set('provider', provider);
+  const qs=params.toString();
+  return qs?('?'+qs):'';
+}
+
+function _applyReasoningOptions(supportedEfforts){
+  const dd=$('composerReasoningDropdown');
+  if(!dd) return;
+  const supported=new Set(Array.isArray(supportedEfforts)?supportedEfforts:[]);
+  dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+    const effort=opt.dataset.effort;
+    if(effort==='none'){
+      opt.style.display='';
+      return;
+    }
+    if(!supported.size){
+      opt.style.display='none';
+      return;
+    }
+    opt.style.display=supported.has(effort)?'':'none';
+  });
+}
+
 function _applyReasoningChip(eff){
+  const meta=arguments[1]||null;
   const effort=_normalizeReasoningEffort(eff);
   _currentReasoningEffort=effort;
+  if(meta&&Array.isArray(meta.supported_efforts)){
+    _currentReasoningEffortsSupported=meta.supported_efforts;
+  }
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
   const chip=$('composerReasoningChip');
   const mobileLabel=$('composerMobileReasoningLabel');
   const mobileAction=$('composerMobileReasoningAction');
   if(!wrap||!label) return;
+  const supportedEfforts=(typeof _currentReasoningEffortsSupported==='undefined')
+    ?null
+    :_currentReasoningEffortsSupported;
+  const supports=Array.isArray(supportedEfforts)
+    ?supportedEfforts.length>0
+    :true;
+  if(!supports){
+    wrap.style.display='none';
+    if(mobileAction) mobileAction.style.display='none';
+    return;
+  }
   wrap.style.display='';
   if(mobileAction) mobileAction.style.display='';
+  if(typeof _applyReasoningOptions==='function') _applyReasoningOptions(supportedEfforts);
   const text=_formatReasoningEffortLabel(effort);
   label.textContent=text;
   if(mobileLabel) mobileLabel.textContent=text;
@@ -1664,14 +1925,13 @@ function _applyReasoningChip(eff){
 }
 
 function fetchReasoningChip(){
-  api('/api/reasoning').then(function(st){
-    _applyReasoningChip((st&&st.reasoning_effort)||'');
-  }).catch(function(){_applyReasoningChip('');});
+  api('/api/reasoning'+_reasoningEffortQuery()).then(function(st){
+    _applyReasoningChip((st&&st.reasoning_effort)||'', st||{});
+  }).catch(function(){_applyReasoningChip('', {supported_efforts:[]});});
 }
 
 function syncReasoningChip(){
-  if(_currentReasoningEffort===null){fetchReasoningChip();return;}
-  _applyReasoningChip(_currentReasoningEffort);
+  fetchReasoningChip();
 }
 
 function _highlightReasoningOption(effort){
@@ -1737,7 +1997,7 @@ document.addEventListener('click',function(e){
     if(effort){
       api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
         .then(function(st){
-          _applyReasoningChip((st&&st.reasoning_effort)||effort);
+          _applyReasoningChip((st&&st.reasoning_effort)||effort, st||{});
           showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
         })
         .catch(function(){showToast('🧠 Failed to set effort');});
@@ -1990,68 +2250,52 @@ window.addEventListener('resize',function(){
 });
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
-// When streaming, auto-scroll only if the user hasn't manually scrolled up.
-// Once the user scrolls back to within 250px of the bottom, re-pin.
-// Uses a guard flag to avoid the race where programmatic scrolls (from
-// scrollIfPinned / scrollToBottom) re-set _scrollPinned=true, overriding
-// the user's explicit scroll-up.  Fixes #1469 / #1360.
-// Direction-aware unpin (issue #1731): the hysteresis below is correct
-// for re-pinning (entering the near-bottom zone), but applying it to
-// unpinning stranded users who scrolled up by a small amount inside the
-// 250px zone — every upward sample still landed in the near-bottom
-// region, so the counter kept incrementing and _scrollPinned stayed
-// true. The next streaming token snapped them back. We now track
-// scrollTop direction: an explicit upward movement (scrollTop decreased
-// by more than 2px between samples) unpins immediately and resets the
-// counter, while downward / stationary movement falls through the
-// original hysteresis path so the macOS momentum re-pin protection from
-// #1360 is preserved.
-// rAF-debounced scroll listener (issue #1360): on macOS WKWebView, trackpad
-// momentum scrolling fires scroll events that interleave with the
-// _programmaticScroll setTimeout(0) guard. A mid-momentum scroll event can
-// either get swallowed (_programmaticScroll still true) or falsely report
-// the user is at the bottom (momentum hasn't settled). rAF defers the
-// distance check to the next paint frame when the browser's scroll
-// position has settled. A hysteresis counter requires two consecutive
-// near-bottom samples before re-pinning, preventing accidental re-pin
-// during initial deceleration.
+// When streaming, auto-scroll only while the user is following the live tail.
+// Any manual scroll up sets a sticky unpinned flag until the user scrolls back
+// to the bottom (near-bottom hysteresis on downward motion) or clicks ↓.
+// Programmatic scrolls are ignored via _programmaticScroll. Fixes #1469 / #1360 / #1731.
 let _scrollPinned=true;
 let _programmaticScroll=false;
 let _nearBottomCount=0;
 let _lastScrollTop=null;
-let _lastNonMessageScrollIntentMs=0;
-let _lastMessageUpwardIntentMs=0;
+// Sticky-unpin model (#3343 supersedes #3330's proximity re-pin): once the user
+// scrolls up, streaming stops auto-following until they return to the bottom or
+// click ↓. The upward-intent TIMEOUT mechanism (_lastMessageUpwardIntentMs /
+// MESSAGE_UPWARD_INTENT_MS) is removed — sticky-unpin makes it unnecessary.
+// Keep the non-message intent timestamp at -Infinity so load-time isn't read as
+// intent (the #3330 follow-up fix); 0 would mark the first NON_MESSAGE_SCROLL_INTENT
+// window after load as suppressed.
+let _lastNonMessageScrollIntentMs=-Infinity;
 let _messageUserUnpinned=false;
 let _bottomSettleToken=0;
 const NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS=350;
-const MESSAGE_UPWARD_INTENT_MS=450;
+let _touchStartY=null;
 function _cancelBottomSettle(){ _bottomSettleToken++; }
 function _recordNonMessageScrollIntent(e){
   const el=document.getElementById('messages');
   const target=e&&e.target;
   if(!el||!target) return;
-  // Streaming token renders should keep pinning the chat only while the user is
-  // actually interacting with the chat pane. A wheel/touch gesture over the
-  // session sidebar (or another independent pane) must not be immediately fought
-  // by scrollIfPinned() writing #messages.scrollTop on the next token (#1784).
   if(!el.contains(target)) _lastNonMessageScrollIntentMs=performance.now();
   else if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY<0)){
-    // User is intentionally moving upward in the transcript. Record the real
-    // input event so later scrollTop decreases caused by layout/windowing do
-    // not masquerade as user intent and strand live streaming away from bottom.
-    _lastMessageUpwardIntentMs=performance.now();
-    // User is intentionally moving in the transcript. Cancel any delayed
-    // scrollToBottom settling that was scheduled by session-load/layout growth.
     _cancelBottomSettle();
     if(typeof e.deltaY==='number'&&e.deltaY<0){
       _messageUserUnpinned=true;
       _nearBottomCount=0;
       _scrollPinned=false;
+    } else if(e.type==='touchmove'&&_touchStartY!==null&&e.touches&&e.touches[0]){
+      // Detect upward-scroll intent on touch: dragging the finger DOWN the
+      // screen scrolls the content up into earlier history (scrollTop
+      // decreases) — the same "user scrolled away" signal the wheel deltaY<0
+      // branch and the scroll listener's movedUp branch use. dy>0 = finger
+      // moved down = reveal earlier content = unpin.
+      const dy=e.touches[0].clientY-_touchStartY;
+      if(dy>8){
+        _messageUserUnpinned=true;
+        _nearBottomCount=0;
+        _scrollPinned=false;
+      }
     }
   }
-}
-function _recentMessageUpwardIntent(){
-  return performance.now()-_lastMessageUpwardIntentMs<MESSAGE_UPWARD_INTENT_MS;
 }
 function _recentNonMessageScrollIntent(){
   return performance.now()-_lastNonMessageScrollIntentMs<NON_MESSAGE_SCROLL_INTENT_SUPPRESS_MS;
@@ -2059,12 +2303,33 @@ function _recentNonMessageScrollIntent(){
 if(typeof document!=='undefined'){
   document.addEventListener('wheel',_recordNonMessageScrollIntent,{capture:true,passive:true});
   document.addEventListener('touchmove',_recordNonMessageScrollIntent,{capture:true,passive:true});
+  document.addEventListener('touchstart',function(e){
+    if(e.touches&&e.touches[0]) _touchStartY=e.touches[0].clientY;
+  },{capture:true,passive:true});
+  document.addEventListener('touchend',function(){ _touchStartY=null; },{capture:true,passive:true});
+  document.addEventListener('touchcancel',function(){ _touchStartY=null; },{capture:true,passive:true});
 }
 // Reset hook for session-switch — called from sessions.js loadSession() to
 // prevent the new chat's first scroll comparing against the previous chat's
 // scrollTop (Opus stage-302 SHOULD-FIX, #1731 follow-up).
-function _resetScrollDirectionTracker(){ _lastScrollTop=null; }
-if(typeof window!=='undefined') window._resetScrollDirectionTracker=_resetScrollDirectionTracker;
+function _resetScrollDirectionTracker(){
+  _lastScrollTop=null;
+  _messageUserUnpinned=false;
+  _scrollPinned=true;
+  _nearBottomCount=0;
+  _touchStartY=null;
+}
+function _resetStreamScrollFollow(){
+  _messageUserUnpinned=false;
+  _scrollPinned=true;
+  _nearBottomCount=0;
+  _lastScrollTop=null;
+  _cancelBottomSettle();
+}
+if(typeof window!=='undefined'){
+  window._resetScrollDirectionTracker=_resetScrollDirectionTracker;
+  window._resetStreamScrollFollow=_resetStreamScrollFollow;
+}
 /* ── Pull-to-refresh for PWA standalone (Android) ── */
 (function(){
   if(typeof document==='undefined') return;
@@ -2144,17 +2409,32 @@ if(typeof window!=='undefined') window._resetScrollDirectionTracker=_resetScroll
     _scrollRaf=requestAnimationFrame(()=>{
       const top=el.scrollTop;
       const nearBottom=el.scrollHeight-top-el.clientHeight<250;
-      // scrollToBottomBtn visibility is updated below after pin state settles.
-      const movedUp=_lastScrollTop!==null && top<_lastScrollTop-2 && _recentMessageUpwardIntent();
+      const movedUp=_lastScrollTop!==null&&top<_lastScrollTop-2;
+      const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
       _lastScrollTop=top;
-      if(movedUp){ _cancelBottomSettle(); _nearBottomCount=0; _scrollPinned=false; _messageUserUnpinned=true; } // #1731
-      else {
+      if(movedUp){
+        _cancelBottomSettle();
+        _nearBottomCount=0;
+        _scrollPinned=false;
+        _messageUserUnpinned=true;
+      }else if(movedDown&&nearBottom){
+        _nearBottomCount=_nearBottomCount+1;
+        if(_nearBottomCount>=2){
+          _scrollPinned=true;
+          _messageUserUnpinned=false;
+        }
+      }else if(!_messageUserUnpinned){
         if(nearBottom){
           _nearBottomCount=_nearBottomCount+1;
           if(_nearBottomCount>=2) _scrollPinned=true;
-        } else { _nearBottomCount=0; _scrollPinned=false; }
-        if(_scrollPinned) _messageUserUnpinned=false;
-      } // #1360
+        }else{
+          _nearBottomCount=0;
+          _scrollPinned=false;
+        }
+      }else if(!nearBottom){
+        _nearBottomCount=0;
+        _scrollPinned=false;
+      }
       const btn=$('scrollToBottomBtn');
       const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
       if(btn) btn.style.display=showBottomButton?'flex':'none';
@@ -2297,7 +2577,7 @@ function _setActivityElapsedStartedAt(group){
 }
 function _updateActiveActivityElapsedTimer(){
   const group=_activityElapsedTimerGroup;
-  if(!group||!group.isConnected||group.getAttribute('data-live-tool-call-group')!=='1'){
+  if(!group||!group.isConnected||group.getAttribute('data-live-tool-call-group')!=='1'||group.getAttribute('data-live-activity-current')!=='1'){
     _clearActivityElapsedTimer();
     return;
   }
@@ -2356,7 +2636,6 @@ function _setCtxCompressButton(btn,text){
 }
 
 function _syncMobileCtxDisplay(state){
-  const badge=$('composerMobileCtxBadge');
   const mobileConfigBtn=$('composerMobileConfigBtn');
   const row=$('composerMobileContextAction');
   const usageLine=$('composerMobileContextUsage');
@@ -2365,22 +2644,34 @@ function _syncMobileCtxDisplay(state){
   const costLine=$('composerMobileContextCost');
   const compressBtn=$('composerMobileCtxCompressBtn');
   if(!state||!state.visible){
-    if(badge)badge.style.display='none';
     if(row)row.style.display='none';
     if(mobileConfigBtn){
       mobileConfigBtn.setAttribute('aria-label',_MOBILE_CONFIG_BASE_LABEL);
       mobileConfigBtn.setAttribute('title',_MOBILE_CONFIG_BASE_LABEL);
     }
     _setCtxCompressButton(compressBtn,'');
+    // Reset context ring to 0% to clear any stale values from previous sessions
+    var arc = document.getElementById('ctx-arc');
+    var num = document.getElementById('ctx-num');
+    if (arc && num) {
+      var circumference = 87.96;
+      arc.setAttribute('stroke-dashoffset', circumference);
+      num.textContent = '0';
+      arc.setAttribute('stroke', '#22c55e');
+    }
     return;
   }
-  if(badge){
-    badge.style.display='inline-flex';
-    badge.textContent=state.hasPromptTok?String(state.pct):'\u00b7';
-    badge.classList.toggle('ctx-mid',state.pct>50&&state.pct<=75);
-    badge.classList.toggle('ctx-high',state.pct>75);
-    badge.setAttribute('title',state.label);
-  }
+  (function updateCtxRing(pct) {
+    var arc = document.getElementById('ctx-arc');
+    var num = document.getElementById('ctx-num');
+    if (!arc || !num) return;
+    var offset = 87.96 * (1 - Math.min(pct, 100) / 100);
+    arc.setAttribute('stroke-dashoffset', offset);
+    num.textContent = Math.round(pct);
+    arc.setAttribute('stroke',
+      pct <= 50 ? '#22c55e' : pct <= 85 ? '#f97316' : '#ef4444'
+    );
+  })(state.pct);
   if(mobileConfigBtn){
     mobileConfigBtn.setAttribute('aria-label',`${_MOBILE_CONFIG_BASE_LABEL}; ${state.label}`);
     mobileConfigBtn.setAttribute('title',`${_MOBILE_CONFIG_BASE_LABEL} \u00b7 ${state.label}`);
@@ -2551,12 +2842,33 @@ function _setMessageScrollToBottom(){
   _lastScrollTop=el.scrollTop;
   _nearBottomCount=2;
   _scrollPinned=true;
-  requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  requestAnimationFrame(()=>{
+    // Retry the bottom write on the next layout frame so a DOM rebuild that
+    // grows the transcript after the first write doesn't strand a pinned
+    // conversation mid-scroll (#3319). But by this frame the user may have
+    // scrolled up — under the sticky-unpin model (#3343) _messageUserUnpinned
+    // is the authoritative "user scrolled away" signal, so DON'T snap them back
+    // or re-pin if so; only release the programmatic-scroll latch.
+    if(_messageUserUnpinned || !_scrollPinned || _recentNonMessageScrollIntent()){
+      requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+      return;
+    }
+    el.scrollTop=el.scrollHeight;
+    _lastScrollTop=el.scrollTop;
+    _nearBottomCount=2;
+    _scrollPinned=true;
+    requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
+  });
 }
 function _isMessagePaneNearBottom(threshold=250){
   const el=$('messages');
   if(!el) return false;
   return el.scrollHeight-el.scrollTop-el.clientHeight<=threshold;
+}
+function _messageBottomDistance(){
+  const el=$('messages');
+  if(!el) return 0;
+  return el.scrollHeight-el.scrollTop-el.clientHeight;
 }
 function _shouldFollowMessagesOnDomReplace(){
   return !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(1200));
@@ -2571,21 +2883,23 @@ function _settleMessageScrollToBottom(force){
   const passes=[0,16,80,180];
   passes.forEach(delay=>setTimeout(()=>{
     if(token!==_bottomSettleToken) return;
-    if(!force && (!_scrollPinned||_recentNonMessageScrollIntent())) return;
+    if(!force && (!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent())) return;
     _setMessageScrollToBottom();
   },delay));
   requestAnimationFrame(()=>{
     if(token!==_bottomSettleToken) return;
-    if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+    if(force || (_scrollPinned&&!_messageUserUnpinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
     requestAnimationFrame(()=>{
       if(token!==_bottomSettleToken) return;
-      if(force || (_scrollPinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
+      if(force || (_scrollPinned&&!_messageUserUnpinned&&!_recentNonMessageScrollIntent())) _setMessageScrollToBottom();
     });
   });
 }
 function scrollIfPinned(){
+  if(_messageUserUnpinned) return;
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
+  if(_messageBottomDistance()>500) _setMessageScrollToBottom();
   _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
@@ -2629,7 +2943,7 @@ function getModelLabel(modelId){
   if(rawId.startsWith('@custom:')){
     const rest=rawId.slice('@custom:'.length);
     if(rest.includes(':')) return rest.slice(rest.lastIndexOf(':')+1)||rawId;
-    if(rest.includes('/')) return rest.split('/').pop()||rawId;
+    if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
     return rest||rawId;
   }
   // Check dynamic labels first, then fall back to splitting the ID
@@ -2637,8 +2951,47 @@ function getModelLabel(modelId){
   // Static fallback for common models
   const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-v4-flash':'DeepSeek V4 Flash','deepseek/deepseek-v4-pro':'DeepSeek V4 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3 (legacy)','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
-  // Safe Ollama-tag fallback formatter before generic split('/').pop()
-  let _last = modelId.split('/').pop() || modelId;
+  // Safe Ollama-tag fallback: strip only the first slash-segment (provider
+  // prefix) so multi-slash IDs preserve their vendor hierarchy (#3360).
+  // URI-scheme ids (e.g. `gpt://${FOLDER}/deepseek-v4-flash/latest`, provider
+  // `yandex:gpt`) must NOT be first-segment-stripped — `indexOf('/')` would
+  // land inside the `://` and leave `/${FOLDER}/...` path junk (#3429). For a
+  // `scheme://authority/path...` id, drop the scheme AND the authority, then
+  // pick the model name from the PATH segments only. A version/channel tail
+  // (`latest`/`stable`/numeric) is skipped only when a real model segment
+  // precedes it — never promoting the authority or a container folder (#3429).
+  let _last;
+  const _uriMatch = /^[a-z][a-z0-9+.-]*:\/\/(.+)$/i.exec(modelId);
+  if (_uriMatch) {
+    const _all = _uriMatch[1].split('/').filter(Boolean);
+    // _all[0] is the authority (folder/host); the model lives in the path tail.
+    const _path = _all.slice(1);
+    // A pure version/channel tail: named channels, or a bare version number
+    // (`v4`, `1.2`, `20231231`) — NOT a mixed model name that merely starts
+    // with a digit (`2026-model`, `4o-mini`), which must be kept as the label.
+    const _isVersionTail = (s) => /^(latest|stable|current|default|v\d[\d.]*|\d[\d.]*)$/i.test(s);
+    const _isPlaceholder = (s) => /\$\{[^}]*\}/.test(s);
+    // Walk path segments right-to-left; the model name is the LAST segment that
+    // is neither a version/channel tail (`latest`, `v4`, `1.2`) nor a `${...}`
+    // env-var placeholder. Fall back to the last non-placeholder segment, then
+    // the literal last segment. Never returns the authority (`_all[0]`).
+    let _pick = '';
+    let _lastUsable = '';
+    for (let _i = _path.length - 1; _i >= 0; _i--) {
+      const _seg = _path[_i];
+      if (_isPlaceholder(_seg)) continue;
+      if (!_lastUsable) _lastUsable = _seg;
+      if (!_isVersionTail(_seg)) { _pick = _seg; break; }
+    }
+    // Fallbacks: the chosen non-version segment, else the last non-placeholder
+    // path segment. NEVER the authority and NEVER a `${...}` placeholder — for
+    // a degenerate id (`gpt://folder123`, `gpt://folder123/${MODEL}`) fall all
+    // the way back to the raw id rather than leak the folder/host or env var.
+    const _lastPath = _path[_path.length - 1] || '';
+    _last = _pick || _lastUsable || (_lastPath && !_isPlaceholder(_lastPath) ? _lastPath : '') || modelId;
+  } else {
+    _last = modelId.includes('/') ? (modelId.slice(modelId.indexOf('/')+1) || modelId) : modelId;
+  }
   // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
   if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
   const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
@@ -2891,9 +3244,10 @@ function renderMd(raw){
   s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Match a single literal backslash before the display delimiter (the common LLM form).
   s=s.replace(/\\\[([\s\S]+?)\\\]/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
-  // Inline math: $...$ — require non-space at boundaries to avoid false positives
-  // e.g. "costs $5 and $10" should not trigger (space after opening $)
-  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{if(m.includes(' | '))return '\$'+m+'\$';math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
+  // Inline math: $...$ — require non-space/non-digit at opening boundary to avoid
+  // false positives on currency like "$1,000 xuống ~$95" or "costs $5 and $10".
+  // Aligns with smd's se() guard which also rejects $ followed by digits.
+  s=s.replace(/\$([^\s$\d\n][^$\n]*?[^\s$\n]|[^\s\d])\$/g,(_,m)=>{if(m.includes(' | '))return '\$'+m+'\$';math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Also stash \(...\) LaTeX delimiters.
   // Match a single literal backslash before the delimiter (the common LLM form).
   s=s.replace(/\\\((.+?)\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
@@ -2903,6 +3257,17 @@ function renderMd(raw){
   // backticks for multiline code and break subsequent code-box rendering.
   const rawPreStash=[];
   s=s.replace(/(<pre\b[^>]*>[\s\S]*?<\/pre>)/gi,m=>{rawPreStash.push(m);return `\x00R${rawPreStash.length-1}\x00`;});
+  // Bare file:// artifact links → media. Some gateway/tool surfaces emit bare
+  // file:// links for local artifacts instead of MEDIA: tokens; browser clients
+  // cannot open the server filesystem directly, so route them through /api/media.
+  // Runs AFTER fenced-block (\x00P), inline-code (\x00F), AND raw-<pre> (\x00R)
+  // stashing so a file:// inside any code/preformatted region stays literal text
+  // (#3219/#3234). Only bare URLs (line-start or whitespace-delimited) match, so
+  // normal [label](file://...) markdown anchors keep the link path below.
+  s=s.replace(/(^|\s)(file:\/\/[^\s<>"')\]]+)/g,(_,lead,raw_ref)=>{
+    media_stash.push(raw_ref);
+    return lead+'\x00D'+(media_stash.length-1)+'\x00';
+  });
   s=s.replace(/<strong>([\s\S]*?)<\/strong>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<b>([\s\S]*?)<\/b>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>'*'+t+'*');
@@ -2960,7 +3325,7 @@ function renderMd(raw){
     t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
-    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|mailto:|tel:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${_markdownHref(u)}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
+    t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
     t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
@@ -3053,7 +3418,7 @@ function renderMd(raw){
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
   const _a_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
-  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|mailto:|tel:)[^\s\)]+)\)/g,(_,label,url)=>`<a href="${_markdownHref(url)}" target="_blank" rel="noopener">${esc(label)}</a>`);
+  s=s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:)[^\s\)]+)\)/g,(_,label,url)=>_markdownAnchor(label,url));
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Restore raw <pre> only after markdown rewrites so literal preformatted
   // content stays placeholder-protected, then let the sanitizer normalize tags.
@@ -3071,6 +3436,24 @@ function renderMd(raw){
   }
   function _markdownHref(raw){
     const href=String(raw||'').replace(/"/g,'%22');
+    if(/^session:\/\//i.test(href)){
+      const sid=href.replace(/^session:\/\//i,'').split(/[?#]/)[0];
+      try{
+        const decoded=decodeURIComponent(sid);
+        if(typeof _sessionUrlForSid==='function') return _sessionUrlForSid(decoded);
+        return 'session/'+encodeURIComponent(decoded);
+      }catch(_){
+        return 'session/'+encodeURIComponent(sid);
+      }
+    }
+    if(/^workspace:\/\//i.test(href)){
+      try{
+        const rel=decodeURIComponent(href.replace(/^workspace:\/\//i,'')).replace(/^~\//,'').replace(/^\.\//,'');
+        return '#workspace='+encodeURIComponent(rel);
+      }catch(_){
+        return '#';
+      }
+    }
     if(/^file:\/\//i.test(href)){
       try{
         const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
@@ -3081,6 +3464,28 @@ function renderMd(raw){
     }
     return href;
   }
+  function _isInternalSessionHref(raw){
+    const href=String(raw||'').trim();
+    if(/^session\/[^?#]+/i.test(href)) return true;
+    try{
+      const base=(typeof document!=='undefined'&&document.baseURI)||
+        (typeof window!=='undefined'&&window.location&&window.location.href)||
+        'http://localhost/';
+      const url=new URL(href,base);
+      const baseUrl=new URL(base,base);
+      if(url.origin!==baseUrl.origin) return false;
+      const basePath=baseUrl.pathname.replace(/(?:index\.html)?$/,'').replace(/\/[^/]*$/,'/');
+      const root=basePath.endsWith('/')?basePath:basePath+'/';
+      return url.pathname.startsWith(root+'session/')||url.pathname.startsWith('/session/');
+    }catch(_){
+      return false;
+    }
+  }
+  function _markdownAnchor(label,rawUrl){
+    const href=_markdownHref(rawUrl);
+    const internal=/^session:\/\//i.test(String(rawUrl||'')) || _isInternalSessionHref(href);
+    return `<a${internal?' class="session-link"':''} href="${href}"${internal?'':' target="_blank" rel="noopener"'}>${esc(label)}</a>`;
+  }
   function _isSafeUrl(v, img){
     const raw=_safeAttrValue(v);
     const compact=raw.replace(/[\u0000-\u001f\u007f\s]+/g,'').toLowerCase();
@@ -3089,7 +3494,7 @@ function renderMd(raw){
     if(/^https?:\/\//i.test(raw)) return true;
     if(/^(mailto:|tel:)/i.test(raw)) return true;
     if(img && /^api\//i.test(raw)) return true;
-    if(!img && (/^api\//i.test(raw) || /^#/.test(raw))) return true;
+    if(!img && (/^api\//i.test(raw) || /^#/.test(raw) || _isInternalSessionHref(raw))) return true;
     return false;
   }
   function _attrs(raw){
@@ -3137,7 +3542,7 @@ function renderMd(raw){
       if(!_isSafeUrl(a.href,false)) return '<a>';
       const target=a.target==='_blank'?' target="_blank"':'';
       const rel=a.rel==='noopener'?' rel="noopener"':'';
-      const cls=_cls(a.class,['msg-media-link','skill-linked-file','skill-file-back']);
+      const cls=_cls(a.class,['msg-media-link','skill-linked-file','skill-file-back','session-link']);
       const download=a.download?` download="${esc(a.download)}"`:'';
       return `<a${cls} href="${esc(_safeAttrValue(a.href))}"${target}${rel}${download}>`;
     }
@@ -3202,7 +3607,7 @@ function renderMd(raw){
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
-    const ref=media_stash[+i];
+    let ref=media_stash[+i];
     // Keep this logic self-contained: some tests extract renderMd() alone and
     // execute it in node, without the top-level helper functions from ui.js.
     const mediaKindForName=(name='')=>{
@@ -3221,6 +3626,28 @@ function renderMd(raw){
         : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
       return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span></div></div>`;
     };
+    const localArtifactCard=(src,name)=>{
+      const safeSrc=esc(src);
+      const safeName=esc(name||'image');
+      const tt=(typeof t==='function')?t:(key=>({media_download:'Download'}[key]||key));
+      // Clean inline image (keeps the existing .msg-media-img lightbox-on-click
+      // behavior) with a hover/focus-revealed Download action overlaid top-right,
+      // matching the ChatGPT/Claude/Gemini pattern. The image stays the hero —
+      // no permanent card chrome. Download is the one affordance the lightbox
+      // (zoom-on-click) doesn't already provide.
+      const dlLabel=esc(tt('media_download'));
+      const dlSvg='<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>';
+      return `<span class="msg-artifact-image"><img class="msg-media-img" src="${safeSrc}" alt="${safeName}" loading="lazy"><a class="msg-artifact-download" href="${safeSrc}" download="${safeName}" title="${dlLabel}" aria-label="${dlLabel}" onclick="event.stopPropagation()">${dlSvg}</a></span>`;
+    };
+    if(/^file:\/\//i.test(ref)){
+      try{
+        const u=new URL(ref);
+        ref=decodeURIComponent(u.pathname||ref.replace(/^file:\/\//i,''));
+      }catch(_){
+        try{ref=decodeURIComponent(ref.replace(/^file:\/\//i,''));}
+        catch(__){ref=ref.replace(/^file:\/\//i,'');}
+      }
+    }
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){
       // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
@@ -3249,10 +3676,11 @@ function renderMd(raw){
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
-    const apiUrl='api/media?path='+encodeURIComponent(ref);
+    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
+    const apiUrl='api/media?path='+encodeURIComponent(ref)+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'');
     const localKind=mediaKindForName(ref);
     if(localKind==='image'){
-      return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
+      return localArtifactCard(apiUrl,ref.split('/').pop()||'image');
     }
     // SVG → inline image (no download, render directly)
     if(_SVG_EXTS.test(ref)){
@@ -3294,6 +3722,10 @@ function renderMd(raw){
   // string verbatim — no further passes can mangle it.
   s=s.replace(/\x00Q(\d+)\x00/g,(_,i)=>_bq_stash[+i]);
   return s;
+}
+
+function _stripAttachedFilesMarkerForDisplay(text){
+  return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
 }
 
 function setStatus(t){
@@ -4050,6 +4482,8 @@ function _stripForTTS(text){
   text=text.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
   // Replace MEDIA: paths with a simple label
   text=text.replace(/MEDIA:[^\s]+/g,'a file');
+  // Strip emoji and emoticons
+  text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
   // Strip HTML tags that may leak through markdown
   text=text.replace(/<[^>]+>/g,' ');
   // Collapse whitespace
@@ -4059,18 +4493,13 @@ function _stripForTTS(text){
 
 let _ttsSpeaking=false;
 let _ttsCurrentUtterance=null;
+let _playingEdgeAudio=null;
 
 function speakMessage(btn){
-  if(!('speechSynthesis' in window)){
-    showToast(t('tts_not_supported')||'Speech synthesis not supported in this browser.');
-    return;
-  }
-  // If already speaking this message, stop
   if(btn&&btn.dataset.speaking==='1'){
     stopTTS();
     return;
   }
-  // Stop any current speech
   stopTTS();
 
   const row=btn?btn.closest('[data-raw-text]'):null;
@@ -4079,6 +4508,17 @@ function speakMessage(btn){
 
   const clean=_stripForTTS(text);
   if(!clean) return;
+
+  const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  if(engine==='edge'){
+    _playEdgeTts(clean, btn);
+    return;
+  }
+
+  if(!('speechSynthesis' in window)){
+    showToast(t('tts_not_supported')||'Speech synthesis not supported in this browser.');
+    return;
+  }
 
   const utter=new SpeechSynthesisUtterance(clean);
 
@@ -4106,9 +4546,58 @@ function speakMessage(btn){
   speechSynthesis.speak(utter);
 }
 
+function _playEdgeTts(text, btn){
+  const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
+  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+  let rate='', pitch='';
+  if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
+  if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
+  if(btn) btn.dataset.speaking='1';
+  _ttsSpeaking=true;
+  // /api/tts is POST-only (and behind the same-origin CSRF gate); GET via
+  // new Audio(url) would 405 and silently fail, and would also leak the message
+  // text into the query string / access log. POST the JSON body, then play the
+  // returned audio via an object URL — mirrors the working boot.js edge path.
+  const _fail=function(msg){
+    _ttsSpeaking=false;_playingEdgeAudio=null;
+    if(btn)btn.dataset.speaking='0';
+    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+  };
+  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({text:text, voice:voice, rate:rate, pitch:pitch})
+  })
+  .then(function(r){
+    if(!r.ok){
+      // Surface the server error (e.g. 503 "edge-tts not installed", 429 rate limit)
+      return r.json().catch(function(){return {};}).then(function(j){
+        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+      });
+    }
+    return r.blob();
+  })
+  .then(function(blob){
+    const url=URL.createObjectURL(blob);
+    const audio=new Audio(url);
+    _playingEdgeAudio=audio;
+    const _cleanup=function(){_ttsSpeaking=false;_playingEdgeAudio=null;if(btn)btn.dataset.speaking='0';try{URL.revokeObjectURL(url);}catch(_){}};
+    audio.onended=_cleanup;
+    audio.onerror=function(){_cleanup();};
+    audio.play().catch(function(e){_cleanup();showToast('Edge TTS error: '+(e&&e.message||e));});
+  })
+  .catch(function(e){ _fail((e&&e.message)||'Edge TTS failed'); });
+}
+
 function stopTTS(){
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
+  }
+  // Stop Edge TTS audio
+  if(_playingEdgeAudio){
+    try{ _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0; }catch(_){}
+    _playingEdgeAudio=null;
   }
   _ttsSpeaking=false;
   _ttsCurrentUtterance=null;
@@ -4117,7 +4606,8 @@ function stopTTS(){
 }
 
 function autoReadLastAssistant(){
-  if(!('speechSynthesis' in window)) return;
+  const engine=localStorage.getItem('hermes-tts-engine')||'browser';
+  if(engine==='browser'&&!('speechSynthesis' in window)) return;
   const pref=localStorage.getItem('hermes-tts-auto-read');
   if(pref!=='true') return;
   // Find the last assistant message segment in the DOM
@@ -4128,7 +4618,10 @@ function autoReadLastAssistant(){
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
-
+  if(engine==='edge'){
+    _playEdgeTts(clean, null);
+    return;
+  }
   const utter=new SpeechSynthesisUtterance(clean);
   const savedVoice=localStorage.getItem('hermes-tts-voice');
   const voices=speechSynthesis.getVoices();
@@ -4424,7 +4917,7 @@ async function pollSystemHealth(){
   if(document.visibilityState !== 'visible') return;
   if(!_systemHealthPanelIsVisible()) return;
   try{
-    const payload=await api('/api/system/health');
+    const payload=await api('/api/system/health',{timeoutToast:false});
     renderSystemHealth(payload);
   }catch(_){
     setSystemHealthUnavailable('Unavailable');
@@ -4490,7 +4983,7 @@ function dismissAgentHealthAlert(){
 async function pollAgentHealth(){
   if(document.visibilityState !== 'visible') return;
   try{
-    const payload=await api('/api/health/agent');
+    const payload=await api('/api/health/agent',{timeoutToast:false});
     if(payload.alive === true){
       _agentHealthLastState='alive';
       _setAgentHealthDismissed(false);
@@ -5027,7 +5520,9 @@ function syncTopbar(){
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
   const _topbarMeta=$('topbarMeta');
   if(_topbarMeta){
-    const sourceLabel=(S.session&&S.session.is_cli_session&&(S.session.source_label||S.session.source_tag||S.session.raw_source))||'';
+    let sourceLabel=(S.session&&(S.session.source_label||S.session.source_tag||S.session.raw_source))||'';
+    // Recovered sidecars stamp source_label 'WebUI' (api/session_recovery.py); don't badge a native session as its own source (#3338).
+    if(/^webui$/i.test(sourceLabel)) sourceLabel='';
     const metaText=t('n_messages',vis.length);
     _topbarMeta.textContent=metaText;
     if(sourceLabel){
@@ -5129,7 +5624,7 @@ function syncTopbar(){
   // modelSelect already set above
   // Update profile chip label
   const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(profileLabel) profileLabel.textContent=(S.session&&S.session.profile)||S.activeProfile||'default';
 }
 
 function msgContent(m){
@@ -5137,6 +5632,29 @@ function msgContent(m){
   let c=m.content||'';
   if(Array.isArray(c))c=c.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('').trim();
   return String(c).trim();
+}
+
+function _isRecoveryControlMessageText(text){
+  const normalized=String(text||'').replace(/\s+/g,' ').trim();
+  if(!normalized) return false;
+  const systemRecovery=/^\[System:/i.test(normalized)
+    && /previous response was cut off by a network error/i.test(normalized)
+    && /continue exactly where you left off/i.test(normalized);
+  const backendRecovery=/^the live worker stopped before this run finished\.?$/i.test(normalized);
+  return !!(systemRecovery || backendRecovery);
+}
+function _isRecoveryControlMessage(m){
+  if(!m||m.role==='tool') return false;
+  if(m.recovery_control===true) return true;
+  // Backward-compat ONLY: strict fully-anchored text match for pre-marker
+  // persisted sessions. NOT provider_details_label — a real "Response
+  // interrupted" card carries 'Interruption details' and must stay visible.
+  return _isRecoveryControlMessageText(msgContent(m)||String(m.content||''));
+}
+function _assistantMessageHasVisibleContent(m){
+  if(!m||m.role!=='assistant') return false;
+  if(_isRecoveryControlMessage(m)) return false;
+  return !!msgContent(m);
 }
 
 function _fmtDateSep(d){
@@ -5282,10 +5800,13 @@ function ensureActivityGroup(inner, opts){
   if(!group){
     group=document.createElement('div');
     let collapsed=opts.collapsed!==false;
+    if(window._activityFeedExpandedDefault===true) collapsed=false;
     const savedState=_readActivityDisclosureState(activityKey);
     // Restore the user's explicit expand intent when recreating the live
     // activity group within the same turn (#1298), then let persisted chat/turn
-    // state win across session switches and reloads.
+    // state win across session switches and reloads. Saved closed-state should
+    // override the default-expanded preference for settled groups the user has
+    // explicitly collapsed.
     if(live && _liveActivityUserExpanded === true) collapsed=false;
     else if(live && _liveActivityUserExpanded === false) collapsed=true;
     if(savedState==='open') collapsed=false;
@@ -5483,6 +6004,19 @@ function appendLiveCompressionCard(state){
     node.setAttribute('data-compression-started-at',String(started));
     node.setAttribute('data-compression-message',String(state.message||'Auto-compressing context...'));
     _startCompressionElapsedTimer();
+  } else {
+    // Completion or error: clear the elapsed-timer attributes so the
+    // interval reader (_compressionLiveCardState) doesn't keep treating
+    // the replaced card as a running compression (#2973).
+    node.removeAttribute('data-compression-started-at');
+    node.removeAttribute('data-compression-message');
+    // Only clear the global timer when the *active* session has no running
+    // compression.  An SSE completion for a background session must not
+    // kill the timer that's driving the current session's display.
+    const _activeCompState = _compressionStateForCurrentSession();
+    if (!_activeCompState || !_activeCompState.automatic || _activeCompState.phase !== 'running') {
+      _clearCompressionElapsedTimer();
+    }
   }
   const existing=inner.querySelector('[data-live-compression-card="1"]');
   if(existing) existing.replaceWith(node);
@@ -5832,6 +6366,7 @@ let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
 function clearMessageRenderCache(){
   _sessionHtmlCache.clear();
   _sessionHtmlCacheSid=null;
+  clearVisibleMessageRowCache();
 }
 
 function _messageRenderCacheSignature(){
@@ -5919,7 +6454,7 @@ function _cliLooksLikePatchDiff(text){
 function _cliToolResultSnippet(raw){
   const fullText=_cliToolResultText(raw);
   if(_cliLooksLikePatchDiff(fullText)) return _clipCliToolSnippet(fullText);
-  return String(fullText||'').slice(0,200);
+  return String(fullText||'').slice(0,4000);
 }
 
 function _prefixedCliDiffLines(prefix, value){
@@ -6001,6 +6536,7 @@ function _restoreMessageScrollSnapshot(snapshot){
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
   _programmaticScroll=true;
   el.scrollTop=Math.max(0,Math.min(Number(snapshot.top)||0,maxTop));
+  // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
   _lastScrollTop=el.scrollTop;
   requestAnimationFrame(()=>{ setTimeout(()=>{_programmaticScroll=false;},0); });
 }
@@ -6078,10 +6614,12 @@ function renderMessages(options){
     if(!m||!m.role||m.role==='tool')return false;
     if(_isContextCompactionMessage(m)) return false;
     if(_isPreservedCompressionTaskListMessage(m)) return false;
+    if(_isRecoveryControlMessage(m)) return false;
     if(m.role==='assistant'){
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
       if(hasTc||hasTu||_messageHasReasoningPayload(m)) return true;
+      if(_assistantMessageHasVisibleContent(m)) return true;
     }
     return m._statusCard||msgContent(m)||m.attachments?.length;
   });
@@ -6099,15 +6637,30 @@ function renderMessages(options){
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   let preservedCompressionTaskCardsAttached=!!referenceNode;
-  const visWithIdx=[];
+  // Cache visWithIdx so expanding the render window (Load earlier) doesn't
+  // re-scan S.messages from scratch.  Invalidate only when the message array
+  // length changes — i.e. new messages arrived or session was truncated.
+  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length){
+    const rebuilt=[];
+    let ri=0;
+    for(const m of S.messages){
+      if(!m||!m.role||m.role==='tool'){ri++;continue;}
+      if(_isPreservedCompressionTaskListMessage(m)){ri++;continue;}
+      if(_isRecoveryControlMessage(m)){ri++;continue;}
+      const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+      const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+      if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) rebuilt.push({m,rawIdx:ri});
+      ri++;
+    }
+    _visWithIdxCache=rebuilt;
+    _visWithIdxCacheLen=S.messages.length;
+  }
+  const visWithIdx=_visWithIdxCache;
   const preservedCompressionRawIdxs=[];
   let rawIdx=0;
   for(const m of S.messages){
     if(!m||!m.role||m.role==='tool'){rawIdx++;continue;}
     if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
-    const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-    const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
     rawIdx++;
   }
   // Show a top affordance when earlier transcript content exists either in
@@ -6157,9 +6710,19 @@ function renderMessages(options){
   }
   let _prevSepKey=null;
   let currentAssistantTurn=null;
+  // Only build question→assistant mapping for the visible window, not the
+  // full visWithIdx.  The jump-to-question button is only rendered for
+  // assistant messages that appear in the current render window anyway.
   const questionRawIdxByAssistantRawIdx=new Map();
+  // Seed lastQuestionRawIdx from hidden messages so the first visible
+  // assistant message still gets a valid jump target even when its
+  // corresponding user message sits just before the render window.
   let lastQuestionRawIdx=-1;
-  for(const entry of visWithIdx){
+  for(let i=0;i<windowStart;i++){
+    const role=visWithIdx[i]?.m?.role;
+    if(role==='user') lastQuestionRawIdx=visWithIdx[i].rawIdx;
+  }
+  for(const entry of renderVisWithIdx){
     const role=entry&&entry.m&&entry.m.role;
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
     else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
@@ -6167,11 +6730,19 @@ function renderMessages(options){
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
+  // Only collect tool-call assistant indices for messages that are actually
+  // rendered in the current window.  S.toolCalls can grow large in long turns,
+  // but we only need the ones whose assistant_msg_idx falls inside the visible
+  // range.
   const toolCallAssistantIdxs=new Set();
   if(Array.isArray(S.toolCalls)){
+    const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
     for(const tc of S.toolCalls){
       if(!tc) continue;
-      toolCallAssistantIdxs.add(tc.assistant_msg_idx!==undefined?tc.assistant_msg_idx:-1);
+      const idx=tc.assistant_msg_idx;
+      if(idx!==undefined && renderedRawIdxs.has(idx)){
+        toolCallAssistantIdxs.add(idx);
+      }
     }
   }
   // Windowed render loop replaces the legacy full loop:
@@ -6224,7 +6795,7 @@ function renderMessages(options){
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
-    const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;
+    const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
     if(thinkingText&&!isUser){
       thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent);
     }
@@ -6243,7 +6814,7 @@ function renderMessages(options){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    let bodyHtml = isUser ? _renderUserFencedBlocks(displayContent) : renderMd(_stripXmlToolCallsDisplay(String(displayContent)));
+    let bodyHtml = _getCachedRender(displayContent, isUser);
     if(!isUser&&m.provider_details){
       const summary=m.provider_details_label||'Provider details';
       bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
@@ -6263,8 +6834,14 @@ function renderMessages(options){
     const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const questionJumpBtn = (!isUser&&!m._live&&isTurnFinalAssistant)
-      ? _questionJumpButtonHtml(questionRawIdxByAssistantRawIdx.get(rawIdx))
+    // #3114: show jump-to-question on every assistant message that has a
+    // resolvable question target, not just the turn-final one. Multi-step
+    // turns (tool_call -> assistant -> tool_call -> assistant) otherwise
+    // strip the button from every intermediate assistant bubble and the
+    // user loses the navigation affordance.
+    const _qJumpTarget=(!isUser&&!m._live)?questionRawIdxByAssistantRawIdx.get(rawIdx):undefined;
+    const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
+      ? _questionJumpButtonHtml(_qJumpTarget)
       : '';
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
@@ -6706,11 +7283,69 @@ function toolIcon(name){
   return icons[name]||li('wrench');
 }
 
+function _toolArgPreviewValue(value){
+  if(value===null||value===undefined) return '';
+  if(Array.isArray(value)){
+    if(!value.length) return '[]';
+    if(value.length<=3&&value.every(v=>v===null||['string','number','boolean'].includes(typeof v))){
+      return value.map(v=>String(v)).join(', ');
+    }
+    return `${value.length} items`;
+  }
+  if(typeof value==='object') return 'object';
+  return String(value).replace(/\s+/g,' ').trim();
+}
+// Secret/sensitive-arg guard for collapsed tool-card previews. Exact-name hiding
+// alone misses camelCase / variant spellings (apiKey, access_token, clientSecret,
+// Authorization, …), so a normalized substring check runs first so secret-shaped
+// argument names are never surfaced in the always-visible collapsed header (#3267).
+function _toolArgPreviewKeyIsHidden(key){
+  const k=String(key||'').toLowerCase().replace(/[^a-z0-9]/g,'');
+  // verbose-but-not-secret bodies we keep out of the compact preview
+  const verbose=['content','filecontent','newstring','oldstring','patch','text','message','prompt','code','script','cookies','headers'];
+  if(verbose.includes(k)) return true;
+  // secret-shaped substrings (covers api_key/apiKey, access_token/auth_token/bearer,
+  // client_secret, password, credential, private_key, authorization, etc.)
+  return /(apikey|token|secret|password|passwd|credential|authorization|\bauth\b|auth$|^auth|bearer|privatekey|accesskey|sessionkey|signingkey|cookie)/.test(k)
+    || k==='auth' || k==='key' || k==='pat';
+}
+function _formatToolArgPreview(args){
+  if(!args||typeof args!=='object') return '';
+  const preferred=['path','file_path','target','pattern','query','url','urls','name','ref','command','action','mode','schedule','workdir'];
+  const keys=[];
+  for(const key of preferred){
+    if(Object.prototype.hasOwnProperty.call(args,key)&&!_toolArgPreviewKeyIsHidden(key)) keys.push(key);
+  }
+  for(const key of Object.keys(args)){
+    if(keys.length>=3) break;
+    if(keys.includes(key)||_toolArgPreviewKeyIsHidden(key)) continue;
+    keys.push(key);
+  }
+  const parts=[];
+  for(const key of keys){
+    const raw=_toolArgPreviewValue(args[key]);
+    if(!raw) continue;
+    const val=raw.length>96?`${raw.slice(0,93)}…`:raw;
+    parts.push(`${key}=${val}`);
+    if(parts.join(' · ').length>=150) break;
+  }
+  const out=parts.join(' · ');
+  return out.length>180?`${out.slice(0,177)}…`:out;
+}
+function _toolCardPreviewText(tc, displaySnippet){
+  const explicit=String(tc&&tc.preview||'').trim();
+  if(explicit) return explicit;
+  const argPreview=_formatToolArgPreview(tc&&tc.args);
+  if(argPreview) return argPreview;
+  if(tc&&tc.done===false) return 'Running';
+  if(tc&&tc.is_error) return 'Failed';
+  return 'Completed';
+}
 function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='tool-card-row';
   const icon=toolIcon(tc.name);
-  const hasDetail=tc.snippet||(tc.args&&Object.keys(tc.args).length>0);
+  const hasDetail=(tc.snippet&&tc.snippet!==tc.preview)||(tc.args&&Object.keys(tc.args).length>0);
   let displaySnippet='';
   if(tc.snippet){
     const s=tc.snippet;
@@ -6730,7 +7365,7 @@ function buildToolCard(tc){
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
   let displayName=_toolDisplayName(tc);
-  let previewText=tc.preview||displaySnippet||'';
+  let previewText=_toolCardPreviewText(tc, displaySnippet);
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
   row.innerHTML=`
     <div class="${cardClass}">
@@ -6746,12 +7381,51 @@ function buildToolCard(tc){
           Object.entries(tc.args).map(([k,v])=>`<div><span class="tool-arg-key">${esc(k)}</span> <span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
         }</div>`:''}
         ${displaySnippet?`<div class="tool-card-result">
-          <pre>${esc(displaySnippet)}</pre>
-          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?this.dataset.moreLabel:this.dataset.lessLabel">${esc(moreLabel)}</button>`:''}
+          <pre>${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?`<code class="diff-block" data-highlighted="1">${_colorDiffLines(displaySnippet)}</code>`:esc(displaySnippet)}</pre>
+          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" data-is-diff="${tc.is_diff||_snippetLooksLikeDiff(displaySnippet)?1:0}" data-more-label="${esc(moreLabel)}" data-less-label="${esc(lessLabel)}" onclick="event.stopPropagation();_toggleToolDiff(this)">${esc(moreLabel)}</button>`:''}
         </div>`:''}
       </div>`:''}
     </div>`;
   return row;
+}
+
+function _colorDiffLines(text){
+  if(typeof text !== 'string') return esc(String(text||''));
+  return esc(text).split('\n').map(line=>{
+    if(line.startsWith('@@')) return `<span class="diff-line diff-hunk">${line}</span>`;
+    if(line.startsWith('+')&&!line.startsWith('+++')) return `<span class="diff-line diff-plus">${line}</span>`;
+    if(line.startsWith('-')&&!line.startsWith('---')) return `<span class="diff-line diff-minus">${line}</span>`;
+    return `<span class="diff-line">${line}</span>`;
+  }).join('\n');
+}
+
+// Detect if text looks like a unified diff (has @@ hunk headers and +/- lines).
+function _snippetLooksLikeDiff(text){
+  if(typeof text!=='string'||text.length<10) return false;
+  if(!/^@@\s/.test(text)) return false;
+  const lines=text.split('\n');
+  let plusMinus=0;
+  for(let i=0;i<lines.length&&i<50;i++){
+    const l=lines[i];
+    if(l.startsWith('+')||l.startsWith('-')) plusMinus++;
+  }
+  return plusMinus>=2;
+}
+
+function _toggleToolDiff(btn){
+  const pre=btn.closest('.tool-card-result')?.querySelector('pre');
+  if(!pre) return;
+  const isDiff=btn.dataset.isDiff==='1';
+  const expanded=btn.textContent===btn.dataset.moreLabel;
+  const raw=expanded?btn.dataset.full:btn.dataset.short;
+  if(isDiff){
+    let code=pre.querySelector('code');
+    if(!code){code=document.createElement('code');code.className='diff-block';pre.textContent='';pre.appendChild(code);}
+    code.innerHTML=_colorDiffLines(raw);
+  }else{
+    pre.textContent=raw;
+  }
+  btn.textContent=expanded?btn.dataset.lessLabel:btn.dataset.moreLabel;
 }
 
 function _syncToolCallGroupSummary(group){
@@ -6795,14 +7469,33 @@ function _activityProgressLabelForToolName(name){
   return 'Working';
 }
 
+function _activityLatestToolName(group){
+  if(!group) return '';
+  const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
+  const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
+  return latest?String(latest.textContent||'').trim():'';
+}
+
+function _activityWaitingDetail(group,label=''){
+  const toolName=_activityLatestToolName(group);
+  if(toolName){
+    const action=_activityProgressLabelForToolName(toolName);
+    if(group&&group.querySelector('.tool-card.tool-card-running')) return `${action}: ${toolName}. Results will appear here.`;
+    return `Last step: ${action} (${toolName}); now choosing the next action or composing a response.`;
+  }
+  if(String(label||'').toLowerCase().includes('model')) return 'Reviewing the prompt and context, then choosing the next action or composing the response.';
+  return 'The agent is running; tool results and response text will appear here.';
+}
+
 function _activityLiveProgressLabel(group){
   if(!group||group.getAttribute('data-live-tool-call-group')!=='1') return '';
   const idleAge=_activityLastObservedAge(group);
   if(idleAge!==null&&idleAge>=90) return `No recent activity for ${_formatActiveElapsedTimer(idleAge)}`;
   const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
-  const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
+  const latest=running?String(running.textContent||'').trim():_activityLatestToolName(group);
   const waiting=group.querySelector('.agent-activity-status-waiting .agent-activity-status-label');
-  if(latest) return _activityProgressLabelForToolName(latest.textContent);
+  if(latest) return _activityProgressLabelForToolName(latest);
+  if(waiting&&waiting.textContent&&String(waiting.textContent).toLowerCase().includes('model')) return 'Reviewing prompt and context';
   if(waiting&&waiting.textContent) return waiting.textContent;
   return 'Starting agent';
 }
@@ -6881,8 +7574,13 @@ function appendLiveToolCard(tc){
     status:toolDone?(tc.is_error?'error':'done'):'waiting',
     ts:_activityNowSeconds(),
   });
-  const waiting=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"] .agent-activity-status-label');
-  if(waiting&&!toolDone) waiting.textContent='Waiting on tool result';
+  const waiting=body.querySelector('.agent-activity-status[data-activity-event-id="thinking-placeholder"]');
+  if(waiting&&!toolDone){
+    const labelEl=waiting.querySelector('.agent-activity-status-label');
+    const detailEl=waiting.querySelector('.agent-activity-status-detail');
+    if(labelEl) labelEl.textContent='Waiting on tool result';
+    if(detailEl) detailEl.textContent=`${_activityProgressLabelForToolName(toolName)}: ${toolName}. Results will appear here.`;
+  }
   // Update existing card in place (tool_complete after tool_start)
   if(tid){
     const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
@@ -7024,11 +7722,22 @@ function postProcessRenderedMessages(container) {
 }
 
 function highlightCode(container) {
-  // Apply Prism.js syntax highlighting to all code blocks in container (or whole messages area)
-  if(typeof Prism === 'undefined' || !Prism.highlightAllUnder) return;
+  // Apply Prism.js syntax highlighting only to *new* code blocks.
+  // Previously every renderMessages() called Prism.highlightAllUnder() which
+  // re-scanned and re-highlighted every <pre> in the container — expensive in
+  // long sessions with dozens of code blocks.  Now we only touch blocks that
+  // don't already have the data-highlighted marker.
+  if(typeof Prism === 'undefined') return;
   const el = container || $('msgInner');
   if(!el) return;
-  Prism.highlightAllUnder(el);
+  // Prefer per-element highlight (avoids the full DOM walk of highlightAllUnder)
+  const blocks = el.querySelectorAll('pre code:not([data-highlighted])');
+  if(blocks.length === 0) return;
+  for(let i = 0; i < blocks.length; i++){
+    const block = blocks[i];
+    if(typeof Prism.highlightElement === 'function') Prism.highlightElement(block);
+    block.dataset.highlighted = '1';
+  }
 }
 
 // Lazy load js-yaml for YAML tree view support
@@ -7038,8 +7747,8 @@ function _loadJsyamlThen(cb){
   if(_jsyamlLoading){ setTimeout(()=>_loadJsyamlThen(cb),100); return; }
   _jsyamlLoading=true;
   const s=document.createElement('script');
-  s.src='https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js';
-  s.integrity='sha384-8pLvVQkv7pCQqFk7AChLpdEe7gXz9h8GAb7cS0zVeJuKhxR5PU5aEET5pRpHZvxUorzdM';
+  s.src='static/vendor/js-yaml/4.1.0/js-yaml.min.js';
+  s.integrity='sha384-+pxiN6T7yvpryuJmE1gM9PX7yQit15auDb+ZwwvJOd/4be2Cie5/IuVXgQb/S9du';
   s.crossOrigin='anonymous';
   s.onload=()=>{ _jsyamlLoading=false; cb(); };
   s.onerror=()=>{ _jsyamlLoading=false; }; // CDN blocked, fall back to raw
@@ -7548,8 +8257,25 @@ function renderMermaidBlocks(container){
 let _katexLoading=false;
 let _katexReady=false;
 
-function renderKatexBlocks(container){
+function _isStreamingEquationPending(el,root){
+  const tagName=(el&&el.tagName||'').toLowerCase();
+  if(tagName!=='equation-block'&&tagName!=='equation-inline') return false;
+  // streaming-markdown fills custom equation elements while the parser owns the
+  // open node. If the equation is currently the last descendant of the live
+  // assistant body, we cannot tell whether more TeX is still coming. Skip it
+  // during live debounce passes so a partial source is not permanently marked
+  // data-rendered before the final parser_end flush.
+  let node=el;
+  while(node&&node!==root){
+    if(node.nextSibling) return false;
+    node=node.parentNode;
+  }
+  return Boolean(node===root);
+}
+
+function renderKatexBlocks(container,options){
   const root=container||document;
+  const streaming=Boolean(options&&options.streaming);
   const blocks=root.querySelectorAll(
     '.katex-block:not([data-rendered]),.katex-inline:not([data-rendered]),'+
     'equation-block:not([data-rendered]),equation-inline:not([data-rendered])'
@@ -7559,7 +8285,7 @@ function renderKatexBlocks(container){
     if(!_katexLoading){
       _katexLoading=true;
       const script=document.createElement('script');
-      script.src='https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js';
+      script.src='static/vendor/katex/0.16.22/katex.min.js';
       script.integrity='sha384-cMkvdD8LoxVzGF/RPUKAcvmm49FQ0oxwDF3BGKtDXcEc+T1b2N+teh/OJfpU0jr6';
       script.crossOrigin='anonymous';
       script.onload=()=>{
@@ -7573,6 +8299,7 @@ function renderKatexBlocks(container){
     return;
   }
   blocks.forEach(el=>{
+    if(streaming&&_isStreamingEquationPending(el,root)) return;
     el.dataset.rendered='true';
     const src=el.textContent||'';
     const tagName=(el.tagName||'').toLowerCase();
@@ -7648,7 +8375,7 @@ function finalizeThinkingCard(){
     // when the user has not manually expanded this turn's activity group, or
     // has manually collapsed it. Otherwise the panel snaps shut whenever new
     // activity arrives, even mid-read.
-    if(_liveActivityUserExpanded !== true){
+    if(_liveActivityUserExpanded !== true && !(window._activityFeedExpandedDefault === true && _liveActivityUserExpanded !== false)){
       group.classList.add('tool-call-group-collapsed');
       const summary=group.querySelector('.tool-call-group-summary');
       if(summary) summary.setAttribute('aria-expanded','false');
@@ -7717,10 +8444,23 @@ function appendThinking(text='', options){
   const body=group&&group.querySelector('.tool-call-group-body');
   if(!body) return;
   if(!cleanThinking||cleanThinking==='Thinking…'){
-    const label=body.querySelector('.tool-card.tool-card-running')?'Waiting on tool result':'Waiting on model';
-    const detail=body.querySelector('.tool-card-row')
-      ? 'The agent is running; tool results and response text will appear here.'
-      : 'No tool activity has been reported yet.';
+    const hasRunningTool=!!body.querySelector('.tool-card.tool-card-running');
+    const hasToolCard=!!body.querySelector('.tool-card-row');
+    let label;
+    let detail;
+    if(!S.activeStreamId && options && options.pending){
+      label='Starting agent';
+      detail='Creating the stream and sending your message…';
+    }else if(hasRunningTool){
+      label='Waiting on tool result';
+      detail=_activityWaitingDetail(group,label);
+    }else if(hasToolCard){
+      label='Waiting on model';
+      detail=_activityWaitingDetail(group,label);
+    }else{
+      label='Waiting for first model token';
+      detail='Stream connected; no model output has arrived yet.';
+    }
     _appendActivityEvent(group,{id:'thinking-placeholder',kind:'waiting',label,detail,status:'waiting',ts:_activityNowSeconds()});
     const active=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
     if(active) active.removeAttribute('data-thinking-active');
@@ -7805,6 +8545,8 @@ function renderBreadcrumb(){
   root.className='breadcrumb-seg breadcrumb-link';
   root.textContent='~';
   root.onclick=()=>loadDir('.');
+  _bindWorkspaceMoveDropTarget(root,'.');
+  _bindWorkspaceOsUploadDropTarget(root,'.');
   bar.appendChild(root);
   // Path segments
   const parts=S.currentDir.split('/');
@@ -7820,6 +8562,8 @@ function renderBreadcrumb(){
       seg.className='breadcrumb-seg breadcrumb-link';
       const target=accumulated;
       seg.onclick=()=>loadDir(target);
+      _bindWorkspaceMoveDropTarget(seg,target);
+      _bindWorkspaceOsUploadDropTarget(seg,target);
     } else {
       seg.className='breadcrumb-seg breadcrumb-current';
     }
@@ -8109,13 +8853,109 @@ function _isWorkspaceMarkdownPath(path){
   return /\.(md|markdown|mdown)$/i.test(String(path||''));
 }
 
+function _isWorkspaceTreeMoveDrag(e){
+  return !!(e.dataTransfer&&e.dataTransfer.types&&e.dataTransfer.types.includes('application/ws-path')&&!e.dataTransfer.types.includes('Files'));
+}
+
+function _workspaceParentDir(relPath){
+  if(!relPath||relPath==='.')return '.';
+  const idx=relPath.lastIndexOf('/');
+  return idx===-1?'.':relPath.substring(0,idx);
+}
+
+function _clearWorkspaceMoveDragOver(){
+  document.querySelectorAll('.file-item.drag-over,.breadcrumb-seg.drag-over').forEach(el=>el.classList.remove('drag-over'));
+}
+
+function _remapWorkspaceCachesAfterMove(oldPath,newPath,isDir){
+  if(isDir&&S._expandedDirs){
+    if(S._expandedDirs.has(oldPath)){
+      S._expandedDirs.delete(oldPath);
+      S._expandedDirs.add(newPath);
+    }
+    for(const expandedPath of [...S._expandedDirs]){
+      if(expandedPath.startsWith(oldPath+'/')){
+        S._expandedDirs.delete(expandedPath);
+        S._expandedDirs.add(newPath+expandedPath.slice(oldPath.length));
+      }
+    }
+    if(S._dirCache[oldPath]){
+      S._dirCache[newPath]=S._dirCache[oldPath];
+      delete S._dirCache[oldPath];
+    }
+    for(const cachePath of Object.keys(S._dirCache)){
+      if(cachePath.startsWith(oldPath+'/')){
+        const remapped=newPath+cachePath.slice(oldPath.length);
+        S._dirCache[remapped]=S._dirCache[cachePath];
+        delete S._dirCache[cachePath];
+      }
+    }
+    if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
+  }
+  delete S._dirCache[_workspaceParentDir(oldPath)];
+  delete S._dirCache[_workspaceParentDir(newPath)];
+  if(typeof _previewCurrentPath!=='undefined'&&_previewCurrentPath){
+    if(_previewCurrentPath===oldPath)_previewCurrentPath=newPath;
+    else if(_previewCurrentPath.startsWith(oldPath+'/'))_previewCurrentPath=newPath+_previewCurrentPath.slice(oldPath.length);
+  }
+}
+
+async function _performWorkspaceMove(srcPath,destDir,isDir){
+  if(!S.session||!srcPath)return;
+  const normDest=destDir||'.';
+  if(srcPath===normDest)return;
+  if(normDest.startsWith(srcPath+'/'))return;
+  if(_workspaceParentDir(srcPath)===normDest)return;
+  try{
+    const data=await api('/api/file/move',{method:'POST',body:JSON.stringify({
+      session_id:S.session.session_id,path:srcPath,dest_dir:normDest
+    })});
+    const movedName=data.new_path.includes('/')?data.new_path.slice(data.new_path.lastIndexOf('/')+1):data.new_path;
+    showToast((t('moved_to')||'Moved to ')+movedName);
+    _remapWorkspaceCachesAfterMove(data.old_path||srcPath,data.new_path||srcPath,isDir);
+    await loadDir(S.currentDir);
+    if(typeof refreshOpenPreviewIfMutated==='function')await refreshOpenPreviewIfMutated();
+  }catch(err){
+    showToast((t('move_failed')||'Move failed: ')+err.message,5000,'error');
+  }
+}
+
+function _bindWorkspaceMoveDropTarget(el,destDir){
+  el.ondragenter=(e)=>{
+    if(!_isWorkspaceTreeMoveDrag(e))return;
+    e.preventDefault();e.stopPropagation();
+    el.classList.add('drag-over');
+  };
+  el.ondragover=(e)=>{
+    if(!_isWorkspaceTreeMoveDrag(e))return;
+    e.preventDefault();e.stopPropagation();
+    e.dataTransfer.dropEffect='move';
+    el.classList.add('drag-over');
+  };
+  el.ondragleave=(e)=>{
+    if(el.contains(e.relatedTarget))return;
+    el.classList.remove('drag-over');
+  };
+  el.ondrop=async(e)=>{
+    if(!_isWorkspaceTreeMoveDrag(e))return;
+    e.preventDefault();e.stopPropagation();
+    el.classList.remove('drag-over');
+    const srcPath=e.dataTransfer.getData('application/ws-path');
+    if(!srcPath)return;
+    const srcType=e.dataTransfer.getData('application/ws-type');
+    await _performWorkspaceMove(srcPath,destDir,srcType==='dir');
+  };
+}
+
 function _renderTreeItems(container, entries, depth){
   for(const item of entries){
     const el=document.createElement('div');el.className='file-item';
     el.style.paddingLeft=(8+depth*16)+'px';
     el.setAttribute('draggable','true');
+    el.dataset.wsType=item.type;
     el.oncontextmenu=(e)=>{e.preventDefault();e.stopPropagation();_showFileContextMenu(e,item);};
-    el.ondragstart=(e)=>{e.dataTransfer.setData('application/ws-path',item.path);e.dataTransfer.setData('application/ws-type',item.type);e.dataTransfer.effectAllowed='copy';};
+    el.ondragstart=(e)=>{e.dataTransfer.setData('application/ws-path',item.path);e.dataTransfer.setData('application/ws-type',item.type);e.dataTransfer.effectAllowed='copy';el.classList.add('dragging');};
+    el.ondragend=()=>{el.classList.remove('dragging');_clearWorkspaceMoveDragOver();};
 
     if(item.type==='dir'){
       // Toggle arrow for directories
@@ -8253,6 +9093,8 @@ function _renderTreeItems(container, entries, depth){
     }
 
     if(item.type==='dir'){
+      _bindWorkspaceMoveDropTarget(el,item.path);
+      _bindWorkspaceOsUploadDropTarget(el,item.path);
       // Single-click toggles expand/collapse
       el.onclick=async(e)=>{
         e.stopPropagation();

@@ -326,7 +326,8 @@ def test_messages_js_names_browser_sse_disconnect_separately():
 def test_server_treats_broken_pipe_as_client_disconnect_not_500():
     server_py = (models.Path(__file__).parent.parent / "server.py").read_text(encoding="utf-8")
 
-    assert "except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):" in server_py
+    # server.py now uses the centralized _CLIENT_DISCONNECT_ERRORS tuple from api.helpers
+    assert "_CLIENT_DISCONNECT_ERRORS" in server_py
     assert "do not convert it into a misleading server 500" in server_py
 
 
@@ -536,3 +537,43 @@ def test_marker_demotes_after_giveup_seconds(hermes_home, monkeypatch):
     assert marker["content"] == models._INTERRUPTED_NEUTRAL_WORDING
     _assert_retry_meta_removed(marker)
     assert append_calls == 0
+
+
+def test_repair_stale_pending_skips_pre_compression_snapshot_parent(hermes_home):
+    """Archived compression parents must not get synthetic interrupt markers."""
+    s = _make_dead_stream_session("compressed_parent", stream_id="dead-stream")
+    s.pre_compression_snapshot = True
+    original_messages = list(s.messages)
+
+    assert models._repair_stale_pending(s) is False
+
+    assert s.messages == original_messages
+    assert s.active_stream_id == "dead-stream"
+    assert s.pending_user_message
+
+
+def test_repair_stale_pending_skips_parent_when_continuation_exists(hermes_home):
+    """Compression old→new rotation owns the turn in the child, not the old parent."""
+    parent = _make_dead_stream_session("compression_parent", stream_id="rotated-stream")
+    child = Session(
+        session_id="compression_child",
+        title="Continuation",
+        parent_session_id="compression_parent",
+        # Pin the production regression: older code could accidentally save the
+        # child with pre_compression_snapshot=True, but its parent link still
+        # proves the parent must not be repaired as a lost standalone turn.
+        pre_compression_snapshot=True,
+        messages=[
+            {"role": "user", "content": "ok, push beide", "timestamp": 10},
+            {"role": "assistant", "content": "done", "timestamp": 11},
+        ],
+    )
+    child.save()
+    original_messages = list(parent.messages)
+
+    assert models._repair_stale_pending(parent) is False
+
+    assert parent.messages == original_messages
+    assert parent.active_stream_id == "rotated-stream"
+    assert parent.pending_user_message
+

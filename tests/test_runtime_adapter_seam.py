@@ -1,4 +1,5 @@
 import importlib
+import io
 import queue
 
 from tests.conftest import requires_agent_modules
@@ -558,6 +559,7 @@ def test_rfc_defines_slice4e_runner_chat_start_route_selection_harness():
     rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
 
     assert "#### Slice 4e: Default-off runner chat-start route-selection harness" in rfc
+    assert "Status as of 2026-05-24: shipped in v0.51.129 via #2794" in rfc
     assert "route `/api/chat/start` through `build_runtime_adapter(...)`" in rfc
     assert "`legacy-direct` stays default" in rfc
     assert "`legacy-journal`\ncontinues to delegate to the legacy in-process stream path" in rfc
@@ -565,6 +567,111 @@ def test_rfc_defines_slice4e_runner_chat_start_route_selection_harness():
     assert "return a bounded not-configured error for `runner-local`" in rfc
     assert "`run_id`, `status`, and\n   `active_controls` remain internal" in rfc
     assert "no supervised runner process yet" in rfc
+
+
+def test_rfc_defines_slice4f_supervised_local_runner_client_gate():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#### Slice 4f: Supervised local runner client backend gate" in rfc
+    assert "Status as of 2026-05-31: shipped in v0.51.188 via #3073 / #3274" in rfc
+    assert "The client\ntransport is now implemented behind `HERMES_WEBUI_RUNNER_BASE_URL`" in rfc
+    assert "`HttpRunnerClient` rejects non-`http(s)` base URL schemes" in rfc
+    assert "uses an opener that\ndoes not follow redirects" in rfc
+    assert "the configured\nrunner must emit events that are already compatible with the browser SSE event\nnames/payloads" in rfc
+    assert "a later runner-owned normalization layer must translate\nHermes runtime families such as `token.delta`, `tool.started`, and `done`" in rfc
+    assert "After the configured runner-client boundary ships" in rfc
+    assert "configured external endpoint or fake-runner fixture" in rfc
+    assert "cancel as the first required live control" in rfc
+    assert "501 path replaced only when configured" in rfc
+    assert "Restart/reattach proves ownership moved" in rfc
+    assert "No runtime-surrogate globals" in rfc
+    assert "Successful chat-start responses remain limited\n   to the legacy-compatible field whitelist" in rfc
+    assert "Unsupported runner controls return safe\n   `unsupported`, `not-active`, or `conflict` results" in rfc
+    assert "no permanent WebUI-owned active-run discovery cache" in rfc
+
+
+def test_rfc_defines_slice4g_supervised_local_runner_process_gate():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#### Slice 4g: Supervised local runner process harness gate" in rfc
+    assert "After #3073 / #3274, WebUI has an explicit configured-runner HTTP client" in rfc
+    assert "still does not ship the supervised runner process itself" in rfc
+    assert "own\n`AIAgent` execution outside the main WebUI request process" in rfc
+    assert "keep WebUI as a client of `HERMES_WEBUI_RUNNER_BASE_URL`" in rfc
+    assert "without WebUI process-global\n  environment mutation" in rfc
+    assert "Process ownership moved" in rfc
+    assert "Restart/reattach with a real runner" in rfc
+    assert "No runtime-surrogate globals in WebUI" in rfc
+    assert "Default-off and reversible" in rfc
+    assert "Runner health and failure are observable" in rfc
+    assert "no claim that this is the canonical Hermes Agent Runtime API" in rfc
+
+def test_runtime_runner_client_factory_stays_bounded_until_endpoint_configured(monkeypatch):
+    routes = importlib.import_module("api.routes")
+
+    monkeypatch.delenv("HERMES_WEBUI_RUNNER_BASE_URL", raising=False)
+    try:
+        routes._runtime_runner_client_factory()
+    except NotImplementedError as exc:
+        assert "runner-local chat backend is not configured" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("runner-local should remain bounded without an endpoint")
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNNER_BASE_URL", "http://runner.local/")
+    client = routes._runtime_runner_client_factory()
+
+    assert client.base_url == "http://runner.local"
+
+
+def test_configured_runner_sse_stream_observes_runner_without_process_maps(monkeypatch):
+    routes = importlib.import_module("api.routes")
+    calls = []
+
+    class FakeRunnerClient:
+        def observe_run(self, run_id, *, cursor=None):
+            calls.append((run_id, cursor))
+            return {
+                "run_id": run_id,
+                "cursor": "7",
+                "events": [
+                    {"event": "message", "payload": {"content": "hello"}, "event_id": "run-1:6"},
+                    {"event": "stream_end", "payload": {"ok": True}, "event_id": "run-1:7"},
+                ],
+            }
+
+    class FakeHandler:
+        def __init__(self):
+            self.status = None
+            self.headers = []
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, key, value):
+            self.headers.append((key, value))
+
+        def end_headers(self):
+            self.headers.append(("__end__", ""))
+
+    monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "runner-local")
+    monkeypatch.setattr(routes, "_runtime_runner_client_factory", lambda: FakeRunnerClient())
+    handler = FakeHandler()
+
+    assert routes._stream_runner_run_events(handler, "run-1", "5") is True
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert handler.status == 200
+    assert calls == [("run-1", "5")]
+    assert "event: message" in body
+    assert "id: run-1:6" in body
+    assert 'data: {"content": "hello"}' in body
+    assert "event: stream_end" in body
+    assert "STREAMS" not in routes._stream_runner_run_events.__code__.co_names
+
+
 
 def test_runner_runtime_adapter_passes_explicit_start_payload_without_env_mutation(monkeypatch):
     runtime = importlib.import_module("api.runtime_adapter")

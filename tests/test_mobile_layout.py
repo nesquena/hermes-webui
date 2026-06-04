@@ -681,7 +681,11 @@ def test_pwa_safe_area_top_stays_scoped_to_installed_modes():
 
 def test_titlebar_safe_area_top_uses_scoped_variable():
     """The titlebar must use the safe-area variable instead of direct env()."""
-    m = re.search(r'\.app-titlebar\{(?P<body>[^}]*)\}', CSS)
+    # Match the GLOBAL `.app-titlebar{...}` rule, not skin-scoped variants like
+    # `:root.dark[data-skin="neon"] .app-titlebar{...}` (#3164) which can appear
+    # earlier in the file. Require the selector to start the line (optionally
+    # indented) with no `[data-skin=` scope prefix.
+    m = re.search(r'(?m)^\s*\.app-titlebar\{(?P<body>[^}]*)\}', CSS)
     assert m, ".app-titlebar rule missing from style.css"
     rule = m.group("body")
     assert "padding-top:var(--app-titlebar-safe-top)" in rule, (
@@ -1110,13 +1114,21 @@ def test_mobile_composer_primary_controls_keep_touch_friendly_sizing():
     assert ctx_wrap.get("display") == "none!important", \
         "context indicator must not add a late-appearing composer-right slot on phones"
 
-    ctx_badge = _declarations(_rule_body(CSS, ".composer-mobile-ctx-badge"))
-    assert ctx_badge.get("position") == "absolute", \
-        "mobile context usage should be shown as a badge on the config button, not a separate slot"
-    assert ctx_badge.get("pointer-events") == "none", \
-        "mobile context badge must not shrink or steal the config button touch target"
-    assert 'id="composerMobileCtxBadge"' in HTML, \
-        "mobile context badge element must exist in the composer config button"
+    # #3062 replaced the old text badge (composerMobileCtxBadge / .composer-mobile-ctx-badge)
+    # with an SVG context-usage ring overlaid on the config button. The invariant is the
+    # same: the ring is a visual indicator hosted ON the 44px config button (whose sizing is
+    # asserted above), and it must not steal/shrink that touch target. The ring SVG is
+    # aria-hidden and uses currentColor; it carries no pointer events of its own.
+    assert 'id="composerMobileCtxRing"' in HTML, \
+        "mobile context-usage ring element must exist in the composer config button"
+    assert 'id="composerMobileCtxBadge"' not in HTML, \
+        "old text badge should be fully replaced by the ring, not left dangling"
+    # Locate the ring's markup and confirm it does not become an interactive/sized control
+    # that would compete with the config button's 44px target.
+    _ring_idx = HTML.find('id="composerMobileCtxRing"')
+    _ring_tag = HTML[HTML.rfind("<", 0, _ring_idx):HTML.find(">", _ring_idx) + 1]
+    assert "aria-hidden" in _ring_tag, \
+        "the context ring is decorative overlay — it must be aria-hidden so it doesn't steal the config button's role/touch target"
 
     icon_btn = _declarations(_rule_body(mobile_css, ".icon-btn"))
     assert icon_btn.get("min-width") == "44px", \

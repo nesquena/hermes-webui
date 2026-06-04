@@ -33,6 +33,23 @@ def test_iframe_uses_inline_param():
     )
 
 
+def test_open_in_browser_uses_unconditional_inline_param():
+    """Workspace Open in browser must use the explicit inline/sandbox open path."""
+    content = _get_workspace_js()
+    idx = content.find("function openInBrowser()")
+    assert idx != -1, "openInBrowser() must exist"
+    block = content[idx:idx + 700]
+    assert "&inline=1" in block, (
+        "openInBrowser() must include inline=1 so HTML opens instead of downloading"
+    )
+    assert "download=1" not in block, (
+        "openInBrowser() must not reuse the Download button path"
+    )
+    assert "window.open(url,'_blank','noopener')" in block or 'window.open(url,"_blank","noopener")' in block, (
+        "openInBrowser() should use noopener for the new tab"
+    )
+
+
 def test_html_preview_iframe_exists_in_html():
     """The previewHtmlIframe element must be present in index.html."""
     content = _get_index_html()
@@ -105,3 +122,15 @@ def test_inline_html_response_sets_csp_sandbox():
             assert "allow-same-origin" not in line, (
                 "CSP sandbox must NOT include allow-same-origin — that would defeat the isolation"
             )
+
+
+def test_file_raw_inline_responses_use_sandbox_csp():
+    """The explicit inline-open contract should sandbox non-download raw files."""
+    content = _get_routes_content()
+    idx = content.find("def _handle_file_raw")
+    assert idx != -1, "_handle_file_raw not found"
+    block = content[idx:idx + 2200]
+    assert "sandbox_csp" in block
+    assert "inline_preview" in block
+    assert "disposition == \"inline\"" in block
+    assert "csp=sandbox_csp" in block or "csp=csp" in block

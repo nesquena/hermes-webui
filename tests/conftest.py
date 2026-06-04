@@ -18,6 +18,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import time
 import urllib.request
 import urllib.error
@@ -73,6 +74,63 @@ os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
 # ~/.hermes/config.yaml.  Override it before any product modules are imported so
 # tests that read/write config.yaml stay inside the isolated test home.
 os.environ['HERMES_CONFIG_PATH'] = str(TEST_STATE_DIR / 'config.yaml')
+
+
+@pytest.fixture(autouse=True)
+def _isolate_hermes_config_path():
+    """Keep profile/.env side effects from leaking the live config path across tests."""
+    isolated_config_path = str(TEST_STATE_DIR / 'config.yaml')
+    os.environ['HERMES_CONFIG_PATH'] = isolated_config_path
+    yield
+    os.environ['HERMES_CONFIG_PATH'] = isolated_config_path
+
+
+@pytest.fixture(autouse=True)
+def _restore_profile_home_globals():
+    """Restore HERMES_HOME / HERMES_BASE_HOME after every test.
+
+    Several tests call ``api.profiles.switch_profile()`` (or set HERMES_HOME
+    directly) which mutates ``os.environ['HERMES_HOME']`` IN PLACE — not via
+    monkeypatch — so the change is not auto-reverted at test teardown. In the
+    normal sequential run the next test usually re-establishes its own profile so
+    the leak is masked, but under pytest-shard (or pytest-randomly) the leaked
+    HERMES_HOME points at a deleted tmpdir and breaks any later test whose
+    config/profile resolution reads it (e.g. test_title_aux_routing's
+    background-worker profile routing, which then falls back to DEFAULT_CONFIG
+    where ``model`` is an empty string). Snapshotting at the conftest level fixes
+    the whole class at once, regardless of which test does the leaking.
+    """
+    saved_home = os.environ.get('HERMES_HOME')
+    saved_base = os.environ.get('HERMES_BASE_HOME')
+    # Re-derive the cached base-home global BEFORE the test runs too: a prior
+    # test's teardown ordering (monkeypatch restoring sys.modules['api.profiles']
+    # after this fixture's teardown) can leave the live module's
+    # _DEFAULT_HERMES_HOME stale. Fixing it at setup time guarantees each test
+    # starts from a base root that matches the current (restored) env.
+    _rederive_default_hermes_home()
+    yield
+    for key, val in (('HERMES_HOME', saved_home), ('HERMES_BASE_HOME', saved_base)):
+        if val is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = val
+    _rederive_default_hermes_home()
+
+
+def _rederive_default_hermes_home():
+    """Recompute api.profiles._DEFAULT_HERMES_HOME from the current env.
+
+    api.profiles caches the base home at import time. A test that re-imports
+    api.profiles under a temporary HERMES_BASE_HOME (e.g. test_profile_env_isolation)
+    corrupts that global to a now-deleted tmpdir, making get_hermes_home_for_profile
+    resolve later tests' profiles under the dead path. Re-deriving keeps it honest.
+    """
+    prof_mod = sys.modules.get('api.profiles')
+    if prof_mod is not None and hasattr(prof_mod, '_resolve_base_hermes_home'):
+        try:
+            prof_mod._DEFAULT_HERMES_HOME = prof_mod._resolve_base_hermes_home()
+        except Exception:
+            pass
 
 # ── Server script: always relative to repo root ───────────────────────────
 SERVER_SCRIPT = REPO_ROOT / 'server.py'
@@ -378,6 +436,11 @@ def pytest_collection_modifyitems(config, items):
         'test_cron_update_unknown_job_404',
         'test_cron_delete_unknown_404',
         'test_crons_output_limit_param',
+        'test_delivery_options_returns_200',
+        'test_delivery_options_has_platforms',
+        'test_delivery_options_structure',
+        'test_delivery_options_includes_common_platforms',
+        'test_delivery_options_local_label',
         # Skills endpoints (need tools.skills_tool module)
         'test_skills_list',
         'test_skills_list_has_required_fields',
@@ -537,6 +600,11 @@ def test_server():
     env["HERMES_WEBUI_TEST_NETWORK_BLOCK"] = "1"
     env.update({
         "HERMES_WEBUI_WORKSPACE_GIT_DESTRUCTIVE": "1",
+        # Small archive-extraction cap so the zip-bomb guard is exercisable
+        # against the out-of-process test server (the real 10x-upload default is
+        # ~200MB — impractical to exceed in a test). 5MB is far above any other
+        # test's archive payload, so only the bomb test trips it.
+        "HERMES_WEBUI_MAX_EXTRACTED_MB":  "5",
         "HERMES_WEBUI_PORT":              str(TEST_PORT),
         "HERMES_WEBUI_HOST":              "127.0.0.1",
         "HERMES_WEBUI_STATE_DIR":         str(TEST_STATE_DIR),

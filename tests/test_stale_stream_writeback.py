@@ -1,5 +1,6 @@
 import queue
 import threading
+import time
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -24,12 +25,14 @@ def _isolate_sessions(tmp_path, monkeypatch):
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.ACTIVE_RUNS.clear()
     config.SESSION_AGENT_LOCKS.clear()
     yield
     models.SESSIONS.clear()
     config.STREAMS.clear()
     config.CANCEL_FLAGS.clear()
     config.AGENT_INSTANCES.clear()
+    config.ACTIVE_RUNS.clear()
     config.SESSION_AGENT_LOCKS.clear()
 
 
@@ -73,6 +76,98 @@ def test_cancel_stream_does_not_append_marker_after_stream_ownership_rotated():
     assert s.pending_user_message == "newer prompt"
     assert [m["content"] for m in s.messages] == ["newer prompt"]
     assert all(m.get("content") != "*Task cancelled.*" for m in s.messages)
+
+
+def test_stale_stream_clear_skips_active_worker_when_sse_channel_is_gone():
+    import api.routes as routes
+
+    sid = "active_worker_missing_sse"
+    stream_id = "live-worker-stream"
+    s = Session(
+        session_id=sid,
+        title="Active worker missing SSE",
+        messages=[{"role": "user", "content": "previous prompt"}],
+    )
+    s.active_stream_id = stream_id
+    s.pending_user_message = "new prompt"
+    s.pending_started_at = time.time()
+    s.save()
+    models.SESSIONS[sid] = s
+
+    config.register_active_run(stream_id, session_id=sid, phase="running")
+
+    assert routes._clear_stale_stream_state(s) is False
+
+    assert s.active_stream_id == stream_id
+    assert s.pending_user_message == "new prompt"
+    assert s.pending_started_at is not None
+    assert [m["content"] for m in s.messages] == ["previous prompt"]
+    assert all(not m.get("_error") for m in s.messages)
+
+
+def test_stale_stream_clear_skips_fresh_pending_turn_inside_grace_window(monkeypatch):
+    import api.routes as routes
+
+    sid = "fresh_pending_missing_sse"
+    stream_id = "fresh-pending-stream"
+    s = Session(
+        session_id=sid,
+        title="Fresh pending missing SSE",
+        messages=[{"role": "user", "content": "previous prompt"}],
+    )
+    s.active_stream_id = stream_id
+    s.pending_user_message = "new prompt"
+    s.pending_started_at = 1000.0
+    s.save()
+    models.SESSIONS[sid] = s
+    monkeypatch.setattr(routes.time, "time", lambda: 1005.0)
+
+    assert routes._clear_stale_stream_state(s) is False
+
+    assert s.active_stream_id == stream_id
+    assert s.pending_user_message == "new prompt"
+    assert s.pending_started_at == 1000.0
+    assert [m["content"] for m in s.messages] == ["previous prompt"]
+    assert all(not m.get("_error") for m in s.messages)
+
+
+def test_stale_stream_clear_trusts_completed_run_journal_instead_of_adding_marker(monkeypatch):
+    import api.routes as routes
+    from api.run_journal import append_run_event
+
+    sid = "completed_journal_late_pending_clear"
+    stream_id = "completed-stream"
+    s = Session(
+        session_id=sid,
+        title="Completed journal late pending clear",
+        messages=[
+            {"role": "user", "content": "previous prompt"},
+            {"role": "assistant", "content": "previous answer"},
+            {"role": "user", "content": "new prompt"},
+            {"role": "assistant", "content": "finished answer"},
+        ],
+    )
+    s.active_stream_id = stream_id
+    s.pending_user_message = "new prompt"
+    s.pending_started_at = 1000.0
+    s.save()
+    models.SESSIONS[sid] = s
+    append_run_event(sid, stream_id, "done", {"session": {"session_id": sid}})
+    monkeypatch.setattr(routes.time, "time", lambda: 1400.0)
+
+    assert routes._clear_stale_stream_state(s) is True
+
+    assert s.active_stream_id is None
+    assert s.pending_user_message is None
+    assert s.pending_started_at is None
+    assert [m["content"] for m in s.messages] == [
+        "previous prompt",
+        "previous answer",
+        "new prompt",
+        "finished answer",
+    ]
+    assert all("Response interrupted" not in str(m.get("content") or "") for m in s.messages)
+    assert all(not m.get("_error") for m in s.messages)
 
 
 def test_success_path_checks_stream_ownership_before_persisting_result():

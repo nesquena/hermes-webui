@@ -318,3 +318,96 @@ def test_insights_mobile_models_table_has_contained_overflow():
     section_block = STYLE_CSS[section_start:section_end]
     assert 'overflow-x' in section_block, 'Mobile rule should include overflow-x handling'
     assert 'insights-model-table' in section_block or 'insights-card' in section_block
+
+
+# ── #3189: CLI/gateway sessions in Insights + webui double-count guard ──────
+
+
+def _call_insights_with_state_db(monkeypatch, tmp_path, entries, state_rows, days="7", now=None):
+    """Like _call_insights but also seeds an agent state.db with `sessions` rows
+    and points _active_state_db_path at it, so the CLI second-pass is exercised."""
+    import sqlite3
+    import api.routes as routes
+    import api.models as models
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    (session_dir / "_index.json").write_text(json.dumps(entries), encoding="utf-8")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    if now is not None:
+        monkeypatch.setattr(time, "time", lambda: now)
+
+    db_path = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT, model TEXT, message_count INTEGER,
+            input_tokens INTEGER, output_tokens INTEGER, estimated_cost_usd REAL,
+            started_at REAL, ended_at REAL
+        )"""
+    )
+    for r in state_rows:
+        conn.execute(
+            "INSERT INTO sessions (id, source, model, message_count, input_tokens, "
+            "output_tokens, estimated_cost_usd, started_at, ended_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (r["id"], r.get("source"), r.get("model"), r.get("message_count", 0),
+             r.get("input_tokens", 0), r.get("output_tokens", 0),
+             r.get("estimated_cost_usd", 0.0), r.get("started_at"), r.get("ended_at")),
+        )
+    conn.commit()
+    conn.close()
+    # _handle_insights does `from api.models import _active_state_db_path`, so patch on the module.
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+    handler = _FakeHandler()
+    parsed = SimpleNamespace(query=f"days={days}")
+    routes._handle_insights(handler, parsed)
+    assert handler.status == 200
+    return handler.json_body()
+
+
+def test_insights_includes_cli_and_gateway_sessions(monkeypatch, tmp_path):
+    """CLI / Telegram / Discord sessions in state.db should appear in Insights totals."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    webui_entries = [
+        {"session_id": "w1", "updated_at": now, "created_at": now, "message_count": 2,
+         "input_tokens": 100, "output_tokens": 50, "estimated_cost": 0.01, "model": "gpt-5.5"},
+    ]
+    state_rows = [
+        {"id": "cli1", "source": "cli", "model": "gpt-5.5", "message_count": 3,
+         "input_tokens": 200, "output_tokens": 80, "estimated_cost_usd": 0.02,
+         "started_at": now, "ended_at": now},
+        {"id": "tg1", "source": "telegram", "model": "gpt-5.5", "message_count": 1,
+         "input_tokens": 60, "output_tokens": 20, "estimated_cost_usd": 0.005,
+         "started_at": now, "ended_at": now},
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, webui_entries, state_rows, days="7", now=now)
+    # 1 webui + 2 cli/gateway = 3 sessions counted
+    assert data["total_sessions"] == 3
+    # input tokens summed across all three: 100 + 200 + 60 = 360
+    assert data["total_input_tokens"] == 360
+
+
+def test_insights_does_not_double_count_webui_state_db_rows(monkeypatch, tmp_path):
+    """WebUI sessions persist to BOTH _index.json AND state.db (source='webui').
+    The CLI second-pass must exclude source='webui' so they aren't counted twice."""
+    now = time.mktime((2026, 5, 30, 12, 0, 0, 0, 0, -1))
+    webui_entries = [
+        {"session_id": "w1", "updated_at": now, "created_at": now, "message_count": 2,
+         "input_tokens": 100, "output_tokens": 50, "estimated_cost": 0.01, "model": "gpt-5.5"},
+    ]
+    # The SAME webui session also has a state.db row (source='webui') + one real cli row.
+    state_rows = [
+        {"id": "w1", "source": "webui", "model": "gpt-5.5", "message_count": 2,
+         "input_tokens": 100, "output_tokens": 50, "estimated_cost_usd": 0.01,
+         "started_at": now, "ended_at": now},
+        {"id": "cli1", "source": "cli", "model": "gpt-5.5", "message_count": 3,
+         "input_tokens": 200, "output_tokens": 80, "estimated_cost_usd": 0.02,
+         "started_at": now, "ended_at": now},
+    ]
+    data = _call_insights_with_state_db(monkeypatch, tmp_path, webui_entries, state_rows, days="7", now=now)
+    # webui session counted once (from _index.json), cli once = 2, NOT 3.
+    assert data["total_sessions"] == 2
+    # webui tokens counted once (100) + cli (200) = 300, NOT 400.
+    assert data["total_input_tokens"] == 300

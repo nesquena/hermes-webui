@@ -11,18 +11,28 @@ from __future__ import annotations
 import errno
 import atexit
 import codecs
-import fcntl
 import os
 import queue
-import select
 import shutil
 import signal
 import struct
 import subprocess
-import termios
+import sys
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_TERMINAL_SUPPORTED = sys.platform != "win32"
+
+if _TERMINAL_SUPPORTED:
+    import fcntl
+    import select
+    import termios
+else:
+    fcntl = None  # type: ignore[assignment]
+    select = None  # type: ignore[assignment]
+    termios = None  # type: ignore[assignment]
 
 
 def _set_nonblocking(fd: int) -> None:
@@ -34,6 +44,13 @@ def _winsize(rows: int, cols: int) -> bytes:
     rows = max(8, min(int(rows or 24), 80))
     cols = max(20, min(int(cols or 80), 240))
     return struct.pack("HHHH", rows, cols, 0, 0)
+
+
+def _safe_close_fd(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
 
 
 @dataclass
@@ -68,6 +85,107 @@ class TerminalSession:
 
 _TERMINALS: dict[str, TerminalSession] = {}
 _LOCK = threading.RLock()
+_spawn_queue: queue.Queue = queue.Queue()
+_spawn_supervisor_started = False
+_spawn_supervisor_lock = threading.Lock()
+_spawn_supervisor_thread: threading.Thread | None = None
+
+
+@dataclass
+class _SpawnRequest:
+    kwargs: dict
+    done: threading.Event = field(default_factory=threading.Event)
+    timed_out: threading.Event = field(default_factory=threading.Event)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    proc: subprocess.Popen | None = None
+    error: BaseException | None = None
+
+
+def _reap_abandoned_spawn(proc: subprocess.Popen) -> bool:
+    if proc.poll() is not None:
+        return True
+    try:
+        os.killpg(proc.pid, signal.SIGHUP)
+    except (OSError, ProcessLookupError):
+        try:
+            proc.terminate()
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        proc.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            try:
+                proc.kill()
+            except (OSError, ProcessLookupError):
+                pass
+        try:
+            proc.wait(timeout=1.0)
+        except (subprocess.TimeoutExpired, ProcessLookupError):
+            pass
+    if proc.poll() is None:
+        print("terminal abandoned spawn cleanup failed", flush=True)
+        return False
+    return True
+
+
+def _spawn_supervisor_loop() -> None:
+    while True:
+        request = None
+        try:
+            request = _spawn_queue.get()
+            try:
+                proc = subprocess.Popen(**request.kwargs)
+                with request.lock:
+                    if request.timed_out.is_set():
+                        _reap_abandoned_spawn(proc)
+                    else:
+                        request.proc = proc
+                    request.done.set()
+            except BaseException as exc:
+                with request.lock:
+                    try:
+                        request.error = exc
+                    except BaseException:
+                        pass
+                    request.done.set()
+        except BaseException as exc:
+            if request is not None:
+                try:
+                    request.error = exc
+                except BaseException:
+                    pass
+                try:
+                    request.done.set()
+                except BaseException:
+                    pass
+            time.sleep(0.01)
+
+
+def _spawn_supervisor_entry() -> None:
+    while True:
+        try:
+            _spawn_supervisor_loop()
+        except BaseException:
+            time.sleep(0.01)
+            pass
+
+
+def _ensure_spawn_supervisor() -> None:
+    global _spawn_supervisor_started, _spawn_supervisor_thread
+    with _spawn_supervisor_lock:
+        if _spawn_supervisor_started and _spawn_supervisor_thread and _spawn_supervisor_thread.is_alive():
+            return
+        thread = threading.Thread(target=_spawn_supervisor_entry, daemon=True)
+        thread.start()
+        _spawn_supervisor_thread = thread
+        _spawn_supervisor_started = True
+
+
+if _TERMINAL_SUPPORTED:
+    _ensure_spawn_supervisor()
 
 
 # NOTE on parent-death-signal: a previous version of this module set
@@ -149,6 +267,8 @@ def _set_size(term: TerminalSession, rows: int, cols: int) -> None:
 
 def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int = 80, restart: bool = False) -> TerminalSession:
     """Start or return the embedded terminal for a WebUI session."""
+    if not _TERMINAL_SUPPORTED:
+        raise NotImplementedError("Embedded terminal is not supported on Windows")
     sid = str(session_id or "").strip()
     if not sid:
         raise ValueError("session_id is required")
@@ -184,16 +304,41 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
             }
         )
         shell = _shell_path()
-        proc = subprocess.Popen(
-            _shell_argv(shell),
-            cwd=cwd,
-            env=env,
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            close_fds=True,
-            start_new_session=True,
+        # Keep the shell in its own process group for explicit cleanup via
+        # close_terminal()/close_all_terminals(); do not use PDEATHSIG here.
+        request = _SpawnRequest(
+            {
+                "args": _shell_argv(shell),
+                "cwd": cwd,
+                "env": env,
+                "stdin": slave_fd,
+                "stdout": slave_fd,
+                "stderr": slave_fd,
+                "close_fds": True,
+                # Required so cleanup can signal the whole interactive shell tree.
+                "start_new_session": True,
+            }
         )
+        _ensure_spawn_supervisor()
+        _spawn_queue.put(request)
+        try:
+            if not request.done.wait(timeout=5.0):
+                timed_out = False
+                with request.lock:
+                    if not request.done.is_set():
+                        request.timed_out.set()
+                        timed_out = True
+                if timed_out:
+                    raise TimeoutError("terminal spawn timeout - supervisor unresponsive")
+            if request.error:
+                raise request.error
+            proc = request.proc
+            if proc is None:
+                raise RuntimeError("terminal spawn failed without process")
+        except BaseException:
+            _safe_close_fd(master_fd)
+            _safe_close_fd(slave_fd)
+            raise
         os.close(slave_fd)
         _set_nonblocking(master_fd)
 
@@ -213,6 +358,8 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
 
 
 def get_terminal(session_id: str) -> TerminalSession | None:
+    if not _TERMINAL_SUPPORTED:
+        return None
     with _LOCK:
         term = _TERMINALS.get(str(session_id or ""))
         if term and term.is_alive():
@@ -221,6 +368,8 @@ def get_terminal(session_id: str) -> TerminalSession | None:
 
 
 def write_terminal(session_id: str, data: str) -> None:
+    if not _TERMINAL_SUPPORTED:
+        raise NotImplementedError("Embedded terminal is not supported on Windows")
     term = get_terminal(session_id)
     if not term or not term.is_alive():
         raise KeyError("terminal not running")
@@ -228,6 +377,8 @@ def write_terminal(session_id: str, data: str) -> None:
 
 
 def resize_terminal(session_id: str, rows: int, cols: int) -> None:
+    if not _TERMINAL_SUPPORTED:
+        raise NotImplementedError("Embedded terminal is not supported on Windows")
     term = get_terminal(session_id)
     if not term:
         raise KeyError("terminal not running")
@@ -235,6 +386,8 @@ def resize_terminal(session_id: str, rows: int, cols: int) -> None:
 
 
 def close_terminal(session_id: str) -> bool:
+    if not _TERMINAL_SUPPORTED:
+        return False
     sid = str(session_id or "")
     with _LOCK:
         term = _TERMINALS.pop(sid, None)

@@ -99,14 +99,28 @@ def test_stream_end_without_done_restores_settled_session_before_closing():
     never replaces the pane with the persisted transcript when done is missing.
     """
     body = _event_body("stream_end")
-    restore_idx = body.find("_restoreSettledSession()")
-    close_idx = body.rfind("source.close()")
+    restore_idx = body.find("_restoreSettledSession(source)")
+    close_idx = body.rfind("_closeSource(source)")
     finalized_idx = body.find("_streamFinalized=true")
     assert restore_idx != -1, "stream_end handler must restore settled session when done is absent"
-    assert close_idx != -1, "stream_end handler must still close the EventSource"
+    assert close_idx != -1, "stream_end handler must still close the owning EventSource"
     assert restore_idx < close_idx, "restore must be attempted before closing the stream"
     assert finalized_idx != -1, "stream_end terminal path must suppress trailing rAF/render work"
 
+
+def test_settled_restore_and_error_close_only_the_event_source_owner():
+    """Late stale-source async cleanup must not close a newer reconnect source."""
+    restore_body = _function_body("_restoreSettledSession")
+    error_body = _function_body("_handleStreamError")
+    event_body = _event_body("error")
+    assert "async function _restoreSettledSession(source)" in MESSAGES_JS
+    assert "function _handleStreamError(source)" in MESSAGES_JS
+    assert "_closeSource(source);" in restore_body
+    assert "_closeSource(source);" in error_body
+    assert "_restoreSettledSession(source)" in event_body
+    assert "_handleStreamError(source)" in event_body
+    assert "_restoreSettledSession())" not in event_body
+    assert "_handleStreamError();" not in event_body
 
 def test_done_handler_is_idempotent_for_replay_or_duplicate_done_events():
     """Duplicate/replayed done events must not replay completion sound or duplicate render."""
@@ -121,6 +135,31 @@ def test_done_handler_is_idempotent_for_replay_or_duplicate_done_events():
     assert guard_idx != -1 and guard_idx < sound_idx, (
         "completion sound must be behind the duplicate-done finalization guard"
     )
+
+
+def test_attention_events_use_distinct_sound_from_completion():
+    approval_body = _event_body("approval")
+    clarify_body = _event_body("clarify")
+    done_body = _event_body("done")
+    attention_body = _function_body("playAttentionSound")
+
+    assert "playAttentionSound(_attentionSoundKey(activeSid,'approval',1));" in approval_body
+    assert "playAttentionSound(_attentionSoundKey(activeSid,'clarify',1));" in clarify_body
+    for body in (approval_body, clarify_body):
+        assert "playNotificationSound();" not in body
+    assert "playNotificationSound();" in done_body
+    assert "playAttentionSound();" not in done_body
+    assert "osc.type='sine'" in attention_body
+    assert "window._lastAttentionSoundAt" in attention_body
+    assert "nowMs-window._lastAttentionSoundAt<900" in attention_body
+    assert "window._attentionSoundSeenKeys" in attention_body
+    assert "seen.has(dedupeKey)" in attention_body
+    assert "seen.set(dedupeKey,nowMs)" in attention_body
+    assert "osc.frequency.setValueAtTime(880,ctx.currentTime);" in attention_body
+    assert "osc.frequency.setValueAtTime(660,ctx.currentTime+0.075);" in attention_body
+    assert "gain.gain.setValueAtTime(0.24,ctx.currentTime);" in attention_body
+    assert "osc.stop(ctx.currentTime+0.24);" in attention_body
+    assert "Notification sound failed" not in attention_body
 
 
 def test_attach_live_stream_registers_one_source_per_session_stream():

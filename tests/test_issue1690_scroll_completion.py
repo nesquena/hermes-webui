@@ -72,5 +72,13 @@ def test_session_switch_and_idle_session_load_keep_default_bottom_pin_behavior()
     load_session = _function_body(SESSIONS_JS, "loadSession")
     idle_branch = load_session[load_session.index("}else{\n      S.busy=false;") : load_session.index("// Sync context usage indicator")]
 
-    assert "syncTopbar();renderMessages();" in idle_branch
-    assert "preserveScroll:true" not in idle_branch
+    # #3326: the idle branch now renders with a CONDITIONAL preserveScroll —
+    # `renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined)`.
+    # For a normal cross-session idle load (currentSid!==sid) sameSessionForceReload
+    # is false, so the arg is undefined and the default bottom-pin behavior (#1690)
+    # is unchanged. preserveScroll only applies to a same-session external
+    # force-refresh (#3239), which is a different code path from #1690's scenario.
+    assert "syncTopbar();renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined);" in idle_branch
+    # The idle path must NOT unconditionally preserveScroll — it stays bottom-pinned
+    # for cross-session loads. Guard against a regression to an always-on preserve.
+    assert "renderMessages({preserveScroll:true})" not in idle_branch

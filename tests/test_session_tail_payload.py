@@ -92,7 +92,10 @@ def test_tail_window_keeps_only_visible_session_tool_calls_for_legacy_messages_w
     payload = _invoke(session)
 
     assert payload["messages"] == [session.messages[-1]]
-    assert payload["tool_calls"] == [session.tool_calls[-1]]
+    assert payload["tool_calls"] == [
+        {"name": "visible-tool", "snippet": "visible snippet", "assistant_msg_idx": 0}
+    ]
+    assert session.tool_calls[-1]["assistant_msg_idx"] == 1
 
 
 def test_full_load_keeps_all_session_tool_calls_for_legacy_messages_without_metadata():
@@ -114,11 +117,12 @@ def test_msg_before_window_keeps_only_that_page_session_tool_calls():
     session = _FakeSession([
         {"role": "user", "content": "first"},
         {"role": "assistant", "content": "second legacy message"},
-        {"role": "user", "content": "third"},
+        {"role": "assistant", "content": "third legacy message"},
         {"role": "assistant", "content": "fourth legacy message"},
     ])
     session.tool_calls = [
         {"name": "first-page-tool", "snippet": "kept", "assistant_msg_idx": 1},
+        {"name": "second-page-tool", "snippet": "also kept", "assistant_msg_idx": 2},
         {"name": "tail-tool", "snippet": "not in page", "assistant_msg_idx": 3},
         {"name": "unindexed-tool", "snippet": "cannot place"},
     ]
@@ -129,5 +133,10 @@ def test_msg_before_window_keeps_only_that_page_session_tool_calls():
     )
 
     assert payload["messages"] == session.messages[1:3]
-    assert payload["tool_calls"] == [session.tool_calls[0]]
+    assert payload["tool_calls"] == [
+        {"name": "first-page-tool", "snippet": "kept", "assistant_msg_idx": 0},
+        {"name": "second-page-tool", "snippet": "also kept", "assistant_msg_idx": 1},
+    ]
+    assert session.tool_calls[0]["assistant_msg_idx"] == 1
+    assert session.tool_calls[1]["assistant_msg_idx"] == 2
     assert payload["_messages_offset"] == 1

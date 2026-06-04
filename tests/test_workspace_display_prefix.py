@@ -35,12 +35,16 @@ def test_user_render_uses_stripped_display_content_without_preempting_context_ca
     assert loop_end != -1, "assistant render branch not found after user branch"
     render_prefix = src[loop_start:loop_end]
 
-    display_idx = render_prefix.find("const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;")
+    display_idx = render_prefix.find("const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;")
     context_idx = render_prefix.find("if(_isContextCompactionMessage(m))")
     user_idx = render_prefix.find("if(isUser)")
     assert display_idx != -1, "display content stripper not used in render loop"
     assert context_idx != -1, "context compaction branch not found"
     assert user_idx != -1, "user render branch not found"
     assert display_idx < context_idx < user_idx
-    assert "_renderUserFencedBlocks(displayContent)" in render_prefix
+    # The render call may be a direct _renderUserFencedBlocks call or go
+    # through the cached wrapper _getCachedRender.  Both paths accept the
+    # already-stripped displayContent, so the invariant holds either way.
+    assert ("_renderUserFencedBlocks(displayContent)" in render_prefix or
+            "_getCachedRender(displayContent, isUser)" in render_prefix)
     assert "row.dataset.rawText=String(displayContent).trim();" in render_prefix

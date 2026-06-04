@@ -1,6 +1,7 @@
 """Sprint 5 tests: workspace CRUD, file save, session index, JS serving."""
 import json, pathlib, uuid, urllib.request, urllib.error, urllib.parse
 import os
+import pytest
 
 from tests._pytest_port import BASE
 
@@ -107,6 +108,70 @@ def test_workspace_suggest_hidden_dirs_only_when_requested(cleanup_test_sessions
     data2, status2 = get(f"/api/workspaces/suggest?prefix={urllib.parse.quote(base + '.w')}")
     assert status2 == 200
     assert str(hidden) in data2["suggestions"]
+
+
+def test_workspace_suggest_preserves_tilde_prefix(monkeypatch, tmp_path):
+    from api import workspace
+
+    home = tmp_path / "home"
+    child = home / "Projects"
+    child.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(workspace, "_trusted_workspace_roots", lambda: [home.resolve()])
+
+    suggestions = workspace.list_workspace_suggestions("~/")
+
+    assert "~/Projects" in suggestions
+    assert str(child.resolve()) not in suggestions
+
+
+def test_workspace_suggest_preserves_tilde_prefix_for_partial_child(monkeypatch, tmp_path):
+    from api import workspace
+
+    home = tmp_path / "home"
+    child = home / "Projects"
+    child.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(workspace, "_trusted_workspace_roots", lambda: [home.resolve()])
+
+    suggestions = workspace.list_workspace_suggestions("~/Pro")
+
+    assert suggestions == ["~/Projects"]
+
+
+def test_workspace_suggest_expands_tilde_when_home_is_symlink(monkeypatch, tmp_path):
+    from api import workspace
+
+    actual_home = tmp_path / "actual-home"
+    child = actual_home / "Documents"
+    child.mkdir(parents=True)
+    link_home = tmp_path / "link-home"
+    try:
+        link_home.symlink_to(actual_home, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks are not available in this environment: {exc}")
+
+    monkeypatch.setenv("HOME", str(link_home))
+    monkeypatch.setattr(workspace, "_trusted_workspace_roots", lambda: [actual_home.resolve()])
+
+    suggestions = workspace.list_workspace_suggestions("~/Doc")
+
+    assert suggestions == ["~/Documents"]
+
+
+def test_workspace_suggest_keeps_absolute_prefix_absolute(monkeypatch, tmp_path):
+    from api import workspace
+
+    home = tmp_path / "home"
+    child = home / "Projects"
+    child.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(workspace, "_trusted_workspace_roots", lambda: [home.resolve()])
+
+    suggestions = workspace.list_workspace_suggestions(str(home) + "/Pro")
+
+    assert suggestions == [str(child.resolve())]
+
 
 def test_workspace_remove(cleanup_test_sessions):
     _, ws = make_session_tracked(cleanup_test_sessions)

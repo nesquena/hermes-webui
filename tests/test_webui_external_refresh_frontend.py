@@ -77,3 +77,46 @@ def test_same_session_force_reload_preserves_non_empty_composer_input():
     assert "const preserveActiveInput = !!(opts && opts.preserveActiveInput);" in SESSIONS_JS
     assert "if (preserveActiveInput && current && current !== text) return;" in SESSIONS_JS
     assert "_restoreComposerDraft(_draft, sid, {preserveActiveInput:currentSid===sid&&forceReload});" in SESSIONS_JS
+
+
+def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
+    """Same-session force refresh must not collapse a long transcript to the tail."""
+    assert "let _sameSessionForceReloadHint = null;" in SESSIONS_JS
+    assert "function _captureSameSessionForceReloadHint(sid)" in SESSIONS_JS
+    assert "loaded_renderable_count:loadedRenderableCount" in SESSIONS_JS
+    assert "message_count:knownMessageCount" in SESSIONS_JS
+    assert "truncated:!!_messagesTruncated" in SESSIONS_JS
+    assert "function _messageReloadLimitForSession(sid)" in SESSIONS_JS
+    assert "if(!hint.truncated) return null;" in SESSIONS_JS
+    assert "const appendedMessageCount=Math.max(0,currentMessageCount-previousMessageCount);" in SESSIONS_JS
+    assert "return Math.max(_INITIAL_MSG_LIMIT,loadedRenderableCount,loadedMessageCount+appendedMessageCount);" in SESSIONS_JS
+    assert "const reloadLimit = _messageReloadLimitForSession(sid);" in SESSIONS_JS
+    assert "const reloadLimitParam = reloadLimit ? `&msg_limit=${reloadLimit}` : '';" in SESSIONS_JS
+    assert "finally {\n    _clearSameSessionForceReloadHint(sid);\n  }" in SESSIONS_JS
+
+    load_start = SESSIONS_JS.index("async function loadSession(sid)")
+    load_end = SESSIONS_JS.index("// ── Handoff hint logic", load_start)
+    load_body = SESSIONS_JS[load_start:load_end]
+    capture_pos = load_body.index("if (sameSessionForceReload) _captureSameSessionForceReloadHint(sid);")
+    clear_pos = load_body.index("else _clearSameSessionForceReloadHint();", capture_pos)
+    reset_pos = load_body.index("S.messages = [];", clear_pos)
+    assert capture_pos < clear_pos < reset_pos
+    assert "const sameSessionForceReload = forceReload && currentSid===sid;" in load_body
+    assert "renderMessages(sameSessionForceReload?{preserveScroll:true}:undefined)" in load_body
+
+
+def test_same_width_force_reload_invalidates_visible_message_cache():
+    """Replacing a transcript with the same length must still refresh cached rows."""
+    clear_start = UI_JS.index("function clearVisibleMessageRowCache()")
+    clear_end = UI_JS.index("function _resetMessageRenderWindow", clear_start)
+    clear_body = UI_JS[clear_start:clear_end]
+    assert "_visWithIdxCache=null;" in clear_body
+    assert "_visWithIdxCacheLen=0;" in clear_body
+    assert "clearVisibleMessageRowCache();" in UI_JS[UI_JS.index("function clearMessageRenderCache()") :]
+
+    ensure_start = SESSIONS_JS.index("async function _ensureMessagesLoaded(sid)")
+    ensure_end = SESSIONS_JS.index("function _messageComparableText", ensure_start)
+    ensure_body = SESSIONS_JS[ensure_start:ensure_end]
+    invalidate_pos = ensure_body.index("if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();")
+    replace_pos = ensure_body.index("S.messages = msgs;")
+    assert invalidate_pos < replace_pos

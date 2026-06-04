@@ -119,7 +119,7 @@ class TestSidebarFirstTurnVisibility:
         )
 
         index_filter_start = src.index("# Hide empty Untitled sessions from the UI entirely")
-        index_filter_end = src.index("result = [s for s in result if not _hide_from_default_sidebar", index_filter_start)
+        index_filter_end = src.index("visible_result = [s for s in sidebar_candidates if not _hide_from_default_sidebar", index_filter_start)
         index_filter = src[index_filter_start:index_filter_end]
         assert "_is_empty_untitled_sidebar_session" in index_filter, (
             "The index-path empty-session filter must use the shared predicate that "

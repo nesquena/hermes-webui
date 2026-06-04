@@ -9,6 +9,7 @@ Four optimizations to reduce session-switch latency:
 """
 
 import pathlib
+import re
 import threading
 import time
 from unittest.mock import patch, MagicMock
@@ -79,9 +80,14 @@ class TestLoadSessionIdleOverlap:
 
         found = False
         for pos in positions:
-            block = SESSIONS_JS[pos : pos + 600]
+            # Window widened 600→850 (#3326 added a reload-width-hint comment +
+            # conditional preserveScroll arg in the idle branch, pushing the
+            # _dirP.catch line further from the S.busy=false anchor).
+            block = SESSIONS_JS[pos : pos + 850]
             has_loaddir = "loadDir('.')" in block
-            has_render = "renderMessages()" in block
+            # #3326 added an optional {preserveScroll} arg to the idle-path render
+            # call; match the call form rather than the bare `renderMessages()`.
+            has_render = "renderMessages(" in block
             if has_loaddir and has_render:
                 found = True
                 assert "highlightCode()" not in block, (
@@ -410,15 +416,23 @@ class TestMessagePaginationFrontend:
         """_loadOlderMessages must be defined for scroll-to-top loading."""
         assert "async function _loadOlderMessages" in SESSIONS_JS
 
-    def test_load_older_uses_index_cursor(self):
-        """_loadOlderMessages must pass msg_before as integer index, not timestamp."""
+    def test_load_older_uses_cumulative_tail_limit(self):
+        """_loadOlderMessages requests a larger authoritative tail window via msg_limit.
+
+        The cumulative tail path is the default. msg_before remains in the
+        body as the race-fallback request when the suffix-continuity check
+        fails.
+        """
         fn_start = SESSIONS_JS.find("async function _loadOlderMessages")
         fn_end = SESSIONS_JS.find("\n}", fn_start) + 2
         fn_body = SESSIONS_JS[fn_start:fn_end]
 
-        assert "msg_before=${_oldestIdx}" in fn_body, (
-            "_loadOlderMessages should use _oldestIdx (integer) as msg_before cursor"
-        )
+        assert "requestedLimit" in fn_body
+        assert "S.messages || []" in fn_body
+        assert "msg_limit=${requestedLimit}" in fn_body
+        assert "tailMatches" in fn_body
+        # Race fallback still issues the legacy msg_before page request.
+        assert "msg_before=${_oldestIdx}" in fn_body
 
     def test_ensure_all_messages_function_exists(self):
         """_ensureAllMessagesLoaded must exist for operations needing full history."""
@@ -479,10 +493,20 @@ class TestSessionSwitchCancellation:
 
     def test_loading_older_reset_on_session_switch(self):
         """loadSession must reset _loadingOlder when switching sessions."""
-        # Find the reset block in loadSession
-        marker = "_messagesTruncated = false;\n    _oldestIdx = 0;\n    _loadingOlder = false;"
-        idx = SESSIONS_JS.find(marker)
-        assert idx >= 0, (
+        # Locate the on-switch reset block — it lives in the `if (currentSid !== sid || forceReload)`
+        # arm of loadSession. Match by the surrounding state-resets rather than by a fragile
+        # multi-line substring, so unrelated code (like the closeOtherLiveStreams teardown
+        # that was inserted between _oldestIdx and _loadingOlder) doesn't break the test.
+        switch_arm = re.search(
+            r"if \(currentSid !== sid \|\| forceReload\) \{(.*?)\n  \}",
+            SESSIONS_JS,
+            re.DOTALL,
+        )
+        assert switch_arm, "loadSession's session-switch reset arm not found"
+        block = switch_arm.group(1)
+        assert "_messagesTruncated = false;" in block
+        assert "_oldestIdx = 0;" in block
+        assert "_loadingOlder = false;" in block, (
             "loadSession must reset _loadingOlder=false on session switch "
             "to prevent a stale _loadOlderMessages lock from blocking the "
             "new session's scroll-to-top loading."
@@ -492,7 +516,7 @@ class TestSessionSwitchCancellation:
         """Verify the guard prevents S.messages mutation.
 
         The guard `if (_loadingSessionId !== null && _loadingSessionId !== sid) return`
-        runs BEFORE `S.messages = [...olderMsgs, ...S.messages]`.
+        runs BEFORE `S.messages = nextMessages`.
         If the session changed, we return early — no mutation.
         """
         fn_start = SESSIONS_JS.find("async function _loadOlderMessages")
@@ -501,7 +525,7 @@ class TestSessionSwitchCancellation:
 
         # Guard must appear before S.messages mutation
         guard_idx = fn_body.find("_loadingSessionId")
-        mutation_idx = fn_body.find("S.messages = [...olderMsgs")
+        mutation_idx = fn_body.find("S.messages = nextMessages")
         assert guard_idx >= 0 and mutation_idx >= 0 and guard_idx < mutation_idx, (
             "The _loadingSessionId guard must appear BEFORE the S.messages "
             "mutation to prevent stale data from landing on the wrong session."
@@ -509,13 +533,20 @@ class TestSessionSwitchCancellation:
 
     def test_messages_truncated_reset_on_switch(self):
         """loadSession must reset _messagesTruncated on session switch."""
-        marker = "_messagesTruncated = false;\n    _oldestIdx = 0;\n    _loadingOlder = false;"
-        idx = SESSIONS_JS.find(marker)
-        assert idx >= 0, (
+        switch_arm = re.search(
+            r"if \(currentSid !== sid \|\| forceReload\) \{(.*?)\n  \}",
+            SESSIONS_JS,
+            re.DOTALL,
+        )
+        assert switch_arm, "loadSession's session-switch reset arm not found"
+        block = switch_arm.group(1)
+        assert "_messagesTruncated = false;" in block, (
             "_messagesTruncated must be reset to false on session switch "
             "to prevent the scroll-to-top handler from trying to load "
             "older messages from the previous session."
         )
+        assert "_oldestIdx = 0;" in block
+        assert "_loadingOlder = false;" in block
 
     def test_oldest_idx_reset_prevents_wrong_cursor(self):
         """_oldestIdx=0 after switch prevents passing stale cursor to API."""
@@ -552,7 +583,7 @@ class TestSessionSwitchCancellation:
         )
         # The S.session check must appear BEFORE the S.messages mutation.
         active_check_idx = fn_body.find("S.session.session_id !== sid")
-        mutation_idx = fn_body.find("S.messages = [...olderMsgs")
+        mutation_idx = fn_body.find("S.messages = nextMessages")
         assert active_check_idx >= 0 and mutation_idx >= 0 and active_check_idx < mutation_idx, (
             "Active-session guard must run before S.messages mutation."
         )

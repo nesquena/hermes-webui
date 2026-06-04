@@ -200,8 +200,13 @@ class TestProjectDotPlacement:
         position:absolute. Without this the title's flex:1 runs underneath
         the absolute-positioned timestamp and the dot has no anchor."""
         # Get the bare .session-time rule (not .session-time.is-hidden, not
-        # .session-item:hover .session-time)
-        idx = STYLE_CSS.find(".session-time{")
+        # .session-item:hover .session-time, and not a skin-scoped variant like
+        # `:root[data-skin="graphite"] .session-item.active .session-time{`).
+        # Anchor on the canonical unscoped rule (start-of-line declaration).
+        import re as _re
+        m = _re.search(r"(?m)^\s*\.session-time\{", STYLE_CSS)
+        assert m, "canonical unscoped .session-time{ rule not found"
+        idx = m.start()
         rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
         assert "position:absolute" not in rule, (
             ".session-time must not be position:absolute — bug 2 requires "
@@ -252,10 +257,11 @@ class TestProjectDotPlacement:
         padding-right selector. Touch devices (iPad, phone) see hover:none so
         they skip the @media (hover:hover) block below. Mouse devices see
         hover:hover and get the padding-right on hover.
-        streaming/unread/focus-within/menu-open expand to 40px for all devices."""
+        streaming/unread/needs-attention/focus-within/menu-open expand to 40px for all devices."""
         # Touch-safe combined rule (no :hover in this one)
         sel = (
             ".session-item.streaming,.session-item.unread,"
+            ".session-item.needs-attention,"
             ".session-item:focus-within,"
             ".session-item.menu-open"
         )

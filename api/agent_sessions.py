@@ -142,14 +142,16 @@ def is_cli_session_row(row: dict) -> bool:
     if not isinstance(row, dict):
         return False
     source = _safe_lower(row.get("session_source"))
-    if source == "messaging":
-        return False
-    if source == "cli":
-        return True
     source_tag = _safe_lower(row.get("source_tag"))
     raw_source = _safe_lower(row.get("raw_source"))
     source_name = _safe_lower(row.get("source"))
     source_label = _safe_lower(row.get("source_label"))
+    if "webui" in {source, source_tag, raw_source, source_name, source_label}:
+        return False
+    if source == "messaging":
+        return False
+    if source == "cli":
+        return True
     if source_tag == "cli" or raw_source == "cli" or source_name == "cli" or source_label == "cli":
         return True
 
@@ -727,6 +729,15 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
         state_title = str(row.get('title') or '').strip()
         if state_title:
             metadata.setdefault(sid, {})['_state_db_title'] = state_title
+        state_source = str(row.get('source') or '').strip().lower()
+        if state_source:
+            entry = metadata.setdefault(sid, {})
+            entry['_state_db_source'] = state_source
+            source_meta = normalize_agent_session_source(state_source)
+            entry['_state_db_source_tag'] = state_source
+            entry['_state_db_raw_source'] = source_meta.get('raw_source')
+            entry['_state_db_session_source'] = source_meta.get('session_source')
+            entry['_state_db_source_label'] = source_meta.get('source_label')
 
         parent_id = row.get('parent_session_id')
         parent_row = rows.get(parent_id) if parent_id else None

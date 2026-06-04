@@ -11,21 +11,19 @@ def _read_ui() -> str:
 
 def test_select_model_custom_option_uses_friendly_label_helper():
     src = _read_ui()
-    start = src.find("async function selectModelFromDropdown(value)")
-    assert start != -1, "selectModelFromDropdown() not found"
-    end = src.find("\nfunction toggleModelDropdown()", start)
-    if end == -1:
-        end = src.find("\nasync function toggleModelDropdown()", start)
-    assert end != -1, "toggleModelDropdown() boundary not found"
+    start = src.find("function _ensureModelOptionInDropdown")
+    assert start != -1, "_ensureModelOptionInDropdown() not found"
+    end = src.find("\nfunction _modelStateFromAppliedDropdown", start)
+    assert end != -1, "_modelStateFromAppliedDropdown() boundary not found"
     body = src[start:end]
 
-    assert "opt.textContent=getModelLabel(value);" in body, (
-        "Temporary model options should use getModelLabel(value) so the chip shows a "
+    assert "getModelLabel(modelId)" in body, (
+        "Temporary model options should use getModelLabel(modelId) so the chip shows a "
         "friendly label instead of a raw slug when the value is not already in the "
         "native <select> options."
     )
     assert "opt.textContent=value.split('/').pop()||value;" not in body, (
-        "Raw slug fallback in selectModelFromDropdown() regresses the model chip for "
+        "Raw slug fallback in temporary model options regresses the model chip for "
         "Ollama-tag style model IDs."
     )
 

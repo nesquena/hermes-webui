@@ -176,14 +176,15 @@ def test_katex_lazy_load_follows_mermaid_pattern():
     assert '_katexReady' in UI_JS,   '_katexReady flag not found'
 
 
-def test_katex_js_loaded_from_cdn():
-    """KaTeX JS must be loaded from jsdelivr CDN."""
-    assert 'katex@0.16' in UI_JS, \
-        'KaTeX JS CDN URL not found in ui.js — expected katex@0.16.x'
+def test_katex_js_loaded_from_vendored_asset():
+    """KaTeX JS must be loaded from the vendored local asset."""
+    assert 'static/vendor/katex/0.16.22/katex.min.js' in UI_JS, \
+        'KaTeX JS vendored URL not found in ui.js — expected local 0.16.22 asset'
+    assert 'https://cdn.jsdelivr.net/npm/katex@0.16' not in UI_JS
 
 
 def test_katex_js_has_sri_hash():
-    """KaTeX JS CDN tag must have an SRI integrity hash."""
+    """KaTeX JS tag must keep an SRI integrity hash for the pinned asset."""
     # The hash is in the script.integrity assignment
     assert "script.integrity='sha384-" in UI_JS or 'script.integrity="sha384-' in UI_JS, \
         'KaTeX JS SRI integrity hash not found in ui.js'
@@ -229,15 +230,16 @@ def test_mermaid_render_failure_removes_temporary_error_dom():
 # ── index.html ────────────────────────────────────────────────────────────────
 
 def test_katex_css_in_index_html():
-    """KaTeX CSS must be loaded in index.html."""
-    assert 'katex@0.16' in INDEX, \
-        'KaTeX CSS CDN link not found in index.html'
+    """KaTeX CSS must be loaded from the vendored local asset."""
+    assert 'static/vendor/katex/0.16.22/katex.min.css' in INDEX, \
+        'KaTeX CSS vendored link not found in index.html'
+    assert 'https://cdn.jsdelivr.net/npm/katex@0.16' not in INDEX
 
 
-def test_katex_css_has_sri_hash():
-    """KaTeX CSS link in index.html must have an SRI integrity hash."""
-    assert 'sha384-5TcZemv2l' in INDEX or 'integrity' in INDEX and 'katex' in INDEX, \
-        'KaTeX CSS SRI integrity hash not found in index.html'
+def test_katex_css_is_pinned_local_asset():
+    """KaTeX CSS is pinned by vendored path instead of CDN integrity metadata."""
+    assert 'static/vendor/katex/0.16.22/katex.min.css' in INDEX, \
+        'KaTeX CSS local pinned asset not found in index.html'
 
 
 # ── style.css ─────────────────────────────────────────────────────────────────
@@ -427,6 +429,24 @@ def test_inline_math_regex_requires_non_space_boundaries():
         f"Inline math regex must exclude spaces at boundaries to prevent false "
         f"positives on currency like $5. Found: {inline_line[:120]}"
     )
+def test_inline_math_regex_rejects_digit_after_opening_dollar():
+    """The $...$ inline regex must reject $ followed by a digit.
+
+    Currency like '$1,000 xuống ~$95' must NOT be parsed as math.
+    The opening $ followed by a digit (0-9) is a strong currency signal.
+    Aligns with smd's se() guard which also rejects $ + digit.
+    """
+    inline_push_idx = UI_JS.find("type:'inline',src:m")
+    assert inline_push_idx != -1
+    line_start = UI_JS.rfind('\n', 0, inline_push_idx) + 1
+    inline_line = UI_JS[line_start:inline_push_idx + 50]
+    # The regex character class for the first char must exclude \d
+    assert '\\d' in inline_line, (
+        f"Inline math regex must exclude digits at opening boundary to prevent "
+        f"false positives on currency like $1,000. Found: {inline_line[:120]}"
+    )
+
+
 def test_display_math_stashed_before_inline():
     """$$...$$ display math must be stashed before $...$ inline math.
 

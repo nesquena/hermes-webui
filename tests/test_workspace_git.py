@@ -31,9 +31,33 @@ def _git(cwd, *args):
 
 def _init_repo(path):
     path.mkdir(parents=True, exist_ok=True)
-    _git(path, "init")
+    init = subprocess.run(
+        ["git", "init", "-b", "master"],
+        cwd=str(path),
+        shell=False,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    if init.returncode != 0:
+        _git(path, "init")
+        _git(path, "checkout", "-B", "master")
     _git(path, "config", "user.email", "hermes-tests@example.invalid")
     _git(path, "config", "user.name", "Hermes Tests")
+    return path
+
+
+def _init_bare_repo(path):
+    init = subprocess.run(
+        ["git", "init", "--bare", "-b", "master", str(path)],
+        shell=False,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    if init.returncode != 0:
+        _git(path.parent, "init", "--bare", str(path))
+        _git(path, "symbolic-ref", "HEAD", "refs/heads/master")
     return path
 
 
@@ -503,14 +527,14 @@ def test_staged_commit_message_prompt_uses_only_staged_diff(tmp_path):
 def test_git_fetch_pull_and_push_with_upstream(tmp_path):
     from api.workspace_git import git_fetch, git_pull, git_push, git_status
 
-    remote = tmp_path / "remote.git"
-    _git(tmp_path, "init", "--bare", str(remote))
+    remote = _init_bare_repo(tmp_path / "remote.git")
 
     origin = _init_repo(tmp_path / "origin")
     (origin / "tracked.txt").write_text("one\n", encoding="utf-8")
     _commit_all(origin)
     _git(origin, "remote", "add", "origin", str(remote))
     _git(origin, "push", "-u", "origin", "HEAD")
+    _git(remote, "symbolic-ref", "HEAD", "refs/heads/master")
 
     clone = tmp_path / "clone"
     _git(tmp_path, "clone", str(remote), str(clone))
@@ -540,8 +564,7 @@ def test_git_fetch_pull_and_push_with_upstream(tmp_path):
 def test_git_branches_lists_local_remote_and_upstream(tmp_path):
     from api.workspace_git import git_branches
 
-    remote = tmp_path / "remote.git"
-    _git(tmp_path, "init", "--bare", str(remote))
+    remote = _init_bare_repo(tmp_path / "remote.git")
     origin = _init_repo(tmp_path / "origin")
     (origin / "tracked.txt").write_text("one\n", encoding="utf-8")
     _commit_all(origin)
@@ -565,8 +588,7 @@ def test_git_branches_lists_local_remote_and_upstream(tmp_path):
 def test_git_checkout_local_new_remote_dirty_and_invalid_refs(tmp_path):
     from api.workspace_git import GitWorkspaceError, git_branches, git_checkout
 
-    remote = tmp_path / "remote.git"
-    _git(tmp_path, "init", "--bare", str(remote))
+    remote = _init_bare_repo(tmp_path / "remote.git")
     origin = _init_repo(tmp_path / "origin")
     (origin / "tracked.txt").write_text("one\n", encoding="utf-8")
     _commit_all(origin)

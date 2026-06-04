@@ -262,3 +262,29 @@ def test_env_docker_example_warns_about_home_mode_asymmetry():
         ".env.docker.example must include a MULTI-CONTAINER WARNING about "
         "the HERMES_HOME_MODE semantic asymmetry between WebUI and agent."
     )
+
+
+# ── 8: Docker localhost and sudo-compose troubleshooting (#3006, #3012) ────
+
+
+def test_docs_docker_warns_about_sudo_compose_home_expansion():
+    """REGRESSION (#3006): the Docker guide must explain that
+    `sudo docker compose` can expand `${HOME}` to `/root`, mounting the wrong
+    `.hermes` directory into the container."""
+    src = (REPO / "docs" / "docker.md").read_text(encoding="utf-8")
+    assert "sudo docker compose" in src
+    assert "/root/.hermes" in src
+    assert "sudo -E docker compose" in src
+    assert "docker group" in src
+
+
+def test_onboarding_docs_cover_linux_host_gateway_for_container_localhost():
+    """REGRESSION (#3012): local-provider onboarding docs must include the
+    Linux Docker host-gateway shape, not only Docker Desktop's
+    `host.docker.internal` shortcut."""
+    src = (REPO / "docs" / "onboarding.md").read_text(encoding="utf-8")
+    assert "host.docker.internal" in src
+    assert "host-gateway" in src
+    assert "extra_hosts" in src
+    assert "api.local" in src
+    assert "localhost" in src and "container" in src

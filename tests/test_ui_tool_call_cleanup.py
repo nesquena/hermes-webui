@@ -285,7 +285,7 @@ class TestToolCallGroupingStatic:
             "The non-simplified path should preserve standalone settled thinking cards."
         )
 
-    def test_live_visible_interim_text_keeps_single_activity_group(self):
+    def test_live_visible_interim_text_preserves_timeline_boundary(self):
         live_thinking_fn = _function_body(UI_JS, "appendThinking")
         live_tool_fn = _function_body(UI_JS, "appendLiveToolCard")
         helper = _function_body(UI_JS, "ensureActivityGroup")
@@ -318,12 +318,22 @@ class TestToolCallGroupingStatic:
             "Compact live thinking should reactivate the latest existing Thinking card instead of stacking a new card after every tool boundary."
         )
         reset_fn = _function_body(MESSAGES_JS, "_resetAssistantSegment")
-        assert "_closeCurrentLiveActivityGroup" not in MESSAGES_JS and "closeActivity" not in reset_fn, (
-            "Assistant text resets should not carry a dead Activity-splitting path."
+        assert "function closeCurrentLiveActivityGroup()" in UI_JS, (
+            "Visible interim assistant progress needs a shared helper to close the current Activity burst."
         )
         interim_match = re.search(r"source\.addEventListener\('interim_assistant',e=>\{(.*?)\n\s*\}\);", MESSAGES_JS, re.S)
-        assert interim_match and "_resetAssistantSegment({closeActivity:true});" not in interim_match.group(1), (
-            "Visible interim assistant text should not split Compact tool activity into multiple Activity rows."
+        assert interim_match and "closeCurrentLiveActivityGroup()" in interim_match.group(1), (
+            "Visible interim assistant progress is timeline content and must split the current Activity burst."
+        )
+        assert interim_match and "ensureAssistantRow(true)" in interim_match.group(1), (
+            "Visible interim assistant progress must create a visible assistant timeline segment."
+        )
+        assert interim_match and "_flushPendingSegmentRender({force:true})" in interim_match.group(1), (
+            "Visible interim assistant progress must be synchronously rendered before the segment reset."
+        )
+        timer_fn = _function_body(UI_JS, "_updateActiveActivityElapsedTimer")
+        assert "data-live-activity-current" in timer_fn, (
+            "Elapsed timers should clear once an Activity group is no longer current."
         )
         tool_start_segment = MESSAGES_JS.split("source.addEventListener('tool',e=>{", 1)[1].split("source.addEventListener('tool_complete'", 1)[0]
         assert "_resetAssistantSegment();" in tool_start_segment, (

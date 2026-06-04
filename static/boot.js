@@ -1,6 +1,9 @@
+// Early boot initialization that must run before any other code.
+// These run during script evaluation to handle server-stopped state
+// and cross-tab shutdown broadcasts as early as possible.
 (function(){
   // Clear stale stop-server flag on successful page load (server is reachable)
-  localStorage.removeItem('hermes-webui-server-stopped');
+  try{localStorage.removeItem('hermes-webui-server-stopped');}catch(_){}
   // Listen for shutdown broadcast from other tabs
   try {
     var _stopChan = new BroadcastChannel('hermes-webui-shutdown');
@@ -29,7 +32,8 @@ async function cancelSessionStream(session){
   if(!streamId||!sid) return;
   try{
     await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{credentials:'include'});
-  }catch(e){/* cancel request failed - cleanup below still runs */}
+  }catch(e){/* close local stream; keep UI state honest below */}
+  if(typeof closeLiveStream==='function') closeLiveStream(sid, streamId);
   session.active_stream_id=null;
   delete INFLIGHT[sid];
   clearInflightState(sid);
@@ -441,6 +445,13 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
   let _forceMediaRecorder=!SpeechRecognition||localStorage.getItem(_micForceMediaRecorderKey)==='1';
 
+  // Raw audio mode preference: send audio file instead of transcribing
+  let _rawAudioMode = localStorage.getItem('hermes-raw-audio-mode') === 'true';
+  // Capture backend pinned at recording start ('speech' | 'media' | null) so
+  // _stopMic / onstop act on the backend that actually started, even if the
+  // raw-audio toggle changes mid-recording (#3169 Codex review).
+  let _activeCaptureMode = null;
+
   const btn=$('btnMic');
   const status=$('micStatus');
   const ta=$('msg');
@@ -455,15 +466,52 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
   let _prefix='';
   let _isRecording=false;
 
+  function _setButtonTooltipAndKey(btn, key){
+    const text = t(key);
+    btn.setAttribute('data-i18n-title', key);
+    if(btn.hasAttribute('data-tooltip')){
+      btn.setAttribute('data-tooltip', text);
+      if(btn.hasAttribute('title')) btn.removeAttribute('title');
+    } else {
+      btn.title = text;
+    }
+  }
+
   function _setRecording(on){
     window._micActive=on;
     btn.classList.toggle('recording',on);
     // Active-state title flips so the tooltip is honest about what
     // pressing the button will do (#1488).
-    _setButtonTooltip(btn, on ? t('voice_dictate_active') : t('voice_dictate'));
+    _setButtonTooltipAndKey(btn, on ? (_rawAudioMode ? 'voice_recording_active' : 'voice_dictate_active') : (_rawAudioMode ? 'voice_send_raw' : 'voice_dictate'));
     status.style.display=on?'':'none';
     if(statusText) statusText.textContent=on?'Listening':'Listening';
     if(!on){ _finalText=''; _prefix=''; }
+  }
+
+  function _updateMicTooltip(){
+    if(!window._micActive){
+      _setButtonTooltipAndKey(btn, _rawAudioMode ? 'voice_send_raw' : 'voice_dictate');
+    }
+  }
+
+  async function _sendRawAudio(blob){
+    const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
+    const file=new File([blob],`voice-input-${Date.now()}.${ext}`,{type:blob.type||`audio/${ext}`});
+    S.pendingFiles.push(file);
+    renderTray();
+    // An explicit Send-button click while recording sets _micPendingSend — that
+    // is an unambiguous send intent, so honor it even when the composer already
+    // has text (mirrors the transcribe path). Otherwise (manual mic-stop): send
+    // immediately only if the composer is empty, else just attach + toast so the
+    // user can keep composing.
+    if(window._micPendingSend){
+      window._micPendingSend=false;
+      send();
+    }else if(!ta.value.trim()){
+      send();
+    }else{
+      showToast(t('voice_raw_attached'));
+    }
   }
 
   function _commitTranscript(text){
@@ -508,7 +556,11 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
 
   function _stopMic(){
     if(!window._micActive) return;
-    if(recognition){
+    // Stop the backend that was ACTIVE WHEN RECORDING STARTED — not whatever
+    // _rawAudioMode says now. The user can toggle Settings → Sound mid-recording,
+    // which would otherwise make us stop the wrong backend and orphan the other
+    // (#3169 Codex review). _activeCaptureMode is pinned at start.
+    if(recognition && _activeCaptureMode==='speech'){
       recognition.stop();
       return;
     }
@@ -588,7 +640,8 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
     _isRecording=true;
     _finalText='';
     _prefix=ta.value;
-    if(recognition && !_forceMediaRecorder){
+    if(recognition && !_forceMediaRecorder && !_rawAudioMode){
+      _activeCaptureMode='speech';
       recognition.start();
       _setRecording(true);
       return;
@@ -617,11 +670,18 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
         const blob=new Blob(audioChunks,{type:mediaRecorder.mimeType||mimeType||'audio/webm'});
         _setRecording(false);
         _stopTracks();
-        if(blob.size){ await _transcribeBlob(blob); }
+        if(blob.size){
+          if(_activeCaptureMode==='media-raw'){
+            await _sendRawAudio(blob);
+          }else{
+            await _transcribeBlob(blob);
+          }
+        }
         else if(window._micPendingSend){
           window._micPendingSend=false;
         }
       };
+      _activeCaptureMode=_rawAudioMode?'media-raw':'media-transcribe';
       mediaRecorder.start();
       _setRecording(true);
     }catch(err){
@@ -631,6 +691,18 @@ $('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInpu
       showToast(t('mic_denied'));
     }
   };
+
+  // Wire up the settings checkbox
+  const rawAudioCheckbox = document.getElementById('settingsRawAudio');
+  if(rawAudioCheckbox){
+    rawAudioCheckbox.checked = _rawAudioMode;
+    rawAudioCheckbox.addEventListener('change', function(){
+      _rawAudioMode = this.checked;
+      localStorage.setItem('hermes-raw-audio-mode', _rawAudioMode ? 'true' : 'false');
+      _updateMicTooltip();
+    });
+  }
+  _updateMicTooltip();
 })();
 window._micActive=window._micActive||false;
 window._micPendingSend=window._micPendingSend||false;
@@ -820,7 +892,56 @@ window._micPendingSend=window._micPendingSend||false;
         .trim();
     }
     if(!clean){ _startListening(); return; }
-
+    const engine=localStorage.getItem("hermes-tts-engine")||"browser";
+    if(engine==="edge"){
+      const voice=localStorage.getItem("hermes-tts-voice")||"zh-CN-XiaoxiaoNeural";
+      const savedRate=parseFloat(localStorage.getItem("hermes-tts-rate"));
+      const savedPitch=parseFloat(localStorage.getItem("hermes-tts-pitch"));
+      let rate='', pitch='';
+      if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
+      if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
+      _ttsSpeaking=true;
+      fetch(new URL('api/tts', document.baseURI || location.href).href, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text: clean, voice, rate, pitch})
+      })
+      .then(r => {
+        if(!r.ok) throw new Error('TTS request failed: ' + r.status);
+        return r.blob();
+      })
+      .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        // Register with the shared handle (declared in ui.js, same global scope;
+        // both scripts are fully evaluated before any voice interaction) so
+        // stopTTS() — called from _deactivate() — can actually pause hands-free
+        // Edge playback. Without this the audio is local here and unstoppable.
+        _playingEdgeAudio=audio;
+        audio.onended = () => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),500);
+        };
+        audio.onerror = () => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          URL.revokeObjectURL(url);
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        };
+        audio.play().catch(e => {
+          _ttsSpeaking=false;
+          if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+          if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+        });
+      })
+      .catch(() => {
+        _ttsSpeaking=false;
+        if(_voiceModeActive) setTimeout(()=>_startListening(),1000);
+      });
+      return;
+    }
     const utter=new SpeechSynthesisUtterance(clean);
 
     // Apply saved voice preferences
@@ -948,6 +1069,10 @@ $('btnNewChat').onclick=async()=>{
      && !S.session.pending_user_message){
     $('msg').focus();closeMobileSidebar();return;
   }
+  if(typeof _restoreRememberedNewChatDraftSession==='function'
+     && await _restoreRememberedNewChatDraftSession()){
+    await renderSessionList();closeMobileSidebar();$('msg').focus();return;
+  }
   await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
 };
 $('btnDownload').onclick=()=>{
@@ -1028,7 +1153,6 @@ function _applySessionContextMetadataUpdate(data){
 }
 
 $('modelSelect').onchange=async()=>{
-  if(!S.session)return;
   const selectedModel=$('modelSelect').value;
   const modelState=(typeof _modelStateForSelect==='function')
     ? _modelStateForSelect($('modelSelect'),selectedModel)
@@ -1036,10 +1160,16 @@ $('modelSelect').onchange=async()=>{
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
   else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
+  if(!S.session){
+    if(typeof syncModelChip==='function') syncModelChip();
+    if(typeof syncReasoningChip==='function') syncReasoningChip();
+    return;
+  }
   if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
   S.session.model=modelState.model;
   S.session.model_provider=modelState.model_provider||null;
   if(typeof syncModelChip==='function') syncModelChip();
+  if(typeof syncReasoningChip==='function') syncReasoningChip();
   syncTopbar();
   // Clarify scope: composer model changes are session-local, not the global default.
   if(typeof showToast==='function'){
@@ -1085,6 +1215,13 @@ $('msg').addEventListener('input',()=>{
       if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
     }
     if(typeof ensureSkillCommandsLoadedForAutocomplete==='function') ensureSkillCommandsLoadedForAutocomplete();
+  } else if(typeof getComposerPathAutocompleteMatches==='function'){
+    const cursor=$('msg').selectionStart;
+    getComposerPathAutocompleteMatches(text,cursor).then(matches=>{
+      const ta=$('msg');
+      if(!ta||ta.value!==text||ta.selectionStart!==cursor) return;
+      if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+    }).catch(()=>hideCmdDropdown());
   } else {
     hideCmdDropdown();
   }
@@ -1115,6 +1252,21 @@ function _isVirtualKeyboardLikelyOpen(){
   if(!vv||!window.innerHeight)return true;
   return window.innerHeight-vv.height>120;
 }
+// #3076: a touch-primary device (`pointer:coarse`) can still have a
+// physical keyboard attached (Android tablet + Bluetooth keyboard,
+// detachable Surface in tablet mode, iPad + Magic Keyboard). When that
+// happens we should NOT force the mobile newline-on-Enter override
+// because Shift+Enter / Ctrl+Enter come from real keys and the user
+// expects desktop semantics. `matchMedia('(any-pointer:fine)')` is true
+// whenever ANY available pointing device is fine-grained — which is the
+// strongest signal browsers expose for "there is a real keyboard /
+// trackpad in the picture too". Skip the mobile default in that case.
+function _hasFinePointerCoexisting(){
+  try{ return matchMedia('(any-pointer:fine)').matches; }catch(_){ return false; }
+}
+function _isNumpadEnter(e){
+  return e.key==='Enter'&&(e.code==='NumpadEnter'||e.location===KeyboardEvent.DOM_KEY_LOCATION_NUMPAD);
+}
 $('msg').addEventListener('keydown',e=>{
   // Autocomplete navigation when dropdown is open
   const dd=$('cmdDropdown');
@@ -1139,9 +1291,13 @@ $('msg').addEventListener('keydown',e=>{
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
     if(_isImeEnter(e)){return;}
-    const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter'&&_isVirtualKeyboardLikelyOpen();
+    const isNumpadEnter=_isNumpadEnter(e);
+    const _mobileDefault=matchMedia('(pointer:coarse)').matches
+      &&!_hasFinePointerCoexisting()
+      &&window._sendKey==='enter'
+      &&_isVirtualKeyboardLikelyOpen();
     if(window._sendKey==='ctrl+enter'||_mobileDefault){
-      if(e.ctrlKey||e.metaKey){e.preventDefault();send();}
+      if(isNumpadEnter||e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
       if(!e.shiftKey){e.preventDefault();send();}
     }
@@ -1205,7 +1361,10 @@ document.addEventListener('keydown',async e=>{
     closeWsDropdown();
     // Clear session search
     const ss=$('sessionSearch');
-    if(ss&&ss.value){ss.value='';filterSessions();}
+    if(ss&&ss.value){
+      if(typeof clearSessionSearch==='function') clearSessionSearch(false);
+      else { ss.value=''; filterSessions(); }
+    }
     // Cancel any active message edit
     const editArea=document.querySelector('.msg-edit-area');
     if(editArea){
@@ -1313,6 +1472,7 @@ const _SKINS=[
   {name:'Default',  colors:['#FFD700','#FFBF00','#CD7F32']},
   {name:'Ares',     colors:['#FF4444','#CC3333','#992222']},
   {name:'Mono',     colors:['#CCCCCC','#999999','#666666']},
+  {name:'Graphite', colors:['#FFFFFF','#D6D6D6','#242424']},
   {name:'Slate',    colors:['#334155','#475569','#64748b']},
   {name:'Poseidon', colors:['#0EA5E9','#0284C7','#0369A1']},
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
@@ -1321,7 +1481,9 @@ const _SKINS=[
   {name:'Catppuccin',colors:['#CBA6F7','#B4BEFE','#8839EF']},
   {name:'Hepburn',   colors:['#c6246a','#ec5597','#f2abca']},
   {name:'Nous',     colors:['#4682B4','#3A6E9A','#2C5F88']},
+  {name:'Neon',     colors:['#B347FF','#C76BFF','#00DDFF']},
   {name:'Geist Contrast', value:'geist-contrast', colors:['#000000','#ffffff','#FFF175']},
+  {name:'Zeus',     colors:['#FFD700','#FFBF00','#1A1A00']},
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
 const _VALID_SKINS=new Set((_SKINS||[]).map(s=>(s.value||s.name).toLowerCase()));
@@ -1539,6 +1701,8 @@ function applyBotName(){
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
+    window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
+    window._activityFeedExpandedDefault=!!s.activity_feed_expanded_default;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
     window._inflightStateLimits={
@@ -1635,6 +1799,7 @@ function applyBotName(){
     window._whatsNewSummaryEnabled=false;
     window._showThinking=true;
     window._simplifiedToolCalling=true;
+    window._terminalAutoExpandOnOutput=false;
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
@@ -1735,6 +1900,7 @@ function applyBotName(){
   // separately below by a `pageshow` listener — the async IIFE here does NOT
   // re-run when the browser restores the page from bfcache.
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
+  if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
   // Initialize reasoning chip on boot (fixes #1103 — chip hidden until session load)
   if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
@@ -1839,6 +2005,7 @@ window.addEventListener('pageshow', async (event) => {
   if (!event.persisted) return;  // fresh loads are handled by the IIFE above
   const _srch = document.getElementById('sessionSearch');
   if (_srch) _srch.value = '';
+  if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
   // Close any dropdowns/popovers that were open when the user navigated away.
   // bfcache freezes DOM state, so a dropdown left open remains open on restore.
   if (typeof closeModelDropdown === 'function') try { closeModelDropdown(); } catch (_) {}
