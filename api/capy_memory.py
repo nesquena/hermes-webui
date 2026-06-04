@@ -571,6 +571,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_pages_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_actions_variables_route_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_actions_variables_path_repo(origin_uri)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     display_name = _safe_public_text(
         record.get("title") or record.get("display_name") or record.get("name"),
         limit=200,
@@ -3887,6 +3892,124 @@ def _github_milestones_refresh_summary(origin_uri: str, payload: list[Any]) -> s
             row_parts.append(f"closed issues: {closed_issues}")
         if due_on:
             row_parts.append(f"due: {due_on}")
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_actions_variables_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "actions"
+        or path[5] != "variables"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_actions_variables_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 6
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "actions"
+            and lowered[5].startswith("variables")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return any(segment.lower().startswith("variables%") for segment in raw_path)
+
+
+def _github_actions_variables_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_actions_variables_route_path_matches(origin_uri)
+
+
+def _github_actions_variable_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    name = value.strip()
+    if not name or name != value:
+        return False
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", name):
+        return False
+    if _refresh_value_is_blocked(name) or _UNSAFE_KEY_RE.search(name):
+        return False
+    return True
+
+
+def _github_actions_variable_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if not _github_actions_variable_name_is_safe(row.get("name")):
+        return False
+    for field in ("created_at", "updated_at"):
+        raw_timestamp = row.get(field)
+        if raw_timestamp is not None and not _safe_iso_timestamp(raw_timestamp):
+            return False
+    for raw_value in (row.get("name"), row.get("created_at"), row.get("updated_at")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_actions_variables_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_actions_variables_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    variables = payload.get("variables")
+    if total_count is None or not isinstance(variables, list) or total_count < len(variables):
+        return False
+    return all(_github_actions_variable_row_is_safe(row) for row in variables)
+
+
+def _github_actions_variables_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_actions_variables_path_repo(origin_uri) or "repository"
+    raw_variables = payload.get("variables")
+    variables = raw_variables if isinstance(raw_variables, list) else []
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    visible_count = total_count if total_count is not None else len(variables)
+    parts = [f"GitHub Actions repository variables for {repo}", f"variable count: {visible_count}"]
+    for row in variables[:5]:
+        if not _github_actions_variable_row_is_safe(row):
+            continue
+        name = _safe_public_text(row.get("name"), limit=120)
+        row_parts = [f"variable: {name}"]
+        created = _safe_iso_timestamp(row.get("created_at")) if row.get("created_at") is not None else ""
+        updated = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
+        if created:
+            row_parts.append(f"created: {created}")
         if updated:
             row_parts.append(f"updated: {updated}")
         parts.append("; ".join(row_parts))
@@ -7492,6 +7615,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_milestones_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    actions_variables_repo = _github_actions_variables_path_repo(origin_uri)
+    if actions_variables_repo:
+        if not _json_payload_is_github_actions_variables_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub Actions variables {actions_variables_repo}",
+            "summary": _github_actions_variables_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_actions_variables_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     topics_repo = _github_topics_path_repo(origin_uri)
     if topics_repo:
         if not _json_payload_is_github_topics_metadata(origin_uri, payload):
@@ -7785,6 +7920,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_milestones_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_milestones_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_actions_variables_route_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_variables_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_repository_events_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_repository_events_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -7856,6 +7994,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_milestones_path_matches(safe_origin_uri):
         if not _github_milestones_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_actions_variables_path_matches(safe_origin_uri):
+        if not _github_actions_variables_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_repository_events_path_matches(safe_origin_uri):
@@ -7939,6 +8081,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_authority_is_exact(final_url, "api.github.com")
             or not _github_pages_path_repo(final_url)
             or _github_pages_path_repo(final_url) != _github_pages_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_variables_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_actions_variables_path_repo(final_url)
+            or _github_actions_variables_path_repo(final_url) != _github_actions_variables_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_dependabot_alerts_path_matches(safe_origin_uri) and (
@@ -8052,6 +8200,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_milestones_path_matches(safe_origin_uri) and (
             not _github_milestones_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_variables_path_matches(safe_origin_uri) and (
+            not _github_actions_variables_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -8778,6 +8931,11 @@ def run_source_refresh_jobs(
         elif _github_pages_path_matches(raw_origin_uri) and (
             not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com")
             or not _github_pages_path_repo(raw_origin_uri)
+        ):
+            origin_uri = f"capy-memory://{source_id}"
+        elif _github_actions_variables_route_path_matches(raw_origin_uri) and (
+            not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
+            or not _github_actions_variables_path_repo(raw_origin_uri)
         ):
             origin_uri = f"capy-memory://{source_id}"
         elif _github_issue_labels_path_matches(raw_origin_uri) and not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com"):
