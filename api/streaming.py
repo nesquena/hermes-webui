@@ -3,6 +3,7 @@ Hermes Web UI -- SSE streaming engine and agent thread runner.
 Includes Sprint 10 cancel support via CANCEL_FLAGS.
 """
 import base64
+import ast
 import contextlib
 import json
 import logging
@@ -3541,10 +3542,89 @@ def live_usage_prompt_estimate_after_tool_delta(
     }
 
 
+def _delegate_task_result_data(raw):
+    data = raw
+    if not isinstance(data, dict):
+        text = str(raw or '')
+        try:
+            data = json.loads(text)
+        except Exception:
+            try:
+                data = ast.literal_eval(text)
+            except Exception:
+                return None
+    if isinstance(data, dict) and isinstance(data.get('results'), list):
+        return data
+    return None
+
+
+def _format_delegate_duration(seconds) -> str:
+    try:
+        value = float(seconds)
+    except Exception:
+        return ''
+    if value <= 0:
+        return ''
+    if value < 60:
+        return f"{value:.1f}s"
+    minutes = int(value // 60)
+    remainder = int(value % 60)
+    return f"{minutes}m {remainder}s" if remainder else f"{minutes}m"
+
+
+def _delegate_task_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str | None:
+    data = _delegate_task_result_data(raw)
+    if not data:
+        return None
+    results = [r for r in data.get('results', []) if isinstance(r, dict)]
+    if not results:
+        return None
+    total = len(results)
+    completed = sum(1 for r in results if str(r.get('status') or '').lower() == 'completed')
+    failed = sum(1 for r in results if str(r.get('status') or '').lower() in {'failed', 'error', 'timeout', 'interrupted'})
+    if total == 1:
+        status = str(results[0].get('status') or 'completed').replace('_', ' ').title()
+    else:
+        status = f"{completed}/{total} completed"
+        if failed:
+            status += f", {failed} failed"
+    api_calls = 0
+    durations = []
+    first_summary = ''
+    for result in results:
+        try:
+            api_calls += int(result.get('api_calls') or 0)
+        except Exception:
+            pass
+        try:
+            duration = float(result.get('duration_seconds') or 0)
+            if duration > 0:
+                durations.append(duration)
+        except Exception:
+            pass
+        if not first_summary:
+            first_summary = str(result.get('summary') or result.get('error') or '').strip()
+    parts = [status]
+    parts.append(f"{total} subagent{'s' if total != 1 else ''}")
+    if durations:
+        parts.append(_format_delegate_duration(max(durations)))
+    if api_calls:
+        parts.append(f"{api_calls} API call{'s' if api_calls != 1 else ''}")
+    text = ' · '.join(p for p in parts if p)
+    if first_summary:
+        first_line = next((line.strip() for line in first_summary.splitlines() if line.strip()), '')
+        if first_line:
+            text += ' — ' + first_line[:240]
+    return text[:limit]
+
+
 def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
     """Extract a bounded result preview from a stored tool message payload."""
     if limit <= 0:
         return ''
+    delegate_preview = _delegate_task_result_snippet(raw, limit=limit)
+    if delegate_preview:
+        return delegate_preview
     text = str(raw or '')
     try:
         data = raw if isinstance(raw, dict) else json.loads(text)
@@ -4603,6 +4683,36 @@ def _run_agent_streaming(
                     return
 
                 args_snap = _tool_args_snapshot(args)
+
+                subagent_event_types = {
+                    'subagent_progress',
+                    'subagent.start',
+                    'subagent.tool',
+                    'subagent.progress',
+                    'subagent.thinking',
+                    'subagent.complete',
+                }
+                if event_type in subagent_event_types:
+                    subagent_args = dict(args_snap)
+                    subagent_args['__subagent_event'] = event_type
+                    if name:
+                        subagent_args['child_tool'] = str(name)
+                    for key, value in cb_kwargs.items():
+                        if key in {
+                            'task_index', 'task_count', 'subagent_id', 'parent_id', 'depth',
+                            'model', 'toolsets', 'tool_count', 'goal', 'status',
+                            'duration_seconds', 'summary', 'api_calls', 'input_tokens',
+                            'output_tokens', 'reasoning_tokens', 'files_read', 'files_written',
+                            'cost_usd', 'output_tail',
+                        }:
+                            subagent_args[key] = value
+                    put('tool', {
+                        'event_type': 'subagent_progress',
+                        'name': 'subagent_progress',
+                        'preview': preview or name,
+                        'args': subagent_args,
+                    })
+                    return
 
                 # Modern Hermes Agent builds can call both tool_progress_callback
                 # and the structured tool_start/tool_complete callbacks for the

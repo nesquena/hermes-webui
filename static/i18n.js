@@ -729,6 +729,7 @@ const LOCALES = {
     tab_logs: 'Logs',
     tab_settings: 'Settings',
     new_conversation: 'New conversation',
+    new_conversation_new_tab: 'New conversation (Cmd+K) · Middle-click or Cmd/Ctrl-click to open in new tab',
     filter_conversations: 'Filter conversations...',
     session_time_unknown: 'Unknown',
     session_time_minutes_ago: (n) => `${n}m`,

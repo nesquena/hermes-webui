@@ -33,6 +33,94 @@ function _markActiveSessionViewedOnReturn() {
   if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
 }
 
+
+function _asNumber(value, fallback=0){
+  const n=Number(value);
+  return Number.isFinite(n)?n:fallback;
+}
+function _liveDelegationChildStatus(eventName,args){
+  const explicit=String(args&&args.status||'').trim();
+  if(explicit) return explicit;
+  if(eventName==='subagent.complete') return 'completed';
+  if(eventName==='subagent.start') return 'running';
+  if(eventName==='subagent.tool'||eventName==='subagent.progress'||eventName==='subagent.thinking') return 'running';
+  return 'running';
+}
+function _liveDelegationFindOrCreateToolCall(inflight, sid, args){
+  if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];
+  for(let i=inflight.toolCalls.length-1;i>=0;i--){
+    const tc=inflight.toolCalls[i];
+    if(tc&&tc.name==='delegate_task'&&tc.done===false) return tc;
+  }
+  for(let i=inflight.toolCalls.length-1;i>=0;i--){
+    const tc=inflight.toolCalls[i];
+    if(tc&&tc.name==='delegate_task') return tc;
+  }
+  const tc={
+    name:'delegate_task',
+    preview:'Delegation run',
+    args:{goal:String(args&&args.goal||'Delegation running'),toolsets:Array.isArray(args&&args.toolsets)?args.toolsets:[]},
+    snippet:'',
+    raw_result:'',
+    done:false,
+    tid:`live-delegation-${sid||'session'}`,
+    _live_delegation:true,
+  };
+  inflight.toolCalls.push(tc);
+  return tc;
+}
+function _liveDelegationTaskTotal(tc,args){
+  const direct=_asNumber(args&&args.task_count,0);
+  if(direct>0) return direct;
+  const existing=_asNumber(tc&&tc._liveDelegation&&tc._liveDelegation.taskCount,0);
+  return existing>0?existing:0;
+}
+function _liveDelegationApplyProgress(sid,d,inflight){
+  const args=(d&&d.args&&typeof d.args==='object')?d.args:{};
+  const eventName=String(args.__subagent_event||d.event_type||'subagent.progress');
+  const tc=_liveDelegationFindOrCreateToolCall(inflight,sid,args);
+  const state=tc._liveDelegation||(tc._liveDelegation={children:{},taskCount:0});
+  const taskIndexRaw=args.task_index;
+  const taskIndex=Number.isFinite(Number(taskIndexRaw))?Number(taskIndexRaw):0;
+  const key=String(args.subagent_id||taskIndex);
+  const child=state.children[key]||(state.children[key]={task_index:taskIndex,status:'pending',summary:'',api_calls:0,duration_seconds:0,tool_trace:[]});
+  child.task_index=taskIndex;
+  if(args.subagent_id) child.subagent_id=String(args.subagent_id);
+  if(args.goal) child.goal=String(args.goal);
+  child.status=_liveDelegationChildStatus(eventName,args);
+  const preview=String(d.preview||args.summary||'').trim();
+  if(preview) child.summary=preview;
+  const apiCalls=_asNumber(args.api_calls,args.tool_count!==undefined?_asNumber(args.tool_count,child.api_calls||0):child.api_calls||0);
+  child.api_calls=apiCalls;
+  const duration=_asNumber(args.duration_seconds,child.duration_seconds||0);
+  if(duration>0) child.duration_seconds=duration;
+  if(eventName==='subagent.complete') child.exit_reason=String(args.status||child.status||'completed');
+  else child.exit_reason=child.status==='running'?'running':(child.exit_reason||child.status);
+  const childTool=String(args.child_tool||'').trim();
+  if(eventName==='subagent.tool'&&childTool){
+    const trace=Array.isArray(child.tool_trace)?child.tool_trace:(child.tool_trace=[]);
+    const last=trace[trace.length-1];
+    if(!last||last.tool!==childTool||last.status!=='running'){
+      trace.push({tool:childTool,status:'running'});
+    }
+  }
+  state.taskCount=Math.max(_liveDelegationTaskTotal(tc,args), taskIndex+1, Object.keys(state.children).length);
+  const rows=[];
+  for(let i=0;i<state.taskCount;i++){
+    const found=Object.values(state.children).find(c=>Number(c.task_index)===i);
+    rows.push(found||{task_index:i,status:'pending',summary:'',api_calls:0,duration_seconds:0,exit_reason:'pending',tool_trace:[]});
+  }
+  rows.sort((a,b)=>Number(a.task_index||0)-Number(b.task_index||0));
+  tc.raw_result=JSON.stringify({results:rows,total_duration_seconds:rows.reduce((max,r)=>Math.max(max,Number(r.duration_seconds||0)),0)});
+  const firstGoal=String(args.goal||tc.args&&tc.args.goal||'Delegation running');
+  tc.args={...(tc.args||{}),goal:firstGoal};
+  if(Array.isArray(args.toolsets)) tc.args.toolsets=args.toolsets;
+  tc.preview='Delegation run';
+  tc.done=false;
+  tc._live_delegation=true;
+  return tc;
+}
+
 function _chatPayloadModel(){
   return S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'';
 }
@@ -1651,14 +1739,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('tool',e=>{
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
-      const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`};
+      const isSubagentProgress=d.name==='subagent_progress';
       const inflight = INFLIGHT[activeSid] || (INFLIGHT[activeSid] = {
         messages:[...S.messages],
         uploaded:[],
         toolCalls:[]
       });
       if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];
-      INFLIGHT[activeSid].toolCalls.push(tc);
+      const tc=isSubagentProgress
+        ? _liveDelegationApplyProgress(activeSid,d,inflight)
+        : {name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`};
+      if(!isSubagentProgress) INFLIGHT[activeSid].toolCalls.push(tc);
       S.toolCalls=INFLIGHT[activeSid].toolCalls;
       persistInflightState();
 

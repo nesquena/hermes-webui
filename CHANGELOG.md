@@ -5,6 +5,8 @@
 
 ### Added
 
+- The chat sidebar `+` new-conversation button now supports middle-click and Cmd/Ctrl-click to create a fresh chat in a new browser tab without stealing the current tab.
+- Delegated sub-agent runs now render as dedicated delegation cards with request, per-child status rows, result summaries, collapsed raw details, and per-child tool-trace disclosures; live subagent progress updates the active delegation card in place instead of creating loose progress snapshots. Reloaded sessions also stitch adjacent `role: tool` delegate results back into the card so completed child rows remain visible after refresh.
 - New opt-in `poseidon-green` skin: a seafoam-green sibling to Poseidon that appears in Settings → Appearance, works with `/theme poseidon-green`, and preserves the existing blue Poseidon skin unchanged.
 - Clicking an inline chat PDF preview now opens a full-page PDF.js modal viewer with continuous multi-page scroll, current-page status, jump-to-page controls, Escape/backdrop close, and a download action, so document review can stay readable without leaving the session.
 - Session unread state is now saved server-side per profile and synced through `/api/sessions`, with a dedicated Unread sidebar group below Active and above Recent, a clearer unread indicator, and explicit `Mark as read` / `Mark as unread` menu actions that do not reorder Recents.
