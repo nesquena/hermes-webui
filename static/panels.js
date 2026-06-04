@@ -3532,7 +3532,7 @@ async function clearConversation() {
 
 // ── Skills panel ──
 async function loadSkills() {
-  if (_skillsData) { renderSkills(_skillsData); return; }
+  if (_skillsData) { renderSkills(_skillsData); _syncSkillsSortUI(); return; }
   const box = $('skillsList');
   try {
     const data = await api('/api/skills');
@@ -3542,18 +3542,26 @@ async function loadSkills() {
     const liveCats = new Set(_skillsData.map(s => s.category || '(general)'));
     for (const c of _collapsedCats) { if (!liveCats.has(c)) _collapsedCats.delete(c); }
     renderSkills(_skillsData);
+    _syncSkillsSortUI();
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
 }
 
 let _collapsedCats = new Set(); // persisted collapsed state across re-renders
-let _skillsSort = 'name'; // 'name' | 'modified'
+let _skillsSort = (function(){ try { return localStorage.getItem('hermes-webui-skills-sort') || 'name'; } catch(e) { return 'name'; } })();
 
 function setSkillsSort(mode) {
   _skillsSort = mode;
+  try { localStorage.setItem('hermes-webui-skills-sort', mode); } catch(e) {}
   document.querySelectorAll('.skills-sort-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.sort === mode);
   });
   if (_skillsData) renderSkills(_skillsData);
+}
+
+function _syncSkillsSortUI() {
+  document.querySelectorAll('.skills-sort-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.sort === _skillsSort);
+  });
 }
 
 function _toggleCatCollapse(cat) {
