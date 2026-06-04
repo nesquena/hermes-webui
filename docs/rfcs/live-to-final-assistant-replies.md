@@ -16,6 +16,7 @@ the hardest browser-agent states. A long-running session can:
 - keep the user waiting for minutes,
 - make many tool calls,
 - produce a long final answer,
+- create or update workspace artifacts,
 - cross Auto Compression boundaries,
 - hit tool-call, retry, or iteration limits,
 - lose browser, network, or SSE continuity,
@@ -60,7 +61,7 @@ RFCs should preserve.
   final answer.
 - Long-running edge-case semantics for Auto Compression, no-final answers,
   tool/iteration limits, cancel/interruption, replay/reconnect/session switch,
-  and sidebar/session ownership.
+  produced artifacts/output handoff, and sidebar/session ownership.
 - The classification of work into implemented slices, active PRs, confirmed
   follow-ups, and child RFCs.
 
@@ -70,6 +71,9 @@ RFCs should preserve.
 - Provider/model selection.
 - A backend tool-event schema change such as a shared display-title field.
 - A new runtime adapter, runner process, storage format, or SSE protocol.
+- Rich artifact rendering, executable HTML, visualization plugins, or Canvas
+  editing surfaces. This RFC only owns how produced artifacts remain findable
+  from the reply lifecycle.
 - The full command semantics for Queue, Steer, Stop-and-send, and Interrupt.
   Those belong to the pending-intent control-surface contract tracked by
   [#3058](https://github.com/nesquena/hermes-webui/issues/3058) and
@@ -92,6 +96,7 @@ not current open/merged/superseded state: for live status, the tracking issue
 | Tool, activity, thinking, and visible progress | [#1298](https://github.com/nesquena/hermes-webui/issues/1298), [#3014](https://github.com/nesquena/hermes-webui/issues/3014), [#3015](https://github.com/nesquena/hermes-webui/pull/3015) | Main reply-rendering concern. Process prose stays primary; tool/reasoning/debug detail stays supporting. |
 | No-final and terminal failure outcomes | [#3315](https://github.com/nesquena/hermes-webui/issues/3315), [#3316](https://github.com/nesquena/hermes-webui/pull/3316) | Confirmed follow-up / active PR scope. A tool-tail or compression-exhausted run must not settle as normal completion without a real final answer. |
 | Cancellation and stream ownership | [#3344](https://github.com/nesquena/hermes-webui/issues/3344), [#3345](https://github.com/nesquena/hermes-webui/pull/3345), [#3475](https://github.com/nesquena/hermes-webui/issues/3475), [#3476](https://github.com/nesquena/hermes-webui/pull/3476) | Supporting cancel/recovery scope. Early-cancel worker reconciliation is addressed by [#3476](https://github.com/nesquena/hermes-webui/pull/3476); frontend cancel owner-guard hardening is the remaining follow-up. |
+| Produced artifacts and output handoff | [#2655](https://github.com/nesquena/hermes-webui/issues/2655), [#2673](https://github.com/nesquena/hermes-webui/pull/2673), [#2881](https://github.com/nesquena/hermes-webui/issues/2881), [#2938](https://github.com/nesquena/hermes-webui/pull/2938), [#3329](https://github.com/nesquena/hermes-webui/pull/3329), [#3348](https://github.com/nesquena/hermes-webui/pull/3348), [#3528](https://github.com/nesquena/hermes-webui/issues/3528) | Supporting session-output concern. Existing Artifacts and `workspace://` surfaces make produced files findable; long-running replay/cancel/terminal paths must not lose the tool metadata needed to recover that handoff. |
 | Sidebar/session ownership and active-session awareness | [#856](https://github.com/nesquena/hermes-webui/issues/856), [#1370](https://github.com/nesquena/hermes-webui/pull/1370), [#1436](https://github.com/nesquena/hermes-webui/issues/1436) | Confirmed follow-up scope when sidebar/session metadata contradicts the visible active turn. |
 | User intervention during live work | [#720](https://github.com/nesquena/hermes-webui/issues/720), [#965](https://github.com/nesquena/hermes-webui/pull/965), [#1062](https://github.com/nesquena/hermes-webui/pull/1062), [#3058](https://github.com/nesquena/hermes-webui/issues/3058), [#3061](https://github.com/nesquena/hermes-webui/pull/3061) | Child RFC scope. This parent RFC only requires that controls preserve ownership, replay, and terminal honesty. |
 
@@ -335,6 +340,41 @@ Expected behavior:
 - Any additional collapse, preview, outline, or navigation affordance for very
   long final answers must preserve the full answer as ordinary assistant prose.
 
+### Produced artifacts and output handoff
+
+Long-running sessions often create or update files in the workspace, such as
+plans, reports, patches, data files, generated markdown, or other artifacts.
+Those artifacts are part of what the user needs from the completed work, even
+when they are not the final answer text itself.
+
+Expected behavior:
+
+- Existing artifact surfaces, such as the session Artifacts tab and
+  `workspace://` links, remain supporting navigation surfaces rather than
+  replacing the final answer.
+- If a turn creates or edits workspace artifacts, the settled reply should not
+  hide the fact that those artifacts exist or make them impossible to find.
+- Reconnect, replay, session switching, cancel, interruption, and no-final
+  terminal paths should preserve enough tool/artifact metadata to rebuild the
+  same artifact handoff.
+- A terminal failure should still distinguish between "no final answer" and
+  "some artifacts were produced before the run stopped".
+- Large generated files or rich artifact types should route through the
+  workspace/artifact preview model instead of being expanded into the main chat
+  transcript by default.
+
+Confirmed follow-up scope:
+
+- Keep artifact recoverability aligned with the session-scoped Artifacts tab
+  work in [#2655](https://github.com/nesquena/hermes-webui/issues/2655) and
+  [#2673](https://github.com/nesquena/hermes-webui/pull/2673).
+- Keep final-answer artifact links aligned with the `workspace://` preview
+  path from [#2881](https://github.com/nesquena/hermes-webui/issues/2881) and
+  [#2938](https://github.com/nesquena/hermes-webui/pull/2938).
+- Treat interrupted/cancelled tool-history loss, such as
+  [#3528](https://github.com/nesquena/hermes-webui/issues/3528), as a
+  live-to-final recoverability bug when it prevents artifact reconstruction.
+
 ### Sidebar and session ownership
 
 Long-running sessions are not only a chat-pane concern. The sidebar and session
@@ -392,6 +432,7 @@ for current open/merged/superseded status.
 | Pending-intent control surface | Queue, Steer, Stop-and-send, Interrupt, delivered/applied/leftover semantics. | [#3058](https://github.com/nesquena/hermes-webui/issues/3058), [#3061](https://github.com/nesquena/hermes-webui/pull/3061). |
 | Reattach and replay polish | Slow rebuild degraded state, replay/body timing, native cursor support, same lifecycle through replay. | Follow-up issue/PR or child RFC if protocol semantics expand. |
 | Tool-limit and max-iteration terminal state | Limit reached state, control prompt visibility, no fake final answer. | Follow-up issue/PR; may involve Hermes Agent if the runtime owns the limit signal. |
+| Artifact handoff and recoverability | Preserve the link between final/terminal replies and workspace artifacts created or edited during the turn. | Existing Artifacts and `workspace://` surfaces; follow-up issue/PR when replay, cancel, or terminal paths lose artifact metadata. |
 | Sidebar/session ownership | Active/terminal state in session rows, stale spinner repair, session-list disappearance, background terminal feedback. | Follow-up issue/PR under session/runtime contracts. |
 | Very long final answer ergonomics | Optional navigation/outline/preview affordances that preserve the final answer as normal prose. | Open product discussion; no implementation vehicle yet. |
 
@@ -431,6 +472,8 @@ Use this checklist when reviewing PRs against this RFC:
   classified honestly?
 - Does reconnect/session switch rebuild the same reply lifecycle or degrade
   explicitly?
+- If the turn produced workspace artifacts, can the user still find them after
+  settle, replay, reconnect, cancel, or terminal failure?
 - Do internal recovery or control messages stay out of ordinary chat content?
 - Does sidebar/session state agree with the visible active or terminal turn?
 - Is the PR's slice clear: lifecycle, terminal/recovery, cancel ownership,
@@ -447,6 +490,9 @@ this RFC, an active implementation PR, or a child RFC.
   preview affordances beyond standard chat transcript behavior? If yes, what
   threshold triggers them and how do they preserve the answer as ordinary
   assistant prose?
+- When a turn produces multiple workspace artifacts, should the final answer
+  include an automatic artifact summary or navigation affordance, or should the
+  product rely on the existing Artifacts tab and explicit `workspace://` links?
 - What is the minimum sidebar signal for background long-running sessions that
   have completed, failed, cancelled, or need attention while the user was
   viewing another session?
