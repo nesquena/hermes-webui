@@ -11642,9 +11642,21 @@ function renderMessages(options){
     if(isInterleavedTranscriptBubbles()&&!m._live){
       const toolResultsByTid={};
       S.messages.forEach(rm=>{
-        if(!rm||rm.role!=='tool') return;
-        const tid=rm.tool_call_id||rm.tool_use_id||'';
-        if(tid) toolResultsByTid[tid]=_cliToolResultSnippet(rm.content);
+        if(!rm) return;
+        if(rm.role==='tool'){
+          const tid=rm.tool_call_id||rm.tool_use_id||'';
+          if(tid) toolResultsByTid[tid]=_cliToolResultSnippet(rm.content);
+          return;
+        }
+        if(Array.isArray(rm.content)){
+          rm.content.forEach(p=>{
+            if(!p||typeof p!=='object'||p.type!=='tool_result') return;
+            const tid=p.tool_use_id||'';
+            if(!tid) return;
+            const raw=typeof p.content==='string'?p.content:Array.isArray(p.content)?p.content.map(c=>c&&c.text?c.text:'').join(''):'';
+            toolResultsByTid[tid]=_cliToolResultSnippet(raw);
+          });
+        }
       });
       const blocks=_assistantTurnBlocks(currentAssistantTurn);
       let lastBubble=null;
