@@ -3582,7 +3582,7 @@ async function _openWikiBrowser() {
   const searchEl = document.getElementById('wikiBrowserSearch');
   let _pages = [];
 
-  function renderList(filter) {
+  function _renderWikiPageList(filter) {
     const q = (filter || '').toLowerCase();
     const visible = q ? _pages.filter(p => p.name.toLowerCase().includes(q)) : _pages;
     if (!visible.length) {
@@ -3616,7 +3616,7 @@ async function _openWikiBrowser() {
     listEl.style.display = '';
   };
 
-  searchEl.addEventListener('input', () => renderList(searchEl.value));
+  searchEl.addEventListener('input', () => _renderWikiPageList(searchEl.value));
 
   try {
     const data = await api('/api/wiki/browse');
@@ -3624,7 +3624,7 @@ async function _openWikiBrowser() {
     if (!_pages.length) {
       listEl.innerHTML = `<div style="padding:12px 16px;color:var(--muted);font-size:13px;">${esc(t('wiki_no_pages'))}</div>`;
     } else {
-      renderList('');
+      _renderWikiPageList('');
     }
   } catch(e) {
     listEl.innerHTML = `<div style="padding:12px 16px;color:var(--error,#f55);font-size:13px;">${esc(e.message || String(e))}</div>`;
