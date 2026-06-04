@@ -3539,9 +3539,96 @@ function _renderLlmWikiStatus(d) {
       </div>
       <div class="wiki-status-footer">
         <span>${esc(toggleNote)}</span>
-        <a href="${esc(docsUrl)}" target="_blank" rel="noopener noreferrer">Docs</a>
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${isReady || isEmpty ? `<button class="wiki-browse-btn" onclick="_openWikiBrowser()">${esc(t('wiki_browse'))}</button>` : ''}
+          <a href="${esc(docsUrl)}" target="_blank" rel="noopener noreferrer">Docs</a>
+        </div>
       </div>
     </div>`;
+}
+
+async function _openWikiBrowser() {
+  const existing = document.getElementById('wikiBrowserOverlay');
+  if (existing) { existing.style.display = 'flex'; return; }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'wikiBrowserOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999;';
+
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.style.display = 'none'; });
+  document.addEventListener('keydown', function escHandler(e) {
+    if (e.key === 'Escape') { overlay.style.display = 'none'; document.removeEventListener('keydown', escHandler); }
+  });
+
+  const panel = document.createElement('div');
+  panel.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;width:min(720px,95vw);max-height:80vh;display:flex;flex-direction:column;overflow:hidden;';
+
+  panel.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border);">
+      <strong style="font-size:14px;">${esc(t('wiki_browse'))}</strong>
+      <button onclick="document.getElementById('wikiBrowserOverlay').style.display='none'" style="background:none;border:none;cursor:pointer;font-size:18px;color:var(--muted);">&#x2715;</button>
+    </div>
+    <div style="padding:10px 16px;border-bottom:1px solid var(--border);">
+      <input id="wikiBrowserSearch" type="text" placeholder="${esc(t('wiki_search_placeholder'))}" style="width:100%;padding:6px 10px;background:var(--input-bg,var(--bg));border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;box-sizing:border-box;" />
+    </div>
+    <div id="wikiBrowserList" style="flex:1;overflow-y:auto;padding:8px 0;min-height:80px;"></div>
+    <div id="wikiBrowserContent" style="display:none;flex:1;overflow-y:auto;padding:16px;border-top:1px solid var(--border);"></div>`;
+
+  overlay.appendChild(panel);
+  document.body.appendChild(overlay);
+
+  const listEl = document.getElementById('wikiBrowserList');
+  const contentEl = document.getElementById('wikiBrowserContent');
+  const searchEl = document.getElementById('wikiBrowserSearch');
+  let _pages = [];
+
+  function renderList(filter) {
+    const q = (filter || '').toLowerCase();
+    const visible = q ? _pages.filter(p => p.name.toLowerCase().includes(q)) : _pages;
+    if (!visible.length) {
+      listEl.innerHTML = `<div style="padding:12px 16px;color:var(--muted);font-size:13px;">${esc(t('wiki_no_pages'))}</div>`;
+      return;
+    }
+    listEl.innerHTML = visible.map(p =>
+      `<div class="wiki-browser-item" data-path="${esc(p.path)}" style="padding:7px 16px;cursor:pointer;font-size:13px;border-radius:4px;margin:0 6px;" onmouseover="this.style.background='var(--hover,rgba(255,255,255,0.07))'" onmouseout="this.style.background=''" onclick="window._wikiBrowserOpenPage(this.dataset.path)">${esc(p.name)}</div>`
+    ).join('');
+  }
+
+  window._wikiBrowserOpenPage = async function(path) {
+    contentEl.innerHTML = '<div style="padding:12px;color:var(--muted);font-size:13px;">Loading...</div>';
+    contentEl.style.display = 'block';
+    listEl.style.display = 'none';
+    try {
+      const data = await api('/api/wiki/page?path=' + encodeURIComponent(path));
+      if (typeof renderMarkdownPreviewContent === 'function') {
+        contentEl.innerHTML = '<button onclick="window._wikiBrowserBack()" style="margin-bottom:10px;background:none;border:1px solid var(--border);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:12px;color:var(--text);">&#8592; Back</button><div id="wikiBrowserMd"></div>';
+        renderMarkdownPreviewContent({content: data.content, el: document.getElementById('wikiBrowserMd')});
+      } else {
+        contentEl.innerHTML = '<button onclick="window._wikiBrowserBack()" style="margin-bottom:10px;background:none;border:1px solid var(--border);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:12px;color:var(--text);">&#8592; Back</button><pre style="white-space:pre-wrap;word-break:break-word;font-size:12px;margin:0;">' + esc(data.content) + '</pre>';
+      }
+    } catch(e) {
+      contentEl.innerHTML = '<button onclick="window._wikiBrowserBack()" style="margin-bottom:10px;background:none;border:1px solid var(--border);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:12px;color:var(--text);">&#8592; Back</button><div style="color:var(--error,#f55);">' + esc(e.message || String(e)) + '</div>';
+    }
+  };
+
+  window._wikiBrowserBack = function() {
+    contentEl.style.display = 'none';
+    listEl.style.display = '';
+  };
+
+  searchEl.addEventListener('input', () => renderList(searchEl.value));
+
+  try {
+    const data = await api('/api/wiki/browse');
+    _pages = Array.isArray(data && data.pages) ? data.pages : [];
+    if (!_pages.length) {
+      listEl.innerHTML = `<div style="padding:12px 16px;color:var(--muted);font-size:13px;">${esc(t('wiki_not_configured'))}</div>`;
+    } else {
+      renderList('');
+    }
+  } catch(e) {
+    listEl.innerHTML = `<div style="padding:12px 16px;color:var(--error,#f55);font-size:13px;">${esc(e.message || String(e))}</div>`;
+  }
 }
 
 /**

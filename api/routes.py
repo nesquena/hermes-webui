@@ -5604,6 +5604,29 @@ def handle_get(handler, parsed) -> bool:
         return True
     if parsed.path == "/api/wiki/status":
         return _handle_llm_wiki_status(handler, parsed)
+    if parsed.path == "/api/wiki/browse":
+        wiki_root, _, _ = _llm_wiki_resolve_path()
+        if not wiki_root or not os.path.isdir(wiki_root):
+            return bad(handler, "Wiki not configured or directory not found", status=404)
+        pages = []
+        for f in sorted(os.listdir(wiki_root)):
+            fp = os.path.join(wiki_root, f)
+            if os.path.isfile(fp) and f.endswith(".md"):
+                st = os.stat(fp)
+                pages.append({"name": f, "path": f, "size": st.st_size, "mtime": int(st.st_mtime)})
+        return j(handler, {"pages": pages})
+    if parsed.path == "/api/wiki/page":
+        wiki_root, _, _ = _llm_wiki_resolve_path()
+        page_path = parse_qs(parsed.query or "").get("path", [""])[0]
+        if not wiki_root or not page_path:
+            return bad(handler, "Wiki not configured or path not provided", status=400)
+        if ".." in page_path or os.path.isabs(page_path):
+            return bad(handler, "Invalid path", status=400)
+        full_path = os.path.join(wiki_root, page_path)
+        if not os.path.isfile(full_path):
+            return bad(handler, "Page not found", status=404)
+        content = Path(full_path).read_text(encoding="utf-8", errors="replace")
+        return j(handler, {"content": content, "path": page_path})
     if parsed.path == "/api/logs":
         return _handle_logs(handler, parsed)
 
