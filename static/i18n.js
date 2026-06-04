@@ -7890,7 +7890,7 @@ const LOCALES = {
     mcp_tools_summary_no_matches: (query,total) => `没有匹配「${query}」的 MCP 工具（共 ${total} 个）。`,
     mcp_tools_summary_none: '没有 MCP 工具可显示。',
     mcp_tools_summary_matching: (query) => ` 匹配「${query}」`,
-    mcp_tools_summary_total_note: (total) => `（共 ${total} 个 MCP 工具）`,
+    mcp_tools_summary_total_note: (total) => `（共 ${total} 个）`,
     mcp_tools_summary_showing: (start,end,filtered,searchNote,totalNote,page,pages) => `显示第 ${start}-${end} 个，共 ${filtered} 个 MCP 工具${searchNote}${totalNote}。第 ${page}/${pages} 页。`,
     mcp_tools_page_size_prefix: '每页显示',
     mcp_tools_page_size_suffix: '个',
