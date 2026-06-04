@@ -33,15 +33,6 @@ _MAX_LOGO_DIMENSION = 256
 # Valid mode values
 _VALID_MODES = {"light", "dark"}
 
-# Sanitize file stem: keep only [a-zA-Z0-9._-], cap at 100 chars
-_SAFE_STEM_RE = _re.compile(r"[^\w.\-]")
-
-
-def _resolve_logo_path(mode: str) -> Path:
-    """Return the canonical save path for a logo mode (light / dark)."""
-    return BRANDING_DIR / f"logo-{mode}.png"
-
-
 def _logo_path_from_settings_value(value: str) -> Path | None:
     """Resolve a stored logo filename if it is one of our canonical assets."""
     raw = str(value or "").strip()
@@ -91,6 +82,37 @@ def _png_dimensions(data: bytes) -> tuple[int, int]:
     return w, h
 
 
+def _ico_dimensions(data: bytes) -> tuple[int, int]:
+    """Parse ICO directory entries and embedded PNG sizes, returning max dimensions."""
+    if len(data) < 22 or data[:4] != b"\x00\x00\x01\x00":
+        raise ValueError("Not a valid ICO file")
+    count = struct.unpack("<H", data[4:6])[0]
+    if count < 1:
+        raise ValueError("Invalid ICO: no image entries")
+    if len(data) < 6 + (count * 16):
+        raise ValueError("Invalid ICO: truncated directory")
+
+    max_w = 0
+    max_h = 0
+    for idx in range(count):
+        entry = data[6 + (idx * 16) : 6 + ((idx + 1) * 16)]
+        w = entry[0] or 256
+        h = entry[1] or 256
+        size = struct.unpack("<I", entry[8:12])[0]
+        offset = struct.unpack("<I", entry[12:16])[0]
+        if size <= 0 or offset <= 0 or offset + size > len(data):
+            raise ValueError("Invalid ICO: image entry points outside file")
+        image = data[offset : offset + size]
+        if image[:8] == b"\x89PNG\r\n\x1a\n":
+            try:
+                w, h = _png_dimensions(image)
+            except ValueError as err:
+                raise ValueError("Invalid ICO: could not parse embedded PNG dimensions") from err
+        max_w = max(max_w, w)
+        max_h = max(max_h, h)
+    return max_w, max_h
+
+
 def _logo_requirements() -> str:
     return (
         f"Logo must be PNG, SVG, or ICO, max {_MAX_LOGO_DIMENSION}x"
@@ -137,8 +159,17 @@ def _validate_upload(body: bytes, filename: str = "") -> tuple[bytes, str]:
 
     if body[:4] == b"\x00\x00\x01\x00":
         # ICO file
+        try:
+            w, h = _ico_dimensions(body)
+        except ValueError as err:
+            raise ValueError("Invalid ICO: could not parse dimensions") from err
+        issues = []
         if size_issue:
-            _raise_logo_requirement_error([size_issue])
+            issues.append(f"{size_issue}")
+        if w > _MAX_LOGO_DIMENSION or h > _MAX_LOGO_DIMENSION:
+            issues.append(f"{w}x{h}px")
+        if issues:
+            _raise_logo_requirement_error(issues)
         return body, ".ico"
 
     # Try SVG detection (text-based)
@@ -172,8 +203,17 @@ def _validate_upload(body: bytes, filename: str = "") -> tuple[bytes, str]:
                 _raise_logo_requirement_error(issues)
             return body, ".png"
         if ext == ".ico":
+            try:
+                w, h = _ico_dimensions(body)
+            except ValueError as err:
+                raise ValueError("Invalid ICO: could not parse dimensions") from err
+            issues = []
             if size_issue:
-                _raise_logo_requirement_error([size_issue])
+                issues.append(f"{size_issue}")
+            if w > _MAX_LOGO_DIMENSION or h > _MAX_LOGO_DIMENSION:
+                issues.append(f"{w}x{h}px")
+            if issues:
+                _raise_logo_requirement_error(issues)
             return body, ".ico"
 
     raise ValueError(_logo_requirements())

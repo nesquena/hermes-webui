@@ -9,6 +9,7 @@ from api import branding
 from api.branding import (
     _branding_version,
     _delete_logo_files_for_mode,
+    _ico_dimensions,
     _validate_upload,
     logo_version_for_settings_value,
 )
@@ -23,6 +24,21 @@ def _png_header(width: int, height: int, payload: bytes = b"") -> bytes:
         + b"\x08\x06\x00\x00\x00"
         + b"\x00\x00\x00\x00"
         + payload
+    )
+
+
+def _ico_with_png(width: int, height: int) -> bytes:
+    png = _png_header(width, height)
+    offset = 6 + 16
+    return (
+        b"\x00\x00\x01\x00"
+        + struct.pack("<H", 1)
+        + bytes([width if width < 256 else 0, height if height < 256 else 0, 0, 0])
+        + struct.pack("<H", 1)
+        + struct.pack("<H", 32)
+        + struct.pack("<I", len(png))
+        + struct.pack("<I", offset)
+        + png
     )
 
 
@@ -54,6 +70,25 @@ def test_logo_upload_accepts_small_png():
 
     assert data == body
     assert ext == ".png"
+
+
+def test_logo_upload_rejects_large_ico_embedded_png_dimensions():
+    with pytest.raises(ValueError) as exc:
+        _validate_upload(_ico_with_png(512, 512), "logo.ico")
+
+    message = str(exc.value)
+    assert "max 256x256 px and 200 KB" in message
+    assert "512x512px" in message
+
+
+def test_logo_upload_accepts_small_ico():
+    body = _ico_with_png(64, 64)
+
+    data, ext = _validate_upload(body, "logo.ico")
+
+    assert data == body
+    assert ext == ".ico"
+    assert _ico_dimensions(body) == (64, 64)
 
 
 def test_branding_version_uses_file_mtime_token(tmp_path):
@@ -139,6 +174,7 @@ def test_custom_logo_upload_cache_busting_contract():
     panels = (root / "static" / "panels.js").read_text(encoding="utf-8")
 
     assert '"version": version' in branding
+    assert "_resolve_logo_path" not in branding
     assert '"deleted": deleted' in branding
     assert "_delete_logo_files_for_mode(mode)" in branding
     assert "logo_version_for_settings_value" in routes
