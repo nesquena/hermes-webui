@@ -26,6 +26,7 @@ import subprocess
 
 REPO = pathlib.Path(__file__).parent.parent
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 
 
@@ -548,6 +549,20 @@ class TestDoneEventSmd:
             "Done follow capture must include a near-bottom DOM check, not only "
             "the possibly-stale _scrollPinned flag."
         )
+
+    def test_dom_replace_follow_threshold_is_not_broad_reader_zone(self):
+        """Completion must not snap readers who scrolled slightly up mid-stream.
+
+        The done handler uses _shouldFollowMessagesOnDomReplace() before replacing
+        the live stream DOM. A wide near-bottom threshold (for example 1200px)
+        treats normal mobile reading position as still-following and jumps the
+        user to the bottom when the response completes.
+        """
+        start = UI_JS.index("function _shouldFollowMessagesOnDomReplace")
+        end = UI_JS.index("function _settleMessageScrollToBottom", start)
+        fn = UI_JS[start:end]
+        assert "_isMessagePaneNearBottom(120)" in fn
+        assert "_isMessagePaneNearBottom(1200)" not in fn
 
     def test_done_handler_prefers_message_tool_metadata_for_settled_render(self):
         """If final messages already contain tool metadata, renderMessages()

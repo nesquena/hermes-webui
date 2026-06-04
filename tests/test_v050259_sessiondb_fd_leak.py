@@ -61,8 +61,8 @@ def test_cached_agent_reuse_closes_old_session_db():
 
 def test_lru_eviction_closes_evicted_agent_session_db():
     """SAME LEAK SHAPE on the LRU eviction path: when SESSION_AGENT_CACHE
-    grows beyond SESSION_AGENT_CACHE_MAX (50), the LRU agent gets popped via
-    `popitem(last=False)`. Without explicit close, its `_session_db` waits
+    grows beyond SESSION_AGENT_CACHE_MAX (default 25), the LRU agent gets popped
+    via `popitem(last=False)`. Without explicit close, its `_session_db` waits
     on GC finalization which may never run on a long-lived server.
 
     Fix: capture the evicted entry, close its agent's `_session_db` before

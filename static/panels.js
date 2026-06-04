@@ -7254,11 +7254,12 @@ async function _refreshProviderModels(providerId, btn){
     const res=await api('/api/models/refresh',{method:'POST',body:JSON.stringify({provider:providerId})});
     if(res.ok){
       showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
+      _refreshModelDropdownsAfterProviderChange();
     }else{
       showToast(res.error||'Failed to refresh models');
     }
   }catch(e){
-    showToast('Error: '+e.message);
+    showToast(e.status===404?'Refresh not available for this provider.':(e.message||'Failed to refresh models'));
   }finally{
     btn.disabled=false;
     btn.innerHTML=orig;

@@ -36,7 +36,7 @@ def _journal_path(session_id: str, session_dir: Path | None = None) -> Path:
     if not sid or "/" in sid or "\\" in sid or not _SESSION_ID_RE.fullmatch(sid):
         raise ValueError("invalid session_id")
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
-    return root / TURN_JOURNAL_DIR_NAME / f"{sid}.jsonl"
+    return root / TURN_JOURNAL_DIR_NAME / f"{sid}~{os.getpid()}.jsonl"
 
 
 def _make_turn_id() -> str:
@@ -84,6 +84,8 @@ def append_turn_journal_event(
     payload["session_id"] = str(session_id)
     payload.setdefault("turn_id", _make_turn_id())
     payload.setdefault("created_at", time.time())
+    if event_name in _TERMINAL_EVENTS:
+        payload.setdefault("terminal", True)
 
     path = _journal_path(session_id, session_dir=session_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,26 +110,46 @@ def append_turn_journal_event(
 
 
 def read_turn_journal(session_id: str, *, session_dir: Path | None = None) -> dict:
-    """Read a session journal, returning valid events plus malformed lines."""
-    path = _journal_path(session_id, session_dir=session_dir)
+    """Read a session journal, merging all pid-scoped shards and returning valid events plus malformed lines."""
+    sid = str(session_id or "").strip()
+    if not sid or "/" in sid or "\\" in sid or not _SESSION_ID_RE.fullmatch(sid):
+        raise ValueError("invalid session_id")
+    root = Path(session_dir) if session_dir is not None else _default_session_dir()
+    journal_dir = root / TURN_JOURNAL_DIR_NAME
     events: list[dict] = []
     malformed: list[dict] = []
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
+    # Collect pid-scoped shards ({sid}~{pid}.jsonl) plus legacy ({sid}.jsonl).
+    # The ~ separator cannot appear in session IDs (_SESSION_ID_RE allows only [A-Za-z0-9_.-]),
+    # so the glob is unambiguous even for dotted-numeric session IDs like "sess.123".
+    shards: list[Path] = list(journal_dir.glob(f"{sid}~*.jsonl")) if journal_dir.exists() else []
+    legacy = journal_dir / f"{sid}.jsonl"
+    if legacy.exists():
+        shards.append(legacy)
+    if not shards:
         return {"session_id": str(session_id), "events": [], "malformed": []}
-    for line_no, raw in enumerate(lines, start=1):
-        if not raw.strip():
-            continue
+    for shard in shards:
         try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            malformed.append({"line": line_no, "raw": raw})
+            lines = shard.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
             continue
-        if isinstance(event, dict):
-            events.append(event)
-        else:
-            malformed.append({"line": line_no, "raw": raw})
+        for line_no, raw in enumerate(lines, start=1):
+            if not raw.strip():
+                continue
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                malformed.append({"line": line_no, "raw": raw, "shard": shard.name})
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+            else:
+                malformed.append({"line": line_no, "raw": raw, "shard": shard.name})
+    def _safe_ts(e):
+        try:
+            return float(e.get("created_at") or 0)
+        except (ValueError, TypeError):
+            return 0.0
+    events.sort(key=_safe_ts)
     return {"session_id": str(session_id), "events": events, "malformed": malformed}
 
 
@@ -207,7 +229,17 @@ def iter_turn_journal_session_ids(session_dir: Path) -> list[str]:
     journal_dir = Path(session_dir) / TURN_JOURNAL_DIR_NAME
     if not journal_dir.exists():
         return []
-    return sorted(path.stem for path in journal_dir.glob("*.jsonl") if path.is_file())
+    session_ids: set[str] = set()
+    for path in journal_dir.glob("*.jsonl"):
+        if not path.is_file():
+            continue
+        stem = path.stem  # e.g. "sid-1~12345" or "sid-1"
+        tilde = stem.find("~")
+        if tilde > 0:
+            session_ids.add(stem[:tilde])
+        else:
+            session_ids.add(stem)
+    return sorted(session_ids)
 
 
 def is_terminal_turn_event(event: dict) -> bool:
