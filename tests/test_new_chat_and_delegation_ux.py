@@ -143,6 +143,11 @@ def test_delegate_task_frontend_has_specialized_summary_renderer():
     assert "Delegation run" in UI_JS
     assert "Raw request / output" in UI_JS
     assert "delegation-child-row" in UI_JS
+    delegation_html = _function_block(UI_JS, "function _delegateTaskCardHtml", "function _subagentProgressCardHtml")
+    assert '<details class="delegation-tool-trace">' in delegation_html
+    assert '<details class="delegation-raw">' in delegation_html
+    assert '<details open class="delegation-tool-trace"' not in delegation_html
+    assert '<details open class="delegation-raw"' not in delegation_html
     assert ".delegation-run-card" in STYLE_CSS
     assert ".delegation-child-row" in STYLE_CSS
     assert ".delegation-tool-trace" in STYLE_CSS
