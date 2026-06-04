@@ -1334,6 +1334,7 @@
   #updateWhatsNewLinks{white-space:normal!important;margin-left:0!important;}
   .update-banner>div:last-child{margin-left:auto;}
   @media (max-width:600px){.update-banner{width:calc(100% - 16px);padding:10px 12px;gap:10px;}.update-banner>div:last-child{width:100%;justify-content:flex-end;}}
+  #checkUpdatesStatus{flex-basis:100%;margin-top:0.25em;font-size:0.85em;}
   .update-btn{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);cursor:pointer;transition:background .15s;}
   .update-btn:hover{background:var(--accent-bg-strong);}
   .update-primary{background:var(--accent-bg-strong);border-color:var(--accent);}
