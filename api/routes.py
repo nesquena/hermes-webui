@@ -6254,7 +6254,11 @@ def handle_post(handler, parsed) -> bool:
         label = str(body.get("label") or "").strip()
         if not text:
             return bad(handler, "text is required")
+        if len(text) > 8000:
+            return bad(handler, "text too long (max 8000 chars)")
         prompts = _load_saved_prompts()
+        if len(prompts) >= 200:
+            return bad(handler, "saved prompts limit reached (max 200)")
         new_prompt = {"id": uuid.uuid4().hex[:12], "label": label or text[:60], "text": text, "created_at": time.time()}
         prompts.append(new_prompt)
         _save_saved_prompts(prompts)
