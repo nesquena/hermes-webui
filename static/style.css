@@ -5116,6 +5116,8 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .rightpanel[data-active-tab="artifacts"] .breadcrumb-bar,.rightpanel[data-active-tab="artifacts"] .file-tree,.rightpanel[data-active-tab="artifacts"] #wsEmptyState{display:none!important;}
 .rightpanel[data-active-tab="artifacts"] .workspace-artifacts{display:block;}
 .rightpanel[data-active-tab="files"] .workspace-artifacts{display:none!important;}
+.rightpanel[data-active-tab="todos"] .breadcrumb-bar,.rightpanel[data-active-tab="todos"] .file-tree,.rightpanel[data-active-tab="todos"] #wsEmptyState,.rightpanel[data-active-tab="todos"] .workspace-artifacts{display:none!important;}
+.rightpanel:not([data-active-tab="todos"]) .workspace-todos{display:none!important;}
 .cron-run-usage-strip{display:inline-flex;align-items:center;gap:4px;margin-left:8px;color:var(--text-secondary);font-size:11px;opacity:.72;white-space:nowrap;}
 .cron-run-usage-footer{display:flex;margin:8px 0 0 0;padding-top:8px;border-top:1px solid var(--border-subtle);}
 .cron-item.active,.ws-row.active,.profile-card.active{background:var(--accent-bg);}

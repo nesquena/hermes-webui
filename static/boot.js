@@ -1863,6 +1863,7 @@ function applyBotName(){
         ? s.worklog_details_expanded_default
         : s.activity_feed_expanded_default
     );
+    window._workspaceTodosTab=!!s.workspace_todos_tab;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
     window._inflightStateLimits={
@@ -1966,6 +1967,7 @@ function applyBotName(){
     window._chatActivityDisplayMode='compact_worklog';
     window._transparentStream=false;
     window._terminalAutoExpandOnOutput=false;
+    window._workspaceTodosTab=false;
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;

@@ -991,6 +991,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsWorkspaceTodosTab" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_workspace_todos_tab">Show Todos tab in workspace panel</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_workspace_todos_tab">When enabled, a Todos tab appears in the workspace panel (right side). The sidebar Todos panel remains available regardless.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsSessionJumpButtons" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_session_jump_buttons">Show session jump buttons</span>
               </label>
@@ -1451,10 +1458,12 @@
     <div class="workspace-panel-tabs" role="tablist" aria-label="Workspace panel views">
       <button class="workspace-panel-tab active" id="workspaceFilesTab" type="button" onclick="switchWorkspacePanelTab('files')" role="tab" aria-selected="true">Files</button>
       <button class="workspace-panel-tab" id="workspaceArtifactsTab" type="button" onclick="switchWorkspacePanelTab('artifacts')" role="tab" aria-selected="false">Artifacts <span id="workspaceArtifactsCount" class="workspace-artifacts-count">0</span></button>
+      <button class="workspace-panel-tab" id="workspaceTodosTab" type="button" onclick="switchWorkspacePanelTab('todos')" role="tab" aria-selected="false" hidden data-i18n="tab_todos">Todos</button>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree"></div>
     <div class="workspace-artifacts" id="workspaceArtifacts" hidden></div>
+    <div class="workspace-todos" id="workspaceTodosPanel" hidden style="flex:1;overflow-y:auto;padding:8px 12px"></div>
     <div id="wsEmptyState" style="display:none;flex:1;align-items:center;justify-content:center;padding:24px 16px;text-align:center;color:var(--muted);font-size:12px;line-height:1.6"></div>
     <div class="preview-area" id="previewArea">
       <div class="preview-path" id="previewPath">

@@ -6381,6 +6381,8 @@ function _preferencesPayloadFromUi(){
   if(fadeTextCb) payload.fade_text_effect=fadeTextCb.checked;
   const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
   if(terminalAutoExpandCb) payload.terminal_auto_expand_on_output=terminalAutoExpandCb.checked;
+  const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
+  if(workspaceTodosTabCb) payload.workspace_todos_tab=workspaceTodosTabCb.checked;
   const apiRedactCb=$('settingsApiRedact');
   if(apiRedactCb) payload.api_redact_enabled=apiRedactCb.checked;
   const showCliCb=$('settingsShowCliSessions');
@@ -6443,6 +6445,14 @@ function _rememberPreferencesSaved(payload){
   if(payload.language!==undefined) localStorage.setItem('hermes-pref-language',payload.language);
 }
 
+function _applyWorkspaceTodosTabVisibility(){
+  const tab=$('workspaceTodosTab');
+  if(tab) tab.hidden=!window._workspaceTodosTab;
+  if(!window._workspaceTodosTab && typeof _workspacePanelActiveTab!=='undefined' && _workspacePanelActiveTab==='todos'){
+    if(typeof switchWorkspacePanelTab==='function') switchWorkspacePanelTab('files');
+  }
+}
+
 function _schedulePreferencesAutosave(){
   const payload=_preferencesPayloadFromUi();
   _rememberPreferencesSaved(payload);
@@ -6457,6 +6467,10 @@ async function _autosavePreferencesSettings(payload){
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
+    }
+    if(payload&&payload.workspace_todos_tab!==undefined){
+      window._workspaceTodosTab=!!(saved&&saved.workspace_todos_tab);
+      if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
     }
     if(payload&&Object.prototype.hasOwnProperty.call(payload,'fade_text_effect')) window._fadeTextEffect=!!payload.fade_text_effect;
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'pinned_sessions_limit')) window._pinnedSessionsLimit=parseInt(saved.pinned_sessions_limit,10)||3;
@@ -6744,6 +6758,17 @@ async function loadSettingsPanel(){
     }
     const terminalAutoExpandCb=$('settingsTerminalAutoExpand');
     if(terminalAutoExpandCb){terminalAutoExpandCb.checked=!!settings.terminal_auto_expand_on_output;window._terminalAutoExpandOnOutput=terminalAutoExpandCb.checked;terminalAutoExpandCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const workspaceTodosTabCb=$('settingsWorkspaceTodosTab');
+    if(workspaceTodosTabCb){
+      workspaceTodosTabCb.checked=!!settings.workspace_todos_tab;
+      window._workspaceTodosTab=workspaceTodosTabCb.checked;
+      _applyWorkspaceTodosTabVisibility();
+      workspaceTodosTabCb.addEventListener('change',()=>{
+        window._workspaceTodosTab=workspaceTodosTabCb.checked;
+        _applyWorkspaceTodosTabVisibility();
+        _schedulePreferencesAutosave();
+      },{once:false});
+    }
     const apiRedactCb=$('settingsApiRedact');
     if(apiRedactCb){apiRedactCb.checked=settings.api_redact_enabled!==false;apiRedactCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
@@ -7858,6 +7883,8 @@ function _applySavedSettingsUi(saved, body, opts){
   window._simplifiedToolCalling=true;
   _syncChatActivityDisplayModeControl(body.chat_activity_display_mode);
   window._terminalAutoExpandOnOutput=!!body.terminal_auto_expand_on_output;
+  window._workspaceTodosTab=!!body.workspace_todos_tab;
+  if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
   window._sessionJumpButtonsEnabled=!!body.session_jump_buttons;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
@@ -8204,6 +8231,7 @@ async function saveSettings(andClose){
   body.show_tps=showTps;
   body.fade_text_effect=fadeTextEffect;
   body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
+  body.workspace_todos_tab=!!window._workspaceTodosTab;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
   // Cron sessions are gated on CLI sessions (server short-circuits otherwise);
