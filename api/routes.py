@@ -5625,10 +5625,12 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Wiki not configured or path not provided", status=400)
         if ".." in page_path or os.path.isabs(page_path):
             return bad(handler, "Invalid path", status=400)
-        full_path = os.path.join(wiki_root, page_path)
-        if not os.path.isfile(full_path):
+        full_path = Path(os.path.join(wiki_root, page_path))
+        if not _skill_path_within(Path(wiki_root), full_path):
+            return bad(handler, "Invalid path", status=400)
+        if not full_path.is_file():
             return bad(handler, "Page not found", status=404)
-        content = Path(full_path).read_text(encoding="utf-8", errors="replace")
+        content = full_path.read_text(encoding="utf-8", errors="replace")
         return j(handler, {"content": content, "path": page_path})
     if parsed.path == "/api/logs":
         return _handle_logs(handler, parsed)

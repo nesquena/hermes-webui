@@ -26,8 +26,10 @@ def test_wiki_page_route_exists_in_routes():
 
 def test_wiki_page_path_traversal_rejection():
     src = (REPO / "api" / "routes.py").read_text(encoding="utf-8")
-    # The handler must reject paths containing ".." to prevent directory traversal.
     assert '".." in page_path' in src, "Path-traversal check (..) not found in wiki page handler"
+    assert "_skill_path_within" in src.split("/api/wiki/page")[1].split("/api/")[0], (
+        "Symlink-safe _skill_path_within guard not found in /api/wiki/page handler"
+    )
 
 
 def test_render_llm_wiki_status_references_browse():
