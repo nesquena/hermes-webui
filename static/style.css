@@ -755,6 +755,54 @@
   :root.dark[data-skin="zeus"] .kanban-modal-overlay{background:rgba(0,0,0,.72);}
   :root.dark[data-skin="zeus"] .kanban-board-switcher-menu{background:linear-gradient(180deg,rgba(24,24,24,.99),rgba(15,15,15,.99));border-color:rgba(255,215,0,0.15);}
 
+  /* ═══ HERMES-AGENT — emerald/gold dashboard palette (dark-only) ═══ */
+  :root.dark[data-skin="hermes-agent"]{
+    --bg:#0F1714;--sidebar:#121D18;--border:#22342C;--border2:rgba(200,154,90,0.10);
+    --text:#F3ECDD;--muted:#A8B4A5;--accent:#C89A5A;--blue:#C89A5A;--gold:#C89A5A;--code-bg:#111B17;
+    --surface:#16211C;--topbar-bg:rgba(15,23,20,.98);--main-bg:rgba(22,33,28,.55);
+    --focus-ring:rgba(200,154,90,.30);--focus-glow:rgba(200,154,90,.10);
+    --input-bg:rgba(255,255,255,.025);--hover-bg:rgba(255,255,255,.045);
+    --strong:#FFF8EB;--em:#D8C5AA;--code-text:#D6AE74;--code-inline-bg:rgba(200,154,90,.08);--pre-text:#F3ECDD;
+    --accent-hover:#D6AE74;--accent-bg:rgba(200,154,90,.08);--accent-bg-strong:rgba(200,154,90,.14);--accent-text:#E4C28D;
+    --error:#D26A6A;--success:#719A68;--warning:#D1A45C;--info:#C89A5A;
+    --radius-sm:1px;--radius-md:2px;--radius-card:2px;--radius-lg:4px;
+    --surface-subtle:rgba(255,255,255,.02);--surface-subtle-hover:rgba(255,255,255,.04);
+    --border-subtle:rgba(255,255,255,.06);--border-muted:rgba(255,255,255,.10);
+  }
+  /* ── Hermes-Agent skin: component-level overrides ── */
+  /* New chat button: gold */
+  :root.dark[data-skin="hermes-agent"] .new-chat-btn{background:var(--accent);border-color:var(--accent);color:#0F1714;font-weight:600;}
+  :root.dark[data-skin="hermes-agent"] .new-chat-btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#0F1714;}
+  /* Scrollbar: gold tint */
+  :root.dark[data-skin="hermes-agent"]::-webkit-scrollbar-thumb{background:rgba(200,154,90,.20);border-radius:3px;}
+  :root.dark[data-skin="hermes-agent"]::-webkit-scrollbar-thumb:hover{background:rgba(200,154,90,.35);}
+  :root.dark[data-skin="hermes-agent"]{scrollbar-width:thin;scrollbar-color:rgba(200,154,90,.20) transparent;}
+  /* Tool cards */
+  :root.dark[data-skin="hermes-agent"] .tool-card{background:rgba(200,154,90,0.03);border-color:rgba(200,154,90,0.08);}
+  :root.dark[data-skin="hermes-agent"] .tool-card:hover{border-color:rgba(200,154,90,0.18);}
+  :root.dark[data-skin="hermes-agent"] .tool-card-running{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+  :root.dark[data-skin="hermes-agent"] .tool-arg-key,
+  :root.dark[data-skin="hermes-agent"] .tool-card-more{color:var(--accent-text);}
+  :root.dark[data-skin="hermes-agent"] .tool-card-running-dot{background:var(--accent);}
+  /* Tree viewer: gold family */
+  :root.dark[data-skin="hermes-agent"] .tree-key{color:#C89A5A;}
+  :root.dark[data-skin="hermes-agent"] .tree-str{color:#E4C28D;}
+  :root.dark[data-skin="hermes-agent"] .tree-num{color:#C89A5A;}
+  :root.dark[data-skin="hermes-agent"] .tree-bool{color:#C89A5A;}
+  /* Session badges/tags */
+  :root.dark[data-skin="hermes-agent"] .session-child-count{background:rgba(200,154,90,.14);color:#E4C28D;}
+  :root.dark[data-skin="hermes-agent"] .session-child-count:hover{background:rgba(200,154,90,.24);color:#F0D0A0;}
+  :root.dark[data-skin="hermes-agent"] .session-tree-badge{background:rgba(200,154,90,.16);color:#E4C28D;}
+  :root.dark[data-skin="hermes-agent"] .session-tag{background:rgba(200,154,90,.16);color:#E4C28D;}
+  /* Diff blocks */
+  :root.dark[data-skin="hermes-agent"] .diff-block .diff-plus{color:#C89A5A;}
+  /* MCP status */
+  :root.dark[data-skin="hermes-agent"] .mcp-http{color:#E4C28D;}
+  :root.dark[data-skin="hermes-agent"] .mcp-status-active{color:#E4C28D;}
+  /* Image lightbox */
+  :root.dark[data-skin="hermes-agent"] .img-lightbox-close:hover{background:rgba(200,154,90,.35);}
+  :root.dark[data-skin="hermes-agent"] .img-lightbox-nav:hover{background:rgba(200,154,90,.40);}
+
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));
