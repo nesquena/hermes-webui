@@ -6448,7 +6448,8 @@ function _rememberPreferencesSaved(payload){
 function _applyWorkspaceTodosTabVisibility(){
   const tab=$('workspaceTodosTab');
   if(tab) tab.hidden=!window._workspaceTodosTab;
-  if(!window._workspaceTodosTab && typeof _workspacePanelActiveTab!=='undefined' && _workspacePanelActiveTab==='todos'){
+  const rp=document.querySelector('.rightpanel');
+  if(!window._workspaceTodosTab && rp && rp.dataset.activeTab==='todos'){
     if(typeof switchWorkspacePanelTab==='function') switchWorkspacePanelTab('files');
   }
 }
