@@ -4484,9 +4484,131 @@ function _stripForTTS(text){
   return text;
 }
 
+function _splitForTTS(text, maxChars){
+  // Split long text into chunks at natural sentence/paragraph boundaries
+  // to avoid browser SpeechSynthesis truncation on long texts.
+  maxChars=maxChars||300;
+  if(text.length<=maxChars) return [text];
+  const chunks=[];
+  let remaining=text;
+  while(remaining.length>0){
+    if(remaining.length<=maxChars){ chunks.push(remaining); break; }
+    let splitAt=maxChars;
+    const sentencePattern=new RegExp('^[\\s\\S]{0,'+(maxChars-1)+'}[。！？.!？](?=\\s|$)','g');
+    const m=sentencePattern.exec(remaining);
+    if(m) splitAt=m.index+m[0].length;
+    else{
+      const sub=remaining.slice(0,maxChars);
+      const lastSpace=Math.max(sub.lastIndexOf(' '),sub.lastIndexOf('\n'),sub.lastIndexOf(','),sub.lastIndexOf('，'));
+      if(lastSpace>maxChars*0.5) splitAt=lastSpace+1;
+    }
+    chunks.push(remaining.slice(0,splitAt).trim());
+    remaining=remaining.slice(splitAt).trim();
+  }
+  return chunks.filter(Boolean);
+}
+
 let _ttsSpeaking=false;
 let _ttsCurrentUtterance=null;
+let _ttsChunkQueue=[];
+let _ttsChunkIndex=0;
+let _ttsActiveBtn=null;
 let _playingEdgeAudio=null;
+
+function _buildBrowserUtterance(text, btn){
+  const utter=new SpeechSynthesisUtterance(text);
+  const savedVoice=localStorage.getItem('hermes-tts-voice');
+  const voices=speechSynthesis.getVoices();
+  if(savedVoice&&voices.length){
+    const match=voices.find(v=>v.name===savedVoice);
+    if(match) utter.voice=match;
+  }
+  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+  if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
+  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+  if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
+  utter.onend=()=>{
+    _ttsChunkIndex++;
+    if(_ttsChunkIndex<_ttsChunkQueue.length){
+      const next=new SpeechSynthesisUtterance(_ttsChunkQueue[_ttsChunkIndex]);
+      next.voice=utter.voice; next.rate=utter.rate; next.pitch=utter.pitch;
+      next.onend=utter.onend; next.onerror=utter.onerror;
+      _ttsCurrentUtterance=next;
+      speechSynthesis.speak(next);
+    } else {
+      _ttsSpeaking=false; _ttsCurrentUtterance=null;
+      _ttsChunkQueue=[]; _ttsChunkIndex=0; _ttsActiveBtn=null;
+      if(btn) btn.dataset.speaking='0';
+    }
+  };
+  utter.onerror=()=>{
+    _ttsSpeaking=false; _ttsCurrentUtterance=null;
+    _ttsChunkQueue=[]; _ttsChunkIndex=0; _ttsActiveBtn=null;
+    if(btn) btn.dataset.speaking='0';
+  };
+  return utter;
+}
+
+function _playEdgeTtsChunked(text, btn){
+  const chunks=_splitForTTS(text);
+  const _playOne=function(idx){
+    if(idx>=chunks.length){
+      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(btn) btn.dataset.speaking='0';
+      return;
+    }
+    const chunk=chunks[idx];
+    const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
+    const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
+    const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
+    let rate='', pitch='';
+    if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
+    if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
+    fetch(new URL('api/tts', document.baseURI || location.href).href, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch})
+    })
+    .then(function(r){
+      if(!r.ok){
+        return r.json().catch(function(){return {};}).then(function(j){
+          throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+        });
+      }
+      return r.blob();
+    })
+    .then(function(blob){
+      if(!_ttsSpeaking) return;
+      const url=URL.createObjectURL(blob);
+      const audio=new Audio(url);
+      _playingEdgeAudio=audio;
+      audio.onended=function(){
+        URL.revokeObjectURL(url);
+        _playingEdgeAudio=null;
+        if(_ttsSpeaking) _playOne(idx+1);
+      };
+      audio.onerror=function(){
+        URL.revokeObjectURL(url);
+        _playingEdgeAudio=null;
+        _ttsSpeaking=false;
+        if(btn) btn.dataset.speaking='0';
+      };
+      audio.play().catch(function(e){
+        URL.revokeObjectURL(url);
+        _playingEdgeAudio=null;
+        _ttsSpeaking=false;
+        if(btn) btn.dataset.speaking='0';
+        if(typeof showToast==='function') showToast('Edge TTS error: '+(e&&e.message||e));
+      });
+    })
+    .catch(function(e){
+      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(btn) btn.dataset.speaking='0';
+      if(typeof showToast==='function') showToast('Edge TTS failed: '+(e&&e.message||e));
+    });
+  };
+  _playOne(0);
+}
 
 function speakMessage(btn){
   if(btn&&btn.dataset.speaking==='1'){
@@ -4504,7 +4626,7 @@ function speakMessage(btn){
 
   const engine=localStorage.getItem('hermes-tts-engine')||'browser';
   if(engine==='edge'){
-    _playEdgeTts(clean, btn);
+    _playEdgeTtsChunked(clean, btn);
     return;
   }
 
@@ -4513,74 +4635,15 @@ function speakMessage(btn){
     return;
   }
 
-  const utter=new SpeechSynthesisUtterance(clean);
+  _ttsChunkQueue=_splitForTTS(clean);
+  _ttsChunkIndex=0;
+  _ttsActiveBtn=btn;
+  _ttsSpeaking=true;
+  if(btn) btn.dataset.speaking='1';
 
-  // Apply saved voice preference
-  const savedVoice=localStorage.getItem('hermes-tts-voice');
-  const voices=speechSynthesis.getVoices();
-  if(savedVoice&&voices.length){
-    const match=voices.find(v=>v.name===savedVoice);
-    if(match) utter.voice=match;
-  }
-
-  // Apply saved rate/pitch
-  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-  if(!isNaN(savedRate)) utter.rate= Math.min(2,Math.max(0.5,savedRate));
-  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-  if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
-
+  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], btn);
   _ttsCurrentUtterance=utter;
-  _ttsSpeaking=true;
-  if(btn) btn.dataset.speaking='1';
-
-  utter.onend=()=>{ _ttsSpeaking=false; _ttsCurrentUtterance=null; if(btn) btn.dataset.speaking='0'; };
-  utter.onerror=()=>{ _ttsSpeaking=false; _ttsCurrentUtterance=null; if(btn) btn.dataset.speaking='0'; };
-
   speechSynthesis.speak(utter);
-}
-
-function _playEdgeTts(text, btn){
-  const voice=localStorage.getItem('hermes-tts-voice')||'zh-CN-XiaoxiaoNeural';
-  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-  let rate='', pitch='';
-  if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
-  if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-  if(btn) btn.dataset.speaking='1';
-  _ttsSpeaking=true;
-  // /api/tts is POST-only (and behind the same-origin CSRF gate); GET via
-  // new Audio(url) would 405 and silently fail, and would also leak the message
-  // text into the query string / access log. POST the JSON body, then play the
-  // returned audio via an object URL — mirrors the working boot.js edge path.
-  const _fail=function(msg){
-    _ttsSpeaking=false;_playingEdgeAudio=null;
-    if(btn)btn.dataset.speaking='0';
-    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
-  };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, voice:voice, rate:rate, pitch:pitch})
-  })
-  .then(function(r){
-    if(!r.ok){
-      // Surface the server error (e.g. 503 "edge-tts not installed", 429 rate limit)
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-      });
-    }
-    return r.blob();
-  })
-  .then(function(blob){
-    const url=URL.createObjectURL(blob);
-    const audio=new Audio(url);
-    _playingEdgeAudio=audio;
-    const _cleanup=function(){_ttsSpeaking=false;_playingEdgeAudio=null;if(btn)btn.dataset.speaking='0';try{URL.revokeObjectURL(url);}catch(_){}};
-    audio.onended=_cleanup;
-    audio.onerror=function(){_cleanup();};
-    audio.play().catch(function(e){_cleanup();showToast('Edge TTS error: '+(e&&e.message||e));});
-  })
-  .catch(function(e){ _fail((e&&e.message)||'Edge TTS failed'); });
 }
 
 function stopTTS(){
@@ -4594,6 +4657,9 @@ function stopTTS(){
   }
   _ttsSpeaking=false;
   _ttsCurrentUtterance=null;
+  _ttsChunkQueue=[];
+  _ttsChunkIndex=0;
+  _ttsActiveBtn=null;
   // Reset all speaking buttons
   document.querySelectorAll('[data-speaking="1"]').forEach(btn=>{ btn.dataset.speaking='0'; });
 }
@@ -4612,21 +4678,15 @@ function autoReadLastAssistant(){
   const clean=_stripForTTS(text);
   if(!clean) return;
   if(engine==='edge'){
-    _playEdgeTts(clean, null);
+    _playEdgeTtsChunked(clean, null);
     return;
   }
-  const utter=new SpeechSynthesisUtterance(clean);
-  const savedVoice=localStorage.getItem('hermes-tts-voice');
-  const voices=speechSynthesis.getVoices();
-  if(savedVoice&&voices.length){
-    const match=voices.find(v=>v.name===savedVoice);
-    if(match) utter.voice=match;
-  }
-  const savedRate=parseFloat(localStorage.getItem('hermes-tts-rate'));
-  if(!isNaN(savedRate)) utter.rate=Math.min(2,Math.max(0.5,savedRate));
-  const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
-  if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
-
+  // Use chunked playback for browser TTS
+  _ttsChunkQueue=_splitForTTS(clean);
+  _ttsChunkIndex=0;
+  _ttsSpeaking=true;
+  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], null);
+  _ttsCurrentUtterance=utter;
   speechSynthesis.speak(utter);
 }
 
