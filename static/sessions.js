@@ -4159,6 +4159,10 @@ function _isChildSession(s){
   return !!(s&&s.parent_session_id&&s.relationship_type==='child_session');
 }
 
+function _isForkWithResolvableParent(s, sessionIdsInList){
+  return !!(s&&s.session_source==='fork'&&s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(s.parent_session_id));
+}
+
 function _sessionLineageKey(s, sessionIdsInList, sessionsById){
   if(!s||!s.session_id) return null;
   if(_isChildSession(s)) return null;
@@ -4206,7 +4210,7 @@ function _resolveSessionIdFromSidebarLineage(sid){
   const candidates=[];
   for(const row of visibleRows){
     if(!row||!row.session_id) continue;
-    if(row.session_source==='fork'||row.relationship_type==='child_session') continue;
+    if(row.relationship_type==='child_session') continue;
     const lineageLike=!!(
       row._lineage_key||row._lineage_root_id||row.lineage_root_id||
       row._compression_segment_count||row.pre_compression_snapshot||
@@ -4380,10 +4384,12 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
       if(seg&&seg.session_id) visibleBySegmentSid.set(seg.session_id,{row,seg});
     }
   }
+  const sessionIdsInList=new Set((rawSessions||[]).map(s=>s&&s.session_id).filter(Boolean));
   const orphans=[];
   for(const child of rawSessions||[]){
-    if(!_isChildSession(child)) continue;
-    if(child._cross_surface_child_session){
+    const isForkChild=_isForkWithResolvableParent(child, sessionIdsInList);
+    if(!_isChildSession(child)&&!isForkChild) continue;
+    if(!isForkChild&&child._cross_surface_child_session){
       orphans.push({...child,_orphan_child_session:true});
       continue;
     }
