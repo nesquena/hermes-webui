@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- Skills panel now supports sorting by **Name** (category-grouped alphabetical, default) or **Modified** (flat list by `st_mtime` descending, newest first). Sort preference persists across page reloads via `localStorage`. (#XXXX)
+
 ## [v0.51.252] — 2026-06-03 — Release HT (stage-q24 — selection-bleed fix + compatibility docs)
 
 ### Fixed
