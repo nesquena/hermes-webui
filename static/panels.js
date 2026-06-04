@@ -6223,7 +6223,10 @@ async function loadSettingsPanel(){
     if(langSel){
       langSel.innerHTML='';
       if(typeof LOCALES!=='undefined'){
+        // TODO: enable other locales once translated completely
+        const allowed=['en','zh'];
         for(const [code,bundle] of Object.entries(LOCALES)){
+          if(!allowed.includes(code)) continue;
           const opt=document.createElement('option');
           opt.value=code;opt.textContent=bundle._label||code;
           langSel.appendChild(opt);
