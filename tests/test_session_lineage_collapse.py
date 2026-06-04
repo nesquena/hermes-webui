@@ -355,6 +355,7 @@ function extractFunc(name) {{
 }}
 eval(extractFunc('_sessionTimestampMs'));
 eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sessionLineageKey'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_collapseSessionLineageForSidebar'));
@@ -392,6 +393,7 @@ function extractFunc(name) {{
   return src.slice(start, i);
 }}
 eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));
 const collapsed = [{{session_id:'telegram_parent', title:'Telegram parent', source_label:'Telegram'}}];
@@ -819,6 +821,7 @@ function extractFunc(name) {{
   return src.slice(start, i);
 }}
 eval(extractFunc('_isChildSession'));
+eval(extractFunc('_isForkWithResolvableParent'));
 eval(extractFunc('_sidebarLineageKeyForRow'));
 eval(extractFunc('_sessionDisplayTitle'));
 eval(extractFunc('_attachChildSessionsToSidebarRows'));

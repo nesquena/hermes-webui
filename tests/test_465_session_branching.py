@@ -83,15 +83,38 @@ def test_branch_marks_explicit_forks_as_fork_sessions():
 
 
 def test_branch_fork_sessions_do_not_collapse_into_parent_lineage():
-    """Forks remain selectable rows even if their parent is not in the current list."""
+    """Fork sessions are not collapsed into compression-lineage; guard must remain in _sessionLineageKey."""
     with open('static/sessions.js') as f:
         src = f.read()
     fn = re.search(r'function _sessionLineageKey\(.*?\n\}', src, re.DOTALL)
     assert fn, "Could not find _sessionLineageKey"
     block = fn.group(0)
     assert "if(s.session_source==='fork') return null;" in block, \
-        "Explicit fork sessions should not collapse via parent_session_id"
+        "Fork guard must remain in _sessionLineageKey to prevent compression-lineage merging"
     assert block.index("if(s.session_source==='fork') return null;") < block.index('return s.parent_session_id || null')
+
+
+def test_branch_fork_sessions_nest_under_parent():
+    """Forks with a resolvable in-list parent are subgrouped via _isForkWithResolvableParent
+    and fed into _attachChildSessionsToSidebarRows, not rendered as flat top-level rows."""
+    with open('static/sessions.js') as f:
+        src = f.read()
+    # Helper must exist
+    assert 'function _isForkWithResolvableParent(' in src, \
+        "Missing _isForkWithResolvableParent helper"
+    # _attachChildSessionsToSidebarRows must check for fork children
+    fn = re.search(r'function _attachChildSessionsToSidebarRows\(.*?\n\}', src, re.DOTALL)
+    assert fn, "Could not find _attachChildSessionsToSidebarRows"
+    block = fn.group(0)
+    assert '_isForkWithResolvableParent' in block, \
+        "_attachChildSessionsToSidebarRows must route fork children via _isForkWithResolvableParent"
+    # _resolveSessionIdFromSidebarLineage must no longer skip fork rows wholesale
+    resolve_fn = re.search(
+        r'function _resolveSessionIdFromSidebarLineage\(.*?\n\}', src, re.DOTALL)
+    assert resolve_fn, "Could not find _resolveSessionIdFromSidebarLineage"
+    resolve_block = resolve_fn.group(0)
+    assert "row.session_source==='fork'" not in resolve_block, \
+        "_resolveSessionIdFromSidebarLineage must not skip fork rows; they may now be active nested children"
 
 
 def test_branch_keep_count_support():
