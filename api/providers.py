@@ -1976,11 +1976,13 @@ def get_providers() -> dict[str, Any]:
                 if pid != "nous":
                     models_total = len(models)
 
+        _is_plugin = is_plugin_model_provider(pid)
         providers.append({
             "id": pid,
             "display_name": display_name,
             "has_key": has_key,
             "configurable": not is_oauth and bool(_provider_env_var_for(pid)),
+            "is_plugin_provider": _is_plugin,
             "is_oauth": is_oauth,
             "key_source": key_source,
             "auth_error": auth_error,

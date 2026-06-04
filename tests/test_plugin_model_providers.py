@@ -92,6 +92,7 @@ class TestPluginModelProvidersSettings:
             assert yandex["display_name"] == "Yandex AI Studio"
             assert yandex["has_key"] is True
             assert yandex["configurable"] is True
+            assert yandex.get("is_plugin_provider") is True
             assert yandex["models_total"] >= 1
         finally:
             config.cfg.clear()
@@ -109,6 +110,13 @@ class TestPluginModelProvidersSettings:
         assert result["ok"] is True
         env_text = (tmp_path / ".env").read_text(encoding="utf-8")
         assert "YANDEX_API_KEY=test-yandex-key-abcdef" in env_text
+
+
+class TestPluginModelProvidersPanelFilter:
+    def test_providers_panel_includes_plugin_model_providers(self):
+        src = open("static/panels.js", encoding="utf-8").read()
+        assert "p.is_plugin_provider" in src
+        assert "filter(p=>p.configurable||p.is_oauth||p.is_custom||p.is_plugin_provider)" in src
 
 
 class TestPluginModelProvidersPicker:
