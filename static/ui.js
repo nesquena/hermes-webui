@@ -3810,6 +3810,222 @@ function unlockComposerForClarify(){
   updateSendBtn();
 }
 
+let _promptEnhanceBusy=false;
+let _promptEnhanceOriginal='';
+let _promptEnhancePreview='';
+let _promptEnhancePreviewSource='';
+let _promptEnhancePreviewMeta='';
+let _promptEnhanceIdleTimer=null;
+let _promptEnhanceRequestSeq=0;
+let _promptEnhancePreviewSessionId='';
+let _promptEnhanceAbortController=null;
+window._suppressNextPromptEnhanceSchedule=false;
+const _PROMPT_ENHANCE_IDLE_MS=5000;
+
+function _promptEnhanceCurrentSessionId(){
+  return (S&&S.session&&S.session.session_id)||'';
+}
+
+function _clearPromptEnhanceIdleTimer(){
+  if(_promptEnhanceIdleTimer){clearTimeout(_promptEnhanceIdleTimer);_promptEnhanceIdleTimer=null;}
+}
+
+function _clearPromptEnhancePreview(opts={}){
+  const keepOriginal=!!opts.keepOriginal;
+  const keepSource=!!opts.keepSource;
+  _promptEnhanceRequestSeq++;
+  if(_promptEnhanceAbortController){
+    try{_promptEnhanceAbortController.abort();}catch(_){}
+    _promptEnhanceAbortController=null;
+  }
+  _promptEnhanceBusy=false;
+  _clearPromptEnhanceIdleTimer();
+  _promptEnhancePreview='';
+  _promptEnhancePreviewMeta='';
+  if(!keepSource) _promptEnhancePreviewSource='';
+  if(!keepOriginal) _promptEnhanceOriginal='';
+  if(typeof setComposerStatus==='function') setComposerStatus('');
+  const wrap=$('composerEnhancePreview');
+  const suggested=$('composerEnhanceSuggested');
+  const meta=$('composerEnhanceMeta');
+  if(wrap) wrap.hidden=true;
+  if(suggested){suggested.textContent='';suggested.classList.remove('is-loading');}
+  if(meta) meta.textContent='';
+}
+
+function _renderPromptEnhancePreview(state={}){
+  const wrap=$('composerEnhancePreview');
+  const suggested=$('composerEnhanceSuggested');
+  const meta=$('composerEnhanceMeta');
+  if(!wrap||!suggested||!meta) return;
+  if(!state.loading && !state.suggested){
+    wrap.hidden=true;
+    suggested.textContent='';
+    suggested.classList.remove('is-loading');
+    meta.textContent='';
+    return;
+  }
+  wrap.hidden=false;
+  suggested.textContent=state.loading?'Generating enhanced preview…':(state.suggested||'');
+  suggested.classList.toggle('is-loading',!!state.loading);
+  meta.textContent=state.meta||'';
+}
+
+function _promptEnhanceButtonMode(){
+  const ta=$('msg');
+  const text=ta&&ta.value?ta.value.trim():'';
+  if(!text) return 'hidden';
+  if(_promptEnhanceBusy) return 'loading';
+  if(_promptEnhancePreview&&_promptEnhancePreviewSource===text) return 'apply';
+  return 'preview';
+}
+
+function _dispatchComposerInputEvent(){
+  const ta=$('msg');
+  if(!ta) return;
+  try{ta.dispatchEvent(new Event('input',{bubbles:true}));}
+  catch(_){autoResize();updateSendBtn();if(typeof syncPromptEnhanceButton==='function') syncPromptEnhanceButton();}
+}
+
+function _schedulePromptEnhancePreview(){
+  const ta=$('msg');
+  if(!ta||ta.disabled||_promptEnhanceBusy) return;
+  const text=ta.value.trim();
+  if(!text){_clearPromptEnhancePreview();syncPromptEnhanceButton();return;}
+  const sid=_promptEnhanceCurrentSessionId();
+  if(_promptEnhancePreviewSessionId && _promptEnhancePreviewSessionId!==sid){
+    _promptEnhancePreviewSessionId=sid;
+    _clearPromptEnhancePreview();
+  }
+  if(_promptEnhancePreviewSource&&_promptEnhancePreviewSource!==text){
+    _promptEnhancePreview='';
+    _promptEnhancePreviewMeta='';
+    _renderPromptEnhancePreview({});
+  }
+  _clearPromptEnhanceIdleTimer();
+  _promptEnhanceIdleTimer=setTimeout(()=>{
+    const live=$('msg');
+    if(!live||live.disabled||_promptEnhanceBusy) return;
+    const latest=live.value.trim();
+    if(!latest) return;
+    if(_promptEnhancePreview&&_promptEnhancePreviewSource===latest) return;
+    void _requestPromptEnhancePreview({text:latest, original:live.value, auto:true});
+  },_PROMPT_ENHANCE_IDLE_MS);
+}
+
+async function _requestPromptEnhancePreview({text, original, auto=false}={}){
+  const ta=$('msg');
+  const latestText=(text||'').trim();
+  if(!ta||!latestText||ta.disabled||_promptEnhanceBusy) return false;
+  const controller=typeof AbortController!=='undefined'?new AbortController():null;
+  const requestSeq=++_promptEnhanceRequestSeq;
+  _promptEnhanceAbortController=controller;
+  _promptEnhanceBusy=true;
+  _promptEnhancePreviewSessionId=_promptEnhanceCurrentSessionId();
+  _promptEnhanceOriginal=original||ta.value;
+  _renderPromptEnhancePreview({loading:true,meta:'Working…'});
+  syncPromptEnhanceButton();
+  if(typeof setComposerStatus==='function') setComposerStatus(auto?'Preparing enhanced preview…':'Enhancing prompt…');
+  try{
+    const payload={
+      session_id:S.session&&S.session.session_id,
+      text:latestText,
+      workspace:S.session&&S.session.workspace,
+      profile:S.activeProfile||S.session&&S.session.profile||'default'
+    };
+    const data=await api('/api/prompt/enhance',{method:'POST',body:JSON.stringify(payload),timeoutMs:120000,signal:controller?controller.signal:undefined});
+    if(requestSeq!==_promptEnhanceRequestSeq) return false;
+    const enhanced=(data&&data.enhanced||'').trim();
+    if(!enhanced) throw new Error('No enhanced prompt returned');
+    _promptEnhancePreview=enhanced;
+    _promptEnhancePreviewSource=latestText;
+    _promptEnhancePreviewMeta=data&&data.preview_label||`${(data&&data.model)||'model'} preview`;
+    _renderPromptEnhancePreview({suggested:_promptEnhancePreview,meta:_promptEnhancePreviewMeta});
+    return true;
+  }catch(err){
+    if(requestSeq!==_promptEnhanceRequestSeq) return false;
+    _promptEnhancePreview='';
+    _promptEnhancePreviewMeta='';
+    _renderPromptEnhancePreview({});
+    if(!auto&&typeof showToast==='function') showToast(err&&err.message||'Prompt enhancement failed',3500,'error');
+    return false;
+  }finally{
+    if(_promptEnhanceAbortController===controller) _promptEnhanceAbortController=null;
+    if(requestSeq===_promptEnhanceRequestSeq){
+      _promptEnhanceBusy=false;
+      if(typeof setComposerStatus==='function') setComposerStatus('');
+      syncPromptEnhanceButton();
+    }
+  }
+}
+
+function syncPromptEnhanceButton(){
+  const ta=$('msg');
+  const row=$('composerDraftActions');
+  const btn=$('btnPromptEnhance');
+  const label=$('composerEnhanceLabel');
+  const undo=$('btnPromptEnhanceUndo');
+  if(!ta||!row||!btn||!label) return;
+  const sid=_promptEnhanceCurrentSessionId();
+  if(_promptEnhancePreviewSessionId && sid && _promptEnhancePreviewSessionId!==sid){
+    _promptEnhancePreviewSessionId=sid;
+    _clearPromptEnhancePreview();
+  }
+  const mode=_promptEnhanceButtonMode();
+  row.hidden=(mode==='hidden');
+  btn.classList.toggle('is-running',mode==='loading');
+  btn.classList.toggle('is-ready',mode==='apply');
+  btn.disabled=(mode==='hidden'||mode==='loading'||!!ta.disabled);
+  if(mode==='apply'){
+    label.textContent='Apply enhance';
+    btn.title='Apply the enhanced preview to the draft';
+    btn.setAttribute('aria-label','Apply the enhanced preview to the draft');
+  }else if(mode==='loading'){
+    label.textContent='Enhancing…';
+    btn.title='Generating enhanced preview';
+    btn.setAttribute('aria-label','Generating enhanced preview');
+  }else{
+    label.textContent='Enhance';
+    btn.title='Generate an enhanced preview';
+    btn.setAttribute('aria-label','Generate an enhanced preview');
+  }
+  if(undo){
+    undo.hidden=!_promptEnhanceOriginal;
+    undo.disabled=_promptEnhanceBusy;
+  }
+}
+
+async function enhancePromptDraft(){
+  const ta=$('msg');
+  if(!ta||ta.disabled) return;
+  const text=ta.value.trim();
+  if(!text){syncPromptEnhanceButton();return;}
+  if(_promptEnhancePreview&&_promptEnhancePreviewSource===text){
+    _promptEnhanceOriginal=ta.value;
+    ta.value=_promptEnhancePreview;
+    _promptEnhancePreview='';
+    _promptEnhancePreviewMeta='';
+    _promptEnhancePreviewSource='';
+    _renderPromptEnhancePreview({});
+    window._suppressNextPromptEnhanceSchedule=true;
+    _dispatchComposerInputEvent();
+    if(typeof showToast==='function') showToast('Enhanced prompt applied',1800,'success');
+    return;
+  }
+  await _requestPromptEnhancePreview({text:text,original:ta.value,auto:false});
+}
+
+function undoPromptEnhance(){
+  const ta=$('msg');
+  if(!ta||!_promptEnhanceOriginal||_promptEnhanceBusy) return;
+  ta.value=_promptEnhanceOriginal;
+  _clearPromptEnhancePreview();
+  _promptEnhanceOriginal='';
+  window._suppressNextPromptEnhanceSchedule=true;
+  _dispatchComposerInputEvent();
+  syncPromptEnhanceButton();
+}
+
 function _composerHasContent(){
   const msg=$('msg');
   return !!((msg&&msg.value.trim().length>0)||S.pendingFiles.length>0);

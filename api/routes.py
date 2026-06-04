@@ -6250,6 +6250,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/goal":
         return _handle_goal_command(handler, body)
 
+    if parsed.path == "/api/prompt/enhance":
+        return _handle_prompt_enhance(handler, body)
+
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body, diag=diag)
 
@@ -9918,6 +9921,196 @@ def _normalize_chat_attachments(raw_attachments):
             if value:
                 normalized.append({"name": value, "path": "", "mime": ""})
     return normalized
+
+
+PROMPT_ENHANCE_PROVIDER = "litellm-chat"
+PROMPT_ENHANCE_MODEL = "fireworks/kimi-k2.6-turbo"
+PROMPT_ENHANCE_BASE_URL = "https://llm.dreamit.au/v1"
+PROMPT_ENHANCE_MAX_CHARS = 250000
+PROMPT_ENHANCE_MAX_OUTPUT_TOKENS = 131072
+PROMPT_ENHANCE_TIMEOUT_SECONDS = 120.0
+PROMPT_ENHANCE_SESSION_MESSAGES = 12
+PROMPT_ENHANCE_SESSION_CONTEXT_CHARS = 64000
+
+
+def _extract_prompt_enhance_text(resp) -> str:
+    """Extract text from common chat-completion response shapes."""
+    if resp is None:
+        return ""
+    if isinstance(resp, str):
+        return resp
+    if isinstance(resp, dict):
+        choices = resp.get("choices") or []
+        if choices:
+            first = choices[0] or {}
+            msg = first.get("message") or {}
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            if content:
+                return str(content)
+            text = first.get("text")
+            if text:
+                return str(text)
+        output = resp.get("output_text") or resp.get("content")
+        if output:
+            return str(output)
+        return ""
+    choices = getattr(resp, "choices", None) or []
+    if choices:
+        first = choices[0]
+        msg = getattr(first, "message", None)
+        content = getattr(msg, "content", "") if msg is not None else ""
+        if content:
+            return str(content)
+        text = getattr(first, "text", "")
+        if text:
+            return str(text)
+    output = getattr(resp, "output_text", "") or getattr(resp, "content", "")
+    return str(output or "")
+
+
+def _clean_prompt_enhancement(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"^```(?:markdown|md|text)?\s*", "", text, flags=re.I).strip()
+    text = re.sub(r"\s*```$", "", text).strip()
+    text = re.sub(
+        r"^(?:enhanced prompt|improved prompt|rewritten prompt|suggested prompt|here(?:'s| is) (?:the )?(?:enhanced|improved|rewritten|suggested) prompt)\s*:\s*",
+        "",
+        text,
+        flags=re.I,
+    ).strip()
+    return text
+
+
+def _prompt_enhancement_recent_context(session, max_messages: int = PROMPT_ENHANCE_SESSION_MESSAGES, max_chars: int = PROMPT_ENHANCE_SESSION_CONTEXT_CHARS) -> str:
+    messages = list(getattr(session, "messages", None) or [])
+    visible = []
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(msg.get("content") or "").strip()
+        if not content:
+            continue
+        visible.append((role, content))
+        if len(visible) >= max_messages:
+            break
+    visible.reverse()
+    if not visible:
+        return ""
+    lines = []
+    used = 0
+    for role, content in visible:
+        prefix = "User" if role == "user" else "Assistant"
+        line = f"{prefix}: {content}"
+        if used and used + len(line) > max_chars:
+            break
+        if not used and len(line) > max_chars:
+            line = line[:max_chars]
+        lines.append(line)
+        used += len(line)
+    return "\n\n".join(lines).strip()
+
+
+def _prompt_enhancement_route() -> tuple[str, str, str, str]:
+    return PROMPT_ENHANCE_PROVIDER, PROMPT_ENHANCE_MODEL, PROMPT_ENHANCE_BASE_URL, "Kimi K2.6 Turbo"
+
+
+def _prompt_enhancement_prompts(text: str, workspace: str = "", session_context: str = "", route_label: str = "") -> tuple[str, str]:
+    workspace_hint = f"\nActive workspace: {workspace}" if workspace else ""
+    route_hint = f"\nTarget chat route: {route_label}" if route_label else ""
+    context_block = f"\n\nRecent session context (for continuity only):\n{session_context}" if session_context else ""
+    system_prompt = (
+        "You rewrite rough user drafts into clear, actionable prompts for an autonomous AI agent. "
+        "Preserve the user's intent, constraints, names, paths, tone, and language. "
+        "When recent session context is provided, use it only to maintain continuity with the current conversation. "
+        "Do not answer the prompt. Do not add facts. Do not add placeholders. "
+        "Return only the improved prompt text, with no preamble or markdown fence."
+    )
+    user_prompt = (
+        f"Rewrite this draft prompt for clarity and specificity.{workspace_hint}{route_hint}"
+        f"{context_block}\n\nDraft to rewrite:\n{text}"
+    )
+    return system_prompt, user_prompt
+
+
+def _generate_prompt_enhancement(
+    text: str,
+    *,
+    workspace: str = "",
+    session_context: str = "",
+) -> tuple[str, str, str, str, str]:
+    provider, route_model, base_url, route_label = _prompt_enhancement_route()
+    system_prompt, user_prompt = _prompt_enhancement_prompts(
+        text,
+        workspace=workspace,
+        session_context=session_context,
+        route_label=route_label,
+    )
+    from agent.auxiliary_client import call_llm
+
+    resp = call_llm(
+        task="prompt_enhancement",
+        provider=provider,
+        model=route_model,
+        base_url=base_url or None,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens=PROMPT_ENHANCE_MAX_OUTPUT_TOKENS,
+        temperature=0.2,
+        timeout=PROMPT_ENHANCE_TIMEOUT_SECONDS,
+    )
+    raw = _extract_prompt_enhance_text(resp)
+    enhanced = _clean_prompt_enhancement(raw)
+    return enhanced, raw[:200], provider, route_model, route_label
+
+
+def _handle_prompt_enhance(handler, body):
+    raw_text = str(body.get("text") or "")
+    text = raw_text.strip()
+    if not text:
+        return bad(handler, "text is required", 400)
+    if len(raw_text) > PROMPT_ENHANCE_MAX_CHARS:
+        return bad(handler, f"text is too long (max {PROMPT_ENHANCE_MAX_CHARS} characters)", 413)
+    workspace = str(body.get("workspace") or "").strip()
+    if workspace:
+        try:
+            workspace = str(resolve_trusted_workspace(workspace))
+        except ValueError:
+            workspace = ""
+    session_context = ""
+    session_id = str(body.get("session_id") or "").strip()
+    if session_id:
+        try:
+            s = get_session(session_id)
+            session_context = _prompt_enhancement_recent_context(s)
+        except Exception:
+            logger.debug("Prompt enhancement could not load session context for %s", session_id, exc_info=True)
+    try:
+        enhanced, raw_preview, provider, route_model, route_label = _generate_prompt_enhancement(
+            text,
+            workspace=workspace,
+            session_context=session_context,
+        )
+    except Exception as exc:
+        logger.warning("Prompt enhancement failed: %s", exc, exc_info=True)
+        return bad(handler, "Prompt enhancement failed", 502)
+    if not enhanced:
+        logger.warning("Prompt enhancement returned empty output: %r", raw_preview)
+        return bad(handler, "Prompt enhancement returned no text", 502)
+    return j(handler, {
+        "ok": True,
+        "enhanced": enhanced,
+        "provider": provider,
+        "model": route_model,
+        "preview_label": route_label,
+        "session_context_used": bool(session_context),
+    })
 
 
 def _handle_chat_sync(handler, body):

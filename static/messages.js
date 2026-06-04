@@ -551,6 +551,9 @@ async function send(){
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
   $('msg').value='';autoResize();
+  if(typeof _clearPromptEnhancePreview==='function') _clearPromptEnhancePreview();
+  if(typeof _promptEnhanceOriginal!=='undefined') _promptEnhanceOriginal='';
+  if(typeof syncPromptEnhanceButton==='function') syncPromptEnhanceButton();
   // Clear persisted composer draft since message was sent.
   if (activeSid && typeof _clearComposerDraft === 'function') _clearComposerDraft(activeSid);
   const displayText=text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
@@ -2577,7 +2580,7 @@ function transcript(){
   return lines.join('\n');
 }
 
-function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();}
+function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();if(typeof syncPromptEnhanceButton==='function') syncPromptEnhanceButton();}
 
 
 // ── YOLO mode state ──

@@ -1079,6 +1079,10 @@ $('modelSelect').onchange=async()=>{
 $('msg').addEventListener('input',()=>{
   autoResize();
   updateSendBtn();
+  if(typeof syncPromptEnhanceButton==='function') syncPromptEnhanceButton();
+  if(window._suppressNextPromptEnhanceSchedule){
+    window._suppressNextPromptEnhanceSchedule=false;
+  }else if(typeof _schedulePromptEnhancePreview==='function') _schedulePromptEnhancePreview();
   // Persist composer draft to server (debounced in _saveComposerDraft).
   const sid = S && S.session && S.session.session_id;
   if (sid && typeof _saveComposerDraft === 'function') {

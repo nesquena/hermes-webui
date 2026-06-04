@@ -5,6 +5,7 @@
 
 ### Added
 
+- The chat composer now includes an `Enhance` draft action that rewrites the current prompt in-place with Kimi K2.6 Turbo via `/api/prompt/enhance`, plus an Undo action; it does not send the prompt or mutate the transcript.
 - The chat sidebar `+` new-conversation button now supports middle-click and Cmd/Ctrl-click to create a fresh chat in a new browser tab without stealing the current tab.
 - Delegated sub-agent runs now render as dedicated delegation cards with request, per-child status rows, result summaries, collapsed raw details, and per-child tool-trace disclosures; live subagent progress updates the active delegation card in place instead of creating loose progress snapshots. Reloaded sessions also stitch adjacent `role: tool` delegate results back into the card so completed child rows remain visible after refresh.
 - New opt-in `poseidon-green` skin: a seafoam-green sibling to Poseidon that appears in Settings → Appearance, works with `/theme poseidon-green`, and preserves the existing blue Poseidon skin unchanged.

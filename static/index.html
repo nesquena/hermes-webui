@@ -562,6 +562,24 @@
           <span class="voice-mode-label" id="voiceModeLabel"></span>
         </div>
         <textarea id="msg" rows="1" placeholder="Message Hermes…"></textarea>
+        <div class="composer-draft-actions" id="composerDraftActions" hidden>
+          <button class="composer-enhance-btn" id="btnPromptEnhance" type="button" onclick="enhancePromptDraft()" title="Generate or apply an enhanced prompt" aria-label="Generate or apply an enhanced prompt">
+            <span class="composer-enhance-icon" aria-hidden="true">✦</span>
+            <span class="composer-enhance-label" id="composerEnhanceLabel">Enhance</span>
+          </button>
+          <button class="composer-enhance-undo" id="btnPromptEnhanceUndo" type="button" onclick="undoPromptEnhance()" title="Restore the original draft" aria-label="Undo prompt enhancement" hidden>Undo</button>
+        </div>
+        <div class="composer-enhance-preview" id="composerEnhancePreview" hidden>
+          <div class="composer-enhance-preview-grid">
+            <div class="composer-enhance-pane composer-enhance-pane-suggested">
+              <div class="composer-enhance-pane-head">
+                <span class="composer-enhance-kicker">Enhanced preview</span>
+                <span class="composer-enhance-meta" id="composerEnhanceMeta"></span>
+              </div>
+              <div class="composer-enhance-pane-body" id="composerEnhanceSuggested"></div>
+            </div>
+          </div>
+        </div>
         <div class="composer-footer">
           <div class="composer-left">
             <input type="file" id="fileInput" class="file-input-visually-hidden" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.env,.xls,.xlsx,.doc,.docx,.zip,.tar,.gz,.tgz,.bz2,.xz">
