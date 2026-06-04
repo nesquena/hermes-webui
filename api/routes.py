@@ -6535,12 +6535,15 @@ def handle_get(handler, parsed) -> bool:
         wiki_root, _, _ = _llm_wiki_resolve_path()
         if not wiki_root or not os.path.isdir(wiki_root):
             return bad(handler, "Wiki not configured or directory not found", status=404)
+        page_paths = _llm_wiki_page_files(wiki_root)
         pages = []
-        for f in sorted(os.listdir(wiki_root)):
-            fp = os.path.join(wiki_root, f)
-            if os.path.isfile(fp) and f.endswith(".md"):
-                st = os.stat(fp)
-                pages.append({"name": f, "path": f, "size": st.st_size, "mtime": int(st.st_mtime)})
+        for fp in sorted(page_paths, key=lambda p: str(p).lower()):
+            try:
+                rel = fp.relative_to(wiki_root)
+            except ValueError:
+                continue
+            st = fp.stat()
+            pages.append({"name": fp.name, "path": str(rel).replace("\\", "/"), "size": st.st_size, "mtime": int(st.st_mtime)})
         return j(handler, {"pages": pages})
     if parsed.path == "/api/wiki/page":
         wiki_root, _, _ = _llm_wiki_resolve_path()

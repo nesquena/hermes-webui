@@ -3627,7 +3627,7 @@ async function _openWikiBrowser() {
     const data = await api('/api/wiki/browse');
     _pages = Array.isArray(data && data.pages) ? data.pages : [];
     if (!_pages.length) {
-      listEl.innerHTML = `<div style="padding:12px 16px;color:var(--muted);font-size:13px;">${esc(t('wiki_not_configured'))}</div>`;
+      listEl.innerHTML = `<div style="padding:12px 16px;color:var(--muted);font-size:13px;">${esc(t('wiki_no_pages'))}</div>`;
     } else {
       renderList('');
     }
