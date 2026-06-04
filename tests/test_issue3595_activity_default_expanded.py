@@ -16,8 +16,8 @@ def test_setting_in_defaults():
 
 def test_setting_in_bool_keys():
     src = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
-    assert '"activity_feed_expanded_default"' in src or "'activity_feed_expanded_default'" in src, \
-        "activity_feed_expanded_default must be in _SETTINGS_BOOL_KEYS"
+    assert re.search(r'_SETTINGS_BOOL_KEYS\b.*?activity_feed_expanded_default', src, re.DOTALL), \
+        "activity_feed_expanded_default must appear inside _SETTINGS_BOOL_KEYS (not just anywhere in config.py)"
 
 
 def test_boot_initializes_window_flag():
@@ -34,8 +34,14 @@ def test_ensure_activity_group_checks_flag():
 
 def test_per_turn_override():
     src = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
-    assert "savedState" in src, \
-        "Per-turn saved state must override the global default"
+    assert re.search(r"savedState\s*===\s*['\"]closed['\"]", src), \
+        "ensureActivityGroup must check savedState==='closed' so per-turn persistence overrides the global default"
+
+
+def test_collapse_class_applied():
+    src = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    assert "tool-call-group-collapsed" in src, \
+        "The collapsed class 'tool-call-group-collapsed' must be present in ui.js for the activity group"
 
 
 def test_settings_checkbox_exists():
