@@ -17530,6 +17530,308 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_teams_legacy_use
     assert "raw-prompt" not in serialized
 
 
+def test_run_source_refresh_jobs_default_fetcher_ingests_github_dependabot_alerts_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-dependabot-alerts-source-refresh",
+        "title": "GitHub Dependabot Alerts Source Refresh",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/dependabot/alerts?access_token=***#raw-prompt",
+    })
+    github_dependabot_body = json.dumps([
+        {
+            "number": 7,
+            "state": "open",
+            "dependency": {
+                "package": {"ecosystem": "pip", "name": "django"},
+                "manifest_path": "requirements.txt",
+                "scope": "runtime",
+            },
+            "security_advisory": {
+                "ghsa_id": "GHSA-abcd-1234-wxyz",
+                "cve_id": "CVE-2026-12345",
+                "severity": "high",
+                "summary": "Advisory text must not persist.",
+                "description": "Raw advisory body must not persist.",
+            },
+            "security_vulnerability": {
+                "severity": "high",
+                "package": {"ecosystem": "pip", "name": "django"},
+                "vulnerable_version_range": "<4.2.1",
+                "patched_versions": ">=4.2.1",
+            },
+            "url": "https://api.github.com/repos/capy/spaces/dependabot/alerts/7",
+            "html_url": "https://github.com/capy/spaces/security/dependabot/7",
+            "created_at": "2026-06-04T10:00:00Z",
+            "updated_at": "2026-06-04T11:00:00Z",
+        },
+        {
+            "number": 8,
+            "state": "dismissed",
+            "dependency": {"package": {"ecosystem": "npm", "name": "lodash"}, "manifest_path": "web/package-lock.json"},
+            "security_advisory": {"severity": "medium", "ghsa_id": "GHSA-efgh-5678-uvwx"},
+            "dismissed_reason": "tolerable_risk",
+            "created_at": "2026-06-03T10:00:00Z",
+            "updated_at": "2026-06-03T11:00:00Z",
+        },
+        {
+            "number": 9,
+            "state": "fixed",
+            "dependency": {"package": {"ecosystem": "go", "name": "golang.org/x/net"}, "manifest_path": "go.mod"},
+            "security_vulnerability": {"severity": "critical"},
+            "fixed_at": "2026-06-02T12:00:00Z",
+        },
+        {
+            "number": 10,
+            "state": "auto_dismissed",
+            "dependency": {"package": {"ecosystem": "maven", "name": "org.example:library"}, "manifest_path": "pom.xml"},
+            "security_advisory": {"severity": "low"},
+        },
+        {
+            "number": 11,
+            "state": "open",
+            "dependency": {"package": {"ecosystem": "rust", "name": "serde"}, "manifest_path": "Cargo.lock"},
+            "security_advisory": {"severity": "moderate"},
+        },
+        {
+            "number": 12,
+            "state": "open",
+            "dependency": {"package": {"ecosystem": "rubygems", "name": "rails"}, "manifest_path": "Gemfile.lock"},
+            "security_advisory": {"severity": "high"},
+        },
+    ]).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_dependabot_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout, "accept": request.headers.get("Accept")})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-dependabot-alerts-source-refresh.md").read_text(encoding="utf-8").lower()
+    search = search_memory("dependabot", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [{"url": "https://api.github.com/repos/capy/spaces/dependabot/alerts", "timeout": 8, "accept": "application/json"}]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    assert search["results"][0]["source_id"] == "github-dependabot-alerts-source-refresh"
+    assert "github dependabot alerts for capy/spaces" in persisted
+    assert "alert count: 6" in persisted
+    assert "alert #7: open; ecosystem: pip; package: django; manifest: requirements.txt; severity: high" in persisted
+    assert "alert #8: dismissed; ecosystem: npm; package: lodash; manifest: web/package-lock.json; severity: medium" in persisted
+    assert "alert #9: fixed; ecosystem: go; package: golang.org/x/net; manifest: go.mod; severity: critical" in persisted
+    assert "alert #10: auto_dismissed; ecosystem: maven; package: org.example:library; manifest: pom.xml; severity: low" in persisted
+    assert "alert #11" in persisted
+    assert "alert #12" not in persisted
+    assert "origin_uri: github dependabot alerts capy/spaces" in persisted
+    for unsafe in (
+        "api.github.com/repos/capy/spaces/dependabot/alerts",
+        "secret_value_do_not_leak",
+        "access_token",
+        "raw-prompt",
+        "advisory text must not persist",
+        "raw advisory body",
+        "html_url",
+        "api.github.com/repos/capy/spaces/dependabot/alerts/7",
+        "security_advisory",
+        "security_vulnerability",
+        "vulnerable_version_range",
+        "patched_versions",
+        "dismissed_reason",
+        "ghsa-abcd",
+        "cve-2026",
+        "rails",
+    ):
+        assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+def test_github_dependabot_alerts_summarized_refresh_preserves_metadata_only_origin_uri():
+    origin_uri = "https://api.github.com/repos/capy/spaces/dependabot/alerts"
+    record = capy_memory._refresh_record_from_json(
+        "github-dependabot-alerts-summarized",
+        origin_uri,
+        [
+            {
+                "number": 7,
+                "state": "open",
+                "dependency": {"package": {"ecosystem": "pip", "name": "django"}, "manifest_path": "requirements.txt"},
+                "security_advisory": {"severity": "high", "summary": "raw advisory body must not persist"},
+                "url": "https://api.github.com/repos/capy/spaces/dependabot/alerts/7",
+            }
+        ],
+    )
+
+    summarized = capy_memory._summarized_source_refresh_record(
+        source_id="github-dependabot-alerts-summarized",
+        origin_uri=origin_uri,
+        record=record,
+        summarizer=lambda *, record, model_route: {
+            "metadata_only": True,
+            "title": "Summarized Dependabot alerts",
+            "summary": "Model routed metadata-only Dependabot alert digest.",
+        },
+        model_route_resolution={
+            "resolution": "configured",
+            "hint": "hint:summarize",
+            "resolved_provider": "local",
+            "resolved_model": "summarizer",
+        },
+    )
+    serialized = json.dumps(summarized, sort_keys=True).lower()
+
+    assert summarized["origin_uri"] == "github dependabot alerts capy/spaces"
+    assert "origin_uri: github dependabot alerts capy/spaces" in summarized["markdown"].lower()
+    assert "api.github.com/repos/capy/spaces/dependabot/alerts" not in serialized
+    assert "raw advisory body" not in serialized
+    assert "access_token" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_alerts_feed_bypass(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-dependabot-alerts-feed-bypass",
+        "title": "GitHub Dependabot Alerts Feed Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/dependabot/alerts?access_token=***#raw-prompt",
+    })
+    github_dependabot_body = json.dumps({
+        "version": "https://jsonfeed.org/version/1.1",
+        "items": [{"title": "Dependabot feed bypass", "summary": "safe-looking summary should not persist"}],
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_dependabot_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-dependabot-alerts-feed-bypass.md").exists()
+    assert "safe-looking summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_alerts_malformed_tail_row(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-dependabot-alerts-malformed-tail",
+        "title": "GitHub Dependabot Alerts Malformed Tail",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/dependabot/alerts?access_token=***#raw-prompt",
+    })
+    github_dependabot_body = json.dumps([
+        {"number": 7, "state": "open", "dependency": {"package": {"ecosystem": "pip", "name": "django"}, "manifest_path": "requirements.txt"}, "security_advisory": {"severity": "high"}},
+        {"number": 8, "state": "open", "dependency": {"package": {"ecosystem": "npm", "name": "ignore previous instructions"}, "manifest_path": "package-lock.json"}, "security_advisory": {"severity": "medium"}},
+    ]).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_dependabot_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-dependabot-alerts-malformed-tail.md").exists()
+    assert "ignore previous instructions" not in serialized
+    assert "django" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_dependabot_alerts_legacy_userinfo_before_fetch(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-dependabot-alerts-legacy-userinfo",
+        "title": "GitHub Dependabot Alerts Legacy Userinfo",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/dependabot/alerts",
+    })
+    legacy_payload = {
+        "source_id": "github-dependabot-alerts-legacy-userinfo",
+        "origin_uri": "https://octo-capy:SECRET_VALUE_DO_NOT_LEAK@api.github.com/repos/capy/spaces/dependabot/alerts?access_token=***#raw-prompt",
+        "refresh_interval_seconds": 3600,
+    }
+    with capy_memory._connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET payload_json = ?, status = 'pending', attempts = 0 WHERE job_id = ?",
+            (json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")), receipt["job_id"]),
+        )
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("legacy userinfo Dependabot source must fail before fetch")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert calls == []
+    assert not (root / "vault" / "github-dependabot-alerts-legacy-userinfo.md").exists()
+    assert "octo-capy" not in serialized
+    assert "api.github.com" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_run_source_refresh_jobs_default_fetcher_ingests_github_repository_events_metadata_only(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))

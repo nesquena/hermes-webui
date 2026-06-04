@@ -38,6 +38,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub Dependabot alerts metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving allow-listed GitHub Dependabot alerts API payloads (`/repos/{owner}/{repo}/dependabot/alerts`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from safe repository path, alert count, bounded alert numbers/states/package ecosystem/package names/manifest paths/severities while omitting advisory summaries/descriptions, CVE/GHSA ids, vulnerable/patched version ranges, dismissed comments/reasons, raw URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
+  - JSON Feed bypass payloads, unsafe tail rows, legacy queued userinfo payloads, non-JSON fallback content, and malformed Dependabot-alert routes fail closed without creating vault records or performing unsafe fetches.
+
 - `feat(capy-spaces): complete structured progress delta taxonomy`
   - Progress status now accepts the roadmap's metadata-only non-content delta/event types: `thinking.delta`, `text.delta`, `tool.args.delta`, `subagent.spawned`, and `subagent.progress`.
   - Product-home Progress events now renders safe thinking/text family chips and recent-stream rows for those types while omitting raw thoughts, text deltas, tool args, prompts, renderer/source fields, API-auth fields, and secret-like fixture values from logs, status JSON, and DOM output.

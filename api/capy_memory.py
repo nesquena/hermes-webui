@@ -499,6 +499,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_teams_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_dependabot_alerts_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_dependabot_alerts_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_pull_requested_reviewers_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or _github_pull_requested_reviewers_path_info(raw_origin_text) is None
@@ -5849,6 +5854,205 @@ def _github_collaborators_refresh_summary(origin_uri: str, payload: list[Any]) -
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_dependabot_alerts_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _matches_dependabot_alerts_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 6
+            and path[0] == ""
+            and lowered[1] == "repos"
+            and any(
+                lowered[index] == "dependabot" and lowered[index + 1].startswith("alerts")
+                for index in range(4, len(lowered) - 1)
+            )
+        )
+
+    return _matches_dependabot_alerts_shape(parts.path) or _matches_dependabot_alerts_shape(unquote(parts.path))
+
+
+def _github_dependabot_alerts_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or parts.netloc != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "dependabot"
+        or path[5] != "alerts"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+_GITHUB_DEPENDABOT_ALERT_STATES = {"auto_dismissed", "dismissed", "fixed", "open"}
+_GITHUB_DEPENDABOT_ALERT_SEVERITIES = {"low", "medium", "moderate", "high", "critical"}
+
+
+def _github_dependabot_alert_number_is_safe(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and 0 < value <= 10_000_000_000
+
+
+def _github_dependabot_alert_text_is_safe(value: Any, *, limit: int = 200) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or text != value:
+        return ""
+    if _safe_public_text(text, limit=limit) != text or _refresh_value_is_blocked(text):
+        return ""
+    return text
+
+
+def _github_dependabot_alert_ecosystem_is_safe(value: Any) -> str:
+    text = _github_dependabot_alert_text_is_safe(value, limit=80)
+    if not text:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,79}", text):
+        return ""
+    return text
+
+
+def _github_dependabot_alert_package_name_is_safe(value: Any) -> str:
+    text = _github_dependabot_alert_text_is_safe(value, limit=200)
+    if not text:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9@][A-Za-z0-9@./_:+-]{0,199}", text):
+        return ""
+    return text
+
+
+def _github_dependabot_alert_manifest_path_is_safe(value: Any) -> str:
+    text = _github_dependabot_alert_text_is_safe(value, limit=200)
+    if not text or text.startswith("/") or "\\" in text:
+        return ""
+    if ".." in text.split("/"):
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+/@:-]{0,199}", text):
+        return ""
+    return text
+
+
+def _github_dependabot_alert_dependency_info(row: dict[str, Any]) -> tuple[str, str, str] | None:
+    dependency = row.get("dependency")
+    if not isinstance(dependency, dict):
+        return None
+    package = dependency.get("package")
+    if not isinstance(package, dict):
+        return None
+    ecosystem = _github_dependabot_alert_ecosystem_is_safe(package.get("ecosystem"))
+    name = _github_dependabot_alert_package_name_is_safe(package.get("name"))
+    manifest = _github_dependabot_alert_manifest_path_is_safe(dependency.get("manifest_path"))
+    if not ecosystem or not name or not manifest:
+        return None
+    return ecosystem, name, manifest
+
+
+def _github_dependabot_alert_severity(row: dict[str, Any]) -> str:
+    for container_name in ("security_advisory", "security_vulnerability"):
+        container = row.get(container_name)
+        if isinstance(container, dict):
+            severity = str(container.get("severity") or "").lower()
+            if severity in _GITHUB_DEPENDABOT_ALERT_SEVERITIES:
+                return severity
+    return ""
+
+
+def _github_dependabot_alert_ignored_value_is_safe(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str)
+            and not _refresh_value_is_blocked(key)
+            and _github_dependabot_alert_ignored_value_is_safe(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return all(_github_dependabot_alert_ignored_value_is_safe(item) for item in value)
+    return not _refresh_value_is_blocked(value)
+
+
+def _github_dependabot_alert_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    allowed_keys = {
+        "auto_dismissed_at",
+        "created_at",
+        "dependency",
+        "dismissed_at",
+        "dismissed_by",
+        "dismissed_comment",
+        "dismissed_reason",
+        "fixed_at",
+        "html_url",
+        "number",
+        "security_advisory",
+        "security_vulnerability",
+        "state",
+        "url",
+        "updated_at",
+    }
+    if any(key not in allowed_keys for key in row):
+        return False
+    if not all(_github_dependabot_alert_ignored_value_is_safe(value) for value in row.values()):
+        return False
+    if not _github_dependabot_alert_number_is_safe(row.get("number")):
+        return False
+    if row.get("state") not in _GITHUB_DEPENDABOT_ALERT_STATES:
+        return False
+    if _github_dependabot_alert_dependency_info(row) is None:
+        return False
+    if not _github_dependabot_alert_severity(row):
+        return False
+    for field in ("created_at", "updated_at", "dismissed_at", "fixed_at", "auto_dismissed_at"):
+        if field in row and row.get(field) is not None and not _safe_iso_timestamp(row.get(field)):
+            return False
+    return True
+
+
+def _json_payload_is_github_dependabot_alerts_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_dependabot_alerts_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_dependabot_alert_row_is_safe(row) for row in payload)
+
+
+def _github_dependabot_alerts_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_dependabot_alerts_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_dependabot_alert_row_is_safe(row)]
+    parts = [f"GitHub Dependabot alerts for {repo}", f"alert count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        dependency = _github_dependabot_alert_dependency_info(row)
+        if dependency is None:
+            continue
+        ecosystem, name, manifest = dependency
+        severity = _github_dependabot_alert_severity(row)
+        parts.append(
+            "; ".join([
+                f"alert #{int(row.get('number'))}: {_safe_public_text(row.get('state'), limit=40)}",
+                f"ecosystem: {ecosystem}",
+                f"package: {name}",
+                f"manifest: {manifest}",
+                f"severity: {severity}",
+            ])
+        )
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_teams_path_matches(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -6291,6 +6495,20 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_teams_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    dependabot_alerts_repo = _github_dependabot_alerts_path_repo(origin_uri)
+    if dependabot_alerts_repo:
+        if not _json_payload_is_github_dependabot_alerts_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub Dependabot alerts {dependabot_alerts_repo}"
+        summary = _github_dependabot_alerts_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": f"github dependabot alerts {dependabot_alerts_repo}",
+        }
+    if _github_dependabot_alerts_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     forks_repo = _github_forks_path_repo(origin_uri)
     if forks_repo:
         if not _json_payload_is_github_forks_metadata(origin_uri, payload):
@@ -6671,6 +6889,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_teams_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_teams_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_dependabot_alerts_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_dependabot_alerts_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_pull_requested_reviewers_path_matches(raw_origin_uri):
         if (
             not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
@@ -6783,6 +7004,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_teams_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_dependabot_alerts_path_matches(safe_origin_uri):
+        if not _github_dependabot_alerts_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_pull_requested_reviewers_path_matches(safe_origin_uri):
         if (
             _github_pull_requested_reviewers_path_info(safe_origin_uri) is None
@@ -6811,6 +7036,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_repository_events_path_repo(final_url)
             or _github_repository_events_path_repo(final_url) != _github_repository_events_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_dependabot_alerts_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_dependabot_alerts_path_repo(final_url)
+            or _github_dependabot_alerts_path_repo(final_url) != _github_dependabot_alerts_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         content_type = _refresh_content_type(response.headers)
@@ -6931,6 +7162,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_teams_path_matches(safe_origin_uri) and (
             not _github_teams_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_dependabot_alerts_path_matches(safe_origin_uri) and (
+            not _github_dependabot_alerts_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -7296,11 +7532,12 @@ def _summarized_source_refresh_record(
         raise ValueError("refresh result must be metadata-only")
     title = summarized.get("title") or record.get("title")
     summary = summarized.get("summary") or summarized.get("description") or summarized.get("abstract")
-    return _source_refresh_record(source_id, origin_uri, {
+    safe_origin_uri = record.get("origin_uri") or origin_uri
+    return _source_refresh_record(source_id, safe_origin_uri, {
         "metadata_only": True,
         "title": title,
         "summary": summary,
-        "origin_uri": origin_uri,
+        "origin_uri": safe_origin_uri,
         "redaction_status": summarized.get("redaction_status"),
     })
 
@@ -7568,6 +7805,11 @@ def run_source_refresh_jobs(
         elif _github_teams_path_matches(raw_origin_uri) and (
             not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
             or not _github_teams_path_repo(raw_origin_uri)
+        ):
+            origin_uri = f"capy-memory://{source_id}"
+        elif _github_dependabot_alerts_path_matches(raw_origin_uri) and (
+            not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
+            or not _github_dependabot_alerts_path_repo(raw_origin_uri)
         ):
             origin_uri = f"capy-memory://{source_id}"
         elif (
