@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Expanded delegation cards now stay open during live sub-agent progress updates instead of collapsing every time the running card refreshes.
 - WebUI session storage now follows `HERMES_WEBUI_STATE_DIR/sessions` again instead of the agent-wide `~/.hermes/sessions` path, keeping session sidecars/indexes aligned with WebUI projects, read/unread state, attachments, and settings after restarts.
 - Restart-killed sessions no longer stay stuck as active/pending in `/api/sessions` after stale pending-state repair, and deep-linked WebUI sessions now reset a persisted CLI-session sidebar filter so old CLI/cron rows do not flood the sidebar on reload.
 - The current session todo list can now render as an always-visible checklist directly above the message composer, with completed items ticked/struck through, a manual collapse toggle, per-session saved open/closed state, and automatic collapse when all items are settled.

@@ -84,6 +84,18 @@ def test_subagent_progress_updates_live_delegation_card_in_place():
     assert "tid:`live-delegation-${sid||'session'}`" in MESSAGES_JS
 
 
+def test_live_tool_card_replacement_preserves_disclosure_state():
+    assert "function _liveToolCardDisclosureState" in UI_JS
+    assert "function _restoreLiveToolCardDisclosureState" in UI_JS
+    assert "function _replaceLiveToolCard" in UI_JS
+    assert "row.querySelector('.tool-card.open')" in UI_JS
+    assert "row.querySelectorAll('details[open]')" in UI_JS
+    assert "card.classList.add('open')" in UI_JS
+    assert "match.open=true" in UI_JS
+    calls = [line.strip() for line in UI_JS.splitlines()].count("_replaceLiveToolCard(existing,tc,tid);")
+    assert calls == 2
+
+
 def test_delegate_task_backend_snippet_is_human_readable():
     preview = _tool_result_snippet(
         {

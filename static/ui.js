@@ -7611,6 +7611,31 @@ function _activityLiveProgressLabel(group){
 // sibling container is no longer used for placement — keeping the cards in the
 // message column eliminates the visible "jump" users saw when renderMessages
 // fired on the done event.
+function _liveToolCardDisclosureState(row){
+  if(!row||!row.querySelectorAll) return {open:false,details:[]};
+  return {
+    open:!!row.querySelector('.tool-card.open'),
+    details:Array.from(row.querySelectorAll('details[open]')).map((el,idx)=>({idx,cls:String(el.className||'')})),
+  };
+}
+function _restoreLiveToolCardDisclosureState(row,state){
+  if(!row||!state) return;
+  const card=row.querySelector&&row.querySelector('.tool-card');
+  if(card&&state.open) card.classList.add('open');
+  const details=Array.from(row.querySelectorAll?row.querySelectorAll('details'):[]);
+  for(const saved of state.details||[]){
+    const match=details.find((el,idx)=>idx===saved.idx&&String(el.className||'')===saved.cls)||details[saved.idx];
+    if(match) match.open=true;
+  }
+}
+function _replaceLiveToolCard(existing,tc,tid){
+  const state=_liveToolCardDisclosureState(existing);
+  const replacement=buildToolCard(tc);
+  if(tid) replacement.dataset.liveTid=tid;
+  _restoreLiveToolCardDisclosureState(replacement,state);
+  existing.replaceWith(replacement);
+  return replacement;
+}
 function appendLiveToolCard(tc){
   // Guard: ignore if session was switched. Prevents stale tool events from
   // a previous session's SSE stream from manipulating the new session's DOM.
@@ -7630,9 +7655,7 @@ function appendLiveToolCard(tc){
     if(tid){
       const existing=inner.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
       if(existing){
-        const replacement=buildToolCard(tc);
-        replacement.dataset.liveTid=tid;
-        existing.replaceWith(replacement);
+        _replaceLiveToolCard(existing,tc,tid);
         // Keep #toolRunningRow alive — dots stay until text starts streaming
         // or the next tool fires (which replaces them). Removing here caused
         // a gap between tool completion and the first text token arriving.
@@ -7684,9 +7707,7 @@ function appendLiveToolCard(tc){
   if(tid){
     const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
     if(existing){
-      const replacement=buildToolCard(tc);
-      replacement.dataset.liveTid=tid;
-      existing.replaceWith(replacement);
+      _replaceLiveToolCard(existing,tc,tid);
       _syncToolCallGroupSummary(group);
       return;
     }
