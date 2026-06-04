@@ -607,6 +607,7 @@ def _normalize_prefill_messages_before_user_turn(prefill_messages: list[dict]) -
     just before that boundary; earlier roles remain untouched.
     """
     sanitized = list(prefill_messages or [])
+    n_dropped = 0
     while sanitized:
         last_message = sanitized[-1]
         if not isinstance(last_message, dict):
@@ -614,6 +615,9 @@ def _normalize_prefill_messages_before_user_turn(prefill_messages: list[dict]) -
         if str(last_message.get("role") or "").strip().lower() != "user":
             break
         sanitized.pop()
+        n_dropped += 1
+    if n_dropped:
+        logger.debug("Dropped %d trailing user message(s) from prefill", n_dropped)
     return sanitized
 
 
