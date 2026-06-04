@@ -2166,11 +2166,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearOwnerInflightState();
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
-      if(S.session&&S.session.session_id===activeSid){
+      let d={};
+      try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      const currentSid=S.session&&S.session.session_id;
+      const eventSid=d.old_session_id||d.session_id||activeSid;
+      const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';
+      const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||continuationSid===currentSid||eventSid===activeSid||continuationSid===activeSid));
+      if(S.session&&eventMatchesCurrent){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
         try{
-          const d=JSON.parse(e.data);
           const isRateLimit=d.type==='rate_limit';
           const isQuotaExhausted=d.type==='quota_exhausted';
           const isAuthMismatch=d.type==='auth_mismatch';
@@ -2186,16 +2191,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const detailsLabel=isCancelled?'Cancellation details':isInterrupted?'Interruption details':undefined;
           window._compressionUi=null;
           if(typeof clearCompressionUi==='function') clearCompressionUi();
-          S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
+          if(d.session&&typeof d.session==='object'){
+            S.session=d.session;
+            S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);
+            if(S.session&&S.session.session_id){
+              try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
+              if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+            }
+          }else{
+            S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,provider_details_label:detailsLabel});
+          }
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
         }
-        _markSessionViewed(activeSid, S.messages.length);
+        _markSessionViewed((S.session&&S.session.session_id)||activeSid, S.messages.length);
         renderMessages({preserveScroll:true});
       }else if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
-        try{const d=JSON.parse(e.data);trackBackgroundError(activeSid,_errTitle,d.message||'Error');}
-        catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
+        trackBackgroundError(activeSid,_errTitle,d.message||'Error');
       }
       _setActivePaneIdleIfOwner();
       renderSessionList(); // clear streaming indicator immediately on apperror

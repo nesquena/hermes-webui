@@ -1,7 +1,14 @@
 """Regression coverage for compression-exhausted stream finalization."""
 
+import json
+import queue
+import sys
+import threading
+import types
 from pathlib import Path
 
+from api import models, streaming
+from api.models import Session
 from api.streaming import (
     _agent_result_terminal_failure,
     _session_lacks_final_assistant_answer,
@@ -12,6 +19,135 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _read(relpath: str) -> str:
     return (ROOT / relpath).read_text(encoding="utf-8")
+
+
+def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_errors_on_continuation(
+    tmp_path, monkeypatch
+):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(streaming, "SESSION_DIR", session_dir)
+    models.SESSIONS.clear()
+    streaming.SESSIONS.clear()
+    streaming.STREAMS.clear()
+    streaming.AGENT_INSTANCES.clear()
+    streaming.SESSION_AGENT_LOCKS.clear()
+    old_sid = "old_sid"
+    new_sid = "new_sid"
+    stream_id = "stream-compression-exhausted"
+    session = Session(
+        session_id=old_sid,
+        title="Compression test",
+        workspace=str(tmp_path),
+        model="gpt-4o",
+        messages=[],
+        context_messages=[],
+    )
+    session.active_stream_id = stream_id
+    session.pending_user_message = "Do the long task."
+    session.pending_started_at = 1.0
+    session.save()
+    models.SESSIONS[old_sid] = session
+    streaming.SESSIONS[old_sid] = session
+    event_queue = queue.Queue()
+    streaming.STREAMS[stream_id] = event_queue
+
+    class FakeAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            api_key=None,
+            platform=None,
+            quiet_mode=False,
+            enabled_toolsets=None,
+            fallback_model=None,
+            session_id=None,
+            session_db=None,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            tool_progress_callback=None,
+            interim_assistant_callback=None,
+            clarify_callback=None,
+            **kwargs,
+        ):
+            self.session_id = session_id
+            self.stream_delta_callback = stream_delta_callback
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = None
+            self.session_cache_read_tokens = 0
+            self.session_cache_write_tokens = 0
+            self.reasoning_config = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            if self.stream_delta_callback:
+                self.stream_delta_callback("I am still working through the files.")
+            self.session_id = new_sid
+            self._last_error = "Context length exceeded: cannot compress further."
+            return {
+                "failed": True,
+                "partial": True,
+                "compression_exhausted": True,
+                "error": "Context length exceeded: cannot compress further.",
+                "messages": [
+                    {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                    {"role": "assistant", "content": "I am still working through the files."},
+                    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1"}]},
+                    {"role": "tool", "tool_call_id": "call_1", "content": "large output"},
+                ],
+            }
+
+        def interrupt(self, _message):
+            return None
+
+    fake_hermes_state = types.ModuleType("hermes_state")
+    fake_hermes_state.SessionDB = lambda *_args, **_kwargs: object()
+
+    with monkeypatch.context() as m:
+        m.setattr(streaming, "get_session", lambda _sid: session)
+        m.setattr(streaming, "_get_ai_agent", lambda: FakeAgent)
+        m.setattr(streaming, "resolve_model_provider", lambda *_args, **_kwargs: ("gpt-4o", "openai", None))
+        m.setattr("api.config.get_config", lambda *_args, **_kwargs: {})
+        m.setattr("api.config._resolve_cli_toolsets", lambda *_args, **_kwargs: [])
+        m.setitem(sys.modules, "hermes_state", fake_hermes_state)
+        streaming._run_agent_streaming(
+            session_id=old_sid,
+            msg_text="Do the long task.",
+            model="gpt-4o",
+            workspace=str(tmp_path),
+            stream_id=stream_id,
+        )
+
+    events = []
+    while not event_queue.empty():
+        events.append(event_queue.get_nowait())
+    apperror_payloads = [payload for event, payload in events if event == "apperror"]
+    assert apperror_payloads, "expected apperror SSE payload"
+    payload = apperror_payloads[-1]
+    assert payload["type"] == "compression_exhausted"
+    assert payload["session"]["session_id"] == new_sid
+    assert payload["old_session_id"] == old_sid
+    assert payload["new_session_id"] == new_sid
+
+    old_payload = json.loads((session_dir / f"{old_sid}.json").read_text(encoding="utf-8"))
+    new_payload = json.loads((session_dir / f"{new_sid}.json").read_text(encoding="utf-8"))
+    assert old_payload["pre_compression_snapshot"] is True
+    assert old_payload["active_stream_id"] is None
+    assert old_payload["pending_user_message"] is None
+    assert new_payload["session_id"] == new_sid
+    assert new_payload["parent_session_id"] == old_sid
+    assert new_payload["pre_compression_snapshot"] is False
+    assert new_payload["messages"][-1]["_error"] is True
+    assert "Context compression exhausted" in new_payload["messages"][-1]["content"]
+    assert old_sid not in streaming.SESSIONS
+    assert streaming.SESSIONS[new_sid].session_id == new_sid
 
 
 def test_compression_exhausted_result_is_terminal_failure_even_after_streamed_text():
@@ -147,3 +283,7 @@ def test_compression_exhausted_apperror_clears_reference_ui_and_labels_error():
     assert "isCompressionExhausted?'Context compression exhausted'" in block
     assert "if(typeof clearCompressionUi==='function') clearCompressionUi();" in block
     assert "window._compressionUi=null;" in block
+    assert "const eventSid=d.old_session_id||d.session_id||activeSid;" in block
+    assert "const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';" in block
+    assert "if(d.session&&typeof d.session==='object')" in block
+    assert "S.session=d.session;" in block
