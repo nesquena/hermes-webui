@@ -2577,6 +2577,22 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
+  // Manual status picker (before danger actions)
+  if (!isExternalSession) {
+    const currentStatus = getSessionManualStatus(session.session_id);
+    for (const status of _SESSION_STATUS_VALUES) {
+      menu.appendChild(_buildSessionAction(
+        t('session_status_' + status.replace(/-/g,'_')) || status,
+        '',
+        '',
+        () => {
+          closeSessionActionMenu();
+          setSessionManualStatus(session.session_id, currentStatus === status ? null : status);
+        },
+        currentStatus === status ? 'is-active' : ''
+      ));
+    }
+  }
   if(!isExternalSession){
     if(session.worktree_path){
       menu.appendChild(_buildSessionAction(
@@ -2600,22 +2616,6 @@ function _openSessionActionMenu(session, anchorEl){
       },
       'danger'
     ));
-  }
-  // Manual status picker
-  if (!isExternalSession) {
-    const currentStatus = getSessionManualStatus(session.session_id);
-    for (const status of _SESSION_STATUS_VALUES) {
-      menu.appendChild(_buildSessionAction(
-        t('session_status_' + status.replace('-','_')) || status,
-        '',
-        '',
-        () => {
-          closeSessionActionMenu();
-          setSessionManualStatus(session.session_id, currentStatus === status ? null : status);
-        },
-        currentStatus === status ? 'is-active' : ''
-      ));
-    }
   }
   _mountSessionActionMenu(menu, session, anchorEl);
 }
@@ -4539,7 +4539,7 @@ function renderSessionListFromCache(){
     if (manualStatus) {
       const statusBadge = document.createElement('span');
       statusBadge.className = 'session-manual-status session-manual-status--' + manualStatus;
-      statusBadge.textContent = t('session_status_' + manualStatus.replace('-','_')) || manualStatus;
+      statusBadge.textContent = t('session_status_' + manualStatus.replace(/-/g,'_')) || manualStatus;
       statusBadge.title = t('session_status_click_to_change') || 'Click to change status';
       statusBadge.onclick = (e) => { e.stopPropagation(); _cycleSessionManualStatus(s); };
       titleRow.appendChild(statusBadge);
