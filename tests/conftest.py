@@ -600,6 +600,11 @@ def test_server():
     env["HERMES_WEBUI_TEST_NETWORK_BLOCK"] = "1"
     env.update({
         "HERMES_WEBUI_WORKSPACE_GIT_DESTRUCTIVE": "1",
+        # Small archive-extraction cap so the zip-bomb guard is exercisable
+        # against the out-of-process test server (the real 10x-upload default is
+        # ~200MB — impractical to exceed in a test). 5MB is far above any other
+        # test's archive payload, so only the bomb test trips it.
+        "HERMES_WEBUI_MAX_EXTRACTED_MB":  "5",
         "HERMES_WEBUI_PORT":              str(TEST_PORT),
         "HERMES_WEBUI_HOST":              "127.0.0.1",
         "HERMES_WEBUI_STATE_DIR":         str(TEST_STATE_DIR),

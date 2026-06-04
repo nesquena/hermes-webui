@@ -96,8 +96,44 @@ def test_new_chat_does_not_send_stale_dropdown_model_when_session_has_default_mo
 
 def test_new_session_posts_picker_model_before_server_default():
     fn = _new_session_function()
+    # Behavior contract: the picker model goes into reqBody so /api/session/new
+    # uses the user's selection before falling back to the server default
+    # (#872). The previous literal-string assertion
+    # "reqBody.model_provider=newModelState.model_provider||null" became a
+    # change-detector once the #2518 follow-up added a fallback chain; the
+    # contract that newModelState.model_provider is the FIRST source of
+    # reqBody.model_provider is now verified by substring + ordering.
     assert "reqBody.model=newModelState.model" in fn
-    assert "reqBody.model_provider=newModelState.model_provider||null" in fn
+    assert "newModelState.model_provider" in fn
+    assert "window._activeProvider" in fn, (
+        "Cold-start fallback must consult window._activeProvider so "
+        "/api/session/new hits the resolve fast path (follow-up from #2518)."
+    )
+    assert "S.session&&S.session.model_provider" in fn, (
+        "Unhydrated-dropdown fallback must consult S.session.model_provider "
+        "before sending model_provider=null (follow-up from #2518)."
+    )
+    provider_assignment = fn[fn.index("reqBody.model_provider="):].split(";", 1)[0]
+    # The assignment sources from the explicit picker value first, then the
+    # bare-model fallback (_fallbackProvider, wired above from _activeProvider /
+    # prev-session), gated so a family-mismatched bare model defers to the
+    # server slow path. Anchor on the real `reqBody.model_provider=` assignment
+    # (not a comment) and verify the fallback wiring exists in the function body.
+    assert "newModelState.model_provider" in provider_assignment
+    assert "_fallbackProvider" in provider_assignment
+    assert "window._activeProvider" in fn
+    assert "S.session&&S.session.model_provider" in fn
+    # Ordering in the body: explicit picker value referenced before the
+    # _activeProvider fallback, which is referenced before prev-session.
+    pos_explicit = fn.index("newModelState.model_provider")
+    pos_active = fn.index("window._activeProvider")
+    pos_prev = fn.index("S.session&&S.session.model_provider")
+    assert pos_explicit < pos_active < pos_prev, (
+        "Fallback chain must be: explicit > _activeProvider > prev-session."
+    )
+    # Family-mismatch guard (Codex #3410-followup finding): a bare known-family
+    # model whose family differs from the fallback provider must NOT fast-path.
+    assert "_familyMismatch" in fn
     assert "_readPersistedModelState" in fn
 
 

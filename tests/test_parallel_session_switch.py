@@ -80,9 +80,14 @@ class TestLoadSessionIdleOverlap:
 
         found = False
         for pos in positions:
-            block = SESSIONS_JS[pos : pos + 600]
+            # Window widened 600→850 (#3326 added a reload-width-hint comment +
+            # conditional preserveScroll arg in the idle branch, pushing the
+            # _dirP.catch line further from the S.busy=false anchor).
+            block = SESSIONS_JS[pos : pos + 850]
             has_loaddir = "loadDir('.')" in block
-            has_render = "renderMessages()" in block
+            # #3326 added an optional {preserveScroll} arg to the idle-path render
+            # call; match the call form rather than the bare `renderMessages()`.
+            has_render = "renderMessages(" in block
             if has_loaddir and has_render:
                 found = True
                 assert "highlightCode()" not in block, (

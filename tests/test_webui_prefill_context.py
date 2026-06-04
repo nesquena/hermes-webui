@@ -264,7 +264,17 @@ def test_public_prefill_status_strips_message_bodies():
 
 
 def test_webui_session_context_adds_gateway_like_metadata(monkeypatch, tmp_path):
-    from api.streaming import _prefill_messages_with_webui_context
+    # #3324: the gateway-like session/delivery context moved OUT of a prefill
+    # `user` message (which broke strict chat templates with two consecutive
+    # user turns) and INTO the ephemeral system prompt. _prefill_messages_with_webui_context
+    # now returns only recall prefill; the metadata is asserted on
+    # _webui_ephemeral_system_prompt instead. The invariants preserved here:
+    # paused platforms excluded, connected platforms shown, home-channel name
+    # shown, and the chat_id never leaks.
+    from api.streaming import (
+        _prefill_messages_with_webui_context,
+        _webui_ephemeral_system_prompt,
+    )
 
     gateway_state = tmp_path / "gateway_state.json"
     gateway_state.write_text(
@@ -290,27 +300,37 @@ def test_webui_session_context_adds_gateway_like_metadata(monkeypatch, tmp_path)
     )
     monkeypatch.setitem(sys.modules, "hermes_constants", fake_constants)
 
+    config_data = {
+        "platforms": {
+            "telegram": {
+                "enabled": True,
+                "home_channel": {"name": "Home DM", "chat_id": "should-not-leak"},
+            }
+        }
+    }
+
+    # The prefill helper no longer appends a session-context user message.
     messages = _prefill_messages_with_webui_context(
         {"messages": [{"role": "user", "content": "recall"}]},
-        {
-            "platforms": {
-                "telegram": {
-                    "enabled": True,
-                    "home_channel": {"name": "Home DM", "chat_id": "should-not-leak"},
-                }
-            }
-        },
+        config_data,
     )
+    assert messages == [{"role": "user", "content": "recall"}]
+    assert not any(
+        isinstance(m, dict) and "## Current Session Context" in str(m.get("content", ""))
+        for m in messages
+    ), "session context must NOT be appended as a prefill user message anymore (#3324)"
 
-    assert messages[0] == {"role": "user", "content": "recall"}
-    context = messages[-1]
-    assert context["role"] == "user"
-    assert "## Current Session Context" in context["content"]
-    assert "**Source:** WebUI (browser session)" in context["content"]
-    assert "telegram: Connected" in context["content"]
-    assert "discord: Connected" not in context["content"]
-    assert "Home DM" in context["content"]
-    assert "should-not-leak" not in context["content"]
+    # The same gateway-like metadata is now carried in the ephemeral system prompt.
+    prompt = _webui_ephemeral_system_prompt(
+        None,
+        surface_context={"source": "webui"},
+        config_data=config_data,
+    )
+    assert "**Connected Platforms:**" in prompt
+    assert "telegram: Connected" in prompt
+    assert "discord: Connected" not in prompt  # paused platform excluded
+    assert "Home DM" in prompt
+    assert "should-not-leak" not in prompt  # chat_id must never leak
 
 
 def test_prefill_status_redactor_handles_secret_shaped_text():

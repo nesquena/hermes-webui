@@ -695,8 +695,15 @@ def test_streaming_persists_reasoning_in_session():
     assert "Persist reasoning trace in the session so it survives reload" in src, \
         "Reasoning persistence comment not found in streaming.py"
 
-    assert "_rm['reasoning'] = _reasoning_text" in src, \
-        "Code to set _rm['reasoning'] not found in streaming.py"
+    # #3455: reasoning is now persisted via the think-split path — either the
+    # merged reasoning (inline <think> + on_reasoning stream) or the existing
+    # _reasoning_text when content has no leading block. Both set _rm['reasoning'].
+    assert "_rm['reasoning'] = _merged_reasoning" in src, \
+        "Code to set the last assistant message's reasoning (merged think-split) not found"
+    assert "_split_thinking_from_content(" in src, \
+        "server-side think-split must run before save (#3455)"
+    assert "_rm['reasoning'] = _existing_reasoning" in src, \
+        "the no-think-block branch must still persist _reasoning_text into the assistant message"
 
     # Persistence block must come BEFORE raw_session assignment
     persist_idx = src.index("Persist reasoning trace in the session")

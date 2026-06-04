@@ -122,10 +122,16 @@ def test_load_older_generation_check_runs_before_replace():
 # ---------------------------------------------------------------------------
 
 def test_ensure_all_bumps_generation_before_replace():
-    """Bump must happen BEFORE `S.messages = msgs` so racing prefetch sees it."""
+    """Bump must happen BEFORE the wholesale `S.messages =` replace so racing prefetch sees it."""
+    import re
     body = _function_body(SESSIONS_JS, "_ensureAllMessagesLoaded")
     bump_idx = body.rindex("_bumpMessagesGeneration()")
-    replace_idx = body.index("S.messages = msgs;")
+    # Match the wholesale replace by its LHS, not the RHS variable name — #3306
+    # added an ephemeral-field carry-forward so the RHS is now `_msgsToAssign`
+    # rather than the literal `msgs`. The invariant we protect is bump-before-replace.
+    m = re.search(r"S\.messages\s*=\s*\w+;", body)
+    assert m is not None, "expected a wholesale `S.messages = <var>;` replace in _ensureAllMessagesLoaded"
+    replace_idx = m.start()
     assert bump_idx < replace_idx, (
         "_ensureAllMessagesLoaded must bump the generation token BEFORE the "
         "wholesale replace, otherwise an in-flight prefetch's post-await "
@@ -201,10 +207,15 @@ def test_ensure_all_resets_oldest_idx():
 
 def test_ensure_all_guards_against_session_switch_mid_await():
     """Same-session check must run after await — old version skipped this."""
+    import re
     body = _function_body(SESSIONS_JS, "_ensureAllMessagesLoaded")
     await_idx = body.index("await api(")
     sid_check_idx = body.index("S.session.session_id !== sid", await_idx)
-    replace_idx = body.index("S.messages = msgs;", await_idx)
+    # #3306 renamed the replace RHS from `msgs` to `_msgsToAssign` (carry-forward);
+    # match by LHS so the ordering invariant survives the rename.
+    m = re.search(r"S\.messages\s*=\s*\w+;", body[await_idx:])
+    assert m is not None, "expected a wholesale `S.messages = <var>;` replace after the await"
+    replace_idx = await_idx + m.start()
     assert await_idx < sid_check_idx < replace_idx, (
         "_ensureAllMessagesLoaded must guard against session-switch races "
         "(re-check S.session.session_id after await) BEFORE wholesale-"

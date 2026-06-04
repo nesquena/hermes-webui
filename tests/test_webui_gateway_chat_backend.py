@@ -285,15 +285,23 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert captured["headers"]["X-hermes-session-key"] == f"webui:{s.session_id}"
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
-    assert [m["content"] for m in payload["messages"]] == [
-        streaming._WEBUI_PROGRESS_PROMPT,
+    # #3324: the gateway path's first system message is now the full WebUI
+    # ephemeral system prompt (progress prompt + session/delivery context),
+    # NOT the bare _WEBUI_PROGRESS_PROMPT — otherwise the delivery/session
+    # context is silently dropped on Gateway-routed WebUI chats.
+    system_msg = payload["messages"][0]
+    assert system_msg["role"] == "system"
+    assert "Final visible assistant replies" in system_msg["content"]
+    assert "Need script" in system_msg["content"]
+    # The moved session/delivery context must be present in the system prompt.
+    assert "Connected Platforms:" in system_msg["content"]
+    assert "Delivery options for scheduled tasks:" in system_msg["content"]
+    # The recall prefill + the actual user turn follow the system message.
+    assert [m["content"] for m in payload["messages"][1:]] == [
         "prefill",
         "webui session context",
         "Say hello",
     ]
-    assert payload["messages"][0]["role"] == "system"
-    assert "Final visible assistant replies" in payload["messages"][0]["content"]
-    assert "Need script" in payload["messages"][0]["content"]
     events = []
     while not subscriber.empty():
         events.append(subscriber.get_nowait())
@@ -313,6 +321,214 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "is_error": False,
         "tid": "call-1",
     }) in events
+
+
+def test_gateway_chat_worker_backfills_context_only_turns_into_display(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    s = new_session()
+    s.context_messages = [
+        {
+            "role": "assistant",
+            "content": "[context compaction] Hidden summary for model continuity.",
+            "timestamp": 9.5,
+        },
+        {"role": "user", "content": "delete the matrix apps", "timestamp": 10.0},
+        {"role": "assistant", "content": "I will verify the Matrix cleanup targets.", "timestamp": 10.1},
+    ]
+    s.messages = [
+        {"role": "user", "content": "when done also delete tunesync", "timestamp": 11.0},
+    ]
+    stream_id = "stream-gateway-context-backfill-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "when done also delete tunesync"
+    s.pending_attachments = []
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "when done also delete tunesync",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(s.session_id)
+    assert [m["content"] for m in saved.messages] == [
+        "delete the matrix apps",
+        "I will verify the Matrix cleanup targets.",
+        "when done also delete tunesync",
+        "done",
+    ]
+    assert len(saved.messages) == 4
+    assert not any("context compaction" in m["content"] for m in saved.messages)
+
+
+def test_gateway_chat_worker_preserves_old_visible_turns_when_context_is_compacted(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"new answer"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    s = new_session()
+    old_visible_turns = [
+        {"role": "user", "content": "turn one", "timestamp": 1.0},
+        {"role": "assistant", "content": "answer one", "timestamp": 1.1},
+        {"role": "user", "content": "turn two", "timestamp": 2.0},
+        {"role": "assistant", "content": "answer two", "timestamp": 2.1},
+        {"role": "user", "content": "recent turn", "timestamp": 3.0},
+        {"role": "assistant", "content": "recent answer", "timestamp": 3.1},
+    ]
+    s.messages = old_visible_turns + [
+        {"role": "user", "content": "new question", "timestamp": 4.0},
+    ]
+    s.context_messages = [
+        {
+            "role": "assistant",
+            "content": "[context compaction] Hidden summary for model continuity.",
+            "timestamp": 2.9,
+        },
+        old_visible_turns[-2],
+        old_visible_turns[-1],
+    ]
+    stream_id = "stream-gateway-compacted-visible-preserve-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "new question"
+    s.pending_attachments = []
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "new question",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(s.session_id)
+    assert [m["content"] for m in saved.messages] == [
+        "turn one",
+        "answer one",
+        "turn two",
+        "answer two",
+        "recent turn",
+        "recent answer",
+        "new question",
+        "new answer",
+    ]
+    assert not any("context compaction" in m["content"] for m in saved.messages)
+
+
+def test_gateway_chat_worker_keeps_repeated_identical_visible_turns(tmp_path, monkeypatch):
+    """#3300 regression (Codex gate): two identical visible user turns must BOTH
+    survive gateway finalization even when context-only rows are backfilled.
+    _message_identity ignores timestamps, so a shared identity must not let the
+    backfill dedup suppress the second visible turn."""
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse())
+
+    s = new_session()
+    # Two identical visible "same" user turns surround a context-only gap that
+    # only lives in context_messages (plus a hidden compaction marker).
+    s.messages = [
+        {"role": "user", "content": "same", "timestamp": 1.0},
+        {"role": "assistant", "content": "first reply", "timestamp": 1.1},
+        {"role": "user", "content": "same", "timestamp": 3.0},
+        {"role": "user", "content": "new question", "timestamp": 4.0},
+    ]
+    s.context_messages = [
+        {"role": "assistant", "content": "[context compaction] hidden", "timestamp": 0.9},
+        {"role": "user", "content": "same", "timestamp": 1.0},
+        {"role": "assistant", "content": "first reply", "timestamp": 1.1},
+        {"role": "user", "content": "context only gap", "timestamp": 2.0},
+        {"role": "user", "content": "same", "timestamp": 3.0},
+    ]
+    stream_id = "stream-gateway-repeated-identical-turns-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "new question"
+    s.pending_attachments = []
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "new question",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    saved = models.get_session(s.session_id)
+    contents = [m["content"] for m in saved.messages]
+    # BOTH identical "same" visible turns must survive (the original bug dropped one).
+    assert contents.count("same") == 2, contents
+    # The context-only gap is backfilled into the visible transcript.
+    assert "context only gap" in contents
+    # The latest turn + reply are present.
+    assert contents[-2:] == ["new question", "answer"]
+    # No compaction marker leaks into the visible transcript.
+    assert not any("context compaction" in c for c in contents)
 
 
 def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_path, monkeypatch):
