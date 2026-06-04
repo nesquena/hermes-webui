@@ -4783,6 +4783,7 @@ function renderSessionListFromCache(){
       row.appendChild(cnt);
       popover.appendChild(row);
     }
+    popover.addEventListener('click',(e)=>{e.stopPropagation();});
     funnelBtn.addEventListener('click',(e)=>{
       e.stopPropagation();
       popover.hidden=!popover.hidden;
