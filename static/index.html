@@ -564,7 +564,6 @@
             <button type="button" class="icon-btn has-tooltip" id="btnSavedPrompts" data-tooltip="Saved prompts" onclick="toggleSavedPromptsPopup()" aria-haspopup="true" aria-expanded="false" aria-controls="savedPromptsPopup">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
             </button>
-            <div id="savedPromptsPopup" class="saved-prompts-popup" style="display:none" role="listbox" aria-label="Saved prompts"></div>
             <button class="icon-btn mic-btn has-tooltip" id="btnMic" data-tooltip="Dictate" data-i18n-title="voice_dictate" style="display:none">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <rect x="9" y="1" width="6" height="12" rx="3"/>
@@ -657,6 +656,7 @@
               </button>
             </div>
           </div>
+          <div id="savedPromptsPopup" class="saved-prompts-popup" style="display:none" role="listbox" aria-label="Saved prompts"></div>
           <div class="composer-right">
             <span class="composer-status" id="composerStatus" style="display:none"></span>
             <div class="ctx-indicator-wrap" id="ctxIndicatorWrap" style="display:none">
