@@ -86,12 +86,44 @@ async function checkOfflineRecoveryNow(){
     _setOfflineChecking(true);
     const ok=await _probeOfflineRecovery();
     _setOfflineChecking(false);
-    if(ok){_stopOfflineProbeTimer();window.location.reload();return true;}
+    if(ok){_stopOfflineProbeTimer();await _recoverFromOfflineSoftly();return true;}
     showOfflineBanner('network');
     return false;
   })();
   try{return await _offlineProbePromise;}
   finally{_offlineProbePromise=null;}
+}
+// Recover from a transient "Connection lost" without a full page reload.
+//
+// The offline banner fires whenever a fetch/SSE errors — which Android does
+// aggressively every time the PWA is backgrounded, even for a second. The old
+// behaviour here was `window.location.reload()`: a hard cold boot that re-runs
+// the whole app and re-pulls /api/sessions + /api/session, producing the
+// multi-second "reload to see the conversation I was just in" flash on every
+// resume. The reload was also intermittent (only when a request actually
+// errored that time), matching the reported "sometimes it reloads, sometimes
+// it doesn't".
+//
+// The server keeps the agent running and buffers stream events while no
+// subscriber is attached (#2307), so a hard reload is never required to
+// recover — we just need to reattach. This does the soft path: hide the
+// banner, restart the gateway SSE (bfcache/background kills the connection),
+// and re-fetch the active session so any messages that landed while we were
+// away appear. A full reload is the fallback only if the soft path throws.
+async function _recoverFromOfflineSoftly(){
+  try{
+    _hideOfflineBanner();
+    if(typeof startGatewaySSE==='function') startGatewaySSE();
+    if(S.session && typeof refreshSession==='function'){
+      await refreshSession();
+    }
+    return true;
+  }catch(_){
+    // Soft reattach failed (server mid-restart, session gone, etc.) — fall
+    // back to the original hard reload so the user is never stuck offline.
+    window.location.reload();
+    return false;
+  }
 }
 function _isAbortError(e){return !!(e&&(e.name==='AbortError'||e.code===20));}
 function _patchOfflineFetch(){
