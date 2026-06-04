@@ -509,6 +509,12 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_code_scanning_alerts_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_secret_scanning_alerts_path_matches(raw_origin_text):
+        secret_scanning_origin = _github_secret_scanning_alerts_safe_origin(raw_origin_text)
+        if not secret_scanning_origin:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = secret_scanning_origin
     if _github_pull_requested_reviewers_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or _github_pull_requested_reviewers_path_info(raw_origin_text) is None
@@ -6282,6 +6288,325 @@ def _github_code_scanning_alerts_refresh_summary(origin_uri: str, payload: list[
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_secret_scanning_alerts_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _matches_secret_scanning_alerts_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 6
+            and path[0] == ""
+            and lowered[1] == "repos"
+            and any(
+                lowered[index] == "secret-scanning" and lowered[index + 1].startswith("alerts")
+                for index in range(4, len(lowered) - 1)
+            )
+        )
+
+    return _matches_secret_scanning_alerts_shape(parts.path) or _matches_secret_scanning_alerts_shape(unquote(parts.path))
+
+
+def _github_secret_scanning_alerts_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or parts.netloc != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "secret-scanning"
+        or path[5] != "alerts"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_secret_scanning_alerts_safe_origin(origin_uri: str) -> str:
+    repo = _github_secret_scanning_alerts_path_repo(origin_uri)
+    if not repo:
+        return ""
+    owner, name = repo.split("/", 1)
+    return f"https://api.github.com/repos/{owner}/{name}/secret-scanning/alerts"
+
+
+_GITHUB_SECRET_SCANNING_ALERT_STATES = {"open", "resolved"}
+_GITHUB_SECRET_SCANNING_ALERT_RESOLUTIONS = {
+    "false_positive",
+    "pattern_deleted",
+    "pattern_edited",
+    "revoked",
+    "used_in_tests",
+    "wont_fix",
+}
+
+
+def _github_secret_scanning_alert_number_is_safe(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and 0 < value <= 10_000_000_000
+
+
+def _github_secret_scanning_alert_type_is_safe(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or text != value:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,119}", text):
+        return ""
+    if re.search(
+        r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|bearer\s+|"
+        r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
+        r"raw[_\s-]*prompt|ignore[_\s-]*previous[_\s-]*instructions",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return ""
+    return text
+
+
+def _github_secret_scanning_alert_resolution_is_safe(value: Any) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return ""
+    resolution = value.strip()
+    if resolution != value or resolution not in _GITHUB_SECRET_SCANNING_ALERT_RESOLUTIONS:
+        return ""
+    return resolution
+
+
+_GITHUB_SECRET_SCANNING_ALLOWED_KEYS = {
+    "assigned_to",
+    "created_at",
+    "first_location_detected",
+    "has_more_locations",
+    "html_url",
+    "is_base64_encoded",
+    "locations_url",
+    "multi_repo",
+    "number",
+    "provider",
+    "provider_slug",
+    "publicly_leaked",
+    "push_protection_bypassed",
+    "push_protection_bypassed_at",
+    "push_protection_bypassed_by",
+    "push_protection_bypass_request_comment",
+    "push_protection_bypass_request_reviewer",
+    "repository",
+    "resolution",
+    "resolution_comment",
+    "resolved_at",
+    "resolved_by",
+    "secret",
+    "secret_type",
+    "secret_type_display_name",
+    "state",
+    "updated_at",
+    "url",
+    "validity",
+}
+
+_GITHUB_SECRET_SCANNING_UNSAFE_IGNORED_KEY_TOKENS = {
+    "api",
+    "apiauth",
+    "auth",
+    "authorization",
+    "bearer",
+    "body",
+    "code",
+    "credential",
+    "data",
+    "generatedbody",
+    "generatedcode",
+    "html",
+    "isbase64encoded",
+    "password",
+    "privatepath",
+    "rawprompt",
+    "renderer",
+    "rendercode",
+    "script",
+    "secret",
+    "source",
+    "token",
+    "widgetbody",
+}
+
+
+def _github_secret_scanning_alert_ignored_key_is_safe(key: str) -> bool:
+    if _refresh_value_is_blocked(key):
+        return False
+    collapsed = re.sub(r"[^a-z0-9]+", "", key.lower())
+    if collapsed in _GITHUB_SECRET_SCANNING_UNSAFE_IGNORED_KEY_TOKENS:
+        return False
+    camel_spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", key)
+    camel_spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", camel_spaced)
+    tokens = [token for token in re.split(r"[^a-z0-9]+", camel_spaced.lower()) if token]
+    return not any(token in _GITHUB_SECRET_SCANNING_UNSAFE_IGNORED_KEY_TOKENS for token in tokens)
+
+
+def _github_secret_scanning_alert_ignored_scalar_is_safe(value: Any) -> bool:
+    if value is None or isinstance(value, bool) or (not isinstance(value, bool) and isinstance(value, int)):
+        return True
+    if isinstance(value, float):
+        return True
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if text != value:
+        return False
+    return not re.search(
+        r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
+        r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
+        r"raw[_\s-]*prompt|system[_\s-]*prompt|developer[_\s-]*prompt|prompt[_\s-]*injection|ignore[_\s-]*previous[_\s-]*instructions|"
+        r"credential|password|authorization|/users/|/private/|javascript\s*:",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
+def _github_secret_scanning_alert_ignored_value_is_safe(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str)
+            and _github_secret_scanning_alert_ignored_key_is_safe(key)
+            and _github_secret_scanning_alert_ignored_value_is_safe(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return all(_github_secret_scanning_alert_ignored_value_is_safe(item) for item in value)
+    if isinstance(value, _PUBLIC_SCALAR_TYPES):
+        return _github_secret_scanning_alert_ignored_scalar_is_safe(value)
+    return not _refresh_value_is_blocked(value)
+
+
+def _github_secret_scanning_alert_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if any(key not in _GITHUB_SECRET_SCANNING_ALLOWED_KEYS for key in row):
+        return False
+    if not _github_secret_scanning_alert_number_is_safe(row.get("number")):
+        return False
+    if row.get("state") not in _GITHUB_SECRET_SCANNING_ALERT_STATES:
+        return False
+    if not _github_secret_scanning_alert_type_is_safe(row.get("secret_type")):
+        return False
+    if "resolution" in row and row.get("resolution") is not None and not _github_secret_scanning_alert_resolution_is_safe(row.get("resolution")):
+        return False
+    if "push_protection_bypassed" in row and not isinstance(row.get("push_protection_bypassed"), bool):
+        return False
+    for field in ("created_at", "resolved_at", "updated_at", "push_protection_bypassed_at"):
+        if field in row and row.get(field) is not None and not _safe_iso_timestamp(row.get(field)):
+            return False
+    for key, value in row.items():
+        if key == "secret" and value not in (None, ""):
+            return False
+        if key not in {"number", "state", "secret_type", "resolution", "created_at", "resolved_at", "updated_at", "push_protection_bypassed"}:
+            if not _github_secret_scanning_alert_ignored_value_is_safe(value):
+                return False
+    return True
+
+
+def _json_payload_is_github_secret_scanning_alerts_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_secret_scanning_alerts_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_secret_scanning_alert_row_is_safe(row) for row in payload)
+
+
+def _github_secret_scanning_alert_summary_text(value: Any, *, limit: int = 80) -> str:
+    if not _github_secret_scanning_alert_ignored_scalar_is_safe(value):
+        return ""
+    return _safe_public_text(value, limit=limit)
+
+
+def _github_secret_scanning_alert_summary_bool(value: Any) -> str:
+    if not isinstance(value, bool):
+        return ""
+    return str(value).lower()
+
+
+def _github_secret_scanning_alert_summary_location(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    raw_path = value.get("path")
+    if not isinstance(raw_path, str) or raw_path.startswith(("/", "\\")) or "://" in raw_path:
+        return ""
+    path = _github_secret_scanning_alert_summary_text(raw_path, limit=160)
+    if not path:
+        return ""
+    start_line = value.get("start_line")
+    end_line = value.get("end_line")
+    if isinstance(start_line, int) and not isinstance(start_line, bool) and start_line > 0:
+        if isinstance(end_line, int) and not isinstance(end_line, bool) and end_line >= start_line:
+            return f"{path}:{start_line}-{end_line}"
+        return f"{path}:{start_line}"
+    return path
+
+
+def _github_secret_scanning_alert_summary_assignee(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _github_secret_scanning_alert_summary_text(value, limit=80)
+    if isinstance(value, dict):
+        return _github_secret_scanning_alert_summary_text(value.get("login"), limit=80)
+    return ""
+
+
+def _github_secret_scanning_alerts_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_secret_scanning_alerts_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_secret_scanning_alert_row_is_safe(row)]
+    parts = [f"GitHub secret scanning alerts for {repo}", f"alert count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        row_parts = [
+            f"alert #{int(row.get('number'))}: {row.get('state')}",
+            f"secret type: {_github_secret_scanning_alert_type_is_safe(row.get('secret_type'))}",
+        ]
+        for field, label in (("provider", "provider"), ("provider_slug", "provider slug"), ("validity", "validity")):
+            value = _github_secret_scanning_alert_summary_text(row.get(field), limit=80)
+            if value:
+                row_parts.append(f"{label}: {value}")
+        for field, label in (("publicly_leaked", "publicly leaked"), ("multi_repo", "multi repo")):
+            value = _github_secret_scanning_alert_summary_bool(row.get(field))
+            if value:
+                row_parts.append(f"{label}: {value}")
+        first_location = _github_secret_scanning_alert_summary_location(row.get("first_location_detected"))
+        if first_location:
+            row_parts.append(f"first location: {first_location}")
+        has_more_locations = _github_secret_scanning_alert_summary_bool(row.get("has_more_locations"))
+        if has_more_locations:
+            row_parts.append(f"has more locations: {has_more_locations}")
+        assigned_to = _github_secret_scanning_alert_summary_assignee(row.get("assigned_to"))
+        if assigned_to:
+            row_parts.append(f"assigned to: {assigned_to}")
+        resolution = _github_secret_scanning_alert_resolution_is_safe(row.get("resolution"))
+        if resolution:
+            row_parts.append(f"resolution: {resolution}")
+        for field in ("created_at", "resolved_at", "updated_at"):
+            if field in row and row.get(field) is not None:
+                row_parts.append(f"{field}: {row.get(field)}")
+        if "push_protection_bypassed" in row:
+            row_parts.append(f"push protection bypassed: {str(row.get('push_protection_bypassed')).lower()}")
+        if "push_protection_bypassed_at" in row and row.get("push_protection_bypassed_at") is not None:
+            row_parts.append(f"push protection bypassed at: {row.get('push_protection_bypassed_at')}")
+        parts.append("; ".join(row_parts))
+    return _safe_text("; ".join(parts), limit=1_200)
+
+
 def _github_teams_path_matches(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -6752,6 +7077,21 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_code_scanning_alerts_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    secret_scanning_alerts_repo = _github_secret_scanning_alerts_path_repo(origin_uri)
+    if secret_scanning_alerts_repo:
+        if not _json_payload_is_github_secret_scanning_alerts_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub secret scanning alerts {secret_scanning_alerts_repo}"
+        summary = _github_secret_scanning_alerts_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": f"github secret scanning alerts {secret_scanning_alerts_repo}",
+            "source_refresh_kind": "github_secret_scanning_alerts",
+        }
+    if _github_secret_scanning_alerts_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     forks_repo = _github_forks_path_repo(origin_uri)
     if forks_repo:
         if not _json_payload_is_github_forks_metadata(origin_uri, payload):
@@ -7138,6 +7478,18 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_code_scanning_alerts_path_matches(raw_origin_uri):
         if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_code_scanning_alerts_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_secret_scanning_alerts_path_matches(raw_origin_uri):
+        try:
+            raw_secret_scanning_parts = urlsplit(raw_origin_uri)
+        except ValueError:
+            raw_secret_scanning_parts = None
+        if (
+            raw_secret_scanning_parts is None
+            or raw_secret_scanning_parts.query
+            or raw_secret_scanning_parts.fragment
+            or not _github_secret_scanning_alerts_safe_origin(raw_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_pull_requested_reviewers_path_matches(raw_origin_uri):
         if (
             not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
@@ -7179,6 +7531,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
+    secret_scanning_safe_origin = _github_secret_scanning_alerts_safe_origin(raw_origin_uri)
+    if secret_scanning_safe_origin:
+        safe_origin_uri = secret_scanning_safe_origin
     if not _source_refresh_allowed(safe_origin_uri):
         raise RuntimeError("refresh fetcher disabled")
     request_accept = "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8"
@@ -7258,6 +7613,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_code_scanning_alerts_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_secret_scanning_alerts_path_matches(safe_origin_uri):
+        if not _github_secret_scanning_alerts_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_pull_requested_reviewers_path_matches(safe_origin_uri):
         if (
             _github_pull_requested_reviewers_path_info(safe_origin_uri) is None
@@ -7265,8 +7624,13 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         ):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    request_url = safe_origin_uri
+    if _github_secret_scanning_alerts_path_matches(safe_origin_uri):
+        # GitHub returns raw secret literals by default; force the documented
+        # metadata-only mode for live fetches while keeping persisted origin clean.
+        request_url = f"{safe_origin_uri}?hide_secret=true"
     request = Request(
-        safe_origin_uri,
+        request_url,
         headers={
             "User-Agent": "Capy-Memory-Refresh/1.0",
             "Accept": request_accept,
@@ -7298,6 +7662,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_authority_is_exact(final_url, "api.github.com")
             or not _github_code_scanning_alerts_path_repo(final_url)
             or _github_code_scanning_alerts_path_repo(final_url) != _github_code_scanning_alerts_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_secret_scanning_alerts_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or not _github_secret_scanning_alerts_path_repo(final_url)
+            or _github_secret_scanning_alerts_path_repo(final_url) != _github_secret_scanning_alerts_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         content_type = _refresh_content_type(response.headers)
@@ -7431,6 +7801,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_secret_scanning_alerts_path_matches(safe_origin_uri) and (
+            not _github_secret_scanning_alerts_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
         if _github_pull_requested_reviewers_path_matches(safe_origin_uri) and (
             _github_pull_requested_reviewers_path_info(safe_origin_uri) is None
             or content_type != "application/json"
@@ -7550,6 +7925,39 @@ def _safe_github_topics_summary_with_drop(value: Any, *, limit: int = 1_200) -> 
     return text[:limit], 0
 
 
+def _safe_github_secret_scanning_alerts_summary_with_drop(value: Any, *, limit: int = 1_200) -> tuple[str, int]:
+    if not isinstance(value, str):
+        return "", 1 if _is_present_public_value(value) else 0
+    text = _safe_text(value, limit=limit)
+    if text != value.strip() or not text.startswith("GitHub secret scanning alerts for "):
+        return "", 1
+    if not re.fullmatch(r"[A-Za-z0-9 ._:/;#-]+", text):
+        return "", 1
+    if re.search(
+        r"https?://|www\.|@|SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|bearer\b|api[ _-]?key|api[ _-]?auth|"
+        r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
+        r"raw[_\s-]*prompt|system[_\s-]*prompt|developer[_\s-]*prompt|prompt[_\s-]*injection|ignore[_\s-]*previous[_\s-]*instructions|"
+        r"credential|password|authorization|/users/|/private/|javascript\s*:",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return "", 1
+    return text, 0
+
+
+def _safe_github_secret_scanning_alerts_origin_text(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    match = re.fullmatch(r"github secret scanning alerts ([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)", text)
+    if not match:
+        return ""
+    owner, repo = match.group(1).split("/", 1)
+    if not _github_repo_path_segment_is_safe(owner) or not _github_repo_path_segment_is_safe(repo):
+        return ""
+    return text
+
+
 def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dict[str, Any]:
     if not isinstance(fetched, dict):
         raise ValueError("refresh result must be a mapping")
@@ -7568,6 +7976,11 @@ def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dic
             fetched.get("summary") or fetched.get("description") or fetched.get("abstract"),
             limit=1_200,
         )
+    elif fetched.get("source_refresh_kind") == "github_secret_scanning_alerts" and _github_secret_scanning_alerts_path_repo(origin_uri):
+        summary, dropped = _safe_github_secret_scanning_alerts_summary_with_drop(
+            fetched.get("summary") or fetched.get("description") or fetched.get("abstract"),
+            limit=1_200,
+        )
     else:
         summary, dropped = _safe_refresh_summary_with_drop(
             fetched.get("summary") or fetched.get("description") or fetched.get("abstract"),
@@ -7577,6 +7990,8 @@ def _source_refresh_record(source_id: str, origin_uri: str, fetched: Any) -> dic
     if not summary:
         raise ValueError("refresh result did not include a safe summary")
     safe_origin_uri = _safe_origin_uri(fetched.get("origin_uri") or origin_uri, source_id=source_id)
+    if fetched.get("source_refresh_kind") == "github_secret_scanning_alerts" and _github_secret_scanning_alerts_path_repo(origin_uri):
+        safe_origin_uri = _safe_github_secret_scanning_alerts_origin_text(fetched.get("origin_uri")) or safe_origin_uri
     body = "\n".join([
         f"# {title}",
         "",
@@ -8078,6 +8493,16 @@ def run_source_refresh_jobs(
             or not _github_code_scanning_alerts_path_repo(raw_origin_uri)
         ):
             origin_uri = f"capy-memory://{source_id}"
+        elif _github_secret_scanning_alerts_path_matches(raw_origin_uri):
+            try:
+                raw_secret_scanning_parts = urlsplit(raw_origin_uri)
+            except ValueError:
+                raw_secret_scanning_parts = None
+            secret_scanning_origin = _github_secret_scanning_alerts_safe_origin(raw_origin_uri)
+            if raw_secret_scanning_parts is None or raw_secret_scanning_parts.query or raw_secret_scanning_parts.fragment or not secret_scanning_origin:
+                origin_uri = f"capy-memory://{source_id}"
+            else:
+                origin_uri = secret_scanning_origin
         elif (
             (
                 _github_issue_events_path_matches(raw_origin_uri)
