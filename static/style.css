@@ -3746,7 +3746,8 @@ main.main > #mainPlugin{display:none;}
 .cron-script-job-banner{margin-bottom:12px;}
 .cron-script-job-banner .detail-alert-title{font-weight:600;}
 .detail-script{background:var(--sidebar);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;white-space:pre-wrap;line-height:1.55;color:var(--text);font-family:'SF Mono',ui-monospace,monospace;word-break:break-word;}
-.cron-script-card .detail-form-hint{margin-top:8px;}
+.detail-hint{font-size:11px;color:var(--muted);line-height:1.5;}
+.cron-script-card .detail-hint,.cron-script-card-hint{margin-top:8px;}
 .detail-badge.cron-mode-badge.script{background:rgba(148,163,184,.14);color:var(--text-secondary);}
 .detail-badge.cron-mode-badge.agent{background:rgba(99,179,237,.14);color:#90cdf4;}
 @keyframes cron-dot-pulse{0%,100%{opacity:1;}50%{opacity:.4;}}

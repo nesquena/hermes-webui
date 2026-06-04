@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- Script cron jobs (`no_agent`) in the Tasks panel no longer show an empty Prompt card that looked like missing configuration; they now display a script badge, banner, script path, and "Script output" run-history labels distinct from agent jobs. (#3589, @pamnard)
+
 ## [v0.51.252] — 2026-06-03 — Release HT (stage-q24 — selection-bleed fix + compatibility docs)
 
 ### Fixed
