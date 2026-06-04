@@ -998,9 +998,12 @@ function _favoriteModelKey(value,providerId){
 function _modelFavoriteProviderId(m){
   return String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||_providerFromModelValue(m&&m.value)||'').trim();
 }
-function _isModelFavorite(value,providerId){
+function _modelFavoriteKeySet(records){
+  return new Set((records||_readModelFavorites()).map(r=>_favoriteModelKey(r.value,r.providerId)));
+}
+function _isModelFavorite(value,providerId,favoriteKeys){
   const key=_favoriteModelKey(value,providerId);
-  return _readModelFavorites().some(r=>_favoriteModelKey(r.value,r.providerId)===key);
+  return (favoriteKeys||_modelFavoriteKeySet()).has(key);
 }
 function _toggleModelFavorite(record){
   const records=_readModelFavorites();
@@ -1011,9 +1014,9 @@ function _toggleModelFavorite(record){
   _writeModelFavorites(records);
   return idx<0;
 }
-function _renderModelFavoriteButton(m){
+function _renderModelFavoriteButton(m,favoriteKeys){
   const favProvider=_modelFavoriteProviderId(m);
-  const isFav=_isModelFavorite(m.value,favProvider);
+  const isFav=_isModelFavorite(m.value,favProvider,favoriteKeys);
   const label=isFav?(t('model_favorite_remove')||'Remove from favorites')+' '+m.name:(t('model_favorite_add')||'Add to favorites')+' '+m.name;
   return `<button type="button" class="model-opt-favorite" aria-pressed="${isFav?'true':'false'}" title="${esc(label)}" aria-label="${esc(label)}" data-fav-value="${esc(m.value)}" data-fav-prov="${esc(favProvider)}">${li('star',12)}</button>`;
 }
@@ -1831,6 +1834,7 @@ function renderModelDropdown(){
       }
     }
     const matches=(m)=>!term||found.has(m.value);
+    const favoriteKeys=_modelFavoriteKeySet();
     const configuredCandidates=_modelData
       .filter(m=>m.badge&&!m.syntheticFavorite&&matches(m));
     const configuredBySemanticKey=new Map();
@@ -1864,7 +1868,7 @@ function renderModelDropdown(){
       });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
     const favoriteModels=_modelData
-      .filter(m=>!m.endpointErrorOnly&&_isModelFavorite(m.value,_modelFavoriteProviderId(m))&&matches(m));
+      .filter(m=>!m.endpointErrorOnly&&_isModelFavorite(m.value,_modelFavoriteProviderId(m),favoriteKeys)&&matches(m));
     const favoriteByKey=new Map();
     for(const m of favoriteModels){
       const key=_favoriteModelKey(m.value,_modelFavoriteProviderId(m));
@@ -1888,7 +1892,7 @@ function renderModelDropdown(){
       for(const m of favoriteRows){
         const row=document.createElement('div');
         row.className='model-opt'+(m.value===sel.value?' active':'');
-        const favBtn=_renderModelFavoriteButton(m);
+        const favBtn=_renderModelFavoriteButton(m,favoriteKeys);
         const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
         row.innerHTML=`<div class="model-opt-top">${favBtn}<span class="model-opt-name">${esc(m.name)}</span>${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
@@ -1911,14 +1915,14 @@ function renderModelDropdown(){
         let modelName = m.name;
         if (m.badge) {
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
-          badgeLabel = m.badge.label || 'Configured';
-          modelName = m.name || getModelLabel(rawId) || rawId;
+          badgeLabel = rawId;
+          modelName = rawId;
           if(m.badge.provider){
             const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
             badgeLabel += ` (${providerName})`;
           }
         }
-        const favBtn=_renderModelFavoriteButton(m);
+        const favBtn=_renderModelFavoriteButton(m,favoriteKeys);
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
         row.innerHTML=`<div class="model-opt-top">${favBtn}<span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectModelFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
@@ -1955,7 +1959,7 @@ function renderModelDropdown(){
       if(m.endpointErrorOnly) continue;
       const row=document.createElement('div');
       row.className='model-opt'+(m.value===sel.value?' active':'');
-      const favBtn=_renderModelFavoriteButton(m);
+      const favBtn=_renderModelFavoriteButton(m,favoriteKeys);
       const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
       const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
       row.innerHTML=`<div class="model-opt-top">${favBtn}<span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
@@ -2091,7 +2095,12 @@ function closeModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
   const mobileAction=$('composerMobileModelAction');
-  if(dd) dd.classList.remove('open');
+  if(dd){
+    dd.classList.remove('open');
+    const search=dd.querySelector('.model-search-input');
+    if(search) search.value='';
+  }
+  _modelDropdownSearchTerm='';
   if(chip) chip.classList.remove('active');
   if(mobileAction) mobileAction.classList.remove('active');
 }

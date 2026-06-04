@@ -58,6 +58,19 @@ def test_model_favorite_provider_id_used_in_favorite_filter():
     assert "_modelFavoriteProviderId" in filter_line
 
 
+def test_favorite_filter_reuses_single_favorite_key_set():
+    filter_section = UI_JS[UI_JS.index("const _filterModels=(term)=>"):UI_JS.index("// Clear and rebuild")]
+    assert "const favoriteKeys=_modelFavoriteKeySet()" in filter_section
+    assert "_isModelFavorite(m.value,_modelFavoriteProviderId(m),favoriteKeys)" in filter_section
+    assert filter_section.count("_readModelFavorites()") == 0
+
+
+def test_favorite_render_buttons_receive_cached_key_set():
+    filter_section = UI_JS[UI_JS.index("const _filterModels=(term)=>"):UI_JS.index("// Wire favorite buttons")]
+    assert "_renderModelFavoriteButton(m,favoriteKeys)" in filter_section
+    assert "_renderModelFavoriteButton(m)" not in filter_section
+
+
 def test_model_favorite_provider_id_used_in_favorite_by_key():
     key_section = UI_JS[UI_JS.index("const favoriteByKey"):]
     key_area = key_section[:300]
@@ -143,10 +156,14 @@ def test_favorite_sorting_is_deterministic():
     assert "localeCompare" in sort_section
 
 
-def test_search_term_preserved_across_renders():
+def test_search_term_preserved_across_open_renders_but_reset_on_close():
     assert "_modelDropdownSearchTerm" in UI_JS
     assert "_existingSearch" in UI_JS
     assert "_si.value=_modelDropdownSearchTerm" in UI_JS or "_modelDropdownSearchTerm=_si.value" in UI_JS
+    close_section = UI_JS[UI_JS.index("function closeModelDropdown"):]
+    close_body = close_section[:500]
+    assert "_modelDropdownSearchTerm=''" in close_body
+    assert "search.value=''" in close_body
 
 
 def test_model_opt_favorite_css_exists():
@@ -194,22 +211,18 @@ def _configured_row_block():
     return UI_JS[start:start + 2000]
 
 
-def test_configured_row_uses_friendly_model_name():
+def test_configured_row_preserves_raw_configured_model_name():
     block = _configured_row_block()
-    assert "modelName = m.name || getModelLabel(rawId) || rawId" in block, \
-        "Configured row should derive modelName from m.name or getModelLabel(rawId), not rawId alone"
+    assert "badgeLabel = rawId" in block, \
+        "Configured row should preserve raw configured model ID labels"
+    assert "modelName = rawId" in block, \
+        "Configured row should preserve raw configured model ID names"
 
 
 def test_configured_row_raw_id_still_in_opt_id():
     block = _configured_row_block()
     assert "model-opt-id" in block
     assert "m.id" in block, "Configured row subtext must still emit m.id (raw ID)"
-
-
-def test_configured_badge_label_uses_badge_label_not_raw_id():
-    block = _configured_row_block()
-    assert "badgeLabel = m.badge.label || 'Configured'" in block, \
-        "Configured badge label should use m.badge.label, not rawId"
 
 
 def test_configured_row_preserves_custom_ids():
