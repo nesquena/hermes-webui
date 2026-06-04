@@ -539,6 +539,7 @@ class TestIssue1410OllamaEnvVarBleed:
             # in config.yaml if the user explicitly opts in).
             assert by_id["ollama-cloud"]["configurable"] is True
             assert by_id["ollama"]["configurable"] is False
+            assert by_id["ollama"]["is_self_hosted"] is True
         finally:
             config.cfg.clear()
             config.cfg.update(old_cfg)

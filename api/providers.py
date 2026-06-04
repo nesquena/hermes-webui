@@ -701,6 +701,11 @@ _OAUTH_PROVIDERS = frozenset({
     "xai-oauth",
 })
 
+# Local / OpenAI-compatible servers configured via base URL + optional key (#3260).
+# Bare ``ollama`` stays out of ``_PROVIDER_ENV_VAR`` (#1410); setup uses
+# ``apply_self_hosted_provider_setup`` and Settings → Providers self-hosted cards.
+_SELF_HOSTED_PROVIDERS = frozenset({"ollama", "lmstudio", "custom"})
+
 # SECTION: Helper functions
 
 
@@ -1733,6 +1738,131 @@ def get_provider_cost_history(provider_id: str | None = None, days: int = 7) -> 
     }
 
 
+def _self_hosted_provider_state(provider_id: str, cfg: dict) -> dict[str, Any]:
+    """Derive Settings → Providers self-hosted card fields from config.yaml."""
+    from api.onboarding import _SUPPORTED_PROVIDER_SETUPS, _normalize_base_url
+
+    meta = _SUPPORTED_PROVIDER_SETUPS.get(provider_id, {})
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    active = str(model_cfg.get("provider") or "").strip().lower()
+    base_url = ""
+    current_model = ""
+    if active == provider_id:
+        base_url = _normalize_base_url(str(model_cfg.get("base_url") or ""))
+        current_model = str(model_cfg.get("default") or "").strip()
+    requires_base_url = bool(meta.get("requires_base_url"))
+    if requires_base_url:
+        configured = active == provider_id and bool(base_url) and bool(current_model)
+    else:
+        configured = active == provider_id and bool(current_model)
+    return {
+        "is_self_hosted": True,
+        "key_optional": bool(meta.get("key_optional")),
+        "requires_base_url": requires_base_url,
+        "default_base_url": str(meta.get("default_base_url") or ""),
+        "base_url": base_url,
+        "current_model": current_model,
+        "default_model": str(meta.get("default_model") or ""),
+        "self_hosted_configured": configured,
+    }
+
+
+def apply_self_hosted_provider_setup(body: dict) -> dict[str, Any]:
+    """Persist a self-hosted provider (Ollama / LM Studio / custom) post-onboarding."""
+    from urllib.parse import urlparse
+
+    from api.onboarding import (
+        _SUPPORTED_PROVIDER_SETUPS,
+        _normalize_base_url,
+        _normalize_model_for_provider,
+        _provider_api_key_present,
+    )
+
+    provider = str(body.get("provider") or "").strip().lower()
+    model = str(body.get("model") or "").strip()
+    api_key = str(body.get("api_key") or "").strip()
+    base_url = _normalize_base_url(str(body.get("base_url") or ""))
+
+    if provider not in _SELF_HOSTED_PROVIDERS:
+        return {
+            "ok": False,
+            "error": (
+                f"Unsupported self-hosted provider '{provider}'. "
+                f"Expected one of: {', '.join(sorted(_SELF_HOSTED_PROVIDERS))}."
+            ),
+        }
+    if provider not in _SUPPORTED_PROVIDER_SETUPS:
+        return {"ok": False, "error": f"Provider setup metadata missing for '{provider}'."}
+    if not model:
+        return {"ok": False, "error": "model is required"}
+
+    provider_meta = _SUPPORTED_PROVIDER_SETUPS[provider]
+    if provider_meta.get("requires_base_url"):
+        if not base_url:
+            return {"ok": False, "error": "base_url is required for self-hosted endpoints"}
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"}:
+            return {"ok": False, "error": "base_url must start with http:// or https://"}
+
+    import api.config as _config
+
+    config_path = _config._get_config_path()
+    if config_path.exists():
+        cfg = _config._load_yaml_config_file(config_path)
+    else:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    env_path = _get_hermes_home() / ".env"
+    env_values = _load_env_file(env_path)
+    if not api_key and not _provider_api_key_present(provider, cfg, env_values):
+        if not provider_meta.get("key_optional"):
+            return {"ok": False, "error": f"{provider_meta['env_var']} is required"}
+
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    model_cfg["provider"] = provider
+    model_cfg["default"] = _normalize_model_for_provider(provider, model)
+    if provider_meta.get("requires_base_url"):
+        model_cfg["base_url"] = base_url
+    elif provider_meta.get("default_base_url"):
+        model_cfg["base_url"] = provider_meta["default_base_url"]
+    else:
+        model_cfg.pop("base_url", None)
+    cfg["model"] = model_cfg
+    _config._save_yaml_config_file(config_path, cfg)
+
+    if api_key:
+        _write_env_file(env_path, {provider_meta["env_var"]: api_key})
+        try:
+            from api.profiles import _reload_dotenv
+            _reload_dotenv(_get_hermes_home())
+        except Exception:
+            logger.debug("Failed to reload dotenv", exc_info=True)
+        os.environ[provider_meta["env_var"]] = api_key
+
+    try:
+        from hermes_cli.config import reload as _cli_reload
+        _cli_reload()
+    except Exception:
+        logger.debug("Failed to reload hermes_cli config", exc_info=True)
+
+    reload_config()
+    invalidate_models_cache()
+
+    label = provider_meta.get("label") or _PROVIDER_DISPLAY.get(provider, provider)
+    return {
+        "ok": True,
+        "provider": provider,
+        "display_name": label,
+        "action": "updated",
+    }
+
+
 # SECTION: Public API
 
 
@@ -1751,7 +1881,11 @@ def get_providers() -> dict[str, Any]:
     providers = []
 
     # Collect all known provider IDs from multiple sources
-    known_ids = set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys())
+    known_ids = (
+        set(_PROVIDER_DISPLAY.keys())
+        | set(_PROVIDER_MODELS.keys())
+        | set(_SELF_HOSTED_PROVIDERS)
+    )
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
@@ -1764,6 +1898,12 @@ def get_providers() -> dict[str, Any]:
 
     for pid in sorted(known_ids):
         display_name = _PROVIDER_DISPLAY.get(pid, pid.replace("-", " ").title())
+        if pid in _SELF_HOSTED_PROVIDERS:
+            from api.onboarding import _SUPPORTED_PROVIDER_SETUPS
+
+            sh_label = (_SUPPORTED_PROVIDER_SETUPS.get(pid) or {}).get("label")
+            if sh_label:
+                display_name = str(sh_label)
         is_oauth = _provider_is_oauth(pid)
         has_key = _provider_has_key(pid)
 
@@ -1939,11 +2079,15 @@ def get_providers() -> dict[str, Any]:
                 if pid != "nous":
                     models_total = len(models)
 
-        providers.append({
+        entry: dict[str, Any] = {
             "id": pid,
             "display_name": display_name,
             "has_key": has_key,
-            "configurable": not is_oauth and pid in _PROVIDER_ENV_VAR,
+            "configurable": (
+                not is_oauth
+                and pid in _PROVIDER_ENV_VAR
+                and pid not in _SELF_HOSTED_PROVIDERS
+            ),
             "is_oauth": is_oauth,
             "key_source": key_source,
             "auth_error": auth_error,
@@ -1956,7 +2100,10 @@ def get_providers() -> dict[str, Any]:
             # command. For providers that don't trim, models_total ==
             # len(models) and the frontend behaves identically to before.
             "models_total": models_total,
-        })
+        }
+        if pid in _SELF_HOSTED_PROVIDERS:
+            entry.update(_self_hosted_provider_state(pid, cfg))
+        providers.append(entry)
 
     # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
     custom_providers_cfg = cfg.get("custom_providers", [])
