@@ -7209,6 +7209,7 @@ async function _refreshProviderModels(providerId, btn){
     const res=await api('/api/models/refresh',{method:'POST',body:JSON.stringify({provider:providerId})});
     if(res.ok){
       showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
+      _refreshModelDropdownsAfterProviderChange();
     }else{
       showToast(res.error||'Failed to refresh models');
     }
