@@ -566,6 +566,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         not _github_repository_artifacts_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_pages_path_matches(raw_origin_text) and (
+        not _github_raw_authority_is_exact(raw_origin_text, "api.github.com")
+        or not _github_pages_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     display_name = _safe_public_text(
         record.get("title") or record.get("display_name") or record.get("name"),
         limit=200,
@@ -6727,6 +6732,111 @@ def _github_secret_scanning_alerts_refresh_summary(origin_uri: str, payload: lis
     return _safe_text("; ".join(parts), limit=1_200)
 
 
+def _github_pages_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _segment_looks_like_pages(raw_segment: str) -> bool:
+        segment = raw_segment.lower()
+        return segment == "pages" or segment.startswith(("pages%", "pages?", "pages\x00"))
+
+    def _matches_pages_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return len(path) >= 5 and path[0] == "" and lowered[1] == "repos" and any(
+            _segment_looks_like_pages(segment) for segment in path[4:]
+        )
+
+    return _matches_pages_shape(parts.path) or _matches_pages_shape(unquote(parts.path))
+
+
+def _github_pages_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or parts.netloc != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "pages"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+_GITHUB_PAGES_STATUSES = {"built", "building", "errored", "pending", "queued"}
+_GITHUB_PAGES_BUILD_TYPES = {"legacy", "workflow"}
+_GITHUB_PAGES_DOMAIN_STATES = {"approved", "errored", "pending", "unverified", "verified"}
+
+
+def _github_pages_cname_is_safe(value: Any) -> bool:
+    if value in (None, ""):
+        return True
+    if not isinstance(value, str):
+        return False
+    cname = value.strip().lower()
+    if cname != value or not cname or len(cname) > 253:
+        return False
+    if _refresh_value_is_blocked(cname) or _UNSAFE_PUBLIC_VALUE_RE.search(cname):
+        return False
+    labels = cname.split(".")
+    return all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels)
+
+
+def _github_pages_payload_is_safe(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if "status" not in payload or payload.get("status") not in _GITHUB_PAGES_STATUSES:
+        return False
+    if "build_type" in payload and payload.get("build_type") is not None and payload.get("build_type") not in _GITHUB_PAGES_BUILD_TYPES:
+        return False
+    for field in ("custom_404", "public", "https_enforced"):
+        if field in payload and payload.get(field) is not None and not isinstance(payload.get(field), bool):
+            return False
+    if "protected_domain_state" in payload and payload.get("protected_domain_state") is not None and payload.get("protected_domain_state") not in _GITHUB_PAGES_DOMAIN_STATES:
+        return False
+    if not _github_pages_cname_is_safe(payload.get("cname")):
+        return False
+    return True
+
+
+def _json_payload_is_github_pages_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_pages_path_repo(origin_uri):
+        return False
+    return _github_pages_payload_is_safe(payload)
+
+
+def _github_pages_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_pages_path_repo(origin_uri) or "repository"
+    parts = [f"GitHub Pages for {repo}", f"status: {payload.get('status')}"]
+    if payload.get("build_type") in _GITHUB_PAGES_BUILD_TYPES:
+        parts.append(f"build type: {payload.get('build_type')}")
+    for field, label in (
+        ("public", "public"),
+        ("custom_404", "custom 404"),
+        ("https_enforced", "https enforced"),
+    ):
+        if isinstance(payload.get(field), bool):
+            parts.append(f"{label}: {str(payload.get(field)).lower()}")
+    cname = payload.get("cname")
+    if _github_pages_cname_is_safe(cname) and cname:
+        parts.append(f"cname: {cname}")
+    protected_domain_state = payload.get("protected_domain_state")
+    if protected_domain_state in _GITHUB_PAGES_DOMAIN_STATES:
+        parts.append(f"protected domain state: {protected_domain_state}")
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_teams_path_matches(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -7154,6 +7264,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
             "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
         }
     if _github_collaborators_path_matches(origin_uri):
+        raise ValueError("refresh failed")
+    pages_repo = _github_pages_path_repo(origin_uri)
+    if pages_repo:
+        if not _json_payload_is_github_pages_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub Pages {pages_repo}",
+            "summary": _github_pages_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_pages_path_matches(origin_uri):
         raise ValueError("refresh failed")
     teams_repo = _github_teams_path_repo(origin_uri)
     if teams_repo:
@@ -7669,6 +7791,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_repository_artifacts_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_repository_artifacts_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_pages_path_matches(raw_origin_uri):
+        if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_pages_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     safe_source_id = _safe_public_id(source_id, fallback="source")
     safe_origin_uri = _safe_origin_uri(origin_uri, source_id=safe_source_id)
     secret_scanning_safe_origin = _github_secret_scanning_alerts_safe_origin(raw_origin_uri)
@@ -7741,6 +7866,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_repository_artifacts_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_pages_path_matches(safe_origin_uri):
+        if not _github_pages_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_assignees_path_matches(safe_origin_uri):
         if not _github_assignees_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -7804,6 +7933,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_repository_artifacts_path_repo(final_url)
             or _github_repository_artifacts_path_repo(final_url) != _github_repository_artifacts_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_pages_path_matches(safe_origin_uri) and (
+            not _github_raw_authority_is_exact(final_url, "api.github.com")
+            or not _github_pages_path_repo(final_url)
+            or _github_pages_path_repo(final_url) != _github_pages_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_dependabot_alerts_path_matches(safe_origin_uri) and (
@@ -7927,6 +8062,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_repository_artifacts_path_matches(safe_origin_uri) and (
             not _github_repository_artifacts_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_pages_path_matches(safe_origin_uri) and (
+            not _github_pages_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -8634,6 +8774,11 @@ def run_source_refresh_jobs(
         source_id = _safe_public_id(payload.get("source_id"), fallback="source")
         raw_origin_uri = str(payload.get("origin_uri") or "").strip()
         if _github_repository_events_path_matches(raw_origin_uri) and not _github_repository_events_path_repo(raw_origin_uri):
+            origin_uri = f"capy-memory://{source_id}"
+        elif _github_pages_path_matches(raw_origin_uri) and (
+            not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com")
+            or not _github_pages_path_repo(raw_origin_uri)
+        ):
             origin_uri = f"capy-memory://{source_id}"
         elif _github_issue_labels_path_matches(raw_origin_uri) and not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com"):
             origin_uri = f"capy-memory://{source_id}"

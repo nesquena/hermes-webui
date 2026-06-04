@@ -19584,3 +19584,247 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_repository_event
     assert "39914751234" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "steal" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_ingests_github_pages_metadata_only(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-pages-source-refresh",
+        "title": "GitHub Pages Source Refresh",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/pages?access_token=***#raw-prompt",
+    })
+    github_pages_body = json.dumps({
+        "status": "built",
+        "cname": "docs.capy.example",
+        "custom_404": True,
+        "html_url": "https://docs.capy.example/?token=***",
+        "url": "https://api.github.com/repos/capy/spaces/pages?token=***",
+        "public": True,
+        "https_enforced": True,
+        "build_type": "workflow",
+        "protected_domain_state": "verified",
+        "pending_domain_unverified_at": None,
+        "source": {"branch": "main", "path": "/docs", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        "https_certificate": {
+            "state": "approved",
+            "description": "Certificate description should not persist.",
+            "domains": ["docs.capy.example", "SECRET_VALUE_DO_NOT_LEAK.example"],
+        },
+    }).encode("utf-8")
+    calls = []
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_pages_body
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout, "accept": request.headers.get("Accept")})
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    persisted = (root / "vault" / "github-pages-source-refresh.md").read_text(encoding="utf-8").lower()
+    search = search_memory("github pages", limit=5)
+    serialized = json.dumps({"result": result, "search": search}, sort_keys=True).lower()
+
+    assert calls == [{"url": "https://api.github.com/repos/capy/spaces/pages", "timeout": 8, "accept": "application/json"}]
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "completed"
+    assert result["jobs"][0]["prompt_preflight"]["boundary"] == "auto_fetched_source"
+    assert result["jobs"][0]["prompt_preflight"]["status"] == "pass"
+    assert search["results"][0]["source_id"] == "github-pages-source-refresh"
+    assert "github pages for capy/spaces" in persisted
+    assert "status: built" in persisted
+    assert "build type: workflow" in persisted
+    assert "public: true" in persisted
+    assert "custom 404: true" in persisted
+    assert "https enforced: true" in persisted
+    assert "cname: docs.capy.example" in persisted
+    assert "protected domain state: verified" in persisted
+    assert "origin_uri: https://api.github.com/repos/capy/spaces/pages" in persisted
+    for unsafe in (
+        "secret_value_do_not_leak",
+        "certificate description",
+        "html_url",
+        "url:",
+        "api_key",
+        "access_token",
+        "raw-prompt",
+        "?token",
+        '"source":',
+        "branch: main",
+        "/docs",
+    ):
+        assert unsafe not in serialized
+        assert unsafe not in persisted
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_pages_feed_bypass(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-pages-feed-bypass",
+        "title": "GitHub Pages Feed Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/pages?access_token=***#raw-prompt",
+    })
+    github_pages_body = json.dumps({
+        "version": "https://jsonfeed.org/version/1.1",
+        "items": [{"title": "Pages feed bypass", "summary": "safe-looking pages summary should not persist"}],
+        "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+    }).encode("utf-8")
+
+    class FakeResponse:
+        headers = {"Content-Type": "application/feed+json; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return github_pages_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-pages-feed-bypass.md").exists()
+    assert "safe-looking pages summary" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_pages_non_json_fallback(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-pages-non-json-fallback",
+        "title": "GitHub Pages Non-JSON Fallback",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/pages?access_token=***#raw-prompt",
+    })
+    fallback_body = b"Summary: safe-looking pages text fallback must not persist\nSECRET_VALUE_DO_NOT_LEAK"
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return fallback_body
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", lambda *_args, **_kwargs: FakeResponse())
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-pages-non-json-fallback.md").exists()
+    assert "safe-looking pages text fallback" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_pages_malformed_path_before_fetch(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-pages-malformed-path",
+        "title": "GitHub Pages Malformed Path",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/pages/builds?access_token=***#raw-prompt",
+    })
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("malformed GitHub Pages route must fail before fetch")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert calls == []
+    assert not (root / "vault" / "github-pages-malformed-path.md").exists()
+    assert "pages/builds" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_pages_legacy_userinfo_before_fetch(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    receipt = register_source_reference({
+        "source_id": "github-pages-legacy-userinfo",
+        "title": "GitHub Pages Legacy Userinfo",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/pages",
+    })
+    legacy_payload = {
+        "source_id": "github-pages-legacy-userinfo",
+        "origin_uri": "https://octo-capy:SECRET_VALUE_DO_NOT_LEAK@api.github.com/repos/capy/spaces/pages?access_token=***#raw-prompt",
+        "refresh_interval_seconds": 3600,
+    }
+    with capy_memory._connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET payload_json = ?, status = 'pending', attempts = 0 WHERE job_id = ?",
+            (json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")), receipt["job_id"]),
+        )
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("legacy userinfo GitHub Pages source must fail before fetch")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 1
+    assert result["jobs"][0]["job_id"] == receipt["job_id"]
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert calls == []
+    assert not (root / "vault" / "github-pages-legacy-userinfo.md").exists()
+    assert "octo-capy" not in serialized
+    assert "api.github.com" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
