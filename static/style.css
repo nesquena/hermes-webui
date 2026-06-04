@@ -4173,6 +4173,18 @@ main.main > #mainPlugin{display:none;}
    the row's gap:6px handles spacing, no margin/vertical-align needed. */
 .session-project-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block;}
 
+/* ── Saved prompts popup ── */
+.saved-prompts-popup{position:absolute;bottom:calc(100% + 8px);left:0;min-width:280px;max-width:380px;max-height:320px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:200;flex-direction:column;gap:2px;padding:6px;}
+.saved-prompt-row{display:flex;align-items:center;gap:6px;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:13px;}
+.saved-prompt-row:hover{background:var(--hover-bg);}
+.saved-prompt-label{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
+.saved-prompt-delete{flex-shrink:0;background:none;border:none;cursor:pointer;color:var(--muted);padding:2px;border-radius:4px;display:flex;align-items:center;justify-content:center;}
+.saved-prompt-delete:hover{color:var(--danger,#f56565);background:rgba(245,101,101,.12);}
+.saved-prompt-add-row{padding:6px 4px 2px;border-top:1px solid var(--border);margin-top:4px;}
+.saved-prompt-save-btn{width:100%;padding:6px 10px;border-radius:6px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:12px;font-weight:600;cursor:pointer;text-align:center;}
+.saved-prompt-save-btn:hover{background:var(--accent-bg-strong);}
+.saved-prompts-empty,.saved-prompts-loading{padding:12px 10px;font-size:12px;color:var(--muted);text-align:center;}
+
 /* ── Code copy button ── */
 .code-copy-btn{background:var(--hover-bg);border:1px solid var(--border2);border-radius:4px;color:var(--muted);font-size:11px;cursor:pointer;padding:2px 6px;transition:all .15s;line-height:1.3;}
 .code-copy-btn:hover{background:rgba(255,255,255,.12);color:var(--text);}
