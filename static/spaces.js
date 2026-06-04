@@ -3941,6 +3941,7 @@
     }).join('') : '<div class="capy-spaces-muted">No spaces found in recovery metadata.</div>';
     return '<div class="capy-spaces-card"><h3>Safe recovery</h3>' +
       '<div class="capy-spaces-muted">Generated widget execution: '+(data.generated_widgets_rendered ? 'enabled' : 'disabled')+'. This panel lists metadata only so broken generated UI cannot execute here.</div>' +
+      renderRecoveryActionReceipt(data || {}) +
       renderRecoveryAdminGate(data || {}) +
       renderRecoveryModules(data || {}) +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';

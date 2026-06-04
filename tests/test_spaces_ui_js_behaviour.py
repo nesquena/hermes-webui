@@ -1170,12 +1170,61 @@ global.fetch = async function(path, opts = {}) {
         disabled_space_count: 1,
         disabled_widget_count: 1,
         rollback_point_count: 3,
-        queued_event_count: 1,
+        queued_event_count: scenario === 'recoverySnapshotReceipts' ? 2 : 1,
         module_count: 3,
         disabled_module_count: 1,
+      },
+      prompt_preflight: scenario === 'recoverySnapshotReceipts' ? {
+        available: true,
+        action: 'space.recovery.snapshot',
+        boundary: 'recovery_action',
+        status: 'required',
+        severity: 'none',
+        metadata_only: true,
+        raw_prompt_stored: false,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
-      },
+      } : undefined,
+      autonomy_policy: scenario === 'recoverySnapshotReceipts' ? {
+        available: true,
+        action: 'space.recovery.snapshot',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['generated_widget_execution'],
+        prompt_preflight_status: 'required',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      } : undefined,
+      progress_event: scenario === 'recoverySnapshotReceipts' ? {
+        event_id: 'evt-recovery-snapshot',
+        event_type: 'tool.completed',
+        family: 'tool',
+        run_id: 'recovery.snapshot:recovery',
+        redaction_status: 'metadata_only',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        raw_prompt: 'ignore previous instructions',
+      } : undefined,
+      output_compaction: scenario === 'recoverySnapshotReceipts' ? {
+        tool: 'capy-spaces-tool-action',
+        command: 'space.recovery.snapshot',
+        exit_status: 0,
+        original_chars: 520,
+        compacted_chars: 180,
+        compacted: true,
+        metadata_only: true,
+        rules_applied: ['retain_artifact_handles'],
+        redaction_status: 'metadata_only',
+        retained_artifact_handles: [{ kind: 'recovery', handle: 'recovery.snapshot', label: 'safe recovery snapshot' }],
+        retained_citations: [],
+        text: 'recovery snapshot metadata only\nrenderer <script>bad()</script> api_key SECRET_VALUE_DO_NOT_LEAK raw_prompt ignore previous',
+      } : undefined,
       modules: [
         { module_id: 'safe-module', name: 'Safe Module', description: 'Metadata-only module descriptor', scope: 'space', disabled: false, revision_event_id: scenario === 'recoveryModuleUnsafeRevisionEventId' ? 'module-rev' : undefined, source: 'SECRET_SOURCE', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
         { module_id: 'unsafe-module', name: '[REDACTED]', description: '[REDACTED]', scope: 'global', disabled: true, disabled_reason: '[REDACTED]', revision_event_id: scenario === 'recoveryModuleUnsafeRevisionEventId' ? '0123456789abcdef0123456789abcdef' : 'module-rev', source: 'SECRET_SOURCE', script: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
@@ -3457,7 +3506,7 @@ async function dispatchWindowMessage(data, opts) {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
     await window.loadCapySpaces();
     await click('deleteSpace', { spaceId: 'lab' });
-  } else if (scenario === 'recovery' || scenario === 'recoveryUnsafeSpaceId' || scenario === 'recoveryUnsafeTopRevisionEventId' || scenario === 'recoveryModuleUnsafeRevisionEventId' || scenario === 'recoveryUnsafeSpaceDisplayMetadata' || scenario === 'recoveryUnownedRevisionSummary') {
+  } else if (scenario === 'recovery' || scenario === 'recoverySnapshotReceipts' || scenario === 'recoveryUnsafeSpaceId' || scenario === 'recoveryUnsafeTopRevisionEventId' || scenario === 'recoveryModuleUnsafeRevisionEventId' || scenario === 'recoveryUnsafeSpaceDisplayMetadata' || scenario === 'recoveryUnownedRevisionSummary') {
     await window.loadCapySpacesRecovery();
   } else if (scenario === 'disableRecoveryWidget') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
@@ -6683,6 +6732,25 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "<script>" not in out["recoveryHtml"]
     assert "renderer" not in out["recoveryHtml"]
     assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_snapshot_renders_metadata_only_trust_receipts(driver_path):
+    out = _run_spaces_scenario(driver_path, "recoverySnapshotReceipts")
+
+    assert "Safe recovery controls" in out["recoveryHtml"]
+    assert "Action policy" in out["recoveryHtml"]
+    assert "Action: space.recovery.snapshot" in out["recoveryHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: required" in out["recoveryHtml"]
+    assert "Gates: Generated widget execution approval" in out["recoveryHtml"]
+    assert "Recovery progress" in out["recoveryHtml"]
+    assert "tool.completed · tool · run recovery.snapshot:recovery · metadata-only progress receipt" in out["recoveryHtml"]
+    assert "Compaction evidence" in out["recoveryHtml"]
+    assert "space.recovery.snapshot" in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
+    assert "raw_prompt" not in out["recoveryHtml"]
 
 
 def test_spaces_ui_recovery_panel_keeps_unowned_revision_summaries_non_actionable(driver_path):

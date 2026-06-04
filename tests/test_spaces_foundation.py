@@ -40,6 +40,42 @@ def test_spaces_feature_flag_disabled_is_safe(monkeypatch, tmp_path):
     assert recovery["generated_widgets_rendered"] is False
 
 
+def test_recovery_snapshot_exposes_metadata_only_policy_progress_and_compaction_receipts(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "recovery-snapshot-lab", "name": "Recovery Snapshot Lab"})
+
+    snapshot = spaces.recovery_snapshot()
+    from api.capy_progress import progress_events_log_path
+
+    serialized = json.dumps(snapshot, sort_keys=True).lower()
+
+    assert snapshot["enabled"] is True
+    assert snapshot["prompt_preflight"]["boundary"] == "recovery_action"
+    assert snapshot["prompt_preflight"]["status"] == "required"
+    assert snapshot["prompt_preflight"]["metadata_only"] is True
+    assert snapshot["prompt_preflight"]["raw_prompt_stored"] is False
+    assert snapshot["autonomy_policy"]["action"] == "space.recovery.snapshot"
+    assert snapshot["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+    assert snapshot["autonomy_policy"]["prompt_preflight_status"] == "required"
+    assert snapshot["autonomy_policy"]["metadata_only"] is True
+    assert snapshot["progress_event"]["event_type"] == "tool.completed"
+    assert snapshot["progress_event"]["stored"] is False
+    assert snapshot["progress_event"]["queued"] is False
+    assert snapshot["progress_event"]["family"] == "tool"
+    assert snapshot["progress_event"]["run_id"] == "recovery.snapshot:recovery"
+    assert snapshot["progress_event"]["redaction_status"] == "metadata_only"
+    assert snapshot["output_compaction"]["tool"] == "capy-spaces-tool-action"
+    assert snapshot["output_compaction"]["command"] == "space.recovery.snapshot"
+    assert snapshot["output_compaction"]["metadata_only"] is True
+
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert '\"renderer\"' not in serialized
+    assert "api_key" not in serialized
+    assert '\"raw_prompt\"' not in serialized
+    assert not progress_events_log_path().exists()
+
+
 def test_development_tool_actions_are_receipt_only_and_redact_payload(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "development-boundary-lab", "name": "Development Boundary Lab"})

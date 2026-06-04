@@ -13529,6 +13529,24 @@ def recovery_snapshot() -> dict[str, Any]:
         except Exception:
             continue
     spaces.sort(key=lambda s: s.get("updated_at") or 0, reverse=True)
+    prompt_preflight = _recovery_required_prompt_preflight_receipt("space.recovery.snapshot")
+    autonomy_policy = _recovery_toggle_action_policy_receipt("space.recovery.snapshot")
+    progress_event = {
+        "stored": False,
+        "queued": False,
+        "event_type": "tool.completed",
+        "family": "tool",
+        "run_id": "recovery.snapshot:recovery",
+        "space_id": "recovery",
+        "redaction_status": "metadata_only",
+    }
+    output_compaction = _space_tool_action_output_compaction_receipt(
+        action="space.recovery.snapshot",
+        space_id="recovery",
+        autonomy_policy=autonomy_policy,
+        progress_event=progress_event,
+        include_widget_count=False,
+    )
     return {
         "enabled": True,
         "schema_version": SCHEMA_VERSION,
@@ -13537,4 +13555,8 @@ def recovery_snapshot() -> dict[str, Any]:
         "summary": counts,
         "spaces": spaces,
         "modules": modules,
+        "prompt_preflight": prompt_preflight,
+        "autonomy_policy": autonomy_policy,
+        "progress_event": progress_event,
+        "output_compaction": output_compaction,
     }
