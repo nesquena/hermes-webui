@@ -7,10 +7,6 @@ import sys
 import types
 from unittest import mock
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text(encoding="utf-8")
-
-
 def test_session_db_helper_uses_request_state_db_path():
     import api.streaming as streaming
 
@@ -50,17 +46,40 @@ def test_session_db_helper_returns_none_when_constructor_fails():
     assert db is None
 
 
-def test_self_heal_retry_reuses_request_state_db_path_for_new_agent():
-    # Both retry branches should refresh session_db with _build_session_db_for_stream(...)
-    # before creating the replacement agent.
-    assert "_build_session_db_for_stream(_state_db_path)" in STREAMING_PY
+def test_self_heal_session_db_handle_is_replaced_safely():
+    import api.streaming as streaming
 
-    silent_block = STREAMING_PY[STREAMING_PY.index("# Rebuild agent kwargs and create a fresh agent"):]
-    silent_branch_index = silent_block.index("agent = _AIAgent(**_agent_kwargs)")
-    silent_assign = silent_block.index("_agent_kwargs['session_db'] = _build_session_db_for_stream(_state_db_path)")
-    assert silent_assign < silent_branch_index
+    class FakeDb:
+        def __init__(self, label):
+            self.label = label
 
-    exception_block = STREAMING_PY[STREAMING_PY.index("# Build a fresh agent with the new credentials"):]
-    except_branch_index = exception_block.index("_heal_agent = _AIAgent(**_heal_kwargs)")
-    except_assign = exception_block.index("_heal_kwargs['session_db'] = _build_session_db_for_stream(_state_db_path)")
-    assert except_assign < except_branch_index
+        def close(self):
+            self.closed = True
+
+    old_db = FakeDb("old")
+    new_db = FakeDb("new")
+    with mock.patch.object(
+        streaming, "_build_session_db_for_stream", return_value=new_db
+    ) as build_db:
+        kwargs = {"session_db": old_db}
+        assigned_db = streaming._replace_session_db_in_kwargs(kwargs, Path("/tmp/profile/state.db"))
+
+    assert assigned_db is new_db
+    assert kwargs["session_db"] is new_db
+    build_db.assert_called_once_with(Path("/tmp/profile/state.db"))
+    assert getattr(old_db, "closed", False) is True
+    assert hasattr(new_db, "closed") is False
+
+
+def test_session_db_handle_not_double_closed_when_rebuilt_to_same_instance():
+    import api.streaming as streaming
+
+    db = mock.Mock(name="session_db")
+
+    with mock.patch.object(streaming, "_build_session_db_for_stream", return_value=db):
+        kwargs = {"session_db": db}
+        returned_db = streaming._replace_session_db_in_kwargs(kwargs, Path("/tmp/profile/state.db"))
+
+    assert returned_db is db
+    assert kwargs["session_db"] is db
+    db.close.assert_not_called()
