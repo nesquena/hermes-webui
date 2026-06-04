@@ -100,6 +100,54 @@ class TestPluginModelProvidersSettings:
             config._cfg_mtime = old_mtime
             config.invalidate_models_cache()
 
+    def test_get_providers_plugin_key_source_from_auth_store(self, monkeypatch, tmp_path):
+        """Credential-pool auth must not be misreported as config_yaml."""
+        _install_fake_yandex_plugin(monkeypatch)
+
+        fake_pkg = types.ModuleType("hermes_cli")
+        fake_pkg.__path__ = []
+        fake_models = types.ModuleType("hermes_cli.models")
+        fake_models.list_available_providers = lambda: []
+        fake_models.provider_model_ids = lambda pid: []
+        fake_auth = types.ModuleType("hermes_cli.auth")
+        fake_auth.get_auth_status = lambda pid: (
+            {
+                "logged_in": True,
+                "configured": True,
+                "key_source": "credential_pool:yandex",
+            }
+            if pid == "yandex"
+            else {}
+        )
+        monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
+        monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+        monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        from api.providers import get_providers
+
+        try:
+            result = get_providers()
+            yandex = next((p for p in result["providers"] if p["id"] == "yandex"), None)
+            assert yandex is not None
+            assert yandex["has_key"] is True
+            assert yandex["key_source"] == "credential_pool:yandex"
+            assert yandex["key_source"] != "config_yaml"
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+            config.invalidate_models_cache()
+
     def test_set_provider_key_accepts_plugin_env_var(self, monkeypatch, tmp_path):
         _install_fake_yandex_plugin(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)

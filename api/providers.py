@@ -1778,6 +1778,7 @@ def get_providers() -> dict[str, Any]:
         display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
         is_oauth = _provider_is_oauth(pid)
         has_key = _provider_has_key(pid)
+        plugin_auth_status: dict[str, Any] | None = None
         if not has_key and is_plugin_model_provider(pid):
             try:
                 from hermes_cli.auth import get_auth_status as _gas_plugin
@@ -1786,6 +1787,7 @@ def get_providers() -> dict[str, Any]:
                     _plugin_status.get("logged_in") or _plugin_status.get("configured")
                 ):
                     has_key = True
+                    plugin_auth_status = _plugin_status
             except Exception:
                 logger.debug("Plugin provider auth check failed for %s", pid, exc_info=True)
 
@@ -1843,9 +1845,19 @@ def get_providers() -> dict[str, Any]:
                             aliased = True
                             break
                     if not aliased:
-                        key_source = "config_yaml"
+                        _plugin_ks = (
+                            str(plugin_auth_status.get("key_source") or "").strip()
+                            if isinstance(plugin_auth_status, dict)
+                            else ""
+                        )
+                        key_source = _plugin_ks or "config_yaml"
             else:
-                key_source = "config_yaml"
+                _plugin_ks = (
+                    str(plugin_auth_status.get("key_source") or "").strip()
+                    if isinstance(plugin_auth_status, dict)
+                    else ""
+                )
+                key_source = _plugin_ks or "config_yaml"
         elif not _provider_env_var_for(pid):
             # Fallback: provider is not a known API-key provider and not in
             # the hardcoded _OAUTH_PROVIDERS set.  It may be a custom or

@@ -8,10 +8,12 @@ relying only on the static ``_PROVIDER_DISPLAY`` / ``_PROVIDER_MODELS`` tables.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_PROFILES_LOCK = threading.Lock()
 _PROFILES_BY_NAME: dict[str, Any] | None = None
 
 
@@ -37,15 +39,20 @@ def _load_profiles_by_name() -> dict[str, Any]:
 def plugin_model_provider_profiles() -> dict[str, Any]:
     """Return registered model-provider profiles keyed by canonical slug."""
     global _PROFILES_BY_NAME
-    if _PROFILES_BY_NAME is None:
-        _PROFILES_BY_NAME = _load_profiles_by_name()
-    return _PROFILES_BY_NAME
+    cached = _PROFILES_BY_NAME
+    if cached is not None:
+        return cached
+    with _PROFILES_LOCK:
+        if _PROFILES_BY_NAME is None:
+            _PROFILES_BY_NAME = _load_profiles_by_name()
+        return _PROFILES_BY_NAME
 
 
 def invalidate_plugin_model_provider_cache() -> None:
     """Clear cached plugin discovery (e.g. after config reload)."""
     global _PROFILES_BY_NAME
-    _PROFILES_BY_NAME = None
+    with _PROFILES_LOCK:
+        _PROFILES_BY_NAME = None
 
 
 def plugin_model_provider_ids() -> frozenset[str]:
