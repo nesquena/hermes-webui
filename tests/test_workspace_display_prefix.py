@@ -16,6 +16,10 @@ def test_workspace_display_prefix_helper_strips_leading_metadata_only():
     assert end != -1, "user fenced block renderer not found after prefix stripper"
     helper = src[start:end]
 
+    # Project context block regex must be present (matches assigned and unassigned
+    # `[HermesWebUIContext::v1 ...]` metadata).
+    assert "HermesWebUIContext::v1" in helper
+    assert "project_id:" in helper and "project_name:" in helper and "workspace:" in helper
     # v1 sentinel regex must be present (matches `[Workspace::v1: <escaped path>]`).
     assert r"^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*" in helper
     # Legacy regex must ALSO be present as a fallback for transcripts saved
