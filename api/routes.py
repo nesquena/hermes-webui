@@ -9720,14 +9720,9 @@ def _handle_tts(handler, parsed):
         if not api_key:
             # Fall back to reading from Hermes .env file
             try:
+                from api.onboarding import _load_env_file
                 from api.profiles import get_active_hermes_home
-                env_path = get_active_hermes_home() / ".env"
-                if env_path.exists():
-                    for line in env_path.read_text(encoding="utf-8").splitlines():
-                        line = line.strip()
-                        if line.startswith("ELEVENLABS_API_KEY="):
-                            api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            break
+                api_key = _load_env_file(get_active_hermes_home() / ".env").get("ELEVENLABS_API_KEY", "")
             except Exception:
                 pass
         if not api_key:
@@ -9738,13 +9733,14 @@ def _handle_tts(handler, parsed):
         voice_id = "gJlzF5JxsCvM5hQAoRyD"  # sensible default (Hermy voice)
         model_id = "eleven_multilingual_v2"
         try:
-            from api.config import _cfg_cache as _cc
-            tts_cfg = (_cc or {}).get("tts", {})
+            from api.config import get_config
+            tts_cfg = (get_config() or {}).get("tts", {})
             if isinstance(tts_cfg, dict):
                 el_cfg = tts_cfg.get("elevenlabs", {})
                 if isinstance(el_cfg, dict):
                     voice_id = el_cfg.get("voice_id", voice_id)
                     model_id = el_cfg.get("model", model_id) or el_cfg.get("model_id", model_id)
+                    # ^ treat empty string as "not set" — fall through to default
         except Exception:
             pass  # fall back to defaults
 
@@ -9768,7 +9764,12 @@ def _handle_tts(handler, parsed):
             "Accept": "audio/mpeg",
         })
 
-        # Download full audio first (ElevenLabs streaming is slow through urllib)
+        # Buffer the full response before sending first byte.
+        # The streaming endpoint is designed for chunked delivery, but urllib's
+        # chunked-read path adds per-chunk overhead that dominates short TTS
+        # payloads. With the 5000-char cap enforced above the buffer is bounded
+        # (a few MB of mp3 worst case), so full-buffer-then-send is faster in
+        # practice and simpler to reason about.
         audio_data = b""
         try:
             with _urlopen(req, timeout=30) as resp:
