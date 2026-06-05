@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- GitHub pull-request list source-refresh now fail-closes non-canonical raw authorities before URL normalization, preventing uppercase-host PR-list route variants from being fetched or persisted and keeping query/fragment/API-auth/raw-prompt markers out of receipts, search output, and vault rows.
+
 - GitHub environment variables source-refresh metadata now has a narrow JSON-only parser for exact allow-listed `/repos/{owner}/{repo}/environments/{environment_name}/variables` API payloads, making environment variable freshness visible only from safe repository path, environment name, variable count, bounded variable names, and safe created/updated timestamps while failing closed on JSON Feed bypasses and lookalike-host route bypasses and omitting raw values, URLs, API-auth/query/fragment/userinfo markers, prompts, scripts, renderer/source/data/html fields, and secret-looking fixture values from receipts/search/vault output.
 
 - GitHub environment private-name source-refresh metadata now has a narrow JSON-only parser for exact allow-listed `/repos/{owner}/{repo}/environments/{environment_name}/secrets` API payloads, making environment secret-name freshness visible only from safe repository path, environment name, count, bounded safe names, and safe created/updated timestamps while failing closed on text fallback, lookalike-host route bypasses, encoded path tricks, malformed environment-secret routes, and omitting raw values, URLs, API-auth/query/fragment/userinfo markers, prompts, scripts, renderer/source/data/html fields, and secret-looking fixture values from receipts/search/vault output.

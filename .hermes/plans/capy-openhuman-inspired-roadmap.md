@@ -122,6 +122,7 @@ Delivered:
 - `GET /api/capy-memory/status` returns local-only source/chunk/stale/error/refresh-job counts.
 - `static/spaces.js` renders the product-home Memory freshness card from `api/capy-memory/status` with hostile fields ignored/redacted.
 - `api/knowledge.py` / Memory Tree bridge registers local knowledge sources as metadata-only Memory Tree source records with local provenance/freshness status.
+- GitHub pull-request list source-refresh now fail-closes non-canonical raw authorities before URL normalization, so uppercase-host PR-list routes downgrade to local `capy-memory://` receipts and never fetch or persist query/fragment/auth prompt markers.
 
 Remaining:
 - Broaden cron/daemon triggering and additional source-specific fetchers while keeping existing manual/scheduled UI trigger receipts, GitHub issue/PR/repository/readme/contents/release/latest-release/release-list/release-assets/branch/tag/labels/topics/workflow/workflow-list/workflow-run/workflow-runs-list/workflow-jobs/workflow-artifacts/repository-artifacts/actions-private-name/environment-private-name/environment-variables/check-runs/commit-statuses/issue-list/issue-event-list/PR-list/PR-requested-reviewers-list/PR-review-list/PR-commit-list/PR-file-list/issue-PR-comments/contributors/stargazers/subscribers/fork-list/commit/commit-list/participation-stats/traffic-views/traffic-clones/environments/collaborators/community-profile metadata ingestion, and all public UI metadata-only.

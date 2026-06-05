@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `fix(capy-memory): fail-close GitHub PR-list raw hosts`
+  - Added RED/GREEN Memory Tree source-refresh regression coverage for uppercase raw GitHub PR-list hosts before URL normalization.
+  - Non-canonical PR-list routes now downgrade to local `capy-memory://` receipts and never fetch, create vault rows, or echo query/fragment/API-auth/raw-prompt markers.
+
 - `feat(capy-memory): ingest GitHub environment variables metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub Actions environment variables API payloads (`/repos/{owner}/{repo}/environments/{environment_name}/variables`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, environment name, variable count, bounded variable names, and safe created/updated timestamps while omitting raw values, row/global URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.

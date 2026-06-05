@@ -515,6 +515,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
             origin_uri = f"capy-memory://{source_id}"
         else:
             origin_uri = secret_scanning_origin
+    if _github_pulls_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_pulls_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_pull_requested_reviewers_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
         or _github_pull_requested_reviewers_path_info(raw_origin_text) is None
@@ -8330,6 +8335,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or raw_secret_scanning_parts.fragment
             or not _github_secret_scanning_alerts_safe_origin(raw_origin_uri)
         ):
+            raise RuntimeError("refresh fetcher disabled")
+    if _github_pulls_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_pulls_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
     if _github_pull_requested_reviewers_path_matches(raw_origin_uri):
         if (

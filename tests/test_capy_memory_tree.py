@@ -3022,6 +3022,41 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_pull_list_case_m
     assert "raw-prompt" not in serialized
 
 
+def test_register_source_reference_fail_closes_github_pull_list_uppercase_host(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+
+    receipt = register_source_reference({
+        "source_id": "github-pr-list-uppercase-host",
+        "title": "GitHub PR List Uppercase Host",
+        "origin_uri": "https://API.GITHUB.COM/repos/capy/spaces/pulls?access_token=***#raw-prompt",
+    })
+    calls = []
+
+    def fake_refresh_open(request, *, timeout):
+        calls.append({"url": request.full_url, "timeout": timeout})
+        raise AssertionError("non-canonical GitHub pull-list host must not be fetched")
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=1)
+    jobs = list_source_refresh_jobs(limit=1)
+    serialized = json.dumps({"receipt": receipt, "result": result, "jobs": jobs}, sort_keys=True).lower()
+
+    assert receipt["origin_uri"] == "capy-memory://github-pr-list-uppercase-host"
+    assert jobs["jobs"][0]["origin_uri"] == "capy-memory://github-pr-list-uppercase-host"
+    assert calls == []
+    assert result["processed"] == 1
+    assert result["jobs"][0]["status"] == "pending"
+    assert result["jobs"][0]["error"] == "refresh failed"
+    assert not (root / "vault" / "github-pr-list-uppercase-host.md").exists()
+    assert "api.github.com/repos/capy/spaces/pulls" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_run_source_refresh_jobs_default_fetcher_rejects_github_pull_list_long_url_title(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
