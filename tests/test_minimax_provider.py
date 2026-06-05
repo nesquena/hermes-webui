@@ -115,6 +115,15 @@ def test_minimax_fallback_provider_label():
 
 # ── _PROVIDER_MODELS ──────────────────────────────────────────────────────────
 
+def test_minimax_provider_models_has_m3():
+    """_PROVIDER_MODELS['minimax'] must include MiniMax-M3."""
+    models = config._PROVIDER_MODELS.get('minimax', [])
+    ids = [m['id'] for m in models]
+    assert 'MiniMax-M3' in ids, (
+        f"MiniMax-M3 missing from _PROVIDER_MODELS['minimax']. Found: {ids}"
+    )
+
+
 def test_minimax_provider_models_has_m2_7():
     """_PROVIDER_MODELS['minimax'] must include MiniMax-M2.7."""
     models = config._PROVIDER_MODELS.get('minimax', [])
