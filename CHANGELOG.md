@@ -3,6 +3,15 @@
 
 ## [Unreleased]
 
+## [v0.51.269] — 2026-06-05 — Release IK (stage-b2 — sidebar perf + search scope + Windows ctl)
+
+### Fixed
+- **Session search results are now scoped to the active profile** (matching how the sidebar already filters), so a search no longer surfaces sessions belonging to other profiles unless `?all_profiles=1` is requested. (#3646, @Hinotoi-agent)
+- **`ctl.sh stop` now tree-kills the WebUI process on Windows (Git Bash/MSYS)** via `taskkill //F //T`, and resolves owned-process paths across Windows/POSIX path forms. POSIX behavior is unchanged (falls through to the existing `kill`/`kill -KILL`). (#3670, @rodboev)
+
+### Performance
+- **The sidebar session list is partitioned in a single pass** instead of chaining five separate `.filter()` passes over the row set on every render, reducing per-render work for large session lists. Filtering/ordering/archived-count behavior is unchanged. (#3658, @pamnard)
+
 ## [v0.51.268] — 2026-06-05 — Release IJ (stage-b1 — low-risk perf + provider/clarify fixes)
 
 ### Fixed
