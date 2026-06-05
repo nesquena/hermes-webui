@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.275] — 2026-06-05 — Release IQ (stage-p3d — approval SSE state extraction)
+
+### Internal
+- **Approval SSE/queue state is extracted from `api/routes.py` into a dedicated `api/route_approvals.py` module**, reducing `routes.py` by ~140 lines with no behavior change. Pure refactor — the approval queue, SSE broadcast, and attention-session-event paths are unchanged (verified by the existing approval/SSE/attention test suites plus a new extraction-contract test). (#3575, @rodboev)
+
 ## [v0.51.274] — 2026-06-05 — Release IP (stage-p3c — symlink-swap TOCTOU hardening for file APIs)
 
 ### Security
