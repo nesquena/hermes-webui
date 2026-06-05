@@ -116,6 +116,34 @@ def test_ensure_workspace_dir_returns_false_for_unwritable_path(monkeypatch, tmp
     assert result is False
 
 
+def test_mode_allows_checks_process_identity_for_owner_bits(monkeypatch, tmp_path):
+    import stat
+
+    path = tmp_path / "root_only"
+    path.mkdir()
+    path.chmod(stat.S_IRWXU)
+    st = path.stat()
+    monkeypatch.setattr(config.os, "geteuid", lambda: st.st_uid + 1, raising=False)
+    monkeypatch.setattr(config.os, "getegid", lambda: st.st_gid + 1, raising=False)
+    monkeypatch.setattr(config.os, "getgroups", lambda: [], raising=False)
+
+    assert config._mode_allows(path, 0b111) is False
+
+
+def test_mode_allows_accepts_other_bits_for_non_owner(monkeypatch, tmp_path):
+    import stat
+
+    path = tmp_path / "public"
+    path.mkdir()
+    path.chmod(stat.S_IRWXU | stat.S_IRWXO)
+    st = path.stat()
+    monkeypatch.setattr(config.os, "geteuid", lambda: st.st_uid + 1, raising=False)
+    monkeypatch.setattr(config.os, "getegid", lambda: st.st_gid + 1, raising=False)
+    monkeypatch.setattr(config.os, "getgroups", lambda: [], raising=False)
+
+    assert config._mode_allows(path, 0b111) is True
+
+
 def test_env_var_wins_over_settings_json_on_startup(monkeypatch, tmp_path):
     """HERMES_WEBUI_DEFAULT_WORKSPACE must not be overridden by settings.json at startup.
 

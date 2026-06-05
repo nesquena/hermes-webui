@@ -879,8 +879,10 @@ async function refreshGitStatus(opts={}){
   if(git.loading&&opts.auto)return git.status;
   git.loading=true;
   try{
+    const sessionId=S.session.session_id;
     const priorSignature=_gitStatusSignature(git.status);
-    const data=await api(`/api/git/status?session_id=${encodeURIComponent(S.session.session_id)}`);
+    const data=await api(`/api/git/status?session_id=${encodeURIComponent(sessionId)}`);
+    if(!S.session||S.session.session_id!==sessionId)return git.status;
     git.status=data.git||null;
     if(!git.status||!git.status.is_git)git.selectedTab='files';
     _reconcileGitSelection();
@@ -1348,7 +1350,9 @@ function setLargeMarkdownForceRenderVisible(visible){
 
 function renderMarkdownPreviewContent(data){
   showPreview('md');
-  renderWorkspaceMarkdown((data&&data.content)||'');
+  $('previewMd').innerHTML=renderMd(data.content);
+  postProcessWorkspaceMarkdown($('previewMd'));
+  if(typeof renderKatexBlocks==='function')renderKatexBlocks($('previewMd'));
 }
 
 function forceRenderMarkdownPreview(){
@@ -2368,7 +2372,7 @@ async function stageGitPath(path){
     const data=await api('/api/git/stage',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,paths:[path]})});
     _setGitStatus(data.git);
     if(S.git.selectedDiff&&S.git.selectedDiff.path===path)openGitDiff(path,'staged');
-  }catch(e){showToast(e.message||t('git_commit_failed'),3000,'error');}
+  }catch(e){showToast(e.message||`${t('git_stage')} failed`,3000,'error');}
   finally{git.mutating=false;renderGitChanges();}
 }
 
@@ -2382,7 +2386,7 @@ async function stageGitAllChanges(){
     const data=await api('/api/git/stage',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,paths})});
     _setGitStatus(data.git);
     if(S.git.selectedDiff&&paths.includes(S.git.selectedDiff.path))openGitDiff(S.git.selectedDiff.path,'staged');
-  }catch(e){showToast(e.message||t('git_commit_failed'),3000,'error');}
+  }catch(e){showToast(e.message||`${t('git_stage_all')} failed`,3000,'error');}
   finally{git.mutating=false;renderGitChanges();}
 }
 
@@ -2396,7 +2400,7 @@ async function stageGitSelectedChanges(){
     const data=await api('/api/git/stage',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,paths})});
     _setGitStatus(data.git);
     if(S.git.selectedDiff&&paths.includes(S.git.selectedDiff.path))openGitDiff(S.git.selectedDiff.path,'staged');
-  }catch(e){showToast(e.message||t('git_commit_failed'),3000,'error');}
+  }catch(e){showToast(e.message||`${t('git_stage_selected')} failed`,3000,'error');}
   finally{git.mutating=false;renderGitChanges();}
 }
 
@@ -2619,8 +2623,10 @@ async function _autoFetchWorkspaceGit(){
   git.autoFetching=true;
   _renderGitAutoFetchStatus();
   try{
+    const sessionId=S.session.session_id;
     const priorSignature=_gitStatusSignature(git.status);
-    const data=await api(`/api/git/fetch`,{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
+    const data=await api(`/api/git/fetch`,{method:'POST',body:JSON.stringify({session_id:sessionId})});
+    if(!S.session||S.session.session_id!==sessionId)return null;
     git.lastAutoFetchAt=Date.now();
     git.lastAutoFetchErrorAt=0;
     git.lastAutoFetchError='';
