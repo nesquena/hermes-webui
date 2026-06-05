@@ -10437,7 +10437,7 @@ def _handle_cron_output(handler, parsed):
     # Match the job_id boundary enforced by the newer cron history/detail
     # handlers.  This endpoint also builds CRON_OUT / job_id before globbing
     # markdown outputs, so reject traversal-shaped IDs before path resolution.
-    if not _re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}", job_id) or job_id in (".", ".."):
+    if not _re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}", job_id):
         return j(handler, {"error": "invalid job_id"}, status=400)
     # Reject malformed limit instead of letting int() raise ValueError and
     # surface as a confusing 500. Clamp to a safe range; a negative value must

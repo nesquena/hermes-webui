@@ -2,6 +2,8 @@
 Sprint 10 Tests: server.py split, cancel endpoint, cron history, tool card polish.
 """
 import json, pathlib, urllib.error, urllib.request, urllib.parse
+from io import BytesIO
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
 from tests._pytest_port import BASE
@@ -23,6 +25,25 @@ def post(path, body=None):
             return json.loads(r.read()), r.status
     except urllib.error.HTTPError as e:
         return json.loads(e.read()), e.code
+
+
+class CaptureHandler:
+    headers = {}
+
+    def __init__(self):
+        self.status = None
+        self.response_headers = []
+        self.wfile = BytesIO()
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.response_headers.append((name, value))
+
+    def end_headers(self):
+        pass
+
 
 def make_session(created_list):
     d, _ = post("/api/session/new", {})
@@ -109,24 +130,6 @@ def test_crons_output_rejects_traversal_job_id(monkeypatch, tmp_path):
     """Cron output listing must not read markdown files outside OUTPUT_DIR."""
     from api.routes import _handle_cron_output
     import cron.jobs
-    from io import BytesIO
-
-    class CaptureHandler:
-        headers = {}
-
-        def __init__(self):
-            self.status = None
-            self.response_headers = []
-            self.wfile = BytesIO()
-
-        def send_response(self, status):
-            self.status = status
-
-        def send_header(self, name, value):
-            self.response_headers.append((name, value))
-
-        def end_headers(self):
-            pass
 
     output_dir = tmp_path / "cron" / "output"
     secret_dir = tmp_path / "memories"
@@ -149,24 +152,6 @@ def test_crons_output_still_returns_valid_job_outputs(monkeypatch, tmp_path):
     """Valid job ids still list recent markdown output content."""
     from api.routes import _handle_cron_output
     import cron.jobs
-    from io import BytesIO
-
-    class CaptureHandler:
-        headers = {}
-
-        def __init__(self):
-            self.status = None
-            self.response_headers = []
-            self.wfile = BytesIO()
-
-        def send_response(self, status):
-            self.status = status
-
-        def send_header(self, name, value):
-            self.response_headers.append((name, value))
-
-        def end_headers(self):
-            pass
 
     output_dir = tmp_path / "cron" / "output"
     job_dir = output_dir / "job_123"
