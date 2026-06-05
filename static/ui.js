@@ -307,9 +307,11 @@ let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 // Cached visWithIdx array — invalidated when S.messages.length changes.
 let _visWithIdxCache=null;
 let _visWithIdxCacheLen=0;
+let _visWithIdxCacheSrc=null;  // S.messages reference — detects wholesale replacement with same length
 function clearVisibleMessageRowCache(){
   _visWithIdxCache=null;
   _visWithIdxCacheLen=0;
+  _visWithIdxCacheSrc=null;
 }
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
@@ -355,9 +357,10 @@ function _messageRenderableMessageCount(){
   for(const m of (S.messages||[])){
     if(!m||!m.role||m.role==='tool') continue;
     if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) continue;
+    if(_isRecoveryControlMessage(m)) continue;
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) count++;
+    if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) count++;
   }
   return count;
 }
@@ -6964,7 +6967,7 @@ function renderMessages(options){
   // Cache visWithIdx so expanding the render window (Load earlier) doesn't
   // re-scan S.messages from scratch.  Invalidate only when the message array
   // length changes — i.e. new messages arrived or session was truncated.
-  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length){
+  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
     const rebuilt=[];
     let ri=0;
     for(const m of S.messages){
@@ -6979,6 +6982,7 @@ function renderMessages(options){
     }
     _visWithIdxCache=rebuilt;
     _visWithIdxCacheLen=S.messages.length;
+    _visWithIdxCacheSrc=S.messages;
   }
   const visWithIdx=_visWithIdxCache;
   const preservedCompressionRawIdxs=[];
