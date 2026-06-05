@@ -3953,6 +3953,14 @@ def _session_message_merge_key(msg: dict):
     message_identity = msg.get("id") or msg.get("message_id")
     if message_identity:
         return ("message_id", str(message_identity))
+    # Include tool_calls so assistant messages that invoke different tools
+    # (but share identical empty content and same-second timestamp) are not
+    # collapsed by the merge-key guard at line ~4216.  Without this,
+    # all tool-calling messages map to the same legacy key and the
+    # timestamp<=max_sidecar_timestamp blanket-skip at line ~4218 drops
+    # every state.db tool-call after the first one registered by the sidecar.
+    _tc = msg.get("tool_calls")
+    _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
     return (
         "legacy",
         str(msg.get("role") or ""),
@@ -3960,6 +3968,7 @@ def _session_message_merge_key(msg: dict):
         _normalized_message_timestamp_for_key(msg.get("timestamp")),
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
+        _tc_key,
     )
 
 
@@ -3976,6 +3985,11 @@ def _session_message_dedup_key(msg: dict):
     message_identity = msg.get("id") or msg.get("message_id")
     if message_identity:
         return ("message_id", str(message_identity))
+    # Include tool_calls in the key so assistant messages that carry
+    # different tool invocations (but identical empty content/timestamp)
+    # are never collapsed into one.  (#3346 regression)
+    _tc = msg.get("tool_calls")
+    _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
     return (
         "legacy",
         str(msg.get("role") or ""),
@@ -3983,6 +3997,7 @@ def _session_message_dedup_key(msg: dict):
         str(msg.get("timestamp") or ""),
         str(msg.get("tool_call_id") or ""),
         str(msg.get("tool_name") or msg.get("name") or ""),
+        _tc_key,
     )
 
 
@@ -4010,9 +4025,16 @@ def _session_message_content_key(msg: dict):
 def _session_message_visible_key(msg: dict):
     if not isinstance(msg, dict):
         return ("non_dict", repr(msg))
+    # Include tool_calls so assistant messages that invoke different tools
+    # (but share identical empty content) are not collapsed by sidecar
+    # prefix matching.  Without this, all tool-calling messages map to
+    # ("assistant", "") and the merge treats state.db rows as replays.
+    _tc = msg.get("tool_calls")
+    _tc_key = json.dumps(_tc, sort_keys=True, default=str) if _tc else ""
     return (
         str(msg.get("role") or ""),
         _normalized_session_message_content(msg),
+        _tc_key,
     )
 
 
@@ -4021,8 +4043,9 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
     loose_by_key = {}
     for key in visible_keys:
         try:
-            role, content = key
-        except (TypeError, ValueError):
+            role = key[0]
+            content = key[1]
+        except (TypeError, IndexError):
             continue
         if not content:
             continue
@@ -4034,24 +4057,27 @@ def _build_visible_duplicate_lookup(visible_keys: set[tuple]) -> dict:
 def _matching_visible_duplicate(visible_key: tuple, visible_keys: set[tuple], lookup: dict | None = None):
     if visible_key in visible_keys:
         return visible_key
-    role, content = visible_key
+    role = visible_key[0]
+    content = visible_key[1] if len(visible_key) > 1 else ""
     if not content:
         return None
     if lookup is None:
         lookup = _build_visible_duplicate_lookup(visible_keys)
     loose_content = None
-    for existing_role, existing_content in lookup.get("by_role", {}).get(role, []):
+    for existing_key in lookup.get("by_role", {}).get(role, []):
+        existing_role = existing_key[0]
+        existing_content = existing_key[1] if len(existing_key) > 1 else ""
         if role != existing_role or not existing_content:
             continue
         if content in existing_content or existing_content in content:
-            return (existing_role, existing_content)
+            return existing_key
         if loose_content is None:
             loose_content = _loose_session_message_content(content)
-        loose_existing = lookup.get("loose_by_key", {}).get((existing_role, existing_content), "")
+        loose_existing = lookup.get("loose_by_key", {}).get(existing_key, "")
         if loose_content and loose_existing and (
             loose_content in loose_existing or loose_existing in loose_content
         ):
-            return (existing_role, existing_content)
+            return existing_key
     return None
 
 
@@ -4253,7 +4279,13 @@ def merge_session_messages_append_only(
             if key in seen_message_keys and key[0] == "message_id":
                 continue
             if not (isinstance(key, tuple) and key[:1] == ("message_id",)):
-                continue
+                # Legacy key within sidecar timestamp range — only skip if
+                # this exact merge_key was already registered by the sidecar.
+                # Different tool_calls produce different merge_keys even with
+                # identical content/timestamp, so an unchecked continue here
+                # would drop legitimately distinct turns.  (#3346 / PR #3665)
+                if key in seen_message_keys:
+                    continue
         if key in seen_message_keys and key[0] == "message_id":
             continue
         matched_visible_key = _matching_visible_duplicate(
@@ -4283,7 +4315,20 @@ def merge_session_messages_append_only(
             and timestamp is not None
             and timestamp <= max_sidecar_timestamp
         ):
-            continue
+            # Legacy key within sidecar timestamp range.  Normally skip — the
+            # sidecar already has this message.  Exception: if the state.db
+            # message has tool_calls that DIFFER from the sidecar version
+            # (same content_key but different dedup_key because tool_calls
+            # differ), preserve it — distinct tool_calls must not be collapsed.
+            _tc = msg.get("tool_calls")
+            if _tc:
+                _ck = _session_message_content_key(msg)
+                if _ck in seen_content_keys and dedup_key not in seen_dedup_keys:
+                    pass  # different tool_calls from sidecar — preserve
+                else:
+                    continue
+            else:
+                continue
         seen_message_keys.add(key)
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(_session_message_content_key(msg))
