@@ -549,8 +549,9 @@ function setLargeMarkdownForceRenderVisible(visible){
 }
 
 function renderMarkdownPreviewContent(data){
-  showPreview('md');
-  $('previewMd').innerHTML=renderMd(data.content);
+  const target=data&&data.el?data.el:$('previewMd');
+  if(!data||!data.el) showPreview('md');
+  target.innerHTML=renderMd(data.content);
   requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
 }
 
