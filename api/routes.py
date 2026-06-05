@@ -1510,18 +1510,23 @@ def _check_csrf(handler) -> bool:
     if origin_value in _allowed_public_origins():
         origin_allowed = True
     if not origin_allowed:
-        # Allow same-origin: check Host, X-Forwarded-Host (reverse proxy), and
-        # X-Real-Host against the origin. Reverse proxies (Caddy, nginx) set
-        # X-Forwarded-Host to the client's original Host header.
+        # Allow same-origin Host by default. Forwarded host headers are only
+        # trustworthy behind a proxy that strips untrusted inbound copies.
         allowed_hosts = [
             h.strip()
-            for h in [
-                host,
-                handler.headers.get("X-Forwarded-Host", ""),
-                handler.headers.get("X-Real-Host", ""),
-            ]
+            for h in [host]
             if h.strip()
         ]
+        trust_forwarded_host = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "").strip().lower()
+        if trust_forwarded_host in ("1", "true", "yes", "on"):
+            allowed_hosts.extend(
+                h.strip()
+                for h in [
+                    handler.headers.get("X-Forwarded-Host", ""),
+                    handler.headers.get("X-Real-Host", ""),
+                ]
+                if h.strip()
+            )
         for allowed in allowed_hosts:
             allowed_name, allowed_port = _normalize_host_port(allowed)
             if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
@@ -8984,6 +8989,18 @@ def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_
 
 
 
+def _normalize_tts_prosody(value, *, unit: str) -> str | None:
+    if not value:
+        return ""
+    value = str(value).strip()
+    if not re.fullmatch(r"[+-]?\d{1,3}" + re.escape(unit), value):
+        return None
+    amount = int(value[: -len(unit)])
+    if -100 <= amount <= 100:
+        return value
+    return None
+
+
 def _handle_tts(handler, parsed):
     """Generate TTS audio via Edge TTS. POST JSON body only.
 
@@ -9014,11 +9031,18 @@ def _handle_tts(handler, parsed):
         data = read_body(handler)
         text = (data.get("text") or "").strip()
         voice = data.get("voice") or voice
-        rate_str = data.get("rate") or ""
-        pitch_str = data.get("pitch") or ""
+        rate_str = _normalize_tts_prosody(data.get("rate"), unit="%")
+        pitch_str = _normalize_tts_prosody(data.get("pitch"), unit="Hz")
     except Exception:
         from api.helpers import bad as _bad
         return _bad(handler, "invalid request body", 400)
+
+    if rate_str is None:
+        from api.helpers import bad as _bad
+        return _bad(handler, "invalid rate", 400)
+    if pitch_str is None:
+        from api.helpers import bad as _bad
+        return _bad(handler, "invalid pitch", 400)
 
     if not text:
         from api.helpers import bad as _bad
@@ -9047,12 +9071,14 @@ def _handle_tts(handler, parsed):
                 self._checks = 0
 
             def _get_client_key(self, h):
-                for hdr in ("X-Forwarded-For", "X-Real-IP", "Forwarded"):
-                    val = h.headers.get(hdr)
-                    if val:
-                        ip = val.split(",")[0].strip().split(";")[0].strip()
-                        if ip:
-                            return ip
+                trust_proxy = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "").strip().lower()
+                if trust_proxy in ("1", "true", "yes", "on"):
+                    for hdr in ("X-Forwarded-For", "X-Real-IP", "Forwarded"):
+                        val = h.headers.get(hdr)
+                        if val:
+                            ip = val.split(",")[0].strip().split(";")[0].strip()
+                            if ip:
+                                return ip
                 return getattr(h, "client_address", ("unknown",))[0]
 
             def check(self, handler, session_cookie=None):

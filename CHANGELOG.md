@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+## [v0.51.267] — 2026-06-04 — Release II (stage-r17 — TTS + CSRF forwarded-header security hardening)
+
+### Security
+- **The `/api/tts` per-client throttle no longer trusts `X-Forwarded-For` by default**, so a client can't spoof the header to evade its own rate limit (or pin another client's bucket). Forwarded IPs are honored only behind an explicit trusted-proxy opt-in. (#3640, @zapabob)
+- **The CSRF same-origin check no longer trusts `X-Forwarded-Host` / `X-Real-Host` by default.** Those headers could previously let an attacker-set forwarded host satisfy the origin check; trusting them now requires an explicit opt-in, and the default uses the real `Host`. Legitimate reverse-proxy deployments keep working via the opt-in. (#3642, @zapabob)
+  - **Operator note:** if you run behind a reverse proxy that does NOT rewrite the `Host` header (it forwards the original host via `X-Forwarded-Host` instead), set `HERMES_WEBUI_TRUST_FORWARDED_HOST=1` after updating, or browser unsafe requests may be rejected by the CSRF check.
+- **Browser-provided TTS prosody values (rate/pitch/volume) are now validated** against the expected `±N%` / `±NHz` grammar before being passed to `edge_tts.Communicate`, rejecting malformed input. (#3643, @zapabob)
+
 ## [v0.51.266] — 2026-06-04 — Release IH (stage-r16 — profile-chip active fix + intermediate reasoning + session-event scoping)
 
 ### Fixed
