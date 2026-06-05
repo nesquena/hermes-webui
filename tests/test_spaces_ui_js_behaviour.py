@@ -1041,6 +1041,25 @@ global.fetch = async function(path, opts = {}) {
           metadata_only: true,
           local_only: true,
         },
+        model_route_invocation: {
+          available: true,
+          status: 'completed',
+          model_route_hint: 'hint:reasoning',
+          route_resolution: 'configured',
+          resolved_provider: 'openrouter',
+          resolved_model: 'openai/gpt-creator-safe',
+          prompt_chars: 180,
+          output_chars: 42,
+          metadata_only: true,
+          local_only: true,
+          raw_prompt_stored: false,
+          draft_prompt_stored: false,
+          model_output_stored: false,
+          raw_prompt: body.prompt,
+          renderer: '<script>bad()</script>',
+          source: 'generated renderer source SECRET_VALUE_DO_NOT_LEAK',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
         prompt: body.prompt,
         raw_prompt: body.prompt,
         generated_code: '<script>bad()</script>',
@@ -7866,6 +7885,27 @@ def test_creator_preview_action_policy_renders_selected_model_route_safely(drive
     assert "Model route: Summarize · Local summary provider · Summary model" in html
     assert "metadata-only" in html
     assert "local-only" in html
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in html
+    assert "<script>" not in html
+    assert "renderer" not in html
+    assert "generated renderer source" not in html.lower()
+    assert "api_key" not in html.lower()
+
+
+def test_creator_preview_renders_model_route_invocation_receipt_safely(driver_path):
+    out = _run_spaces_scenario(driver_path, "creatorPreviewGate")
+    html = out["rootHtml"]
+
+    assert "Creator preview ready" in html
+    assert "Model invocation" in html
+    assert "Status: completed" in html
+    assert "Route: hint:reasoning · configured · openrouter · openai/gpt-creator-safe" in html
+    assert "Prompt chars: 180" in html
+    assert "Output chars: 42" in html
+    assert "metadata-only" in html
+    assert "local-only" in html
+    assert "raw prompt not stored" in html
+    assert "model output not stored" in html
     assert "SECRET_VALUE_DO_NOT_LEAK" not in html
     assert "<script>" not in html
     assert "renderer" not in html

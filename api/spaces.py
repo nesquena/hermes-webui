@@ -5722,6 +5722,98 @@ def _space_creator_store_preview_receipt(draft: dict[str, Any]) -> str:
     return preview_id
 
 
+def _space_creator_model_invocation_prompt(draft: dict[str, Any]) -> tuple[str, dict[str, int | str]]:
+    """Build a bounded metadata-only prompt for creator-preview route invocation."""
+    raw_space = draft.get("space")
+    space: dict[str, Any] = raw_space if isinstance(raw_space, dict) else {}
+    raw_widgets = draft.get("widget_details")
+    widgets: list[Any] = raw_widgets if isinstance(raw_widgets, list) else []
+    raw_memory = draft.get("memory_assist")
+    memory: dict[str, Any] = raw_memory if isinstance(raw_memory, dict) else {}
+    space_id = validate_space_id(space.get("space_id") or "creator-preview")
+    memory_hit_count = _space_creator_safe_count(memory.get("hit_count"), limit=20)
+    lines = [
+        "creator preview metadata-only draft",
+        "raw user prompt omitted",
+        "generated bodies omitted",
+        f"space_id: {space_id}",
+        f"widget_count: {len(widgets[:20])}",
+        f"memory_hit_count: {memory_hit_count}",
+        "required_gates: prompt preflight, sandbox preview, visual QA, approval, rollback recovery",
+    ]
+    for widget in widgets[:20]:
+        if not isinstance(widget, dict):
+            continue
+        widget_id = validate_widget_id(str(widget.get("id") or widget.get("widget_id") or "widget"))
+        kind_text = _payload_text_summary(widget.get("kind") or "info", 40)
+        kind = _source_slugify_segment(kind_text if kind_text != "[REDACTED]" else "info", "info")[:40] or "info"
+        title = _payload_text_summary(widget.get("title") or widget_id, 80)
+        if not title or title == "[REDACTED]":
+            title = widget_id
+        lines.append(f"widget: {widget_id} · kind: {kind} · title: {title[:80]}")
+    return "\n".join(lines), {
+        "space_id": space_id,
+        "widget_count": len(widgets[:20]),
+        "memory_hit_count": memory_hit_count,
+    }
+
+
+def _invoke_space_creator_model_route(*, route: dict[str, Any], draft_prompt: str, draft_summary: dict[str, Any]) -> dict[str, Any]:
+    """Default creator-preview route invoker.
+
+    The production route is intentionally conservative until a provider runtime is
+    explicitly wired here: it exposes the configured route decision but does not
+    store or synthesize model output. Tests can monkeypatch this seam to verify the
+    exact metadata-only prompt and route used by the invocation boundary.
+    """
+    return {"status": "not_configured", "output_chars": 0}
+
+
+def _space_creator_safe_count(value: Any, *, limit: int = 100000) -> int:
+    try:
+        return max(0, min(int(value or 0), limit))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _space_creator_model_route_invocation_receipt(draft: dict[str, Any]) -> dict[str, Any]:
+    """Return metadata-only evidence for creator-preview model-route invocation."""
+    from api.capy_policy import resolve_model_route_hint
+
+    route = resolve_model_route_hint("hint:reasoning")
+    draft_prompt, draft_summary = _space_creator_model_invocation_prompt(draft)
+    raw_result: dict[str, Any] = {}
+    status = "skipped"
+    if isinstance(route, dict) and route.get("resolution") == "configured":
+        try:
+            candidate = _invoke_space_creator_model_route(
+                route=copy.deepcopy(route),
+                draft_prompt=draft_prompt,
+                draft_summary=copy.deepcopy(draft_summary),
+            )
+            raw_result = candidate if isinstance(candidate, dict) else {}
+            raw_status = str(raw_result.get("status") or "completed").strip().lower().replace(" ", "_")
+            status = raw_status if raw_status in {"completed", "failed", "not_configured", "skipped"} else "completed"
+        except Exception:
+            status = "failed"
+    receipt = {
+        "available": True,
+        "status": status,
+        "model_route_hint": "hint:reasoning",
+        "route_resolution": route.get("resolution") if isinstance(route, dict) else "default_fallback",
+        "resolved_provider": route.get("resolved_provider") if isinstance(route, dict) else "current Hermes provider",
+        "resolved_model": route.get("resolved_model") if isinstance(route, dict) else "configured reasoning model",
+        "prompt_chars": len(draft_prompt),
+        "output_chars": _space_creator_safe_count(raw_result.get("output_chars")),
+        "metadata_only": True,
+        "local_only": True,
+        "raw_prompt_stored": False,
+        "draft_prompt_stored": False,
+        "model_output_stored": False,
+    }
+    return receipt
+
+
 def _record_creator_preview_progress_event(preview_id: str, space_id: str) -> dict[str, Any]:
     """Best-effort metadata-only producer event for creator preview generation."""
     safe_preview_id = str(preview_id or "").strip()
@@ -5840,6 +5932,7 @@ def _space_creator_preview_payload(name: str, payload: dict[str, Any]) -> dict[s
             "commit_requires_revision": True,
         },
         "output_compaction": _space_creator_preview_compaction(draft, command=name),
+        "model_route_invocation": _space_creator_model_route_invocation_receipt(draft),
         "progress_event": _record_creator_preview_progress_event(preview_id, draft["space"]["space_id"]),
         "space": draft["space"],
         "widgets": widgets,

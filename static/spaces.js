@@ -1346,6 +1346,32 @@
       '</div>';
   }
 
+  function renderModelRouteInvocationEvidence(invocation){
+    const data = invocation && typeof invocation === 'object' && !Array.isArray(invocation) ? invocation : null;
+    if (!data || data.available !== true || data.metadata_only !== true) return '';
+    const status = safeDisplayMetadataText(data.status || 'skipped', 'skipped') || 'skipped';
+    const hint = safeModelRouteHint(data.model_route_hint || '');
+    const resolution = safeModelRouteResolutionLabel(data.route_resolution || '');
+    const provider = safeModelRouteField(data.resolved_provider || '');
+    const model = safeModelRouteField(data.resolved_model || '');
+    const promptChars = safeNonNegativeCount(data.prompt_chars);
+    const outputChars = safeNonNegativeCount(data.output_chars);
+    const flags = [];
+    if (data.metadata_only === true) flags.push('metadata-only');
+    if (data.local_only === true) flags.push('local-only');
+    if (data.raw_prompt_stored === false) flags.push('raw prompt not stored');
+    if (data.draft_prompt_stored === false) flags.push('draft prompt not stored');
+    if (data.model_output_stored === false) flags.push('model output not stored');
+    const routeParts = [hint, resolution, provider, model].filter(Boolean).join(' · ');
+    if (!status && !routeParts && !promptChars && !outputChars) return '';
+    return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Model invocation</strong>' +
+      '<div class="capy-spaces-muted">Status: '+escapeHtml(status)+(routeParts ? ' · Route: '+escapeHtml(routeParts) : '')+'</div>' +
+      '<div class="capy-spaces-muted">Prompt chars: '+promptChars+' · Output chars: '+outputChars+'</div>' +
+      (flags.length ? '<div class="capy-spaces-muted">'+escapeHtml(flags.join(' · '))+'</div>' : '') +
+      '<div class="capy-spaces-muted">Invocation receipt is metadata-only; raw prompts and model outputs remain omitted.</div>' +
+      '</div></div></div>';
+  }
+
   function renderPackageProgressEvidence(event, title){
     const data = event && typeof event === 'object' && !Array.isArray(event) ? event : null;
     if (!data) return '';
@@ -1431,7 +1457,7 @@
     const commitButton = previewId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="commitCreatorSpec" data-preview-id="'+escapeHtml(previewId)+'">Approve revisioned commit</button></div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Creator preview ready</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(stage)+' · stored: '+stored+' · executed: '+executed+(gateLabels.length ? ' · '+escapeHtml(gateLabels.join(' · ')) : '')+'</div>' +
-      renderCreatorSpecSummary(data && data.spec) + renderCreatorRevisionPreview(data || {}) + renderCreatorMemoryAssist(data || {}) + renderPromptPreflightEvidence(data && data.prompt_preflight) + renderCompactionEvidence(data && (data.output_compaction || data.compaction)) + renderActionPolicyEvidence(data && data.autonomy_policy) + renderPackageProgressEvidence(data && data.progress_event, 'Creator preview progress') + gateChecklist + commitButton + '</div>';
+      renderCreatorSpecSummary(data && data.spec) + renderCreatorRevisionPreview(data || {}) + renderCreatorMemoryAssist(data || {}) + renderPromptPreflightEvidence(data && data.prompt_preflight) + renderCompactionEvidence(data && (data.output_compaction || data.compaction)) + renderActionPolicyEvidence(data && data.autonomy_policy) + renderModelRouteInvocationEvidence(data && data.model_route_invocation) + renderPackageProgressEvidence(data && data.progress_event, 'Creator preview progress') + gateChecklist + commitButton + '</div>';
   }
 
   function renderCreatorCommitResult(data){
