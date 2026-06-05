@@ -47,7 +47,8 @@ from api.plugin_providers import (
     effective_provider_display_name,
     effective_provider_env_var,
     is_plugin_model_provider,
-    plugin_model_provider_ids,
+    is_user_installed_plugin_model_provider,
+    user_installed_plugin_model_provider_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -1763,7 +1764,7 @@ def get_providers() -> dict[str, Any]:
 
     # Collect all known provider IDs from multiple sources
     known_ids = set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys())
-    known_ids.update(plugin_model_provider_ids())
+    known_ids.update(user_installed_plugin_model_provider_ids())
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
@@ -1956,7 +1957,7 @@ def get_providers() -> dict[str, Any]:
                     models_total = len(models)
             except Exception:
                 logger.debug("Failed to load LM Studio models from hermes_cli")
-        if is_plugin_model_provider(pid):
+        if is_user_installed_plugin_model_provider(pid) and has_key:
             try:
                 live_models = _models_from_live_provider_ids(
                     pid,
@@ -1988,13 +1989,12 @@ def get_providers() -> dict[str, Any]:
                 if pid != "nous":
                     models_total = len(models)
 
-        _is_plugin = is_plugin_model_provider(pid)
         providers.append({
             "id": pid,
             "display_name": display_name,
             "has_key": has_key,
             "configurable": not is_oauth and bool(_provider_env_var_for(pid)),
-            "is_plugin_provider": _is_plugin,
+            "is_plugin_provider": is_user_installed_plugin_model_provider(pid),
             "is_oauth": is_oauth,
             "key_source": key_source,
             "auth_error": auth_error,

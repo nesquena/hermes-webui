@@ -16,6 +16,12 @@ import api.profiles as profiles
 from api.plugin_providers import invalidate_plugin_model_provider_cache
 
 
+def _install_user_yandex_plugin_dir(tmp_path):
+    root = tmp_path / "plugins" / "model-providers" / "yandex"
+    root.mkdir(parents=True)
+    (root / "__init__.py").write_text("# user-installed model-provider plugin\n", encoding="utf-8")
+
+
 def _install_fake_yandex_plugin(monkeypatch):
     profile = SimpleNamespace(
         name="yandex",
@@ -69,6 +75,7 @@ class TestPluginModelProvidersSettings:
     def test_get_providers_includes_plugin_model_provider(self, monkeypatch, tmp_path):
         _install_fake_yandex_plugin(monkeypatch)
         _install_fake_hermes_cli(monkeypatch, model_ids=["deepseek-v4-flash/latest"])
+        _install_user_yandex_plugin_dir(tmp_path)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
         env_path = tmp_path / ".env"
@@ -103,6 +110,7 @@ class TestPluginModelProvidersSettings:
     def test_get_providers_plugin_key_source_from_auth_store(self, monkeypatch, tmp_path):
         """Credential-pool auth must not be misreported as config_yaml."""
         _install_fake_yandex_plugin(monkeypatch)
+        _install_user_yandex_plugin_dir(tmp_path)
 
         fake_pkg = types.ModuleType("hermes_cli")
         fake_pkg.__path__ = []
@@ -150,6 +158,7 @@ class TestPluginModelProvidersSettings:
 
     def test_set_provider_key_accepts_plugin_env_var(self, monkeypatch, tmp_path):
         _install_fake_yandex_plugin(monkeypatch)
+        _install_user_yandex_plugin_dir(tmp_path)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
         from api.providers import set_provider_key
@@ -158,6 +167,96 @@ class TestPluginModelProvidersSettings:
         assert result["ok"] is True
         env_text = (tmp_path / ".env").read_text(encoding="utf-8")
         assert "YANDEX_API_KEY=test-yandex-key-abcdef" in env_text
+
+
+    def test_get_providers_skips_bundled_plugin_without_user_install_dir(
+        self, monkeypatch, tmp_path
+    ):
+        """Bundled agent-only slugs must not inflate Settings → Providers."""
+        profile = SimpleNamespace(
+            name="xai",
+            display_name="xAI",
+            env_vars=("XAI_API_KEY",),
+            auth_type="api_key",
+            aliases=(),
+        )
+
+        def _fake_list_providers():
+            return [profile]
+
+        fake_providers = types.ModuleType("providers")
+        fake_providers.list_providers = _fake_list_providers
+        monkeypatch.setitem(sys.modules, "providers", fake_providers)
+        invalidate_plugin_model_provider_cache()
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            config._cfg_mtime = 0.0
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        from api.providers import get_providers
+
+        try:
+            result = get_providers()
+            assert next((p for p in result["providers"] if p["id"] == "xai"), None) is None
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+            config.invalidate_models_cache()
+
+    def test_get_providers_skips_live_fetch_without_key(self, monkeypatch, tmp_path):
+        _install_fake_yandex_plugin(monkeypatch)
+        _install_user_yandex_plugin_dir(tmp_path)
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.delenv("YANDEX_API_KEY", raising=False)
+        monkeypatch.delenv("YANDEX_FOLDER_ID", raising=False)
+
+        calls: list[str] = []
+
+        def _track_provider_model_ids(pid):
+            calls.append(pid)
+            return ["should-not-run"]
+
+        fake_pkg = types.ModuleType("hermes_cli")
+        fake_pkg.__path__ = []
+        fake_models = types.ModuleType("hermes_cli.models")
+        fake_models.list_available_providers = lambda: []
+        fake_models.provider_model_ids = _track_provider_model_ids
+        fake_auth = types.ModuleType("hermes_cli.auth")
+        fake_auth.get_auth_status = lambda pid: {}
+        monkeypatch.setitem(sys.modules, "hermes_cli", fake_pkg)
+        monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
+        monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {}
+        try:
+            config._cfg_mtime = 0.0
+        except Exception:
+            config._cfg_mtime = 0.0
+
+        from api.providers import get_providers
+
+        try:
+            result = get_providers()
+            yandex = next((p for p in result["providers"] if p["id"] == "yandex"), None)
+            assert yandex is not None
+            assert yandex["has_key"] is False
+            assert yandex["models_total"] == 0
+            assert "yandex" not in calls
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+            config.invalidate_models_cache()
 
 
 class TestPluginOnlyExcludesStaticProviders:

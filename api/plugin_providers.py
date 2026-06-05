@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,42 @@ def plugin_model_provider_ids() -> frozenset[str]:
     return frozenset(
         pid for pid in plugin_model_provider_profiles().keys() if pid not in static
     )
+
+
+def _user_model_provider_plugins_dir() -> Path | None:
+    """Return ``$HERMES_HOME/plugins/model-providers/`` when present."""
+    try:
+        from api.profiles import get_active_hermes_home
+
+        root = get_active_hermes_home() / "plugins" / "model-providers"
+        return root if root.is_dir() else None
+    except Exception:
+        logger.debug("Failed to resolve user model-provider plugins dir", exc_info=True)
+        return None
+
+
+def user_installed_plugin_model_provider_ids() -> frozenset[str]:
+    """Slugs for user-installed plugins under ``$HERMES_HOME/plugins/model-providers/``.
+
+    Settings → Providers should surface these directories only.  Bundled
+    agent-only profiles from ``list_providers()`` stay out of the panel so
+    ``get_providers()`` does not live-fetch catalogs for every bundled slug.
+    """
+    root = _user_model_provider_plugins_dir()
+    if root is None:
+        return frozenset()
+    return frozenset(
+        child.name.strip().lower()
+        for child in sorted(root.iterdir())
+        if child.is_dir()
+        and not child.name.startswith(("_", "."))
+        and (child / "__init__.py").is_file()
+    )
+
+
+def is_user_installed_plugin_model_provider(provider_id: str) -> bool:
+    pid = (provider_id or "").strip().lower()
+    return bool(pid) and pid in user_installed_plugin_model_provider_ids()
 
 
 def plugin_model_provider_display_name(provider_id: str) -> str | None:
