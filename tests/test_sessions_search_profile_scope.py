@@ -40,3 +40,13 @@ def test_title_search_should_not_return_other_profile_rows():
 def test_content_search_should_not_return_other_profile_rows():
     captured = _run_search("/api/sessions/search?q=needle&content=1&depth=0")
     assert captured["payload"]["count"] == 0
+
+
+def test_all_profiles_opt_in_keeps_aggregate_session_search():
+    captured = _run_search("/api/sessions/search?all_profiles=1")
+    assert captured["payload"]["all_profiles"] is True
+    assert [s["session_id"] for s in captured["payload"]["sessions"]] == [
+        "active-s",
+        "other-s",
+        "other-content-s",
+    ]
