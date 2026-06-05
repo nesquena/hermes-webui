@@ -1,0 +1,74 @@
+from pathlib import Path
+
+
+REPO = Path(__file__).resolve().parents[1]
+PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
+
+
+def _function_body(src: str, signature: str) -> str:
+    start = src.index(signature)
+    brace = src.index("{", start)
+    depth = 0
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError(f"function body not found: {signature}")
+
+
+def test_static_model_health_metadata_and_renderer_exist():
+    renderer = _function_body(PANELS_JS, "function _renderStaticModelHealthTable")
+
+    assert "const STATIC_MODEL_HEALTH_ROWS = [" in PANELS_JS
+    assert "inputCostPerM" in PANELS_JS
+    assert "outputCostPerM" in PANELS_JS
+    assert "replacement:" in PANELS_JS
+    assert "insights-model-health-table" in renderer
+    assert "insights_model_health_cost_per_m" in renderer
+    assert "insights_model_health_replacement" in renderer
+
+
+def test_render_insights_includes_static_table_before_usage_models():
+    render = _function_body(PANELS_JS, "function _renderInsights")
+
+    assert "const modelHealthHtml = _renderStaticModelHealthTable();" in render
+    assert "${modelHealthHtml}" in render
+    assert render.index("${modelHealthHtml}") < render.index("insights-usage-grid")
+    assert "modelsHtml" in render
+
+
+def test_no_runtime_quality_or_hallucination_fetch_added():
+    load = _function_body(PANELS_JS, "async function loadInsights")
+
+    assert "quality" not in load.lower()
+    assert "hallucination" not in load.lower()
+    assert "/api/model" not in load
+    assert "api(`/api/insights?days=${period}`)" in load
+
+
+def test_model_health_i18n_keys_exist_in_locale_blocks():
+    keys = [
+        "insights_model_health_title",
+        "insights_model_health_provider",
+        "insights_model_health_quality",
+        "insights_model_health_quality_deferred",
+        "insights_model_health_hallucination",
+        "insights_model_health_hallucination_deferred",
+        "insights_model_health_replacement",
+        "insights_model_health_cost_per_m",
+    ]
+    for key in keys:
+        assert I18N_JS.count(f"{key}:") >= 8, f"missing locale entries for {key}"
+
+
+def test_model_health_table_css_is_responsive_and_contained():
+    assert ".insights-model-health-table" in STYLE_CSS
+    assert ".insights-model-health-table .insights-table-head" in STYLE_CSS
+    assert "minmax(130px,1.5fr)" in STYLE_CSS
+    assert "overflow-x:auto" in STYLE_CSS
+    assert ".insights-model-health-replacement" in STYLE_CSS
