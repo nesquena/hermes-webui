@@ -4270,9 +4270,21 @@ def merge_session_messages_append_only(
             and max_sidecar_timestamp is not None
             and timestamp is not None
             and timestamp <= max_sidecar_timestamp
-            and key in seen_message_keys
         ):
-            continue
+            # Legacy key within sidecar timestamp range.  Normally skip — the
+            # sidecar already has this message.  Exception: if the state.db
+            # message has tool_calls that DIFFER from the sidecar version
+            # (same content_key but different dedup_key because tool_calls
+            # differ), preserve it — distinct tool_calls must not be collapsed.
+            _tc = msg.get("tool_calls")
+            if _tc:
+                _ck = _session_message_content_key(msg)
+                if _ck in seen_content_keys and dedup_key not in seen_dedup_keys:
+                    pass  # different tool_calls from sidecar — preserve
+                else:
+                    continue
+            else:
+                continue
         seen_message_keys.add(key)
         seen_dedup_keys.add(dedup_key)
         seen_content_keys.add(_session_message_content_key(msg))
