@@ -24825,9 +24825,18 @@ def test_widget_event_ready_resize_runtime_messages_are_local_noops_metadata_onl
         {"message_type": "capy:agent:prompt", "renderer": "<script>bad()</script>"},
         prompt="SECRET_VALUE_DO_NOT_LEAK",
     )
+    unsafe_action_ready = spaces.queue_widget_event(
+        created["space_id"],
+        "sandbox",
+        "capy:ready",
+        {"message_type": "capy:ready"},
+        action="SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>",
+    )
 
     events = spaces.list_widget_events(created["space_id"], "sandbox")
-    serialized = json.dumps({"ready": ready, "resize": resize, "mixed": mixed_ready_prompt, "events": events}).lower()
+    serialized = json.dumps(
+        {"ready": ready, "resize": resize, "mixed": mixed_ready_prompt, "unsafe_action": unsafe_action_ready, "events": events}
+    ).lower()
 
     assert ready["queued"] is False
     assert ready["status"] == "local-noop"
@@ -24843,6 +24852,18 @@ def test_widget_event_ready_resize_runtime_messages_are_local_noops_metadata_onl
     assert ready["output_compaction"]["command"] == "space.widget.event"
     assert "widget_event_status: local-noop" in ready["output_compaction"]["text"]
     assert "event_name: capy:ready" in ready["output_compaction"]["text"]
+    for receipt in (ready, resize, mixed_ready_prompt):
+        assert receipt["prompt_preflight"]["boundary"] == "widget_runtime_prompt"
+        assert receipt["prompt_preflight"]["status"] == "required"
+        assert receipt["prompt_preflight"]["metadata_only"] is True
+        assert receipt["prompt_preflight"]["raw_prompt_stored"] is False
+        assert receipt["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+        assert receipt["autonomy_policy"]["prompt_preflight_status"] == "required"
+        assert receipt["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+        assert "prompt_preflight_status: required" in receipt["output_compaction"]["text"]
+        assert "prompt_preflight_boundary: widget_runtime_prompt" in receipt["output_compaction"]["text"]
+        assert "approval_required: True" in receipt["output_compaction"]["text"]
+        assert "model_route_hint: hint:reasoning" in receipt["output_compaction"]["text"]
     assert resize["queued"] is False
     assert resize["status"] == "local-noop"
     assert resize["event_name"] == "capy:resize"
@@ -24929,6 +24950,17 @@ def test_widget_event_route_treats_ready_resize_message_type_as_local_noop(monke
         assert body["event_name"] != "agent.prompt"
         assert body["local"] is True
         assert "event_id" not in body
+        assert body["prompt_preflight"]["boundary"] == "widget_runtime_prompt"
+        assert body["prompt_preflight"]["status"] == "required"
+        assert body["prompt_preflight"]["metadata_only"] is True
+        assert body["prompt_preflight"]["raw_prompt_stored"] is False
+        assert body["autonomy_policy"]["approval_gates"] == ["generated_widget_execution"]
+        assert body["autonomy_policy"]["prompt_preflight_status"] == "required"
+        assert body["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
+        assert "prompt_preflight_status: required" in body["output_compaction"]["text"]
+        assert "prompt_preflight_boundary: widget_runtime_prompt" in body["output_compaction"]["text"]
+        assert "approval_required: True" in body["output_compaction"]["text"]
+        assert "model_route_hint: hint:reasoning" in body["output_compaction"]["text"]
         assert "secret_value_do_not_leak" not in serialized
         assert "bearer" not in serialized
         assert "<script" not in serialized

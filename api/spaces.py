@@ -12862,13 +12862,18 @@ def queue_widget_event(
         raise ValueError("Widget is disabled for recovery")
     local_message_type = _local_runtime_message_type(name, payload_data)
     if local_message_type:
+        safe_action = _safe_widget_event_action(action)
+        prompt_preflight_receipt = _widget_reload_required_prompt_preflight_receipt(safe_action)
+        autonomy_policy_receipt = _widget_reload_action_policy_receipt(safe_action, prompt_preflight_receipt)
         progress_event = _record_widget_local_noop_progress_event(sid, wid, local_message_type)
         output_compaction = _widget_event_output_compaction_receipt(
-            action=action,
+            action=safe_action,
             space_id=sid,
             widget_id=wid,
             event_name=local_message_type,
             status="local-noop",
+            preflight_receipt=prompt_preflight_receipt,
+            autonomy_policy_receipt=autonomy_policy_receipt,
         )
         output_compaction["metadata_only"] = True
         if output_compaction.get("redaction_status") == "none":
@@ -12880,6 +12885,8 @@ def queue_widget_event(
             "space_id": sid,
             "widget_id": wid,
             "event_name": local_message_type,
+            "prompt_preflight": prompt_preflight_receipt,
+            "autonomy_policy": autonomy_policy_receipt,
             "progress_event": progress_event,
             "output_compaction": output_compaction,
         }
