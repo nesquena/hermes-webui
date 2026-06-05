@@ -2919,6 +2919,12 @@ from api.workspace import (
     safe_resolve_ws,
     resolve_trusted_workspace,
     open_anchored_fd,
+    open_anchored_create_fd,
+    open_anchored_write_fd,
+    unlink_anchored,
+    rmtree_anchored,
+    rename_anchored,
+    make_anchored_dir,
     validate_workspace_to_add,
     _is_blocked_system_path,
     _strip_surrounding_quotes,
@@ -8985,63 +8991,92 @@ def _parse_range_header(range_header: str, file_size: int) -> tuple[int, int] | 
         return None
 
 
-def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None):
-    """Serve a file with correct MIME/disposition and optional byte-range support."""
+def _open_file_read_fd(target: Path, anchor_root: Path | None = None) -> int:
+    if anchor_root is None:
+        return os.open(str(target), os.O_RDONLY)
+    return open_anchored_fd(anchor_root, target.resolve(), want_dir=False)
+
+
+def _close_fd_quietly(fd: int | None) -> None:
+    if fd is None:
+        return
     try:
-        file_size = target.stat().st_size
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None, anchor_root: Path | None = None):
+    """Serve a file with correct MIME/disposition and optional byte-range support."""
+    fd = None
+    try:
+        fd = _open_file_read_fd(target, anchor_root)
+        file_size = os.fstat(fd).st_size
     except PermissionError:
+        _close_fd_quietly(fd)
         return bad(handler, "Permission denied", 403)
+    except FileNotFoundError:
+        _close_fd_quietly(fd)
+        return j(handler, {"error": "not found"}, status=404)
+    except ValueError as e:
+        _close_fd_quietly(fd)
+        return bad(handler, _sanitize_error(e), 403)
     except Exception:
+        _close_fd_quietly(fd)
         return bad(handler, "Could not stat file", 500)
 
-    byte_range = _parse_range_header(handler.headers.get("Range", ""), file_size)
-    if handler.headers.get("Range") and byte_range is None:
-        handler.send_response(416)
-        handler.send_header("Content-Range", f"bytes */{file_size}")
-        handler.send_header("Accept-Ranges", "bytes")
-        handler.send_header("Content-Length", "0")
-        _security_headers(handler)
-        handler.end_headers()
-        return True
-
-    start, end = byte_range if byte_range else (0, max(0, file_size - 1))
-    content_length = end - start + 1 if file_size else 0
-    handler.send_response(206 if byte_range else 200)
-    handler.send_header("Content-Type", mime)
-    handler.send_header("Content-Length", str(content_length))
-    handler.send_header("Accept-Ranges", "bytes")
-    if byte_range:
-        handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-    handler.send_header("Cache-Control", cache_control)
-    handler.send_header("Content-Disposition", _content_disposition_value(disposition, target.name))
-    if csp:
-        # Sandboxed inline HTML must remain frameable for workspace previews;
-        # X-Frame-Options: DENY would block the iframe before CSP sandbox applies.
-        handler.send_header("Content-Security-Policy", csp)
-        handler.send_header("X-Content-Type-Options", "nosniff")
-        handler.send_header("Referrer-Policy", "same-origin")
-        handler.send_header(
-            "Permissions-Policy",
-            "camera=(), microphone=(self), geolocation=(), clipboard-write=(self)",
-        )
-    else:
-        _security_headers(handler)
-    handler.end_headers()
-
-    if content_length:
-        try:
-            with target.open("rb") as f:
-                f.seek(start)
-                remaining = content_length
-                while remaining:
-                    chunk = f.read(min(1024 * 1024, remaining))
-                    if not chunk:
-                        break
-                    handler.wfile.write(chunk)
-                    remaining -= len(chunk)
-        except PermissionError:
+    try:
+        byte_range = _parse_range_header(handler.headers.get("Range", ""), file_size)
+        if handler.headers.get("Range") and byte_range is None:
+            handler.send_response(416)
+            handler.send_header("Content-Range", f"bytes */{file_size}")
+            handler.send_header("Accept-Ranges", "bytes")
+            handler.send_header("Content-Length", "0")
+            _security_headers(handler)
+            handler.end_headers()
             return True
-    return True
+
+        start, end = byte_range if byte_range else (0, max(0, file_size - 1))
+        content_length = end - start + 1 if file_size else 0
+        handler.send_response(206 if byte_range else 200)
+        handler.send_header("Content-Type", mime)
+        handler.send_header("Content-Length", str(content_length))
+        handler.send_header("Accept-Ranges", "bytes")
+        if byte_range:
+            handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        handler.send_header("Cache-Control", cache_control)
+        handler.send_header("Content-Disposition", _content_disposition_value(disposition, target.name))
+        if csp:
+            # Sandboxed inline HTML must remain frameable for workspace previews;
+            # X-Frame-Options: DENY would block the iframe before CSP sandbox applies.
+            handler.send_header("Content-Security-Policy", csp)
+            handler.send_header("X-Content-Type-Options", "nosniff")
+            handler.send_header("Referrer-Policy", "same-origin")
+            handler.send_header(
+                "Permissions-Policy",
+                "camera=(), microphone=(self), geolocation=(), clipboard-write=(self)",
+            )
+        else:
+            _security_headers(handler)
+        handler.end_headers()
+
+        if content_length:
+            try:
+                with os.fdopen(fd, "rb", closefd=True) as f:
+                    fd = None
+                    f.seek(start)
+                    remaining = content_length
+                    while remaining:
+                        chunk = f.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            break
+                        handler.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except PermissionError:
+                return True
+        return True
+    finally:
+        _close_fd_quietly(fd)
 
 
 
@@ -9232,14 +9267,28 @@ def _html_preview_with_blank_base(raw: bytes) -> bytes:
     return text.encode("utf-8")
 
 
-def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp: str):
+def _serve_inline_html_preview(handler, target: Path, cache_control: str, *, csp: str, anchor_root: Path | None = None):
     """Serve sandboxed workspace HTML preview with links targeting a new tab."""
+    fd = None
     try:
-        body = _html_preview_with_blank_base(target.read_bytes())
+        fd = _open_file_read_fd(target, anchor_root)
+        with os.fdopen(fd, "rb", closefd=True) as f:
+            fd = None
+            body = _html_preview_with_blank_base(f.read())
     except PermissionError:
         return bad(handler, "Permission denied", 403)
+    except FileNotFoundError:
+        return j(handler, {"error": "not found"}, status=404)
+    except ValueError as e:
+        return bad(handler, _sanitize_error(e), 403)
     except Exception:
         return bad(handler, "Could not read file", 500)
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     handler.send_response(200)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
@@ -9612,14 +9661,15 @@ def _handle_media(handler, parsed):
     return _serve_file_bytes(handler, target, mime, disposition, "private, max-age=3600", csp=csp)
 
 
-def _file_raw_target(session, sid: str, rel: str) -> Path | None:
+def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
     """Resolve /api/file/raw paths from the workspace or this session's uploads."""
+    workspace_root = Path(session.workspace)
     try:
-        target = safe_resolve(Path(session.workspace), rel)
+        target = safe_resolve(workspace_root, rel)
     except ValueError:
         target = None
     if target and target.exists() and target.is_file():
-        return target
+        return workspace_root, target
 
     # Chat uploads now live in a per-session attachment inbox outside the
     # workspace. Keep the public URL stable while scoping fallback lookup to
@@ -9627,11 +9677,12 @@ def _file_raw_target(session, sid: str, rel: str) -> Path | None:
     try:
         from api.upload import _session_attachment_dir
 
-        attachment_target = safe_resolve(_session_attachment_dir(sid), rel)
+        attachment_root = _session_attachment_dir(sid)
+        attachment_target = safe_resolve(attachment_root, rel)
     except Exception:
         return None
     if attachment_target.exists() and attachment_target.is_file():
-        return attachment_target
+        return attachment_root, attachment_target
     return None
 
 
@@ -9660,8 +9711,9 @@ def _folder_download_collect(target: Path, workspace_root: Path,
                               max_bytes: int, max_files: int):
     """Walk target dir; return (files, total_bytes, hit_limit_reason_or_None).
 
-    files is a list of (filesystem_path, archive_name) tuples ready for
-    ZipFile.write. Symlinks escaping the workspace are skipped.
+    files is a list of (filesystem_path, archive_name) tuples. Each filesystem
+    path is reopened through the workspace anchor when streamed into the ZIP.
+    Symlinks escaping the workspace are skipped.
     """
     import os as _os
     files = []
@@ -9773,11 +9825,24 @@ def _handle_folder_download(handler, parsed):
     written = 0
     with zipfile.ZipFile(handler.wfile, mode="w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
         for fp, arcname in files:
+            fd = None
             try:
-                zf.write(fp, arcname=arcname)
+                fd = open_anchored_fd(workspace_root, fp.resolve(), want_dir=False)
+                info = zipfile.ZipInfo(arcname)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                with os.fdopen(fd, "rb", closefd=True) as src:
+                    fd = None
+                    with zf.open(info, "w") as dst:
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
                 written += 1
-            except (OSError, PermissionError) as e:
+            except (ValueError, OSError, PermissionError) as e:
                 logger.warning("folder-download: skipping %s: %s", fp, e)
+            finally:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
     logger.info(
         "folder-download: streamed %d/%d files (~%d bytes) from %s",
         written, len(files), total_bytes, target,
@@ -9795,9 +9860,10 @@ def _handle_file_raw(handler, parsed):
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]
     force_download = qs.get("download", [""])[0] == "1"
-    target = _file_raw_target(s, sid, rel)
-    if target is None:
+    resolved = _file_raw_target(s, sid, rel)
+    if resolved is None:
         return j(handler, {"error": "not found"}, status=404)
+    anchor_root, target = resolved
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
     # Security: force download for dangerous MIME types to prevent XSS.
@@ -9819,8 +9885,8 @@ def _handle_file_raw(handler, parsed):
     csp = sandbox_csp if (inline_preview and not force_download and disposition == "inline") else None
     # _serve_file_bytes sends Content-Security-Policy when csp is set.
     if html_inline_ok:
-        return _serve_inline_html_preview(handler, target, "no-store", csp=sandbox_csp)
-    return _serve_file_bytes(handler, target, mime, disposition, "no-store", csp=csp)
+        return _serve_inline_html_preview(handler, target, "no-store", csp=sandbox_csp, anchor_root=anchor_root)
+    return _serve_file_bytes(handler, target, mime, disposition, "no-store", csp=csp, anchor_root=anchor_root)
 
 
 def _handle_file_read(handler, parsed):
@@ -12176,17 +12242,18 @@ def _handle_file_delete(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        ws_root = Path(s.workspace)
+        target = safe_resolve(ws_root, body["path"])
         if not target.exists():
             return bad(handler, "File not found", 404)
         if target.is_dir():
             if not body.get("recursive"):
                 return bad(handler, "Set recursive=true to delete directories")
-            shutil.rmtree(target)
+            rmtree_anchored(ws_root, target)
         else:
-            target.unlink()
+            unlink_anchored(ws_root, target)
         return j(handler, {"ok": True, "path": body["path"]})
-    except (ValueError, PermissionError) as e:
+    except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
 
 
@@ -12200,16 +12267,20 @@ def _handle_file_save(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        ws_root = Path(s.workspace)
+        target = safe_resolve(ws_root, body["path"])
         if not target.exists():
             return bad(handler, "File not found", 404)
         if target.is_dir():
             return bad(handler, "Cannot save: path is a directory")
-        target.write_text(body.get("content", ""), encoding="utf-8")
+        data = str(body.get("content", "")).encode("utf-8")
+        fd = open_anchored_write_fd(ws_root, target)
+        with os.fdopen(fd, "wb", closefd=True) as fh:
+            fh.write(data)
         return j(
-            handler, {"ok": True, "path": body["path"], "size": target.stat().st_size}
+            handler, {"ok": True, "path": body["path"], "size": len(data)}
         )
-    except (ValueError, PermissionError) as e:
+    except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
 
 
@@ -12223,15 +12294,20 @@ def _handle_file_create(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        ws_root = Path(s.workspace)
+        target = safe_resolve(ws_root, body["path"])
         if target.exists():
             return bad(handler, "File already exists")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(body.get("content", ""), encoding="utf-8")
+        data = str(body.get("content", "")).encode("utf-8")
+        fd = open_anchored_create_fd(ws_root, target)
+        with os.fdopen(fd, "wb", closefd=True) as fh:
+            fh.write(data)
         return j(
-            handler, {"ok": True, "path": str(target.relative_to(Path(s.workspace)))}
+            handler, {"ok": True, "path": target.relative_to(ws_root.resolve()).as_posix()}
         )
-    except (ValueError, PermissionError) as e:
+    except FileExistsError:
+        return bad(handler, "File already exists")
+    except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
 
 
@@ -12245,18 +12321,22 @@ def _handle_file_rename(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        source = safe_resolve(Path(s.workspace), body["path"])
+        ws_root = Path(s.workspace)
+        ws_root_resolved = ws_root.resolve()
+        source = safe_resolve(ws_root, body["path"])
         if not source.exists():
             return bad(handler, "File not found", 404)
         new_name = body["new_name"].strip()
-        if not new_name or "/" in new_name or ".." in new_name:
+        if not new_name or "/" in new_name or "\\" in new_name or ".." in new_name:
             return bad(handler, "Invalid file name")
         dest = source.parent / new_name
         if dest.exists():
             return bad(handler, f'A file named "{new_name}" already exists')
-        source.rename(dest)
-        new_rel = str(dest.relative_to(Path(s.workspace)))
+        rename_anchored(ws_root, source, dest)
+        new_rel = dest.relative_to(ws_root_resolved).as_posix()
         return j(handler, {"ok": True, "old_path": body["path"], "new_path": new_rel})
+    except FileExistsError:
+        return bad(handler, f'A file named "{body.get("new_name", "")}" already exists')
     except (ValueError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
 
@@ -12304,7 +12384,7 @@ def _handle_file_move(handler, body):
                 pass
         dest = dest_parent / source.name
         if dest.resolve() == source.resolve():
-            new_rel = str(source.relative_to(ws_root_resolved))
+            new_rel = source.relative_to(ws_root_resolved).as_posix()
             return j(
                 handler,
                 {"ok": True, "old_path": body["path"], "new_path": new_rel},
@@ -12347,7 +12427,7 @@ def _handle_file_move(handler, body):
                     f'A file named "{source.name}" already exists in that folder',
                 )
             source.rename(dest)
-        new_rel = str(dest.relative_to(ws_root_resolved))
+        new_rel = dest.relative_to(ws_root_resolved).as_posix()
         return j(
             handler,
             {"ok": True, "old_path": body["path"], "new_path": new_rel},
@@ -12366,14 +12446,15 @@ def _handle_create_dir(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        ws_root = Path(s.workspace)
+        target = safe_resolve(ws_root, body["path"])
         if target.exists():
             return bad(handler, "Path already exists")
-        target.mkdir(parents=True)
+        make_anchored_dir(ws_root, target)
         return j(
-            handler, {"ok": True, "path": str(target.relative_to(Path(s.workspace)))}
+            handler, {"ok": True, "path": target.relative_to(ws_root.resolve()).as_posix()}
         )
-    except (ValueError, PermissionError, OSError) as e:
+    except (ValueError, FileNotFoundError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
 
 
