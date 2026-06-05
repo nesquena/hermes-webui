@@ -91,8 +91,27 @@ def _get_ai_agent():
     return AIAgent
 
 
-def _safe_streaming_progress_run_id(stream_id) -> str:
+_STREAMING_SUBAGENT_EVENT_TYPES = {
+    "subagent.started",
+    "subagent.spawned",
+    "subagent.progress",
+    "subagent.completed",
+    "subagent.failed",
+}
+_STREAMING_LEGACY_SUBAGENT_EVENT_TYPES = {
+    "subagent.start",
+    "subagent.spawn_requested",
+    "subagent_progress",
+    "subagent.complete",
+    "subagent.thinking",
+    "subagent.tool",
+}
+_STREAMING_SUBAGENT_INPUT_EVENT_TYPES = _STREAMING_SUBAGENT_EVENT_TYPES | _STREAMING_LEGACY_SUBAGENT_EVENT_TYPES
+
+
+def _safe_streaming_progress_run_id(stream_id, *, family: str = "tool") -> str:
     """Return a bounded public run id for WebUI streaming progress events."""
+    safe_family = family if family in {"tool", "subagent"} else "tool"
     raw_stream_id = str(stream_id or "").strip()
     unsafe_pattern = re.compile(
         r"SECRET_VALUE_DO_NOT_LEAK|api[_ -]?(?:key|auth)|authorization|bearer|cookie|"
@@ -102,14 +121,102 @@ def _safe_streaming_progress_run_id(stream_id) -> str:
         re.IGNORECASE,
     )
     if unsafe_pattern.search(raw_stream_id):
-        return "webui.tool:stream"
+        return f"webui.{safe_family}:stream"
     safe_stream_id = re.sub(r"[^A-Za-z0-9_.:-]+", "-", raw_stream_id)[:80]
     safe_stream_id = safe_stream_id.strip(".-_:") or "stream"
     if unsafe_pattern.search(safe_stream_id):
         safe_stream_id = "stream"
     if not re.match(r"^[A-Za-z0-9]", safe_stream_id):
         safe_stream_id = f"stream-{safe_stream_id}"
-    return f"webui.tool:{safe_stream_id}"
+    return f"webui.{safe_family}:{safe_stream_id}"
+
+
+def _safe_streaming_event_type(event_type, *, status=None, is_error: bool = False) -> tuple[str, str]:
+    """Normalize supported streaming progress event types to event/family."""
+    if event_type in _STREAMING_SUBAGENT_EVENT_TYPES:
+        return str(event_type), "subagent"
+    if event_type == "subagent.start":
+        return "subagent.started", "subagent"
+    if event_type == "subagent.spawn_requested":
+        return "subagent.spawned", "subagent"
+    if event_type == "subagent_progress":
+        return "subagent.progress", "subagent"
+    if event_type in {"subagent.thinking", "subagent.tool"}:
+        return "subagent.progress", "subagent"
+    if event_type == "subagent.complete":
+        if is_error or str(status or "").strip().lower() in {"failed", "error", "timeout", "timed_out"}:
+            return "subagent.failed", "subagent"
+        return "subagent.completed", "subagent"
+    if event_type == "tool.failed":
+        return "tool.failed", "tool"
+    if event_type == "tool.started":
+        return "tool.started", "tool"
+    return "tool.completed", "tool"
+
+
+def _parse_streaming_progress_callback(cb_args, cb_kwargs) -> tuple[object, object, object, object]:
+    """Parse legacy and current streaming progress callback argument shapes."""
+    cb_kwargs = cb_kwargs or {}
+    event_type = None
+    name = None
+    preview = cb_kwargs.get('preview')
+    args = cb_kwargs.get('args')
+
+    if len(cb_args) >= 4:
+        event_type, name, preview, args = cb_args[:4]
+    elif len(cb_args) == 3:
+        name, preview, args = cb_args
+        event_type = 'tool.started'
+    elif len(cb_args) == 2:
+        event_type, name = cb_args
+    elif len(cb_args) == 1:
+        only = cb_args[0]
+        if only in _STREAMING_SUBAGENT_INPUT_EVENT_TYPES:
+            event_type = only
+            name = cb_kwargs.get('tool_name')
+        else:
+            name = only
+            event_type = 'tool.started'
+    return event_type, name, preview, args
+
+
+def _record_streaming_progress_event(
+    *,
+    event_type,
+    stream_id,
+    tool_name=None,
+    preview=None,
+    args=None,
+    function_result=None,
+    status=None,
+    is_error: bool = False,
+):
+    """Best-effort metadata-only progress receipt for WebUI lifecycle events.
+
+    Callback inputs may contain raw prompts, command bodies, URLs, renderer
+    details, secrets, arbitrary tool output, or subagent handoff data. Do not
+    persist any of them; the durable progress stream only needs the safe
+    lifecycle boundary.
+    """
+    safe_event_type, family = _safe_streaming_event_type(event_type, status=status, is_error=is_error)
+    run_id = _safe_streaming_progress_run_id(stream_id, family=family)
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({
+            "event_type": safe_event_type,
+            "run_id": run_id,
+        })
+    except Exception:
+        logger.debug("Failed to record streaming progress event", exc_info=True)
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": safe_event_type,
+            "family": family,
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+        }
 
 
 def _record_streaming_tool_progress_event(
@@ -120,36 +227,20 @@ def _record_streaming_tool_progress_event(
     preview=None,
     args=None,
     function_result=None,
+    status=None,
+    is_error: bool = False,
 ):
-    """Best-effort metadata-only progress receipt for WebUI tool lifecycle events.
-
-    The callback inputs may contain raw prompts, command bodies, URLs, renderer
-    details, secrets, or arbitrary tool output. Do not persist any of them; the
-    durable progress stream only needs the safe lifecycle boundary.
-    """
-    if event_type == "tool.failed":
-        safe_event_type = "tool.failed"
-    elif event_type == "tool.started":
-        safe_event_type = "tool.started"
-    else:
-        safe_event_type = "tool.completed"
-    try:
-        from api.capy_progress import record_progress_event
-
-        return record_progress_event({
-            "event_type": safe_event_type,
-            "run_id": _safe_streaming_progress_run_id(stream_id),
-        })
-    except Exception:
-        logger.debug("Failed to record streaming tool progress event", exc_info=True)
-        return {
-            "stored": False,
-            "queued": False,
-            "event_type": safe_event_type,
-            "family": "tool",
-            "run_id": _safe_streaming_progress_run_id(stream_id),
-            "redaction_status": "metadata_only",
-        }
+    """Compatibility wrapper for WebUI tool lifecycle progress receipts."""
+    return _record_streaming_progress_event(
+        event_type=event_type,
+        stream_id=stream_id,
+        tool_name=tool_name,
+        preview=preview,
+        args=args,
+        function_result=function_result,
+        status=status,
+        is_error=is_error,
+    )
 
 
 def _is_quota_error_text(err_text: str) -> bool:
@@ -2665,16 +2756,7 @@ def _run_agent_streaming(
                 preview = None
                 args = None
 
-                if len(cb_args) >= 4:
-                    event_type, name, preview, args = cb_args[:4]
-                elif len(cb_args) == 3:
-                    name, preview, args = cb_args
-                    event_type = 'tool.started'
-                elif len(cb_args) == 2:
-                    event_type, name = cb_args
-                elif len(cb_args) == 1:
-                    name = cb_args[0]
-                    event_type = 'tool.started'
+                event_type, name, preview, args = _parse_streaming_progress_callback(cb_args, cb_kwargs)
 
                 if event_type in ('reasoning.available', '_thinking'):
                     reason_text = preview if event_type == 'reasoning.available' else name
@@ -2687,6 +2769,23 @@ def _run_agent_streaming(
                         _metering_reasoning_deltas[0] += 1
                         meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
                         _emit_metering()
+                    return
+
+                if event_type in _STREAMING_SUBAGENT_INPUT_EVENT_TYPES:
+                    subagent_receipt = _record_streaming_progress_event(
+                        event_type=event_type,
+                        stream_id=stream_id,
+                        tool_name=name,
+                        preview=preview,
+                        args=args,
+                        status=cb_kwargs.get('status'),
+                        is_error=bool(cb_kwargs.get('is_error', False)),
+                    )
+                    put('progress_event', {
+                        'event_type': subagent_receipt.get('event_type') or 'subagent.progress',
+                        'family': 'subagent',
+                        'redaction_status': 'metadata_only',
+                    })
                     return
 
                 args_snap = {}
