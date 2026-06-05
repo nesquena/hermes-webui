@@ -4116,7 +4116,6 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   }
   const showCliOnly=_sessionSourceFilter==='cli';
   const profileFiltered=[];
-  const projectFiltered=[];
   const sessionsRaw=[];
   let archivedCount=0;
   for(const s of allMatched){
@@ -4130,7 +4129,6 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     } else if(_activeProject){
       if(s.project_id!==_activeProject) continue;
     }
-    projectFiltered.push(s);
     if(s.archived) archivedCount++;
     if(!_showArchived&&s.archived) continue;
     sessionsRaw.push(s);
@@ -4139,7 +4137,6 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
     webuiSessionCount,
     cliSessionCount,
     profileFiltered,
-    projectFiltered,
     sessionsRaw,
     archivedCount,
   };
