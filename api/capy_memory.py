@@ -9909,6 +9909,25 @@ def _snippet(markdown: str, query: str = "", *, limit: int = 700) -> str:
     return _safe_text(text, limit=limit)
 
 
+_MEMORY_ADVISORY_REQUIRED_GATES = [
+    "prompt_preflight",
+    "approval",
+    "sandbox_preview",
+    "visual_qa",
+    "rollback_recovery",
+]
+
+
+def _memory_advisory_envelope() -> dict[str, Any]:
+    return {
+        "metadata_only": True,
+        "advisory_context": True,
+        "context_authority": "untrusted_advisory",
+        "can_bypass_safety_gates": False,
+        "required_gates": list(_MEMORY_ADVISORY_REQUIRED_GATES),
+    }
+
+
 def _public_hit(row: sqlite3.Row | tuple[Any, ...], *, query: str = "") -> dict[str, Any]:
     if isinstance(row, sqlite3.Row):
         data = dict(row)
@@ -9916,6 +9935,7 @@ def _public_hit(row: sqlite3.Row | tuple[Any, ...], *, query: str = "") -> dict[
         keys = ["source_id", "chunk_id", "source_type", "display_name", "origin_uri", "space_id", "summary", "redaction_status"]
         data = dict(zip(keys, row))
     return {
+        **_memory_advisory_envelope(),
         "source_id": _safe_text(data.get("source_id"), limit=160),
         "chunk_id": _safe_text(data.get("chunk_id"), limit=160),
         "source_type": _safe_text(data.get("source_type"), limit=80),
@@ -10035,6 +10055,7 @@ def search_memory(query: str, *, space_id: str | None = None, limit: int = 10) -
         conn.executescript(_SCHEMA_SQL)
         rows = conn.execute(sql, params).fetchall()
     return {
+        **_memory_advisory_envelope(),
         "query": query_text,
         "limit": limit,
         "space_id": _safe_text(space_id, limit=160) if space_id else None,
@@ -10071,6 +10092,7 @@ def relevant_memory_for_space(space_id: str, *, limit: int = 5, exclude_auto_ing
         conn.executescript(_SCHEMA_SQL)
         rows = conn.execute(sql, params).fetchall()
     return {
+        **_memory_advisory_envelope(),
         "space_id": safe_space_id,
         "limit": limit,
         "local_only": True,

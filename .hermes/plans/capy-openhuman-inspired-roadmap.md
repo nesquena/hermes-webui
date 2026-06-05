@@ -137,6 +137,7 @@ Delivered:
 - New artifact canonicalizers cover Space manifests, revision events, widget events, and visual/UI QA reports as searchable local artifacts.
 - Production boundaries now call the canonicalizers automatically for Space manifest/revision writes (including rollback/restore anchors), widget events, recovery/repair events, and creator visual-QA commit reports.
 - Active-space context now includes cited advisory relevant-memory slices only through a prompt-preflighted, metadata-only envelope with compaction, context status, progress-event, and action-policy evidence.
+- Public Memory Tree retrieval payloads (`search_memory`, `/api/capy-memory/search`, `relevant_memory_for_space`, and `/api/spaces/memory`) now carry explicit machine-readable advisory/no-authority fields (`metadata_only`, `advisory_context`, `context_authority: untrusted_advisory`, `can_bypass_safety_gates: false`, and required gate labels), so downstream Spaces/tool consumers cannot treat retrieved snippets as trusted instructions or gate bypasses.
 
 Remaining:
 - Extend the same preflighted advisory-memory envelope to remaining source/tool/browser/development boundaries where memory can influence actions.

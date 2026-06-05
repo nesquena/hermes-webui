@@ -15483,9 +15483,25 @@ def test_search_memory_returns_bounded_redacted_snippets(tmp_path, monkeypatch):
     result = search_memory("dashboard", limit=3)
 
     assert result["local_only"] is True
+    assert result["metadata_only"] is True
+    assert result["advisory_context"] is True
+    assert result["context_authority"] == "untrusted_advisory"
+    assert result["can_bypass_safety_gates"] is False
+    assert result["required_gates"] == [
+        "prompt_preflight",
+        "approval",
+        "sandbox_preview",
+        "visual_qa",
+        "rollback_recovery",
+    ]
     assert result["query"] == "dashboard"
     assert len(result["results"]) == 1
     hit = result["results"][0]
+    assert hit["metadata_only"] is True
+    assert hit["advisory_context"] is True
+    assert hit["context_authority"] == "untrusted_advisory"
+    assert hit["can_bypass_safety_gates"] is False
+    assert hit["required_gates"] == result["required_gates"]
     assert hit["source_id"] == record["source_id"]
     assert hit["chunk_id"] == record["chunk_id"]
     assert hit["space_id"] == "source-space"
@@ -15509,8 +15525,25 @@ def test_relevant_memory_for_space_filters_by_space_id(tmp_path, monkeypatch):
     relevant = relevant_memory_for_space("source-space", limit=5)
 
     assert relevant["local_only"] is True
+    assert relevant["metadata_only"] is True
+    assert relevant["advisory_context"] is True
+    assert relevant["context_authority"] == "untrusted_advisory"
+    assert relevant["can_bypass_safety_gates"] is False
+    assert relevant["required_gates"] == [
+        "prompt_preflight",
+        "approval",
+        "sandbox_preview",
+        "visual_qa",
+        "rollback_recovery",
+    ]
     assert relevant["space_id"] == "source-space"
     assert [item["source_id"] for item in relevant["results"]] == [source_record["source_id"]]
+    hit = relevant["results"][0]
+    assert hit["metadata_only"] is True
+    assert hit["advisory_context"] is True
+    assert hit["context_authority"] == "untrusted_advisory"
+    assert hit["can_bypass_safety_gates"] is False
+    assert hit["required_gates"] == relevant["required_gates"]
 
 
 class _RouteHandler:
@@ -15812,7 +15845,24 @@ def test_capy_memory_search_route_filters_and_redacts(tmp_path, monkeypatch):
     assert body["query"] == "dashboard"
     assert body["space_id"] == "source-space"
     assert body["local_only"] is True
+    assert body["metadata_only"] is True
+    assert body["advisory_context"] is True
+    assert body["context_authority"] == "untrusted_advisory"
+    assert body["can_bypass_safety_gates"] is False
+    assert body["required_gates"] == [
+        "prompt_preflight",
+        "approval",
+        "sandbox_preview",
+        "visual_qa",
+        "rollback_recovery",
+    ]
     assert [item["source_id"] for item in body["results"]] == [record["source_id"]]
+    hit = body["results"][0]
+    assert hit["metadata_only"] is True
+    assert hit["advisory_context"] is True
+    assert hit["context_authority"] == "untrusted_advisory"
+    assert hit["can_bypass_safety_gates"] is False
+    assert hit["required_gates"] == body["required_gates"]
     serialized = json.dumps(body, sort_keys=True).lower()
     assert "secret_value_do_not_leak" not in serialized
     assert "<script" not in serialized
@@ -15986,7 +16036,28 @@ def test_spaces_memory_route_requires_space_id_and_returns_relevant_memory(tmp_p
     assert status == 200
     assert body["space_id"] == "source-space"
     assert body["local_only"] is True
+    assert body["metadata_only"] is True
+    assert body["advisory_context"] is True
+    assert body["context_authority"] == "untrusted_advisory"
+    assert body["can_bypass_safety_gates"] is False
+    assert body["required_gates"] == [
+        "prompt_preflight",
+        "approval",
+        "sandbox_preview",
+        "visual_qa",
+        "rollback_recovery",
+    ]
     assert [item["source_id"] for item in body["results"]] == [record["source_id"]]
+    hit = body["results"][0]
+    assert hit["metadata_only"] is True
+    assert hit["advisory_context"] is True
+    assert hit["context_authority"] == "untrusted_advisory"
+    assert hit["can_bypass_safety_gates"] is False
+    assert hit["required_gates"] == body["required_gates"]
+    serialized = json.dumps(body, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
 
 
 def test_run_source_refresh_jobs_default_fetcher_ingests_github_contents_list_metadata_only(tmp_path, monkeypatch):

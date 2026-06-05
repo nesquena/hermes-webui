@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): mark public memory retrieval advisory`
+  - Added RED/GREEN Memory Tree retrieval coverage proving `search_memory`, `/api/capy-memory/search`, `relevant_memory_for_space`, and `/api/spaces/memory` now expose explicit metadata-only advisory/no-authority envelopes.
+  - Every public memory hit now carries `context_authority: untrusted_advisory`, `can_bypass_safety_gates: false`, and required gate labels for prompt-preflight, approval, sandbox preview, visual QA, and rollback/recovery, while hostile fixture strings remain absent from serialized output.
+
 - `fix(capy-memory): fail-close GitHub PR-list raw hosts`
   - Added RED/GREEN Memory Tree source-refresh regression coverage for uppercase raw GitHub PR-list hosts before URL normalization.
   - Non-canonical PR-list routes now downgrade to local `capy-memory://` receipts and never fetch, create vault rows, or echo query/fragment/API-auth/raw-prompt markers.
