@@ -1014,6 +1014,7 @@ async function loadSession(sid){
   if(_s&&typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
     const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
+    const _pickPositive=(latest,stored,dflt=0)=>Number(latest)>0?latest:(Number(stored)>0?stored:dflt);
     _syncCtxIndicator({
       input_tokens:      _pick(u.input_tokens,      _s.input_tokens),
       output_tokens:     _pick(u.output_tokens,     _s.output_tokens),
@@ -1021,7 +1022,7 @@ async function loadSession(sid){
       cache_read_tokens: _pick(u.cache_read_tokens, _s.cache_read_tokens),
       cache_write_tokens:_pick(u.cache_write_tokens,_s.cache_write_tokens),
       cache_hit_percent: _pick(u.cache_hit_percent, _s.cache_hit_percent, null),
-      context_length:    _pick(_s.context_length,    u.context_length),
+      context_length:    _pickPositive(u.context_length, _s.context_length),
       last_prompt_tokens:_pick(u.last_prompt_tokens,_s.last_prompt_tokens),
       threshold_tokens:  _pick(_s.threshold_tokens,  u.threshold_tokens),
     });
@@ -1451,7 +1452,8 @@ function _resolveSessionModelForDisplaySoon(sid){
       if(!model||!S.session||S.session.session_id!==sid) return;
       S.session.model=model;
       S.session.model_provider=provider||null;
-      S.session.context_length=data.session.context_length||0;
+      const resolvedContextLength=data.session.context_length||S.session.context_length||0;
+      S.session.context_length=resolvedContextLength;
       S.session.threshold_tokens=data.session.threshold_tokens||0;
       S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
       S.session._modelResolutionDeferred=false;
@@ -1466,7 +1468,7 @@ function _resolveSessionModelForDisplaySoon(sid){
           cache_read_tokens:_pick(u.cache_read_tokens,S.session.cache_read_tokens),
           cache_write_tokens:_pick(u.cache_write_tokens,S.session.cache_write_tokens),
           cache_hit_percent:_pick(u.cache_hit_percent,S.session.cache_hit_percent,null),
-          context_length:data.session.context_length||0,
+          context_length:resolvedContextLength||u.context_length||0,
           last_prompt_tokens:_pick(u.last_prompt_tokens,S.session.last_prompt_tokens),
           threshold_tokens:data.session.threshold_tokens||0,
         });

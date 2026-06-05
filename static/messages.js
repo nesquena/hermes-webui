@@ -2187,7 +2187,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // Stamp _ts on the last assistant message if it has no timestamp
           if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
           if(d.usage){
-            S.lastUsage=d.usage;_syncCtxIndicator(d.usage);
+            const _doneUsageFallback={...(S.lastUsage||{})};
+            if(S.session){
+              for(const _usageField of ['context_length','threshold_tokens','last_prompt_tokens']){
+                if(_doneUsageFallback[_usageField]==null&&S.session[_usageField]!=null){
+                  _doneUsageFallback[_usageField]=S.session[_usageField];
+                }
+              }
+            }
+            S.lastUsage=typeof _mergeUsageForCtxIndicator==='function'
+              ? _mergeUsageForCtxIndicator(d.usage,_doneUsageFallback)
+              : {..._doneUsageFallback,...d.usage};
+            _syncCtxIndicator(S.lastUsage);
             // #503 — compute per-turn cost delta and attach to last assistant message
             if(lastAsst){
               const prevIn=_prevIn;
@@ -2389,7 +2400,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const displaySid=currentSid;
       const message=String(d.message||'Context auto-compressed to continue the conversation').trim();
       if(d.usage&&typeof _syncCtxIndicator==='function'){
-        S.lastUsage={...(S.lastUsage||{}),...d.usage};
+        S.lastUsage=typeof _mergeUsageForCtxIndicator==='function'
+          ? _mergeUsageForCtxIndicator(d.usage,S.lastUsage||{})
+          : {...(S.lastUsage||{}),...d.usage};
         _syncCtxIndicator(S.lastUsage);
       }
       if(typeof setCompressionUi==='function'){
@@ -2425,7 +2438,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if((d.session_id||activeSid)!==activeSid) return;
         if(d.usage&&typeof _syncCtxIndicator==='function'){
           if(S.session&&S.session.session_id===activeSid){
-            S.lastUsage={...(S.lastUsage||{}),...d.usage};
+            S.lastUsage=typeof _mergeUsageForCtxIndicator==='function'
+              ? _mergeUsageForCtxIndicator(d.usage,S.lastUsage||{})
+              : {...(S.lastUsage||{}),...d.usage};
             _syncCtxIndicator(S.lastUsage);
           }
         }

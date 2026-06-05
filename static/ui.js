@@ -2753,6 +2753,30 @@ function _syncMobileCtxDisplay(state){
   _setCtxCompressButton(compressBtn,state.compressText||'');
 }
 
+function _mergeUsageForCtxIndicator(latest, fallback){
+  const latestObj=(latest&&typeof latest==='object')?latest:{};
+  const fallbackObj=(fallback&&typeof fallback==='object')?fallback:{};
+  const merged={...latestObj};
+  for(const field of [
+    'input_tokens','output_tokens','estimated_cost',
+    'cache_read_tokens','cache_write_tokens','cache_hit_percent',
+    'turn_cache_hit_percent','duration_seconds','tps','gateway_routing',
+  ]){
+    if(merged[field]==null&&fallbackObj[field]!=null){
+      merged[field]=fallbackObj[field];
+    }
+  }
+  if(!(Number(latestObj.context_length)>0)&&Number(fallbackObj.context_length)>0){
+    merged.context_length=fallbackObj.context_length;
+  }
+  for(const field of ['threshold_tokens','last_prompt_tokens']){
+    if(latestObj[field]==null&&fallbackObj[field]!=null){
+      merged[field]=fallbackObj[field];
+    }
+  }
+  return merged;
+}
+
 // Context usage indicator in composer footer
 function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
