@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.278] — 2026-06-05 — Release IT (stage-p3g — repair inline PDF preview)
+
+### Fixed
+- **Inline PDF preview in chat now renders again.** The PDF.js loader previously created a `<script>` with both `src` and `textContent` set (the latter is ignored when `src` is present), so PDF.js never initialized and the preview hung on the spinner before degrading to a download link. It now loads PDF.js via a blob module script that sets the worker source, passes `isEvalSupported:false` to harden the parser, and revokes the blob URL on load. CSP gains `blob:` in `script-src` and a scoped `worker-src blob: 'self' https://cdn.jsdelivr.net` to permit the worker. (#3652, @xx77yy; closes #3649)
+
 ## [v0.51.277] — 2026-06-05 — Release IS (stage-p3f — preserve context-window in usage indicator)
 
 ### Fixed
