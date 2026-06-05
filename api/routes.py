@@ -6321,6 +6321,7 @@ def handle_post(handler, parsed) -> bool:
                 gateway_routing_history=copy.deepcopy(getattr(session, "gateway_routing_history", None) or []),
                 # Preserve LLM-generated title flag so we don't regenerate title on duplicate.
                 llm_title_generated=getattr(session, "llm_title_generated", False),
+                manual_title=getattr(session, "manual_title", False),
                 # Composer draft — preserve per-session draft state.
                 composer_draft=copy.deepcopy(getattr(session, "composer_draft", None) or {}),
                 # Context engine state — preserve so the duplicate's context engine
@@ -6481,7 +6482,8 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         with _get_session_agent_lock(body["session_id"]):
-            s.title = str(body["title"]).strip()[:80] or "Untitled"
+            from api.session_ops import apply_session_title_rename
+            apply_session_title_rename(s, body["title"])
             s.save()
         _sync_session_title_to_insights(s)
         publish_session_list_changed("session_rename", profile=getattr(s, "profile", None))
@@ -6507,7 +6509,9 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, f"Could not generate a better title ({reason or 'empty'})", 422)
         with _get_session_agent_lock(sid):
             s.title = str(next_title).strip()[:80] or "Untitled"
-            s.llm_title_generated = True
+            from api.session_ops import mark_session_title_generated
+            # mark_session_title_generated sets s.llm_title_generated = True and clears manual_title.
+            mark_session_title_generated(s)
             s.save(touch_updated_at=False)
         _sync_session_title_to_insights(s)
         publish_session_list_changed("session_title_regenerate", profile=getattr(s, "profile", None))
