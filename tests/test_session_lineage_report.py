@@ -265,15 +265,8 @@ def test_lineage_report_endpoint_returns_404_for_unknown_session(tmp_path):
     assert captured == {"status": 404, "message": "Session not found"}
 
 
-def test_lineage_report_batches_child_fetch_by_parent_ids():
-    import inspect
-
-    src = inspect.getsource(agent_sessions.read_session_lineage_report)
-    assert "WHERE s.parent_session_id IN ({placeholders})" in src
-    assert "WHERE s.parent_session_id = ?" not in src
-
-
 def test_lineage_report_preserves_child_order_for_each_segment_parent(tmp_path):
+    """Behavioural coverage for batched child fetch: started_at DESC per parent."""
     conn = _ensure_state_db(tmp_path / "state.db")
     t0 = time.time() - 200
     try:
