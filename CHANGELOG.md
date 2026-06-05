@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.276] — 2026-06-05 — Release IR (stage-p3e — preserve manually-named session titles)
+
+### Fixed
+- **Sessions you deliberately rename now keep that title** — the adaptive auto-title refresh no longer overwrites a manually-set name. A per-session `manual_title` flag is set when you rename a session and checked at every auto-rename entry point (background title update, refresh, and scheduling); clearing the title or resetting it to an automatic label (`Untitled`/`New Chat`) re-enables auto-naming, and the title-regenerate action also clears the flag. Free-flowing sessions still get auto-named on the configured schedule. (#3542, @mvanhorn; fixes #3230)
+
 ## [v0.51.275] — 2026-06-05 — Release IQ (stage-p3d — approval SSE state extraction)
 
 ### Internal
