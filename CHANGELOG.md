@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.277] — 2026-06-05 — Release IS (stage-p3f — preserve context-window in usage indicator)
+
+### Fixed
+- **The context-window usage indicator no longer flips to the 128K/131.1k fallback after a turn completes.** A terminal or reload usage snapshot that arrived with missing/stale context metadata could replace already-resolved values; the indicator now merges usage snapshots field-by-field, preserving a known `context_length` (and other resolved usage fields) instead of overwriting them with nulls. (#3663, @franksong2702; fixes #3185, #3660)
+
 ## [v0.51.276] — 2026-06-05 — Release IR (stage-p3e — preserve manually-named session titles)
 
 ### Fixed
