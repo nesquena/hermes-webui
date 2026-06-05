@@ -33,6 +33,18 @@ let _draftSaveTimer = null;
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 
+function _profileMatchesActiveProfile(profile, activeProfile){
+  const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
+  const activeName = (typeof activeProfile === 'string' && activeProfile.trim()) ? activeProfile.trim() : 'default';
+  if(eventName === activeName) return true;
+  return eventName === 'default' && !!S.activeProfileIsDefault;
+}
+
+function _sessionEventProfilesMatch(eventProfile, activeProfile){
+  if(!(typeof eventProfile === 'string' && eventProfile.trim())) return true;
+  return _profileMatchesActiveProfile(eventProfile, activeProfile);
+}
+
 function _isRestorableNewChatDraftSession(session, requireDraft=false) {
   if (!session || !session.session_id) return false;
   const messageCount = Number(session.message_count || 0);
@@ -42,7 +54,7 @@ function _isRestorableNewChatDraftSession(session, requireDraft=false) {
   if (title !== 'Untitled' && title !== 'New Chat') return false;
   const activeProfile = S.activeProfile || 'default';
   const sessionProfile = session.profile || 'default';
-  if (sessionProfile !== activeProfile) return false;
+  if (!_profileMatchesActiveProfile(sessionProfile, activeProfile)) return false;
   if (!requireDraft) return true;
   const draft = session.composer_draft || {};
   const text = (typeof draft.text === 'string') ? draft.text : '';
@@ -611,6 +623,7 @@ async function newSession(flash, options={}){
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     S.session=data.session;S.messages=data.session.messages||[];
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
@@ -802,6 +815,7 @@ async function loadSession(sid){
   // Stale response? A newer loadSession() call has already started (#1060).
   if (_loadingSessionId !== sid) return;
   S.session=data.session;
+  if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
   // Reset scroll-direction tracker on session switch so the new chat's
@@ -853,6 +867,13 @@ async function loadSession(sid){
         messages:Array.isArray(stored.messages)&&stored.messages.length?stored.messages:[],
         uploaded:Array.isArray(stored.uploaded)?stored.uploaded:[],
         toolCalls:Array.isArray(stored.toolCalls)?stored.toolCalls:[],
+        // Phase 2: restore the live todo snapshot from persisted INFLIGHT
+        // so the panel does not flicker to empty when a mid-stream
+        // browser reload reattaches before the next `todo_state` event
+        // fires.  Both fields are optional; missing values fall back to
+        // cold-load via session.todo_state.
+        todos:Array.isArray(stored.todos)?stored.todos:null,
+        todoStateMeta:stored.todoStateMeta||null,
         reattach:true,
       };
     }
@@ -872,6 +893,8 @@ async function loadSession(sid){
     if(_mergePendingSessionMessage(S.session,S.messages)){
       INFLIGHT[sid].messages=S.messages;
     }
+    // Refresh todos from cold-load or persisted INFLIGHT before painting.
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.busy=true;
     // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
     // replaying persisted live tools so the compact Activity count survives
@@ -1049,6 +1072,16 @@ function _isMessagingSession(session) {
   // Fallback: check raw_source directly
   const raw = (session.raw_source || session.source_tag || session.source || '').toLowerCase();
   return _MESSAGING_RAW_SOURCES.has(raw);
+}
+
+/**
+ * Returns true when a session originates from an external channel (CLI bridge,
+ * Discord, Telegram, Slack, etc.) and therefore needs a server-side import
+ * before the WebUI can read or send messages into it.
+ * Covers both legacy CLI sessions and messaging-source sessions.
+ */
+function _isExternalSession(session) {
+  return !!(session && (session.is_cli_session || _isMessagingSession(session)));
 }
 
 function _isReadOnlySession(session) {
@@ -1512,8 +1545,12 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   const hasMessageToolMetadata=msgs.some(m=>{
     if(!m) return false;
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+    // `_partial_tool_calls` are emitted by interrupted/partial turns and must also
+    // anchor rendering to the owning assistant message, so we can reconstruct
+    // settled tool cards from the message history when available.
+    const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    return hasTc||hasTu;
+    return hasTc||hasPartialTc||hasTu;
   });
   if(!hasMessageToolMetadata&&Array.isArray(sessionToolCalls)&&sessionToolCalls.length){
     S.toolCalls=sessionToolCalls.map(tc=>({...tc,done:true}));
@@ -1565,9 +1602,31 @@ async function _ensureMessagesLoaded(sid) {
   S.messages = msgs;
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
-    if(Object.prototype.hasOwnProperty.call(data.session,'todo_state')) S.session.todo_state=data.session.todo_state;
-    else delete S.session.todo_state;
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
+    // Phase 2: the messages=1 response carries the canonical cold-load
+    // `todo_state` snapshot, derived server-side from the FULL untruncated
+    // message list (api/routes.py + api/todo_state.py). The earlier
+    // messages=0 fetch in loadSession() does not include this field —
+    // attach_todo_state is gated on `load_messages`. Without applying it
+    // here, long sessions whose latest todo write falls outside the
+    // _INITIAL_MSG_LIMIT tail would lose the panel on refresh: the
+    // legacy reverse-scan in _legacyTodosFromMessages() can only see the
+    // tail S.messages, while the authoritative snapshot was already
+    // computed by the server and is sitting in this very response.
+    // _hydrateTodosFromSession is idempotent and picks newer of
+    // cold-load vs INFLIGHT by timestamp, so calling it again here is
+    // safe even when an INFLIGHT snapshot was already restored.
+    if(data.session.todo_state !== undefined){
+      S.session.todo_state = data.session.todo_state;
+    }else{
+      delete S.session.todo_state;
+    }
+    if(typeof _hydrateTodosFromSession === 'function'){
+      _hydrateTodosFromSession(S.session);
+    }
+    if(typeof scheduleTodosRefresh === 'function'){
+      scheduleTodosRefresh();
+    }
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
   }
 }
@@ -2152,6 +2211,7 @@ function _renderBatchActionBar(){
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
         S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+        if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions');
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
@@ -3003,7 +3063,18 @@ function ensureSessionEventsSSE(){
       _sessionEventsNeedsRefreshOnOpen = false;
       void refreshSessionList('reconnect');
     };
-    _sessionEventsSSE.addEventListener('sessions_changed', () => {
+    _sessionEventsSSE.addEventListener('sessions_changed', (ev) => {
+      const activeProfile = S.activeProfile || 'default';
+      try {
+        const payload = typeof ev?.data === 'string' ? JSON.parse(ev.data) : {};
+        const eventProfile = payload && typeof payload.profile === 'string' ? payload.profile : '';
+        if (!_sessionEventProfilesMatch(eventProfile, activeProfile)) {
+          return;
+        }
+      } catch (_err) {
+        // Non-JSON payload (or transient malformed event). Keep legacy behavior:
+        // refresh once event was seen.
+      }
       _scheduleSessionEventsRefresh('event');
     });
     _sessionEventsSSE.onerror = () => {
@@ -3106,8 +3177,9 @@ function startGatewaySSE(){
           }
           // If the active session received new gateway messages, refresh the conversation view.
           // S.busy check prevents stomping on an in-progress WebUI response.
-          // is_cli_session check ensures we only poll import_cli for CLI-originated sessions.
-          if(S.session && !S.busy && S.session.is_cli_session){
+          // _isExternalSession covers CLI-originated and messaging-source sessions
+          // that need a server-side import before WebUI can read them.
+          if(S.session && !S.busy && _isExternalSession(S.session)){
             const changedIds = new Set((data.sessions||[]).map(s=>s.session_id));
             if(changedIds.has(S.session.session_id)){
               // Capture active session ID before async fetch — race guard.
@@ -4398,7 +4470,7 @@ function renderSessionListFromCache(){
     if(animateRefresh&&(enterAllAnimatedRows||!(flipBefore&&flipBefore.has(s.session_id)))){
       el.classList.add('session-list-flip-enter');
     }
-    if(s.is_cli_session){
+    if(s.is_cli_session||_isMessagingSession(s)){
       el.classList.add('cli-session');
       el.dataset.source=_getChannelLabel(s)||'CLI';
       el.dataset.sourceKey=_sourceKeyForSession(s)||'cli';
@@ -4535,6 +4607,14 @@ function renderSessionListFromCache(){
       };
       titleRow.appendChild(childCountEl);
     }
+    if(s.is_cli_session||_isMessagingSession(s)){
+      const chipLabel=_getChannelLabel(s)||'CLI';
+      const chip=document.createElement('span');
+      chip.className='session-source-chip';
+      chip.textContent=chipLabel;
+      chip.dataset.sourceKey=_sourceKeyForSession(s)||'cli';
+      titleRow.appendChild(chip);
+    }
     titleRow.appendChild(ts);
     sessionText.appendChild(titleRow);
     if(density==='detailed'){
@@ -4548,7 +4628,7 @@ function renderSessionListFromCache(){
       const modelMeta=_formatSessionModelWithGateway(s);
       if(modelMeta) metaBits.push(modelMeta);
       const sourceLabel=_getChannelLabel(s);
-      if(s.is_cli_session&&sourceLabel) metaBits.push(sourceLabel);
+      if(sourceLabel&&(s.is_cli_session||_isMessagingSession(s))) metaBits.push(sourceLabel);
       if(readOnly) metaBits.push('read-only');
       if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
       const meta=document.createElement('div');
@@ -4579,7 +4659,7 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
-          if(seg.is_cli_session){
+          if(_isExternalSession(seg)){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:seg.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
@@ -4606,7 +4686,7 @@ function renderSessionListFromCache(){
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
-          if(child.is_cli_session){
+          if(_isExternalSession(child)){
             try{await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:child.session_id})});}
             catch(_e){ /* read-only fallback */ }
           }
@@ -4996,8 +5076,9 @@ function renderSessionListFromCache(){
         _tapTimer=null;
         _lastTapTime=0;
         if(_renamingSid) return;
-        // For CLI sessions, import into WebUI store first (idempotent)
-        if(s.is_cli_session){
+        // For external sessions (CLI, Discord, Telegram, Slack), import into
+        // WebUI store first so /api/chat/start finds a persisted session.
+        if(_isExternalSession(s)){
           try{
             await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:s.session_id})});
           }catch(e){ /* import failed -- fall through to read-only view */ }
@@ -5213,6 +5294,7 @@ async function deleteSession(sid, beforeDelete=null){
   }
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
     localStorage.removeItem('hermes-webui-session');
     // load the most recent remaining session, or show blank if none left
     const remaining=await api('/api/sessions');

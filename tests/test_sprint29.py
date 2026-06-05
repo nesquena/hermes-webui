@@ -119,7 +119,7 @@ class TestCSRF:
         )
         assert status != 403, f"Expected non-403 for same-referer request, got {status}"
 
-    def test_proxy_host_default_https_port_matches_http_origin(self):
+    def test_proxy_host_default_https_port_matches_http_origin(self, monkeypatch):
         """http:// origin without port must NOT match X-Forwarded-Host with :443.
 
         After the scheme-aware _ports_match fix: http:// absent port = :80,
@@ -129,20 +129,23 @@ class TestCSRF:
         See test_proxy_host_default_https_port_matches_https_origin for the
         real-world proxy case that should pass.
         """
+        monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "1")
         assert not self._csrf_allowed({
             "Origin": "http://example.com",
             "X-Forwarded-Host": "example.com:443",
         }), 'http origin (port :80) must not match https host (:443)'
 
-    def test_proxy_host_default_https_port_matches_https_origin(self):
+    def test_proxy_host_default_https_port_matches_https_origin(self, monkeypatch):
         """HTTPS Origin without port should match X-Forwarded-Host with explicit :443."""
+        monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "1")
         assert self._csrf_allowed({
             "Origin": "https://example.com",
             "X-Forwarded-Host": "example.com:443",
         })
 
-    def test_proxy_host_port_normalization_still_rejects_other_host(self):
+    def test_proxy_host_port_normalization_still_rejects_other_host(self, monkeypatch):
         """Port normalization must not allow different hosts through."""
+        monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "1")
         assert not self._csrf_allowed({
             "Origin": "https://evil.com",
             "X-Forwarded-Host": "example.com:443",
@@ -168,19 +171,21 @@ class TestCSRF:
 
     # ── Port normalization: scheme-aware (M-1 fix) ────────────────────────────
 
-    def test_cross_protocol_port_not_confused_http_origin_https_host(self):
+    def test_cross_protocol_port_not_confused_http_origin_https_host(self, monkeypatch):
         """http:// origin must NOT match a host with :443 (HTTPS default).
 
         Before M-1 fix, _ports_match treated both 80 and 443 as equivalent to
         absent port, allowing http://host to match https://host:443 servers.
         """
+        monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "1")
         assert not self._csrf_allowed({
             'Origin': 'http://example.com',     # http, no port = :80
             'X-Forwarded-Host': 'example.com:443',  # HTTPS port
         }), 'http origin should NOT match host advertising port 443'
 
-    def test_cross_protocol_port_not_confused_https_origin_http_host(self):
+    def test_cross_protocol_port_not_confused_https_origin_http_host(self, monkeypatch):
         """https:// origin must NOT match a host with :80 (HTTP default)."""
+        monkeypatch.setenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "1")
         assert not self._csrf_allowed({
             'Origin': 'https://example.com',    # https, no port = :443
             'X-Forwarded-Host': 'example.com:80',   # HTTP port

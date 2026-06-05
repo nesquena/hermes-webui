@@ -162,12 +162,15 @@ def _discover_python(agent_dir) -> str:
     if os.getenv('HERMES_WEBUI_PYTHON'):
         return os.getenv('HERMES_WEBUI_PYTHON')
     if agent_dir:
-        venv_py = agent_dir / 'venv' / 'bin' / 'python'
-        if venv_py.exists():
-            return str(venv_py)
-    local_venv = REPO_ROOT / '.venv' / 'bin' / 'python'
-    if local_venv.exists():
-        return str(local_venv)
+        for venv_dir in ('venv', '.venv'):
+            for subdir, binary in (('bin', 'python'), ('Scripts', 'python.exe')):
+                venv_py = agent_dir / venv_dir / subdir / binary
+                if venv_py.exists():
+                    return str(venv_py)
+    for subdir, binary in (('bin', 'python'), ('Scripts', 'python.exe')):
+        local_venv = REPO_ROOT / '.venv' / subdir / binary
+        if local_venv.exists():
+            return str(local_venv)
     return shutil.which('python3') or shutil.which('python') or 'python3'
 
 HERMES_AGENT = _discover_agent_dir()
