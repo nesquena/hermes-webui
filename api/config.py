@@ -2246,10 +2246,17 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
         return True
     if "step" in token_set or normalized.startswith("step"):
         return True
-    if normalized.startswith(("deepseek-v", "deepseek-r")):
-        return True
-    if len(tokens) >= 2 and tokens[0] == "deepseek" and tokens[1].startswith(("v", "r")):
-        return True
+    if "deepseek" in token_set:
+        # Check the token immediately after "deepseek" for a V-series or R-series
+        # version marker (e.g. "v4", "r1"). This is position-independent so it
+        # handles bare "deepseek-v4-flash" and @custom:name:DeepSeek-V4-Flash
+        # (→ "my-provider-deepseek-v4-flash") equally, while correctly excluding
+        # non-reasoning models like deepseek-chat and deepseek-coder.
+        # Using tokens.index() ensures the provider slug (e.g. "vertex" in
+        # "vertex-deepseek-chat") cannot falsely trigger the version guard.
+        idx = tokens.index("deepseek")
+        if idx + 1 < len(tokens) and tokens[idx + 1].startswith(("v", "r")):
+            return True
     return False
 
 
