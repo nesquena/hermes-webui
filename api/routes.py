@@ -9047,12 +9047,14 @@ def _handle_tts(handler, parsed):
                 self._checks = 0
 
             def _get_client_key(self, h):
-                for hdr in ("X-Forwarded-For", "X-Real-IP", "Forwarded"):
-                    val = h.headers.get(hdr)
-                    if val:
-                        ip = val.split(",")[0].strip().split(";")[0].strip()
-                        if ip:
-                            return ip
+                trust_proxy = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_FOR", "").strip().lower()
+                if trust_proxy in ("1", "true", "yes", "on"):
+                    for hdr in ("X-Forwarded-For", "X-Real-IP", "Forwarded"):
+                        val = h.headers.get(hdr)
+                        if val:
+                            ip = val.split(",")[0].strip().split(";")[0].strip()
+                            if ip:
+                                return ip
                 return getattr(h, "client_address", ("unknown",))[0]
 
             def check(self, handler, session_cookie=None):
