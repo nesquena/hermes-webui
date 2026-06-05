@@ -247,7 +247,16 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
 
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
-    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "loaded", "source": "test", "label": "test", "message_count": 1, "messages": [{"role": "user", "content": "prefill"}]})
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
+        "status": "loaded",
+        "source": "test",
+        "label": "test",
+        "message_count": 2,
+        "messages": [
+            {"role": "assistant", "content": "prefill summary"},
+            {"role": "user", "content": "prefill"},
+        ],
+    })
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: list(ctx["messages"]) + [{"role": "user", "content": "webui session context"}])
     monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
 
@@ -296,12 +305,13 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     # The moved session/delivery context must be present in the system prompt.
     assert "Connected Platforms:" in system_msg["content"]
     assert "Delivery options for scheduled tasks:" in system_msg["content"]
-    # The recall prefill + the actual user turn follow the system message.
+    # The gateway path keeps safe recall prefill context while removing
+    # terminal user-role prefill before the actual browser user turn.
     assert [m["content"] for m in payload["messages"][1:]] == [
-        "prefill",
-        "webui session context",
+        "prefill summary",
         "Say hello",
     ]
+    assert [m["role"] for m in payload["messages"]] == ["system", "assistant", "user"]
     events = []
     while not subscriber.empty():
         events.append(subscriber.get_nowait())
@@ -321,6 +331,77 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "is_error": False,
         "tid": "call-1",
     }) in events
+
+
+def test_gateway_chat_worker_normalizes_prefill_slice_before_system_prefix(tmp_path, monkeypatch):
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"done"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+
+    prefill_raw = [
+        {"role": "assistant", "content": "prefill summary"},
+        {"role": "user", "content": "first terminal user"},
+        {"role": "user", "content": "second terminal user"},
+    ]
+
+    def fake_urlopen(req, timeout=0):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResponse()
+
+    original_normalizer = streaming._normalize_prefill_messages_before_user_turn
+
+    def recording_normalizer(messages):
+        captured["normalizer_input"] = list(messages)
+        return original_normalizer(messages)
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
+        "status": "loaded",
+        "source": "test",
+        "label": "test",
+        "message_count": len(prefill_raw),
+        "messages": prefill_raw,
+    })
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: list(ctx["messages"]))
+    monkeypatch.setattr(streaming, "_normalize_prefill_messages_before_user_turn", recording_normalizer)
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    s = new_session()
+    stream_id = "stream-gateway-prefill-slice-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.save()
+    STREAMS[stream_id] = create_stream_channel()
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    assert captured["normalizer_input"] == prefill_raw
+    payload_messages = captured["body"]["messages"]
+    assert [m["role"] for m in payload_messages] == ["system", "assistant", "user"]
+    assert [m["content"] for m in payload_messages[1:]] == ["prefill summary", "Say hello"]
 
 
 def test_gateway_chat_worker_backfills_context_only_turns_into_display(tmp_path, monkeypatch):
@@ -583,7 +664,9 @@ def test_gateway_chat_worker_forwards_image_attachments_as_multimodal_parts(tmp_
     content = captured["body"]["messages"][-1]["content"]
     assert captured["body"]["messages"][0]["role"] == "system"
     assert "Final visible assistant replies" in captured["body"]["messages"][0]["content"]
-    assert captured["body"]["messages"][1] == {"role": "user", "content": "webui session context"}
+    image_payload = captured["body"]["messages"][1]
+    assert image_payload["role"] == "user"
+    assert image_payload["content"][0] == {"type": "text", "text": "What is in this image?"}
     assert content[0] == {"type": "text", "text": "What is in this image?"}
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
