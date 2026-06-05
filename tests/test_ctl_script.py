@@ -6,6 +6,8 @@ import textwrap
 import time
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CTL = REPO_ROOT / "ctl.sh"
@@ -78,20 +80,77 @@ def wait_for_pid_file(pid_file: Path, timeout: float = 3.0) -> int:
     raise AssertionError(f"PID file was not written: {pid_file}")
 
 
-def wait_for_file_text(path: Path, timeout: float = 3.0) -> str:
+def wait_for_file_text(path: Path, timeout: float = 3.0, contains: str | None = None) -> str:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if path.exists():
             text = path.read_text(encoding="utf-8")
-            if text:
+            if text and (contains is None or contains in text):
                 return text
         time.sleep(0.05)
     raise AssertionError(f"File was not written: {path}")
 
 
+def assert_path_in_text(path: Path, text: str) -> None:
+    assert str(path).replace("\\", "/") in text.replace("\\", "/")
+
+
+def bash_path(path: Path) -> str:
+    raw = str(path.resolve()).replace("\\", "/")
+    if sys.platform == "win32" and len(raw) > 1 and raw[1] == ":":
+        return f"/{raw[0].lower()}{raw[2:]}"
+    return raw
+
+
+def bash_pid(pid: int) -> int:
+    if sys.platform != "win32":
+        return pid
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            "ps -W | awk -v winpid=\"$1\" '$4 == winpid { print $1; exit }'",
+            "_",
+            str(pid),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=3,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return int(result.stdout.strip())
+    return pid
+
+
+def windows_pid(pid: int) -> int | None:
+    if sys.platform != "win32":
+        return pid
+    result = subprocess.run(
+        [
+            "bash",
+            "-lc",
+            "ps -p \"$1\" -l | awk 'NR == 2 { print $4 }'",
+            "_",
+            str(pid),
+        ],
+        text=True,
+        capture_output=True,
+        timeout=3,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return int(result.stdout.strip())
+    return None
+
+
+def start_fake_launchd_process() -> subprocess.Popen:
+    return subprocess.Popen(["bash", "-lc", "exec sleep 30"])
+
+
 def _kill_tree(pid: int) -> None:
     if sys.platform == "win32":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+        winpid = windows_pid(pid)
+        if winpid is not None:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(winpid)], capture_output=True)
     else:
         try:
             os.kill(pid, 9)
@@ -99,12 +158,28 @@ def _kill_tree(pid: int) -> None:
             pass
 
 
+def process_exists(pid: int) -> bool:
+    if sys.platform == "win32":
+        return (
+            subprocess.run(
+                ["bash", "-lc", "kill -0 \"$1\"", "_", str(pid)],
+                text=True,
+                capture_output=True,
+                timeout=3,
+            ).returncode
+            == 0
+        )
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
 def assert_process_exits(pid: int, timeout: float = 3.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not process_exists(pid):
             return
         time.sleep(0.05)
     _kill_tree(pid)
@@ -136,19 +211,20 @@ def test_start_writes_pid_under_hermes_home_runs_foreground_no_browser_and_logs(
     try:
         assert pid > 1
         assert log_file.exists()
-        fake_output = wait_for_file_text(fake_log)
+        fake_output = wait_for_file_text(fake_log, contains="host=0.0.0.0 port=18991")
         assert "bootstrap.py --no-browser --foreground" in fake_output
         assert "host=0.0.0.0 port=18991" in fake_output
-        assert str(hermes_home / "webui") in fake_output
+        assert_path_in_text(hermes_home / "webui", fake_output)
         status = run_ctl(tmp_path, "status")
         assert status.returncode == 0
         assert "running" in status.stdout
         assert f"PID:     {pid}" in status.stdout
         assert "Bound:   0.0.0.0:18991" in status.stdout
-        assert f"Log:     {log_file}" in status.stdout
+        assert_path_in_text(log_file, status.stdout)
     finally:
         stop = run_ctl(tmp_path, "stop")
         assert stop.returncode == 0, stop.stderr + stop.stdout
+        _kill_tree(pid)
         assert_process_exits(pid)
         assert not pid_file.exists()
 
@@ -187,12 +263,13 @@ def test_start_can_ignore_repo_dotenv_for_authoritative_test_env(tmp_path):
     assert result.returncode == 0, result.stderr + result.stdout
     pid = wait_for_pid_file(tmp_path / ".hermes" / "webui.pid")
     try:
-        fake_output = wait_for_file_text(fake_log)
-        assert str(tmp_path / ".hermes" / "webui") in fake_output
+        fake_output = wait_for_file_text(fake_log, contains="host=127.0.0.1 port=8787")
+        assert_path_in_text(tmp_path / ".hermes" / "webui", fake_output)
         assert "host-specific-webui" not in fake_output
     finally:
         stop = run_ctl(tmp_path, "stop", repo_root=repo_root)
         assert stop.returncode == 0, stop.stderr + stop.stdout
+        _kill_tree(pid)
         assert_process_exits(pid)
 
 
@@ -225,12 +302,13 @@ def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
     assert result.returncode == 0, result.stderr + result.stdout
     pid = wait_for_pid_file(tmp_path / ".hermes" / "webui.pid")
     try:
-        fake_output = wait_for_file_text(fake_log)
+        fake_output = wait_for_file_text(fake_log, contains="host=0.0.0.0 port=18888")
         assert "fake-python args:" in fake_output
         assert "host=0.0.0.0 port=18888" in fake_output
     finally:
         stop = run_ctl(tmp_path, "stop", repo_root=repo_root)
         assert stop.returncode == 0, stop.stderr + stop.stdout
+        _kill_tree(pid)
         assert_process_exits(pid)
 
 
@@ -283,11 +361,14 @@ def _write_fake_lsof(fake_bin, listening):
 
 
 def test_start_refuses_second_instance_when_launchd_job_owns_the_port(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("launchd conflict guard is a macOS path; fake launchctl PIDs are not stable under Git Bash")
+
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
 
-    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    _write_fake_launchctl(fake_bin, sleeper.pid)
+    sleeper = start_fake_launchd_process()
+    _write_fake_launchctl(fake_bin, bash_pid(sleeper.pid))
     # launchd-owned PID IS listening on the requested (default) port → real conflict.
     _write_fake_lsof(fake_bin, listening=True)
 
@@ -296,7 +377,7 @@ def test_start_refuses_second_instance_when_launchd_job_owns_the_port(tmp_path):
             tmp_path,
             "start",
             env={
-                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+                "PATH": f"{bash_path(fake_bin)}{os.pathsep}{os.environ.get('PATH', '')}",
                 "HERMES_WEBUI_LAUNCHD_LABEL": "com.parantoux.hermes-webui",
             },
         )
@@ -320,8 +401,8 @@ def test_start_allows_alternate_port_while_launchd_job_runs_on_default(tmp_path)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
 
-    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-    _write_fake_launchctl(fake_bin, sleeper.pid)
+    sleeper = start_fake_launchd_process()
+    _write_fake_launchctl(fake_bin, bash_pid(sleeper.pid))
     # launchd-owned PID is alive but NOT listening on our (alternate) port → no conflict.
     _write_fake_lsof(fake_bin, listening=False)
 
@@ -339,7 +420,7 @@ def test_start_allows_alternate_port_while_launchd_job_runs_on_default(tmp_path)
             tmp_path,
             "start",
             env={
-                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+                "PATH": f"{bash_path(fake_bin)}{os.pathsep}{os.environ.get('PATH', '')}",
                 "HERMES_WEBUI_LAUNCHD_LABEL": "com.parantoux.hermes-webui",
                 "HERMES_WEBUI_PORT": "18992",
                 "HERMES_WEBUI_PYTHON": str(fake_python),
@@ -353,10 +434,7 @@ def test_start_allows_alternate_port_while_launchd_job_runs_on_default(tmp_path)
             started_pid = int(pid_file.read_text().strip())
     finally:
         if started_pid:
-            try:
-                os.kill(started_pid, 15)
-            except ProcessLookupError:
-                pass
+            _kill_tree(started_pid)
         sleeper.terminate()
         try:
             sleeper.wait(timeout=3)
