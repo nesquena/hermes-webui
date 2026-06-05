@@ -25,7 +25,7 @@ def _run_search(query):
     lives in its LAST message, capturing the JSON payload/status."""
     import api.routes as routes
 
-    sessions_meta = [{"session_id": "s1", "title": "Untitled"}]
+    sessions_meta = [{"session_id": "s1", "title": "Untitled", "profile": "default"}]
     session = SimpleNamespace(
         session_id="s1",
         messages=[
@@ -42,7 +42,9 @@ def _run_search(query):
 
     with patch("api.routes.all_sessions", return_value=list(sessions_meta)), patch(
         "api.routes.get_session", return_value=session
-    ), patch("api.routes.j", side_effect=fake_j):
+    ), patch("api.profiles.get_active_profile_name", return_value="default"), patch(
+        "api.routes.j", side_effect=fake_j
+    ):
         routes._handle_sessions_search(SimpleNamespace(), urlparse(query))
     return captured
 
