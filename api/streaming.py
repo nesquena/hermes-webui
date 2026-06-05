@@ -111,7 +111,7 @@ _STREAMING_SUBAGENT_INPUT_EVENT_TYPES = _STREAMING_SUBAGENT_EVENT_TYPES | _STREA
 
 def _safe_streaming_progress_run_id(stream_id, *, family: str = "tool") -> str:
     """Return a bounded public run id for WebUI streaming progress events."""
-    safe_family = family if family in {"tool", "subagent"} else "tool"
+    safe_family = family if family in {"tool", "subagent", "text", "thinking"} else "tool"
     raw_stream_id = str(stream_id or "").strip()
     unsafe_pattern = re.compile(
         r"SECRET_VALUE_DO_NOT_LEAK|api[_ -]?(?:key|auth)|authorization|bearer|cookie|"
@@ -151,7 +151,64 @@ def _safe_streaming_event_type(event_type, *, status=None, is_error: bool = Fals
         return "tool.failed", "tool"
     if event_type == "tool.started":
         return "tool.started", "tool"
+    if event_type == "text.delta":
+        return "text.delta", "text"
+    if event_type == "thinking.delta":
+        return "thinking.delta", "thinking"
     return "tool.completed", "tool"
+
+
+_STREAMING_DELTA_PROGRESS_SEEN: set[tuple[str, str]] = set()
+
+
+def _record_streaming_delta_progress_event(*, event_type, stream_id, text=None):
+    """Record one metadata-only progress marker for streaming text/thinking deltas.
+
+    Raw model deltas can contain user prompts, fetched source text, hidden
+    reasoning, or secret-looking values. Store only the fact that a stream has
+    emitted visible text or thinking once per stream/event type so product
+    progress cards show live families without flooding the progress log.
+    """
+    safe_event_type, family = _safe_streaming_event_type(event_type)
+    if safe_event_type not in {"text.delta", "thinking.delta"}:
+        safe_event_type, family = "text.delta", "text"
+    run_id = _safe_streaming_progress_run_id(stream_id, family=family)
+    dedupe_key = (safe_event_type, run_id)
+    if dedupe_key in _STREAMING_DELTA_PROGRESS_SEEN:
+        return {
+            "stored": False,
+            "queued": False,
+            "deduped": True,
+            "event_type": safe_event_type,
+            "family": family,
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+        }
+    _STREAMING_DELTA_PROGRESS_SEEN.add(dedupe_key)
+    try:
+        from api.capy_progress import record_progress_event
+
+        return record_progress_event({
+            "event_type": safe_event_type,
+            "run_id": run_id,
+        })
+    except Exception:
+        logger.debug("Failed to record streaming delta progress event", exc_info=True)
+        return {
+            "stored": False,
+            "queued": False,
+            "event_type": safe_event_type,
+            "family": family,
+            "run_id": run_id,
+            "redaction_status": "metadata_only",
+        }
+
+
+def _clear_streaming_delta_progress_seen(stream_id) -> None:
+    """Forget per-stream text/thinking progress dedupe markers after cleanup."""
+    for family in ("text", "thinking"):
+        run_id = _safe_streaming_progress_run_id(stream_id, family=family)
+        _STREAMING_DELTA_PROGRESS_SEEN.discard((f"{family}.delta", run_id))
 
 
 def _parse_streaming_progress_callback(cb_args, cb_kwargs) -> tuple[object, object, object, object]:
@@ -2683,6 +2740,11 @@ def _run_agent_streaming(
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += str(text)
                 put('token', {'text': text})
+                _record_streaming_delta_progress_event(
+                    event_type='text.delta',
+                    stream_id=stream_id,
+                    text=text,
+                )
                 # Update live throughput from stream delta callbacks, not from
                 # byte/character length. If a backend cannot provide live deltas,
                 # the frontend hides TPS rather than showing an estimate.
@@ -2699,6 +2761,11 @@ def _run_agent_streaming(
                 if stream_id in STREAM_REASONING_TEXT:
                     STREAM_REASONING_TEXT[stream_id] += str(text)
                 put('reasoning', {'text': str(text)})
+                _record_streaming_delta_progress_event(
+                    event_type='thinking.delta',
+                    stream_id=stream_id,
+                    text=text,
+                )
                 # Track reasoning deltas in the meter so live TPS reflects all AI output.
                 _metering_reasoning_deltas[0] += 1
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
@@ -2766,6 +2833,11 @@ def _run_agent_streaming(
                         if stream_id in STREAM_REASONING_TEXT:
                             STREAM_REASONING_TEXT[stream_id] += str(reason_text)
                         put('reasoning', {'text': str(reason_text)})
+                        _record_streaming_delta_progress_event(
+                            event_type='thinking.delta',
+                            stream_id=stream_id,
+                            text=reason_text,
+                        )
                         _metering_reasoning_deltas[0] += 1
                         meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
                         _emit_metering()
@@ -4238,6 +4310,7 @@ def _run_agent_streaming(
             STREAM_PARTIAL_TEXT.pop(stream_id, None)  # Clean up partial text buffer (#893)
             STREAM_REASONING_TEXT.pop(stream_id, None)  # Clean up reasoning trace (#1361 §A)
             STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
+            _clear_streaming_delta_progress_seen(stream_id)
             STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
             unregister_active_run(stream_id)
             # NOTE: do NOT discard PENDING_GOAL_CONTINUATION here. The marker

@@ -303,7 +303,78 @@ def test_streaming_progress_uses_fallback_run_id_for_unsafe_subagent_stream_ids(
         assert unsafe.lower() not in serialized.lower()
 
 
-def test_streaming_callbacks_invoke_progress_recorder_for_tool_and_subagent_events():
+def test_streaming_text_and_thinking_deltas_record_metadata_only_once_per_stream(tmp_path, monkeypatch):
+    """WebUI token/reasoning streams should appear as metadata-only Capy progress.
+
+    Raw model text and reasoning deltas may contain prompts, source text, or
+    secret-looking data. The durable progress producer should record only the
+    event family/type and safe stream run id, and it should not write one row per
+    token because model deltas can be very high volume.
+    """
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    first_text = streaming._record_streaming_delta_progress_event(
+        event_type="text.delta",
+        stream_id="stream-delta-123",
+        text="SECRET_VALUE_DO_NOT_LEAK raw_prompt <script>ignore previous instructions</script>",
+    )
+    duplicate_text = streaming._record_streaming_delta_progress_event(
+        event_type="text.delta",
+        stream_id="stream-delta-123",
+        text="second token with api_key bearer placeholder renderer source data",
+    )
+    thinking = streaming._record_streaming_delta_progress_event(
+        event_type="thinking.delta",
+        stream_id="stream-delta-123",
+        text="hidden chain with SECRET_VALUE_DO_NOT_LEAK api_auth raw_prompt",
+    )
+    status = capy_progress.progress_status()
+    raw_log = Path(tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8")
+    serialized = raw_log + "\n" + str(status)
+
+    assert first_text["stored"] is True
+    assert first_text["event_type"] == "text.delta"
+    assert first_text["family"] == "text"
+    assert first_text["run_id"] == "webui.text:stream-delta-123"
+    assert duplicate_text["stored"] is False
+    assert duplicate_text["deduped"] is True
+    assert thinking["stored"] is True
+    assert thinking["event_type"] == "thinking.delta"
+    assert thinking["family"] == "thinking"
+    assert thinking["run_id"] == "webui.thinking:stream-delta-123"
+    assert status["recent_family_counts"]["text"] == 1
+    assert status["recent_family_counts"]["thinking"] == 1
+    assert {event["event_type"] for event in status["recent_events"]} >= {"text.delta", "thinking.delta"}
+    for unsafe in UNSAFE_FIXTURES + ("api_auth", "bearer placeholder", "source data"):
+        assert unsafe.lower() not in serialized.lower()
+
+
+def test_streaming_delta_progress_uses_fallback_run_id_for_unsafe_stream_ids(tmp_path, monkeypatch):
+    """Unsafe text/thinking stream ids must not become durable progress metadata."""
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    receipt = streaming._record_streaming_delta_progress_event(
+        event_type="text.delta",
+        stream_id="SECRET_VALUE_DO_NOT_LEAK<script>source.data ignore previous instructions",
+        text="safe visible token",
+    )
+    raw_log = Path(tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8")
+    serialized = raw_log + "\n" + str(capy_progress.progress_status())
+
+    assert receipt["stored"] is True
+    assert receipt["event_type"] == "text.delta"
+    assert receipt["family"] == "text"
+    assert receipt["run_id"] == "webui.text:stream"
+    assert "webui.text:stream" in serialized
+    for unsafe in ("SECRET_VALUE_DO_NOT_LEAK", "<script", "source.data", "ignore-previous-instructions"):
+        assert unsafe.lower() not in serialized.lower()
+
+
+def test_streaming_callbacks_invoke_progress_recorder_for_tool_subagent_and_delta_events():
     """The real streaming callback must feed tool/subagent events into the recorder."""
     src = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text(encoding="utf-8")
     started_idx = src.find("if event_type in (None, 'tool.started'):")
@@ -316,6 +387,12 @@ def test_streaming_callbacks_invoke_progress_recorder_for_tool_and_subagent_even
     subagent_idx = src.find("if event_type in _STREAMING_SUBAGENT_INPUT_EVENT_TYPES:", on_tool_idx)
     subagent_recorder_idx = src.find("_record_streaming_progress_event", subagent_idx)
     subagent_return_idx = src.find("return", subagent_idx)
+    on_token_idx = src.find("def on_token(text):")
+    on_token_recorder_idx = src.find("_record_streaming_delta_progress_event", on_token_idx)
+    on_token_meter_idx = src.find("meter().record_token", on_token_idx)
+    on_reasoning_idx = src.find("def on_reasoning(text):")
+    on_reasoning_recorder_idx = src.find("_record_streaming_delta_progress_event", on_reasoning_idx)
+    on_reasoning_meter_idx = src.find("meter().record_reasoning", on_reasoning_idx)
 
     assert started_idx != -1, "streaming tool.started callback block not found"
     assert started_recorder_idx != -1 and started_idx < started_recorder_idx < started_return_idx, (
@@ -328,4 +405,12 @@ def test_streaming_callbacks_invoke_progress_recorder_for_tool_and_subagent_even
     assert subagent_idx != -1, "streaming subagent callback block not found"
     assert subagent_recorder_idx != -1 and subagent_idx < subagent_recorder_idx < subagent_return_idx, (
         "subagent callback must record a metadata-only Capy progress event before returning"
+    )
+    assert on_token_idx != -1, "streaming token callback block not found"
+    assert on_token_recorder_idx != -1 and on_token_idx < on_token_recorder_idx < on_token_meter_idx, (
+        "token callback must record one metadata-only text.delta Capy progress event before metering"
+    )
+    assert on_reasoning_idx != -1, "streaming reasoning callback block not found"
+    assert on_reasoning_recorder_idx != -1 and on_reasoning_idx < on_reasoning_recorder_idx < on_reasoning_meter_idx, (
+        "reasoning callback must record one metadata-only thinking.delta Capy progress event before metering"
     )
