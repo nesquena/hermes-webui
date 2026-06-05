@@ -4235,7 +4235,13 @@ def merge_session_messages_append_only(
             if key in seen_message_keys and key[0] == "message_id":
                 continue
             if not (isinstance(key, tuple) and key[:1] == ("message_id",)):
-                continue
+                # Legacy key within sidecar timestamp range — only skip if
+                # this exact merge_key was already registered by the sidecar.
+                # Different tool_calls produce different merge_keys even with
+                # identical content/timestamp, so an unchecked continue here
+                # would drop legitimately distinct turns.  (#3346 / PR #3665)
+                if key in seen_message_keys:
+                    continue
         if key in seen_message_keys and key[0] == "message_id":
             continue
         matched_visible_key = _matching_visible_duplicate(
@@ -4264,6 +4270,7 @@ def merge_session_messages_append_only(
             and max_sidecar_timestamp is not None
             and timestamp is not None
             and timestamp <= max_sidecar_timestamp
+            and key in seen_message_keys
         ):
             continue
         seen_message_keys.add(key)
