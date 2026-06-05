@@ -1085,16 +1085,19 @@ def _schedule_restart(delay: float = 2.0) -> None:
                         args = sys.argv
                     else:
                         args = [sys.executable] + sys.argv
-                    # Start new process detached
+                    # Start new process detached, redirect all stdio to
+                    # avoid broken-pipe errors when the parent exits.
                     subprocess.Popen(
                         args,
                         cwd=os.getcwd(),
                         creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
                         close_fds=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                     )
-                    # Give the new process a moment to start
-                    time.sleep(1)
-                    # Exit old process — the port is released when we die
+                    # Exit immediately — the port is released as soon as
+                    # this process dies, allowing the new process to bind.
                     os._exit(0)
                 else:
                     if getattr(sys, "frozen", False):
