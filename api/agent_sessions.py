@@ -595,7 +595,10 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
 
             segment_ids = {row['id'] for row in segments}
             child_rows: list[dict] = []
-            for parent in segments:
+            parent_ids = [row['id'] for row in segments]
+            children_by_parent: dict[str, list[dict]] = {pid: [] for pid in parent_ids}
+            if parent_ids:
+                placeholders = ','.join('?' * len(parent_ids))
                 cur.execute(
                     f"""
                     SELECT s.id,
@@ -607,13 +610,19 @@ def read_session_lineage_report(db_path: Path, session_id: str | None, max_hops:
                            {ended_expr},
                            {end_reason_expr}
                     FROM sessions s
-                    WHERE s.parent_session_id = ?
-                    ORDER BY s.started_at DESC
+                    WHERE s.parent_session_id IN ({placeholders})
                     """,
-                    (parent['id'],),
+                    parent_ids,
                 )
                 for child_row in cur.fetchall():
                     child = dict(child_row)
+                    parent_id = child.get('parent_session_id')
+                    if parent_id in children_by_parent:
+                        children_by_parent[parent_id].append(child)
+            for parent in segments:
+                parent_children = children_by_parent.get(parent['id'], [])
+                parent_children.sort(key=lambda row: row.get('started_at') or 0, reverse=True)
+                for child in parent_children:
                     if child['id'] in segment_ids:
                         continue
                     if _is_continuation_session(parent, child):
