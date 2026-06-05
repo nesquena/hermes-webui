@@ -111,7 +111,7 @@ _STREAMING_SUBAGENT_INPUT_EVENT_TYPES = _STREAMING_SUBAGENT_EVENT_TYPES | _STREA
 
 def _safe_streaming_progress_run_id(stream_id, *, family: str = "tool") -> str:
     """Return a bounded public run id for WebUI streaming progress events."""
-    safe_family = family if family in {"tool", "subagent", "text", "thinking"} else "tool"
+    safe_family = family if family in {"run", "tool", "subagent", "text", "thinking"} else "tool"
     raw_stream_id = str(stream_id or "").strip()
     unsafe_pattern = re.compile(
         r"SECRET_VALUE_DO_NOT_LEAK|api[_ -]?(?:key|auth)|authorization|bearer|cookie|"
@@ -157,10 +157,18 @@ def _safe_streaming_event_type(event_type, *, status=None, is_error: bool = Fals
         return "text.delta", "text"
     if event_type == "thinking.delta":
         return "thinking.delta", "thinking"
+    if event_type == "run.started":
+        return "run.started", "run"
+    if event_type == "run.completed":
+        return "run.completed", "run"
+    if event_type == "run.failed":
+        return "run.failed", "run"
     return "tool.completed", "tool"
 
 
 _STREAMING_DELTA_PROGRESS_SEEN: set[tuple[str, str]] = set()
+_STREAMING_RUN_TERMINAL_PROGRESS_LOCK = threading.Lock()
+_STREAMING_RUN_TERMINAL_PROGRESS_SEEN: set[str] = set()
 
 
 def _record_streaming_delta_progress_event(*, event_type, stream_id, text=None):
@@ -259,6 +267,24 @@ def _record_streaming_progress_event(
     """
     safe_event_type, family = _safe_streaming_event_type(event_type, status=status, is_error=is_error)
     run_id = _safe_streaming_progress_run_id(stream_id, family=family)
+    terminal_reserved = False
+    if safe_event_type == "run.started":
+        with _STREAMING_RUN_TERMINAL_PROGRESS_LOCK:
+            _STREAMING_RUN_TERMINAL_PROGRESS_SEEN.discard(run_id)
+    elif safe_event_type in {"run.completed", "run.failed"}:
+        with _STREAMING_RUN_TERMINAL_PROGRESS_LOCK:
+            if run_id in _STREAMING_RUN_TERMINAL_PROGRESS_SEEN:
+                return {
+                    "stored": False,
+                    "queued": False,
+                    "deduped": True,
+                    "event_type": safe_event_type,
+                    "family": family,
+                    "run_id": run_id,
+                    "redaction_status": "metadata_only",
+                }
+            _STREAMING_RUN_TERMINAL_PROGRESS_SEEN.add(run_id)
+            terminal_reserved = True
     try:
         from api.capy_progress import record_progress_event
 
@@ -267,6 +293,9 @@ def _record_streaming_progress_event(
             "run_id": run_id,
         })
     except Exception:
+        if terminal_reserved:
+            with _STREAMING_RUN_TERMINAL_PROGRESS_LOCK:
+                _STREAMING_RUN_TERMINAL_PROGRESS_SEEN.discard(run_id)
         logger.debug("Failed to record streaming progress event", exc_info=True)
         return {
             "stored": False,
@@ -2329,6 +2358,16 @@ def _run_agent_streaming(
         provider=model_provider,
         ephemeral=bool(ephemeral),
     )
+    _capy_stream_run_terminal_recorded = False
+
+    def _record_stream_run_terminal(event_type: str) -> None:
+        nonlocal _capy_stream_run_terminal_recorded
+        if _capy_stream_run_terminal_recorded:
+            return
+        _capy_stream_run_terminal_recorded = True
+        _record_streaming_progress_event(event_type=event_type, stream_id=stream_id)
+
+    _record_streaming_progress_event(event_type="run.started", stream_id=stream_id)
     if not ephemeral:
         try:
             append_turn_journal_event_for_stream(
@@ -2533,6 +2572,7 @@ def _run_agent_streaming(
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
         # Check for pre-flight cancel (user cancelled before agent even started)
         if cancel_event.is_set():
+            _record_stream_run_terminal("run.failed")
             put('cancel', {'message': 'Cancelled before start'})
             return
 
@@ -3387,6 +3427,7 @@ def _run_agent_streaming(
                         agent.interrupt("Cancelled before start")
                     except Exception:
                         logger.debug("Failed to interrupt agent before start")
+                    _record_stream_run_terminal("run.failed")
                     put('cancel', {'message': 'Cancelled by user'})
                     return
 
@@ -3484,6 +3525,7 @@ def _run_agent_streaming(
                     if isinstance(_m, dict) and _m.get('role') == 'assistant':
                         _answer = str(_m.get('content', ''))
                         break
+                _record_stream_run_terminal("run.completed")
                 put('done', {
                     'session': {'session_id': session_id, 'messages': result.get('messages', [])},
                     'usage': {'input_tokens': 0, 'output_tokens': 0},
@@ -3510,6 +3552,7 @@ def _run_agent_streaming(
                         stream_id,
                         getattr(s, 'active_stream_id', None),
                     )
+                    _record_stream_run_terminal("run.failed")
                     return
                 _result_messages = result.get('messages') or _previous_context_messages
                 _next_context_messages = _restore_reasoning_metadata(
@@ -3709,6 +3752,7 @@ def _run_agent_streaming(
                         # Legacy #373 source tests and clients look for the
                         # no_response type; #1765 keeps that type but improves
                         # the catch-all label, hint, and provider details.
+                        _record_stream_run_terminal("run.failed")
                         return  # apperror already closes the stream on the client side
 
                 # ── Handle context compression side effects ──
@@ -4183,6 +4227,7 @@ def _run_agent_streaming(
             except Exception as _goal_exc:
                 logger.debug("Goal continuation hook failed for session %s: %s", session_id, _goal_exc)
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
+            _record_stream_run_terminal("run.completed")
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
             # Emit one last metering packet for the live message-header TPS label.
             meter_stats = meter().get_stats()
@@ -4329,6 +4374,7 @@ def _run_agent_streaming(
                                 )
                                 s.save()
                         logger.info('[webui] self-heal (except path): retry succeeded')
+                        _record_stream_run_terminal("run.completed")
                         return  # skip error emission
                     except Exception as _retry_exc2:
                         logger.warning('[webui] self-heal (except path): retry failed: %s', _retry_exc2)
@@ -4388,6 +4434,7 @@ def _run_agent_streaming(
                         )
                     except Exception:
                         logger.debug("Failed to append interrupted turn journal event", exc_info=True)
+        _record_stream_run_terminal("run.failed")
         put('apperror', _error_payload)
     finally:
         # Stop the periodic checkpoint thread before the final recovery path.
@@ -4584,6 +4631,8 @@ def cancel_stream(stream_id: str) -> bool:
                 q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
             except Exception:
                 logger.debug("Failed to put cancel event to queue")
+
+        _record_streaming_progress_event(event_type="run.failed", stream_id=stream_id)
 
         # ── Eager session lock release (fixes #653) ──────────────────────────
         # Pop stream state now so the 409 guard in routes.py sees the session

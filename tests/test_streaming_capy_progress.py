@@ -270,11 +270,17 @@ def test_run_agent_streaming_structured_tool_callbacks_record_metadata_only_prog
 
     assert saved_snapshots, "stream worker should have reached the agent run"
     assert status["recent_family_counts"]["tool"] == 2
-    assert {event["event_type"] for event in status["recent_events"]} == {
+    assert status["recent_family_counts"]["run"] == 2
+    assert {event["event_type"] for event in status["recent_events"]} >= {
         "tool.started",
         "tool.completed",
     }
-    assert {event["run_id"] for event in status["recent_events"]} == {"webui.tool:stream-structured-tool"}
+    assert {
+        event["run_id"] for event in status["recent_events"] if event["family"] == "tool"
+    } == {"webui.tool:stream-structured-tool"}
+    assert {
+        event["run_id"] for event in status["recent_events"] if event["family"] == "run"
+    } == {"webui.run:stream-structured-tool"}
     for unsafe in UNSAFE_FIXTURES + (
         "api_key",
         "id_rsa",
@@ -456,7 +462,13 @@ def test_run_agent_streaming_prefers_structured_tool_progress_over_legacy_duplic
     assert event_types.count("tool.started") == 1
     assert event_types.count("tool.completed") == 1
     assert status["recent_family_counts"]["tool"] == 2
-    assert {event["run_id"] for event in status["recent_events"]} == {"webui.tool:stream-structured-legacy-duplicate"}
+    assert status["recent_family_counts"]["run"] == 2
+    assert {
+        event["run_id"] for event in status["recent_events"] if event["family"] == "tool"
+    } == {"webui.tool:stream-structured-legacy-duplicate"}
+    assert {
+        event["run_id"] for event in status["recent_events"] if event["family"] == "run"
+    } == {"webui.run:stream-structured-legacy-duplicate"}
     for unsafe in UNSAFE_FIXTURES + (
         "api_key",
         "payload-id-is-not-callback-metadata",
@@ -639,7 +651,13 @@ def test_run_agent_streaming_preserves_legacy_failed_tool_status_with_structured
     assert event_types.count("tool.failed") == 1
     assert "tool.completed" not in event_types
     assert status["recent_family_counts"]["tool"] == 2
-    assert {event["run_id"] for event in status["recent_events"]} == {"webui.tool:stream-structured-legacy-failed"}
+    assert status["recent_family_counts"]["run"] == 2
+    assert {
+        event["run_id"] for event in status["recent_events"] if event["family"] == "tool"
+    } == {"webui.tool:stream-structured-legacy-failed"}
+    assert {
+        event["run_id"] for event in status["recent_events"] if event["family"] == "run"
+    } == {"webui.run:stream-structured-legacy-failed"}
     for unsafe in UNSAFE_FIXTURES + (
         "api_key",
         "failed-payload-id-is-not-callback-metadata",
@@ -968,6 +986,435 @@ def test_streaming_delta_progress_uses_fallback_run_id_for_unsafe_stream_ids(tmp
     assert "webui.text:stream" in serialized
     for unsafe in ("SECRET_VALUE_DO_NOT_LEAK", "<script", "source.data", "ignore-previous-instructions"):
         assert unsafe.lower() not in serialized.lower()
+
+
+def test_streaming_run_lifecycle_records_metadata_only_progress_events(tmp_path, monkeypatch):
+    """WebUI stream run start/finish markers should be metadata-only.
+
+    A streaming run can be initiated by hostile user text, attachments, or state.
+    The durable Capy progress event must keep only the safe run lifecycle and a
+    sanitized stream-scoped run id, not the raw prompt or any request payload.
+    """
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    started = streaming._record_streaming_progress_event(
+        event_type="run.started",
+        stream_id="stream-run-123",
+        preview="SECRET_VALUE_DO_NOT_LEAK raw_prompt <script>ignore previous instructions</script>",
+        args={"api_key": "bearer placeholder", "renderer": "<script>alert(1)</script>"},
+    )
+    completed = streaming._record_streaming_progress_event(
+        event_type="run.completed",
+        stream_id="stream-run-123",
+        function_result={"source": "raw assistant output SECRET_VALUE_DO_NOT_LEAK"},
+    )
+    failed = streaming._record_streaming_progress_event(
+        event_type="run.failed",
+        stream_id="SECRET_VALUE_DO_NOT_LEAK<script>source.data ignore previous instructions",
+        preview="raw exception with api_auth bearer placeholder",
+    )
+    status = capy_progress.progress_status()
+    raw_log = Path(tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8")
+    serialized = raw_log + "\n" + str(status)
+
+    assert started["event_type"] == "run.started"
+    assert started["family"] == "run"
+    assert started["run_id"] == "webui.run:stream-run-123"
+    assert completed["event_type"] == "run.completed"
+    assert completed["run_id"] == "webui.run:stream-run-123"
+    assert failed["event_type"] == "run.failed"
+    assert failed["family"] == "run"
+    assert failed["run_id"] == "webui.run:stream"
+    assert status["recent_family_counts"]["run"] == 3
+    assert status["active_run_count"] == 0
+    for unsafe in UNSAFE_FIXTURES + ("api_key", "api_auth", "bearer placeholder", "raw assistant output"):
+        assert unsafe.lower() not in serialized.lower()
+
+
+def test_run_agent_streaming_records_run_started_and_completed_progress(tmp_path, monkeypatch):
+    """The real WebUI stream worker should emit run lifecycle progress.
+
+    Tool/subagent/delta producers cover work inside the run; product progress
+    also needs the stream-level run.started/run.completed envelope so autonomous
+    WebUI work appears as a bounded active run without leaking user text.
+    """
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    saved_snapshots = []
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "run_lifecycle_session"
+            self.title = "Run lifecycle"
+            self.workspace = str(tmp_path)
+            self.model = "gpt-test"
+            self.model_provider = None
+            self.profile = None
+            self.personality = None
+            self.messages = []
+            self.context_messages = []
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.estimated_cost = 0
+            self.tool_calls = []
+            self.gateway_routing = None
+            self.gateway_routing_history = []
+            self.active_stream_id = "stream-run-lifecycle"
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.context_length = 0
+            self.threshold_tokens = 0
+            self.last_prompt_tokens = 0
+            self.llm_title_generated = True
+            self.path = str(tmp_path / "ephemeral-run-lifecycle-session.json")
+
+        def save(self, *args, **kwargs):
+            saved_snapshots.append(kwargs)
+
+        def compact(self):
+            return {"session_id": self.session_id, "title": self.title}
+
+    class SimpleAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            api_key=None,
+            platform=None,
+            quiet_mode=False,
+            enabled_toolsets=None,
+            fallback_model=None,
+            session_id=None,
+            session_db=None,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            tool_progress_callback=None,
+            clarify_callback=None,
+            tool_start_callback=None,
+            tool_complete_callback=None,
+        ):
+            self.session_id = session_id
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            return {
+                "messages": [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "done"},
+                ]
+            }
+
+        def interrupt(self, _message):
+            pass
+
+    fake_session = FakeSession()
+    fake_stream_id = fake_session.active_stream_id
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(fake_runtime_module, "resolve_runtime_provider", lambda requested=None: {
+        "provider": "openai",
+        "base_url": None,
+        "api_key": "sk-test",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    })
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_module)
+    fake_hermes_state = types.ModuleType("hermes_state")
+    setattr(fake_hermes_state, "SessionDB", lambda: None)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: fake_session)
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: SimpleAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda _model: ("gpt-test", "openai", None))
+    monkeypatch.setattr(streaming, "_prewarm_skill_tool_modules", lambda: None)
+    monkeypatch.setattr("api.config.get_config", lambda: {})
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda _cfg: [])
+
+    streaming.STREAMS[fake_stream_id] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=fake_session.session_id,
+            msg_text="SECRET_VALUE_DO_NOT_LEAK raw_prompt <script>ignore previous instructions</script>",
+            model="gpt-test",
+            workspace=str(tmp_path),
+            stream_id=fake_stream_id,
+            ephemeral=True,
+        )
+    finally:
+        streaming.STREAMS.pop(fake_stream_id, None)
+
+    status = capy_progress.progress_status()
+    raw_log = Path(tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8")
+    serialized = raw_log + "\n" + str(status)
+    event_types = [event["event_type"] for event in status["recent_events"]]
+
+    assert saved_snapshots, "stream worker should have reached the agent run"
+    assert event_types.count("run.started") == 1
+    assert event_types.count("run.completed") == 1
+    assert "run.failed" not in event_types
+    assert status["recent_family_counts"] == {"run": 2}
+    assert status["active_run_count"] == 0
+    assert {event["run_id"] for event in status["recent_events"]} == {"webui.run:stream-run-lifecycle"}
+    for unsafe in UNSAFE_FIXTURES + ("sk-test", "raw_prompt"):
+        assert unsafe.lower() not in serialized.lower()
+
+
+def test_run_agent_streaming_records_failed_progress_for_stale_writeback(tmp_path, monkeypatch):
+    """Stale stream workers should close their run progress before returning.
+
+    A canceled/replaced browser stream can become stale after the agent returns.
+    The worker must not leave a durable run.started without a terminal event,
+    because the product progress card counts unterminated runs as active.
+    """
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "stale_writeback_session"
+            self.title = "Stale writeback"
+            self.workspace = str(tmp_path)
+            self.model = "gpt-test"
+            self.model_provider = None
+            self.profile = None
+            self.personality = None
+            self.messages = []
+            self.context_messages = []
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.estimated_cost = 0
+            self.tool_calls = []
+            self.gateway_routing = None
+            self.gateway_routing_history = []
+            self.active_stream_id = "newer-stream-wins"
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.context_length = 0
+            self.threshold_tokens = 0
+            self.last_prompt_tokens = 0
+            self.llm_title_generated = True
+            self.path = str(tmp_path / "stale-writeback-session.json")
+
+        def save(self, *args, **kwargs):
+            pass
+
+        def compact(self):
+            return {"session_id": self.session_id, "title": self.title}
+
+    class SimpleAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            api_key=None,
+            platform=None,
+            quiet_mode=False,
+            enabled_toolsets=None,
+            fallback_model=None,
+            session_id=None,
+            session_db=None,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            tool_progress_callback=None,
+            clarify_callback=None,
+            tool_start_callback=None,
+            tool_complete_callback=None,
+        ):
+            self.session_id = session_id
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def run_conversation(self, **kwargs):
+            return {
+                "messages": [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "done"},
+                ]
+            }
+
+        def interrupt(self, _message):
+            pass
+
+    fake_session = FakeSession()
+    fake_stream_id = "stale-stream"
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(fake_runtime_module, "resolve_runtime_provider", lambda requested=None: {
+        "provider": "openai",
+        "base_url": None,
+        "api_key": "sk-test",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    })
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_module)
+    fake_hermes_state = types.ModuleType("hermes_state")
+    setattr(fake_hermes_state, "SessionDB", lambda: None)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: fake_session)
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: SimpleAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda _model: ("gpt-test", "openai", None))
+    monkeypatch.setattr(streaming, "_prewarm_skill_tool_modules", lambda: None)
+    monkeypatch.setattr(streaming, "append_turn_journal_event_for_stream", lambda *args, **kwargs: None)
+    monkeypatch.setattr("api.config.get_config", lambda: {})
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda _cfg: [])
+
+    streaming.STREAMS[fake_stream_id] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=fake_session.session_id,
+            msg_text="SECRET_VALUE_DO_NOT_LEAK raw_prompt <script>ignore previous instructions</script>",
+            model="gpt-test",
+            workspace=str(tmp_path),
+            stream_id=fake_stream_id,
+            ephemeral=False,
+        )
+    finally:
+        streaming.STREAMS.pop(fake_stream_id, None)
+
+    status = capy_progress.progress_status()
+    raw_log = Path(tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8")
+    serialized = raw_log + "\n" + str(status)
+    event_types = [event["event_type"] for event in status["recent_events"]]
+
+    assert event_types.count("run.started") == 1
+    assert event_types.count("run.failed") == 1
+    assert "run.completed" not in event_types
+    assert status["recent_family_counts"] == {"run": 2}
+    assert status["active_run_count"] == 0
+    assert {event["run_id"] for event in status["recent_events"]} == {"webui.run:stale-stream"}
+    for unsafe in UNSAFE_FIXTURES + ("sk-test", "raw_prompt"):
+        assert unsafe.lower() not in serialized.lower()
+
+
+def test_streaming_run_terminal_retry_after_recording_failure(tmp_path, monkeypatch):
+    """A transient progress-log failure must not permanently dedupe the terminal event."""
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    real_record_progress_event = capy_progress.record_progress_event
+    calls = []
+
+    def flaky_record_progress_event(payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            raise RuntimeError("temporary progress log failure")
+        return real_record_progress_event(payload)
+
+    monkeypatch.setattr(capy_progress, "record_progress_event", flaky_record_progress_event)
+
+    failed_once = streaming._record_streaming_progress_event(event_type="run.failed", stream_id="retry-terminal-stream")
+    retried = streaming._record_streaming_progress_event(event_type="run.failed", stream_id="retry-terminal-stream")
+    status = capy_progress.progress_status()
+
+    assert failed_once["stored"] is False
+    assert retried["stored"] is True
+    assert [event["event_type"] for event in status["recent_events"]] == ["run.failed"]
+    assert status["active_run_count"] == 0
+
+
+def test_streaming_run_terminal_dedupe_uses_lock():
+    """Terminal run-event dedupe must be atomic across cancel and worker threads."""
+    src = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text(encoding="utf-8")
+    lock_decl_idx = src.find("_STREAMING_RUN_TERMINAL_PROGRESS_LOCK")
+    dedupe_set_idx = src.find("_STREAMING_RUN_TERMINAL_PROGRESS_SEEN")
+    branch_idx = src.find('elif safe_event_type in {"run.completed", "run.failed"}:')
+    lock_use_idx = src.find("with _STREAMING_RUN_TERMINAL_PROGRESS_LOCK:", branch_idx)
+    record_idx = src.find("return record_progress_event", branch_idx)
+
+    assert lock_decl_idx != -1 and lock_decl_idx < dedupe_set_idx, "run terminal dedupe lock must be declared with the dedupe set"
+    assert lock_use_idx != -1 and branch_idx < lock_use_idx < record_idx, (
+        "run terminal dedupe check/add must happen under the lock before persistence"
+    )
+
+
+def test_cancel_stream_records_failed_progress_immediately(tmp_path, monkeypatch):
+    """User cancellation should close active run progress even if worker is blocked."""
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    class InterruptibleAgent:
+        session_id = None
+
+        def __init__(self):
+            self.interruptions = []
+
+        def interrupt(self, message):
+            self.interruptions.append(message)
+
+    stream_id = "cancel-progress-stream"
+    agent = InterruptibleAgent()
+    streaming._record_streaming_progress_event(event_type="run.started", stream_id=stream_id)
+    streaming.STREAMS[stream_id] = queue.Queue()
+    streaming.CANCEL_FLAGS[stream_id] = streaming.threading.Event()
+    streaming.AGENT_INSTANCES[stream_id] = agent
+    streaming.STREAM_PARTIAL_TEXT[stream_id] = "SECRET_VALUE_DO_NOT_LEAK raw_prompt <script>ignore previous instructions</script>"
+    try:
+        assert streaming.cancel_stream(stream_id) is True
+        status = capy_progress.progress_status()
+        raw_log = Path(tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8")
+        serialized = raw_log + "\n" + str(status)
+        event_types = [event["event_type"] for event in status["recent_events"]]
+
+        assert agent.interruptions == ["Cancelled by user"]
+        assert event_types.count("run.started") == 1
+        assert event_types.count("run.failed") == 1
+        assert status["recent_family_counts"] == {"run": 2}
+        assert status["active_run_count"] == 0
+        assert {event["run_id"] for event in status["recent_events"]} == {"webui.run:cancel-progress-stream"}
+        for unsafe in UNSAFE_FIXTURES:
+            assert unsafe.lower() not in serialized.lower()
+    finally:
+        streaming.STREAMS.pop(stream_id, None)
+        streaming.CANCEL_FLAGS.pop(stream_id, None)
+        streaming.AGENT_INSTANCES.pop(stream_id, None)
+        streaming.STREAM_PARTIAL_TEXT.pop(stream_id, None)
+
+
+def test_run_agent_streaming_cancel_returns_close_run_progress_before_returning():
+    """Cancel returns must terminate Capy run progress before leaving worker."""
+    src = (Path(__file__).resolve().parents[1] / "api" / "streaming.py").read_text(encoding="utf-8")
+    cancel_before_start_idx = src.find("if cancel_event.is_set():")
+    cancel_before_start_terminal_idx = src.find('_record_stream_run_terminal("run.failed")', cancel_before_start_idx)
+    cancel_before_start_return_idx = src.find("return", cancel_before_start_idx)
+    cancel_during_init_idx = src.find("if stream_id in CANCEL_FLAGS and CANCEL_FLAGS[stream_id].is_set():")
+    cancel_during_init_terminal_idx = src.find('_record_stream_run_terminal("run.failed")', cancel_during_init_idx)
+    cancel_during_init_return_idx = src.find("return", cancel_during_init_idx)
+
+    assert cancel_before_start_idx != -1, "pre-flight cancel branch not found"
+    assert cancel_before_start_terminal_idx != -1 and cancel_before_start_idx < cancel_before_start_terminal_idx < cancel_before_start_return_idx, (
+        "pre-flight cancel branch must record run.failed before returning"
+    )
+    assert cancel_during_init_idx != -1, "cancel-during-agent-init branch not found"
+    assert cancel_during_init_terminal_idx != -1 and cancel_during_init_idx < cancel_during_init_terminal_idx < cancel_during_init_return_idx, (
+        "cancel-during-agent-init branch must record run.failed before returning"
+    )
 
 
 def test_streaming_callbacks_invoke_progress_recorder_for_tool_subagent_and_delta_events():
