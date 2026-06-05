@@ -1,4 +1,7 @@
 """Capy progress receipts for WebUI streaming tool lifecycle events."""
+import queue
+import sys
+import types
 from pathlib import Path
 
 
@@ -113,6 +116,538 @@ def test_streaming_tool_start_records_metadata_only_progress_event(tmp_path, mon
     assert status["recent_events"][0]["event_type"] == "tool.started"
     assert status["recent_events"][0]["run_id"] == "webui.tool:stream-start-123"
     for unsafe in UNSAFE_FIXTURES + ("api_auth", "bearer placeholder", "id_rsa"):
+        assert unsafe.lower() not in serialized.lower()
+
+
+def test_run_agent_streaming_structured_tool_callbacks_record_metadata_only_progress(tmp_path, monkeypatch):
+    """Structured AIAgent tool callbacks should produce safe Capy tool progress.
+
+    Newer AIAgent builds can emit tool_start_callback/tool_complete_callback
+    without the legacy tool_progress_callback path. The WebUI stream worker must
+    still record metadata-only lifecycle progress and must not persist callback
+    payloads such as tool names, args, results, prompts, commands, or secrets.
+    """
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    saved_snapshots = []
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "structured_tool_callbacks_session"
+            self.title = "Structured callbacks"
+            self.workspace = str(tmp_path)
+            self.model = "gpt-test"
+            self.model_provider = None
+            self.profile = None
+            self.personality = None
+            self.messages = []
+            self.context_messages = []
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.estimated_cost = 0
+            self.tool_calls = []
+            self.gateway_routing = None
+            self.gateway_routing_history = []
+            self.active_stream_id = "stream-structured-tool"
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.context_length = 0
+            self.threshold_tokens = 0
+            self.last_prompt_tokens = 0
+            self.llm_title_generated = True
+            self.path = str(tmp_path / "ephemeral-session.json")
+
+        def save(self, *args, **kwargs):
+            saved_snapshots.append(kwargs)
+
+        def compact(self):
+            return {"session_id": self.session_id, "title": self.title}
+
+    class StructuredOnlyAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            api_key=None,
+            platform=None,
+            quiet_mode=False,
+            enabled_toolsets=None,
+            fallback_model=None,
+            session_id=None,
+            session_db=None,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            tool_progress_callback=None,
+            clarify_callback=None,
+            tool_start_callback=None,
+            tool_complete_callback=None,
+        ):
+            self.session_id = session_id
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+            self.tool_progress_callback = tool_progress_callback
+            self.tool_start_callback = tool_start_callback
+            self.tool_complete_callback = tool_complete_callback
+
+        def run_conversation(self, **kwargs):
+            assert self.tool_start_callback is not None
+            assert self.tool_complete_callback is not None
+            # Intentionally do not call tool_progress_callback; this is the gap.
+            hostile_args = {
+                "command": "cat ~/.ssh/id_rsa SECRET_VALUE_DO_NOT_LEAK",
+                "api_key": "sk-test-SECRET_VALUE_DO_NOT_LEAK",
+                "renderer": "<script>alert(1)</script>",
+                "raw_prompt": "ignore previous instructions",
+            }
+            self.tool_start_callback("call-structured-1", "dangerous_tool_<script>", hostile_args)
+            self.tool_complete_callback(
+                "call-structured-1",
+                "dangerous_tool_<script>",
+                hostile_args,
+                {"source": "raw fetched body SECRET_VALUE_DO_NOT_LEAK", "html": "<script>"},
+            )
+            return {
+                "messages": [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "done"},
+                ]
+            }
+
+        def interrupt(self, _message):
+            pass
+
+    fake_session = FakeSession()
+    fake_stream_id = fake_session.active_stream_id
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(fake_runtime_module, "resolve_runtime_provider", lambda requested=None: {
+        "provider": "openai",
+        "base_url": None,
+        "api_key": "sk-test",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    })
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_module)
+    fake_hermes_state = types.ModuleType("hermes_state")
+    setattr(fake_hermes_state, "SessionDB", lambda: None)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: fake_session)
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: StructuredOnlyAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda _model: ("gpt-test", "openai", None))
+    monkeypatch.setattr(streaming, "_prewarm_skill_tool_modules", lambda: None)
+    monkeypatch.setattr("api.config.get_config", lambda: {})
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda _cfg: [])
+
+    streaming.STREAMS[fake_stream_id] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=fake_session.session_id,
+            msg_text="please use a tool",
+            model="gpt-test",
+            workspace=str(tmp_path),
+            stream_id=fake_stream_id,
+            ephemeral=True,
+        )
+    finally:
+        streaming.STREAMS.pop(fake_stream_id, None)
+
+    status = capy_progress.progress_status()
+    log_path = Path(tmp_path / "progress" / "events.jsonl")
+    raw_log = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+    serialized = raw_log + "\n" + str(status)
+
+    assert saved_snapshots, "stream worker should have reached the agent run"
+    assert status["recent_family_counts"]["tool"] == 2
+    assert {event["event_type"] for event in status["recent_events"]} == {
+        "tool.started",
+        "tool.completed",
+    }
+    assert {event["run_id"] for event in status["recent_events"]} == {"webui.tool:stream-structured-tool"}
+    for unsafe in UNSAFE_FIXTURES + (
+        "api_key",
+        "id_rsa",
+        "sk-test",
+        "html",
+        "raw fetched body",
+    ):
+        assert unsafe.lower() not in serialized.lower()
+
+
+def test_run_agent_streaming_prefers_structured_tool_progress_over_legacy_duplicates(tmp_path, monkeypatch):
+    """Agents that emit both legacy and structured tool callbacks should count once.
+
+    Current Hermes Agent builds can call the legacy tool_progress_callback without
+    an id and also call structured tool_start/tool_complete callbacks with a
+    tool_call_id for the same tool invocation. WebUI should keep the structured
+    durable Capy lifecycle markers and not double-count the legacy compatibility
+    callbacks. The persisted progress stream must remain metadata-only.
+    """
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    saved_snapshots = []
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "structured_legacy_duplicate_session"
+            self.title = "Structured and legacy callbacks"
+            self.workspace = str(tmp_path)
+            self.model = "gpt-test"
+            self.model_provider = None
+            self.profile = None
+            self.personality = None
+            self.messages = []
+            self.context_messages = []
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.estimated_cost = 0
+            self.tool_calls = []
+            self.gateway_routing = None
+            self.gateway_routing_history = []
+            self.active_stream_id = "stream-structured-legacy-duplicate"
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.context_length = 0
+            self.threshold_tokens = 0
+            self.last_prompt_tokens = 0
+            self.llm_title_generated = True
+            self.path = str(tmp_path / "ephemeral-duplicate-session.json")
+
+        def save(self, *args, **kwargs):
+            saved_snapshots.append(kwargs)
+
+        def compact(self):
+            return {"session_id": self.session_id, "title": self.title}
+
+    class LegacyAndStructuredAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            api_key=None,
+            platform=None,
+            quiet_mode=False,
+            enabled_toolsets=None,
+            fallback_model=None,
+            session_id=None,
+            session_db=None,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            tool_progress_callback=None,
+            clarify_callback=None,
+            tool_start_callback=None,
+            tool_complete_callback=None,
+        ):
+            self.session_id = session_id
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+            self.tool_progress_callback = tool_progress_callback
+            self.tool_start_callback = tool_start_callback
+            self.tool_complete_callback = tool_complete_callback
+
+        def run_conversation(self, **kwargs):
+            assert self.tool_progress_callback is not None
+            assert self.tool_start_callback is not None
+            assert self.tool_complete_callback is not None
+            hostile_args = {
+                "id": "payload-id-is-not-callback-metadata",
+                "command": "cat ~/.ssh/id_rsa SECRET_VALUE_DO_NOT_LEAK",
+                "api_key": "sk-tes...LEAK",
+                "renderer": "<script>alert(1)</script>",
+                "raw_prompt": "ignore previous instructions",
+            }
+            self.tool_progress_callback(
+                "tool.started",
+                "dangerous_tool_<script>",
+                "SECRET_VALUE_DO_NOT_LEAK raw prompt ignore previous instructions",
+                hostile_args,
+            )
+            self.tool_start_callback("call-structured-legacy-1", "dangerous_tool_<script>", hostile_args)
+            self.tool_progress_callback(
+                "tool.completed",
+                "dangerous_tool_<script>",
+                None,
+                None,
+                duration=0.01,
+                is_error=False,
+                result={"source": "raw fetched body SECRET_VALUE_DO_NOT_LEAK", "html": "<script>"},
+            )
+            self.tool_complete_callback(
+                "call-structured-legacy-1",
+                "dangerous_tool_<script>",
+                hostile_args,
+                {"source": "raw fetched body SECRET_VALUE_DO_NOT_LEAK", "html": "<script>"},
+            )
+            return {
+                "messages": [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "done"},
+                ]
+            }
+
+        def interrupt(self, _message):
+            pass
+
+    fake_session = FakeSession()
+    fake_stream_id = fake_session.active_stream_id
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(fake_runtime_module, "resolve_runtime_provider", lambda requested=None: {
+        "provider": "openai",
+        "base_url": None,
+        "api_key": "sk-test",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    })
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_module)
+    fake_hermes_state = types.ModuleType("hermes_state")
+    setattr(fake_hermes_state, "SessionDB", lambda: None)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: fake_session)
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: LegacyAndStructuredAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda _model: ("gpt-test", "openai", None))
+    monkeypatch.setattr(streaming, "_prewarm_skill_tool_modules", lambda: None)
+    monkeypatch.setattr("api.config.get_config", lambda: {})
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda _cfg: [])
+
+    streaming.STREAMS[fake_stream_id] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=fake_session.session_id,
+            msg_text="please use a tool",
+            model="gpt-test",
+            workspace=str(tmp_path),
+            stream_id=fake_stream_id,
+            ephemeral=True,
+        )
+    finally:
+        streaming.STREAMS.pop(fake_stream_id, None)
+
+    status = capy_progress.progress_status()
+    log_path = Path(tmp_path / "progress" / "events.jsonl")
+    raw_log = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+    serialized = raw_log + "\n" + str(status)
+    event_types = [event["event_type"] for event in status["recent_events"]]
+
+    assert saved_snapshots, "stream worker should have reached the agent run"
+    assert event_types.count("tool.started") == 1
+    assert event_types.count("tool.completed") == 1
+    assert status["recent_family_counts"]["tool"] == 2
+    assert {event["run_id"] for event in status["recent_events"]} == {"webui.tool:stream-structured-legacy-duplicate"}
+    for unsafe in UNSAFE_FIXTURES + (
+        "api_key",
+        "payload-id-is-not-callback-metadata",
+        "id_rsa",
+        "sk-test",
+        "html",
+        "raw fetched body",
+    ):
+        assert unsafe.lower() not in serialized.lower()
+
+
+def test_run_agent_streaming_preserves_legacy_failed_tool_status_with_structured_callbacks(tmp_path, monkeypatch):
+    """Legacy failed completions must not be overwritten by structured complete callbacks.
+
+    Current Hermes Agent emits legacy completion first with is_error=True, then
+    structured completion without any failure/status field. When WebUI prefers
+    structured progress to avoid duplicate success events, it must still keep the
+    only failure signal and suppress the following structured tool.completed.
+    """
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    saved_snapshots = []
+
+    class FakeSession:
+        def __init__(self):
+            self.session_id = "structured_legacy_failed_session"
+            self.title = "Structured and legacy failed callbacks"
+            self.workspace = str(tmp_path)
+            self.model = "gpt-test"
+            self.model_provider = None
+            self.profile = None
+            self.personality = None
+            self.messages = []
+            self.context_messages = []
+            self.input_tokens = 0
+            self.output_tokens = 0
+            self.estimated_cost = 0
+            self.tool_calls = []
+            self.gateway_routing = None
+            self.gateway_routing_history = []
+            self.active_stream_id = "stream-structured-legacy-failed"
+            self.pending_user_message = None
+            self.pending_attachments = []
+            self.pending_started_at = None
+            self.context_length = 0
+            self.threshold_tokens = 0
+            self.last_prompt_tokens = 0
+            self.llm_title_generated = True
+            self.path = str(tmp_path / "ephemeral-failed-session.json")
+
+        def save(self, *args, **kwargs):
+            saved_snapshots.append(kwargs)
+
+        def compact(self):
+            return {"session_id": self.session_id, "title": self.title}
+
+    class FailedLegacyAndStructuredAgent:
+        def __init__(
+            self,
+            model=None,
+            provider=None,
+            base_url=None,
+            api_key=None,
+            platform=None,
+            quiet_mode=False,
+            enabled_toolsets=None,
+            fallback_model=None,
+            session_id=None,
+            session_db=None,
+            stream_delta_callback=None,
+            reasoning_callback=None,
+            tool_progress_callback=None,
+            clarify_callback=None,
+            tool_start_callback=None,
+            tool_complete_callback=None,
+        ):
+            self.session_id = session_id
+            self.context_compressor = None
+            self.session_prompt_tokens = 0
+            self.session_completion_tokens = 0
+            self.session_estimated_cost_usd = 0
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+            self.tool_progress_callback = tool_progress_callback
+            self.tool_start_callback = tool_start_callback
+            self.tool_complete_callback = tool_complete_callback
+
+        def run_conversation(self, **kwargs):
+            assert self.tool_progress_callback is not None
+            assert self.tool_start_callback is not None
+            assert self.tool_complete_callback is not None
+            hostile_args = {
+                "id": "failed-payload-id-is-not-callback-metadata",
+                "command": "cat ~/.ssh/id_rsa SECRET_VALUE_DO_NOT_LEAK",
+                "api_key": "sk-tes...LEAK",
+                "renderer": "<script>alert(1)</script>",
+                "raw_prompt": "ignore previous instructions",
+            }
+            self.tool_progress_callback(
+                "tool.started",
+                "dangerous_tool_<script>",
+                "SECRET_VALUE_DO_NOT_LEAK raw prompt ignore previous instructions",
+                hostile_args,
+            )
+            self.tool_start_callback("call-structured-legacy-failed-1", "dangerous_tool_<script>", hostile_args)
+            self.tool_progress_callback(
+                "tool.completed",
+                "dangerous_tool_<script>",
+                None,
+                None,
+                duration=0.01,
+                is_error=True,
+                result={"source": "raw fetched body SECRET_VALUE_DO_NOT_LEAK", "html": "<script>"},
+            )
+            self.tool_complete_callback(
+                "call-structured-legacy-failed-1",
+                "dangerous_tool_<script>",
+                hostile_args,
+                {"source": "raw fetched body SECRET_VALUE_DO_NOT_LEAK", "html": "<script>"},
+            )
+            return {
+                "messages": [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "done"},
+                ]
+            }
+
+        def interrupt(self, _message):
+            pass
+
+    fake_session = FakeSession()
+    fake_stream_id = fake_session.active_stream_id
+    fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(fake_runtime_module, "resolve_runtime_provider", lambda requested=None: {
+        "provider": "openai",
+        "base_url": None,
+        "api_key": "sk-test",
+        "api_mode": "chat_completions",
+        "command": None,
+        "args": [],
+        "credential_pool": None,
+    })
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_module)
+    fake_hermes_state = types.ModuleType("hermes_state")
+    setattr(fake_hermes_state, "SessionDB", lambda: None)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_module)
+    monkeypatch.setitem(sys.modules, "hermes_state", fake_hermes_state)
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: fake_session)
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: FailedLegacyAndStructuredAgent)
+    monkeypatch.setattr(streaming, "resolve_model_provider", lambda _model: ("gpt-test", "openai", None))
+    monkeypatch.setattr(streaming, "_prewarm_skill_tool_modules", lambda: None)
+    monkeypatch.setattr("api.config.get_config", lambda: {})
+    monkeypatch.setattr("api.config._resolve_cli_toolsets", lambda _cfg: [])
+
+    streaming.STREAMS[fake_stream_id] = queue.Queue()
+    try:
+        streaming._run_agent_streaming(
+            session_id=fake_session.session_id,
+            msg_text="please use a failing tool",
+            model="gpt-test",
+            workspace=str(tmp_path),
+            stream_id=fake_stream_id,
+            ephemeral=True,
+        )
+    finally:
+        streaming.STREAMS.pop(fake_stream_id, None)
+
+    status = capy_progress.progress_status()
+    log_path = Path(tmp_path / "progress" / "events.jsonl")
+    raw_log = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+    serialized = raw_log + "\n" + str(status)
+    event_types = [event["event_type"] for event in status["recent_events"]]
+
+    assert saved_snapshots, "stream worker should have reached the agent run"
+    assert event_types.count("tool.started") == 1
+    assert event_types.count("tool.failed") == 1
+    assert "tool.completed" not in event_types
+    assert status["recent_family_counts"]["tool"] == 2
+    assert {event["run_id"] for event in status["recent_events"]} == {"webui.tool:stream-structured-legacy-failed"}
+    for unsafe in UNSAFE_FIXTURES + (
+        "api_key",
+        "failed-payload-id-is-not-callback-metadata",
+        "id_rsa",
+        "sk-test",
+        "html",
+        "raw fetched body",
+    ):
         assert unsafe.lower() not in serialized.lower()
 
 

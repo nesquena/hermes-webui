@@ -2714,6 +2714,9 @@ def _run_agent_streaming(
             _self_healed = False  # (#1401) prevents infinite self-heal retries
             _reasoning_text = ''  # accumulates reasoning/thinking trace for persistence
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
+            _capy_tool_lifecycle_progress_seen = set()
+            _capy_prefer_structured_tool_progress = [False]
+            _capy_pending_legacy_failed_tool_completions = [0]
 
             # Throttle: emit metering events at most every 100 ms so the per-message
             # TPS label feels live during fast token streams without flooding SSE.
@@ -2818,6 +2821,57 @@ def _run_agent_streaming(
                     'content': _result_text,
                 }])
 
+            def _capy_tool_progress_dedupe_id(tool_call_id=None, cb_kwargs=None):
+                candidate = tool_call_id
+                if not candidate and isinstance(cb_kwargs, dict):
+                    for key in ('tool_call_id', 'call_id'):
+                        if cb_kwargs.get(key):
+                            candidate = cb_kwargs.get(key)
+                            break
+                candidate = str(candidate or '').strip()
+                return candidate or None
+
+            def _record_streaming_tool_progress_event_once(
+                *,
+                event_type,
+                stream_id,
+                tool_call_id=None,
+                tool_name=None,
+                preview=None,
+                args=None,
+                function_result=None,
+                status=None,
+                is_error=False,
+                cb_kwargs=None,
+            ):
+                dedupe_id = _capy_tool_progress_dedupe_id(
+                    tool_call_id=tool_call_id,
+                    cb_kwargs=cb_kwargs,
+                )
+                if dedupe_id:
+                    dedupe_key = (str(event_type or ''), dedupe_id)
+                    if dedupe_key in _capy_tool_lifecycle_progress_seen:
+                        return {
+                            'stored': False,
+                            'queued': False,
+                            'deduped': True,
+                            'event_type': event_type,
+                            'family': 'tool',
+                            'run_id': _safe_streaming_progress_run_id(stream_id, family='tool'),
+                            'redaction_status': 'metadata_only',
+                        }
+                    _capy_tool_lifecycle_progress_seen.add(dedupe_key)
+                return _record_streaming_tool_progress_event(
+                    event_type=event_type,
+                    stream_id=stream_id,
+                    tool_name=tool_name,
+                    preview=preview,
+                    args=args,
+                    function_result=function_result,
+                    status=status,
+                    is_error=is_error,
+                )
+
             def on_tool(*cb_args, **cb_kwargs):
                 nonlocal _reasoning_text
                 event_type = None
@@ -2905,13 +2959,15 @@ def _run_agent_streaming(
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
                     put('metering', _tool_stats)
-                    _record_streaming_tool_progress_event(
-                        event_type='tool.started',
-                        stream_id=stream_id,
-                        tool_name=name,
-                        preview=preview,
-                        args=args,
-                    )
+                    if not _capy_prefer_structured_tool_progress[0]:
+                        _record_streaming_tool_progress_event_once(
+                            event_type='tool.started',
+                            stream_id=stream_id,
+                            tool_call_id=_capy_tool_progress_dedupe_id(cb_kwargs=cb_kwargs),
+                            tool_name=name,
+                            preview=preview,
+                            args=args,
+                        )
                     # Fallback: poll for pending approval in case notify_cb wasn't
                     # registered (e.g. older approval module without gateway support).
                     try:
@@ -2947,13 +3003,18 @@ def _run_agent_streaming(
                     # Signal the checkpoint thread that new work has completed (Issue #765).
                     # Each completed tool call is a meaningful unit of progress worth persisting.
                     _checkpoint_activity[0] += 1
-                    _record_streaming_tool_progress_event(
-                        event_type='tool.failed' if bool(cb_kwargs.get('is_error', False)) else 'tool.completed',
-                        stream_id=stream_id,
-                        tool_name=name,
-                        preview=preview,
-                        args=args,
-                    )
+                    _legacy_tool_completed_is_error = bool(cb_kwargs.get('is_error', False))
+                    if (not _capy_prefer_structured_tool_progress[0]) or _legacy_tool_completed_is_error:
+                        _record_streaming_tool_progress_event_once(
+                            event_type='tool.failed' if _legacy_tool_completed_is_error else 'tool.completed',
+                            stream_id=stream_id,
+                            tool_call_id=_capy_tool_progress_dedupe_id(cb_kwargs=cb_kwargs),
+                            tool_name=name,
+                            preview=preview,
+                            args=args,
+                        )
+                        if _capy_prefer_structured_tool_progress[0] and _legacy_tool_completed_is_error:
+                            _capy_pending_legacy_failed_tool_completions[0] += 1
                     put('tool_complete', {
                         'event_type': event_type,
                         'name': name,
@@ -2969,6 +3030,13 @@ def _run_agent_streaming(
                     return
 
             def on_tool_start(tool_call_id, name, args):
+                _record_streaming_tool_progress_event_once(
+                    event_type='tool.started',
+                    stream_id=stream_id,
+                    tool_call_id=tool_call_id,
+                    tool_name=name,
+                    args=args,
+                )
                 try:
                     _record_live_tool_start(tool_call_id, name, args)
                     _tool_stats = meter().get_stats()
@@ -2979,6 +3047,17 @@ def _run_agent_streaming(
                     logger.debug('Failed to update live prompt estimate on tool start', exc_info=True)
 
             def on_tool_complete(tool_call_id, name, args, function_result):
+                if _capy_pending_legacy_failed_tool_completions[0] > 0:
+                    _capy_pending_legacy_failed_tool_completions[0] -= 1
+                else:
+                    _record_streaming_tool_progress_event_once(
+                        event_type='tool.completed',
+                        stream_id=stream_id,
+                        tool_call_id=tool_call_id,
+                        tool_name=name,
+                        args=args,
+                        function_result=function_result,
+                    )
                 try:
                     _record_live_tool_complete(tool_call_id, name, function_result)
                     _tool_stats = meter().get_stats()
@@ -3088,6 +3167,10 @@ def _run_agent_streaming(
             # argument 'credential_pool' — issue #772)
             import inspect as _inspect
             _agent_params = set(_inspect.signature(_AIAgent.__init__).parameters)
+            _capy_prefer_structured_tool_progress[0] = (
+                'tool_start_callback' in _agent_params
+                and 'tool_complete_callback' in _agent_params
+            )
 
             # CLI-parity max-iteration budget: read config.yaml's
             # agent.max_turns and pass it to AIAgent when supported. Without
