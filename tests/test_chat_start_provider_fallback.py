@@ -104,7 +104,11 @@ modelSelect = makeSelect(args.options || [], args.initialValue || '');
 if (args.persisted) localStorage.setItem(MODEL_STATE_KEY, JSON.stringify(args.persisted));
 var S = {session: {model_provider: args.sessionProvider || null}};
 
-process.stdout.write(JSON.stringify({provider: _modelProviderForSend(args.model)}));
+if (args.mode === 'modelState') {
+  process.stdout.write(JSON.stringify(_modelStateForSelect(modelSelect, args.model)));
+} else {
+  process.stdout.write(JSON.stringify({provider: _modelProviderForSend(args.model)}));
+}
 """
 
 node_test = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -127,6 +131,19 @@ def _run_helper(driver_path, payload):
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")
     return json.loads(result.stdout)["provider"]
+
+
+def _run_model_state_helper(driver_path, payload):
+    payload = {"mode": "modelState", **payload}
+    result = subprocess.run(
+        [NODE, driver_path, str(UI_JS_PATH), json.dumps(payload)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")
+    return json.loads(result.stdout)
 
 
 @node_test
@@ -181,3 +198,40 @@ def test_model_provider_for_send_uses_only_matching_persisted_state(driver_path)
 
     assert matching == "xai-oauth"
     assert unrelated is None
+
+
+@node_test
+def test_model_state_reads_live_custom_provider_from_option_metadata(driver_path):
+    state = _run_model_state_helper(driver_path, {
+        "model": "llama-3.3-custom",
+        "initialValue": "llama-3.3-custom",
+        "options": [{
+            "provider": "custom:lab",
+            "optionProvider": "custom:lab",
+            "value": "llama-3.3-custom",
+        }],
+    })
+
+    assert state == {"model": "llama-3.3-custom", "model_provider": "custom:lab"}
+
+
+def test_live_custom_models_are_tagged_with_provider_metadata():
+    ui_src = UI_JS_PATH.read_text(encoding="utf-8")
+    start = ui_src.index("function _addLiveModelsToSelect")
+    body = ui_src[start:ui_src.index("async function _fetchLiveModels", start)]
+
+    assert "providerGroup.dataset.provider=provider;" in body
+    assert "opt.dataset.provider=provider;" in body
+
+
+def test_new_session_does_not_fallback_to_stale_named_custom_provider():
+    sessions_src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = sessions_src.index("async function newSession(")
+    body = sessions_src[start:sessions_src.index("const data=await api('/api/session/new'", start)]
+    assignment = body[body.index("reqBody.model_provider="):].split(";", 1)[0]
+
+    assert "const _fallbackIsNamedCustom=String(_fallbackProvider||'').toLowerCase().startsWith('custom:');" in body
+    assert "newModelState.model_provider" in assignment
+    assert "!_familyMismatch" in assignment
+    assert "!_fallbackIsNamedCustom" in assignment
+    assert "_fallbackProvider||null" in assignment
