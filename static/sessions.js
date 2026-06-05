@@ -4093,6 +4093,55 @@ function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtual
   });
 }
 
+function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
+  return (s.message_count||0)>0 ||
+    _sessionAttentionState(s) ||
+    _isSessionEffectivelyStreaming(s) ||
+    !!s.active_stream_id ||
+    !!s.pending_user_message ||
+    (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
+    (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
+}
+
+function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
+  let webuiSessionCount=0;
+  let cliSessionCount=0;
+  for(const s of allMatched){
+    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
+    if(_isCliSession(s)) cliSessionCount++;
+    else webuiSessionCount++;
+  }
+  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
+    _sessionSourceFilter='webui';
+  }
+  const showCliOnly=_sessionSourceFilter==='cli';
+  const profileFiltered=[];
+  const sessionsRaw=[];
+  let archivedCount=0;
+  for(const s of allMatched){
+    if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
+    const isCli=_isCliSession(s);
+    if(showCliOnly ? !isCli : isCli) continue;
+    if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
+    profileFiltered.push(s);
+    if(_activeProject===NO_PROJECT_FILTER){
+      if(s.project_id) continue;
+    } else if(_activeProject){
+      if(s.project_id!==_activeProject) continue;
+    }
+    if(s.archived) archivedCount++;
+    if(!_showArchived&&s.archived) continue;
+    sessionsRaw.push(s);
+  }
+  return {
+    webuiSessionCount,
+    cliSessionCount,
+    profileFiltered,
+    sessionsRaw,
+    archivedCount,
+  };
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -4115,49 +4164,15 @@ function renderSessionListFromCache(){
   // session id into another conversation, that content hit should still appear.
   const searchMatches=_sessionSearchMergeMatches(sidebarRows,searchQueryRaw,_contentSearchResults);
   const allMatched=_ensureActiveSessionRowPresent(searchMatches,sidebarRows);
-  // Keep inactive ephemeral 0-message sessions out of the sidebar — they only
-  // become real once the first message is sent. The server already filters them.
-  // Exception: the active freshly-created chat is injected above so it remains
-  // visible/selected until the user sends the first turn or switches away.
-  const withMessages=allMatched.filter(s=>
-    (s.message_count||0)>0 ||
-    _sessionAttentionState(s) ||
-    _isSessionEffectivelyStreaming(s) ||
-    !!s.active_stream_id ||
-    !!s.pending_user_message ||
-    (activeSidForSidebar&&s.session_id===activeSidForSidebar) ||
-    (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0)
-  );
-  const webuiSessionCount = withMessages.filter(s=>!_isCliSession(s)).length;
-  const cliSessionCount = withMessages.filter(s=>_isCliSession(s)).length;
-  if(_sessionSourceFilter==='cli' && !window._showCliSessions && cliSessionCount===0){
-    _sessionSourceFilter='webui';
-  }
-  const sourceFiltered = _sessionSourceFilter==='cli'
-    ? withMessages.filter(s=>_isCliSession(s))
-    : withMessages.filter(s=>!_isCliSession(s));
-  // The server is authoritative for profile scoping (#1611): it filters by
-  // active profile when no query param is set, and returns the aggregate when
-  // we send ?all_profiles=1. The renamed-root cross-alias (a row tagged
-  // 'default' matching active 'kinni' when kinni.is_default) lives server-side
-  // in _profiles_match, and a strict-equality client filter would reject those
-  // rows incorrectly. So we trust the wire data and skip the redundant client
-  // filter entirely.
-  const profileFiltered=sourceFiltered.filter(s=>
-    !s.default_hidden||(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)
-  );
-  // Filter by active project. NO_PROJECT_FILTER sentinel asks for sessions
-  // with no project_id; otherwise filter to the matching project_id, or
-  // pass through when no filter is active.
-  const projectFiltered=
-    _activeProject===NO_PROJECT_FILTER
-      ?profileFiltered.filter(s=>!s.project_id)
-      :(_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered);
-  // Filter archived unless toggle is on
-  const sessionsRaw=_showArchived?projectFiltered:projectFiltered.filter(s=>!s.archived);
+  const {
+    webuiSessionCount,
+    cliSessionCount,
+    profileFiltered,
+    sessionsRaw,
+    archivedCount,
+  }=_partitionSidebarSessionRows(allMatched, activeSidForSidebar);
   const sessions=_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
-  const archivedCount=projectFiltered.filter(s=>s.archived).length;
   const list=$('sessionList');
   const animateRefresh=_sessionListRefreshAnimationPending;
   _sessionListRefreshAnimationPending=false;
