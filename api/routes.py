@@ -6811,7 +6811,12 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(sid):
             s.messages = []
             s.tool_calls = []
-            s.title = "Untitled"
+            # Reset the title via the rename helper so clearing a manually-named
+            # session also clears manual_title/llm_title_generated — otherwise the
+            # reused session keeps its manual-title protection and never auto-names
+            # again (#3542 lifecycle gap).
+            from api.session_ops import apply_session_title_rename
+            apply_session_title_rename(s, "Untitled")
             s.save()
         # Evict cached agent outside the per-session lock.  Eviction may run a
         # boundary memory commit for batch-extraction providers, and provider
