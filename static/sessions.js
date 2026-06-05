@@ -1587,7 +1587,13 @@ async function _ensureMessagesLoaded(sid) {
   // toast on every mobile message (SSE/visibility events trigger this reload path
   // more aggressively on mobile).
   let msgs = (data.session.messages || []).filter(m => m && m.role);
-  _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
+  // Skip _syncToolCalls when INFLIGHT exists — the INFLIGHT restore path
+  // (loadSession line ~871) will overwrite S.toolCalls from INFLIGHT[sid].toolCalls.
+  // Clearing here and then overwriting is wasteful, and if S.busy becomes true
+  // before the next render, the fallback can't re-derive from messages.
+  if(!(typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[sid])){
+    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);
+  }
   clearLiveToolCards();
   // #3018: preserve client-side ephemeral turn fields (_turnUsage, _turnDuration,
   // _turnTps, _gatewayRouting, _statusCard) across the loadSession replace.
