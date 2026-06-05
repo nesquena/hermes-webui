@@ -141,6 +141,18 @@ def test_agent_session_rows_existing_batches_over_500_ids(tmp_path, monkeypatch)
     assert existing == frozenset(ids[:300])
 
 
+def test_agent_session_rows_existing_normalizes_whitespace_in_probe_ids(tmp_path, monkeypatch):
+    from api import models
+
+    home = tmp_path / "home"
+    home.mkdir()
+    _make_state_db(home / "state.db", ["cli-padded"])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: home / "state.db")
+
+    existing = models.agent_session_rows_existing(["  cli-padded  "])
+    assert existing == frozenset({"cli-padded"})
+
+
 # ── Orphan-prune decision predicate (mirrors the sidebar merge-loop guard) ──
 
 

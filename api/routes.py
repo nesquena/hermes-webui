@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 import re
+from collections import defaultdict
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs, urlsplit
@@ -5442,28 +5443,26 @@ def handle_get(handler, parsed) -> bool:
                     else:
                         _kept_after_orphan_prune.append(s)
                 if _orphan_probe_rows:
-                    from collections import defaultdict
-
                     rows_by_profile: dict[object, list[dict]] = defaultdict(list)
                     for row in _orphan_probe_rows:
                         rows_by_profile[row.get("profile")].append(row)
                     missing_orphan_ids: set[str] = set()
                     for profile_key, rows in rows_by_profile.items():
                         probe_ids = [
-                            str(row.get("session_id"))
+                            str(row.get("session_id")).strip()
                             for row in rows
-                            if row.get("session_id")
+                            if str(row.get("session_id") or "").strip()
                         ]
                         existing = agent_session_rows_existing(
                             probe_ids,
                             profile=profile_key if isinstance(profile_key, str) and profile_key else None,
                         )
                         for row in rows:
-                            sid = str(row.get("session_id") or "")
+                            sid = str(row.get("session_id") or "").strip()
                             if sid and sid not in existing:
                                 missing_orphan_ids.add(sid)
                     for s in _orphan_probe_rows:
-                        _sid = s.get("session_id")
+                        _sid = str(s.get("session_id") or "").strip()
                         if _sid in missing_orphan_ids:
                             try:
                                 prune_session_from_index(_sid)

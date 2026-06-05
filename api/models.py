@@ -2777,7 +2777,7 @@ def agent_session_rows_existing(
                     f"SELECT id FROM sessions WHERE id IN ({placeholders})",
                     chunk,
                 )
-                existing.update(str(row[0]) for row in cur.fetchall())
+                existing.update(str(row[0]).strip() for row in cur.fetchall())
             return frozenset(existing)
     except Exception:
         logger.debug(
