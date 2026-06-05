@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.283] — 2026-06-05 — Release IY (stage-w2 — composer queue hint during auto-compaction)
+
+### Fixed
+- **The composer now tells you a message will queue during auto-compaction instead of looking dead.** While automatic compression runs, the send button previously went `disabled` with only a "Waiting for compression to finish" tooltip. It now shows a `queue` action with the placeholder + tooltip "Type a message — it will queue and send after compression", so you can type and have it sent automatically when compaction completes. (#3512, @rodboev; closes #3079)
+
 ## [v0.51.282] — 2026-06-05 — Release IX (stage-3544 — surface memory/skill saves in Activity summary)
 
 ### Added
