@@ -5,7 +5,7 @@
 // legacy reverse-scan over S.messages — that keeps new clients working
 // against old servers (Phase 1 may not yet be deployed everywhere).
 // See api/todo_state.py for the wire contract.
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null};
 
 function assistantDisplayName(){
   if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
@@ -5900,9 +5900,19 @@ function syncTopbar(){
   if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
   if(typeof syncTerminalButton==='function') syncTerminalButton();
   // modelSelect already set above
-  // Update profile chip label
+  // Update profile chip label.
+  // The chip is the profile-SWITCHER trigger (it fronts the profile dropdown) and
+  // governs where the next message / new chat routes — both follow the client
+  // active profile (the hermes_profile cookie, set only by /api/profile/switch).
+  // It must therefore reflect S.activeProfile, NOT the loaded session's profile.
+  // #3331 briefly keyed this on S.session.profile so the label would track the
+  // session being browsed, but loadSession() never updates S.activeProfile, so
+  // opening a cross-profile session made the chip disagree with the dropdown
+  // checkmark and lie about message routing (#3635). #3331's legitimate work —
+  // scoping project/session operations to the session's own profile — is
+  // unaffected by this line.
   const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=(S.session&&S.session.profile)||S.activeProfile||'default';
+  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
 }
 
 function msgContent(m){

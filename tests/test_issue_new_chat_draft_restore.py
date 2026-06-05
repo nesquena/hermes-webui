@@ -97,7 +97,7 @@ def test_restorable_candidate_rejects_in_flight_worktree_and_cross_profile_sessi
     body = SESSIONS_JS[start:end]
     assert "messageCount !== 0" in body
     assert "session.active_stream_id || session.pending_user_message || session.worktree_path" in body
-    assert "sessionProfile !== activeProfile" in body
+    assert "_profileMatchesActiveProfile(sessionProfile, activeProfile)" in body
     assert "session.composer_draft || {}" in body
     assert "text || files.length" in body
 

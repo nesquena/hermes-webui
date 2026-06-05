@@ -685,16 +685,16 @@ def test_cleanTitle_is_let_not_const():
 
 # ── Sprint 42 additional tests: thinking panel persistence (#427) ────────
 def test_streaming_persists_reasoning_in_session():
-    """streaming.py must accumulate reasoning_text and patch last assistant message."""
+    """streaming.py must accumulate reasoning and patch assistant messages."""
     src = (REPO / 'api' / 'streaming.py').read_text()
 
-    # _reasoning_text must be initialised
-    assert "_reasoning_text = ''" in src, \
-        "_reasoning_text variable not initialised in streaming.py"
+    # #3587: per-message reasoning segments replaced the flat _reasoning_text accumulator
+    assert "_reasoning_segments" in src, \
+        "_reasoning_segments dict not found in streaming.py"
 
-    # on_reasoning must accumulate non-echo reasoning into _reasoning_text
-    assert '_reasoning_text += reasoning_delta' in src, \
-        "on_reasoning callback does not accumulate accepted reasoning deltas into _reasoning_text"
+    # on_reasoning must accumulate non-echo reasoning into segments
+    assert '_reasoning_segments[_current_reasoning_idx]' in src or '_reasoning_segments.get(_current_reasoning_idx' in src, \
+        "on_reasoning callback does not accumulate into per-message _reasoning_segments"
     assert '_is_visible_output_echo(reasoning_delta)' in src, \
         "on_reasoning callback should suppress reasoning deltas that only echo visible streamed output"
 

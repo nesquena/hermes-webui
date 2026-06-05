@@ -300,7 +300,7 @@ const _sessionTitleProvisionalBySid = new Map();
 // their canonical command is registered on the backend (for example
 // /reload-mcp). Keep this intentionally narrow and include underscore variants
 // observed by users so typing either form still routes through executeAgentCommand.
-const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp']);
+const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set(['reload-mcp', 'reload_mcp', 'codex-runtime', 'codex_runtime']);
 
 function _clearStaleBusyStateBeforeSend({compressionRunning=false}={}){
   if(!S||!S.busy||compressionRunning) return false;
@@ -858,6 +858,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
+  function _ownsActiveStreamOrBackground(){
+    return !_isActiveSession() || S.activeStreamId===streamId;
+  }
+  function _bailOutOfTerminalEventsFromStaleStream(){
+    if(_ownsActiveStreamOrBackground()) return false;
+    _closeSource(source);
+    return true;
+  }
   function _clearActivePaneInflightIfOwner(){
     if(_isActiveSession()) clearInflight();
   }
@@ -880,6 +888,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     hideClarifyCard(true, reason||'terminal');
   }
   function _clearOwnerInflightState(){
+    if(_isActiveSession() && S.activeStreamId!==streamId) return;
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
@@ -2075,6 +2084,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
+      if(_bailOutOfTerminalEventsFromStaleStream()) return;
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
       // _streamFinalized=false, calls _restoreSettledSession(), and overwrites
@@ -2277,6 +2287,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource(source);
         return;
       }
+      if(_bailOutOfTerminalEventsFromStaleStream()) return;
       _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
@@ -2417,6 +2428,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('apperror',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream()) return;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -2492,6 +2504,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('error',async e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream() && !_streamFinalized){
+        return;
+      }
       if(_terminalStateReached || _streamFinalized){
         _closeSource(source);
         return;
@@ -2542,6 +2557,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('cancel',e=>{
+      if(_bailOutOfTerminalEventsFromStaleStream()) return;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -2633,6 +2649,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   async function _restoreSettledSession(source){
+    if(_isActiveSession() && S.activeStreamId!==streamId){
+      _closeSource(source);
+      return false;
+    }
     try{
       const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
       // Opus #2852 race-fix: if a late `done` event ran the finalize path while
@@ -2700,6 +2720,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _handleStreamError(source){
+    if(_isActiveSession() && S.activeStreamId!==streamId){
+      _closeSource(source);
+      return;
+    }
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
     if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}

@@ -23,6 +23,7 @@ from api.workspace import get_last_workspace
 from api.usage import prompt_cache_hit_percent
 from api.agent_sessions import (
     _is_continuation_session,
+    is_cli_session_row,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
@@ -3490,7 +3491,7 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
         db_path,
         limit=CLI_VISIBLE_SESSION_LIMIT,
         log=logger,
-        exclude_sources=None,
+        exclude_sources=("cron",),
     ):
         sid = row['id']
         raw_ts = row['last_activity'] or row['started_at']
@@ -3561,7 +3562,7 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
             '_lineage_root_id': row.get('_lineage_root_id'),
             '_lineage_tip_id': row.get('_lineage_tip_id'),
             '_compression_segment_count': row.get('_compression_segment_count'),
-            'is_cli_session': True,
+            'is_cli_session': is_cli_session_row(row),
         })
 
     # --- Second pass: fetch cron sessions that may have been squeezed out
@@ -3645,7 +3646,7 @@ def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) 
                 '_lineage_root_id': row.get('_lineage_root_id'),
                 '_lineage_tip_id': row.get('_lineage_tip_id'),
                 '_compression_segment_count': row.get('_compression_segment_count'),
-                'is_cli_session': True,
+                'is_cli_session': is_cli_session_row(row),
             })
             existing_sids.add(sid)
     except Exception:
