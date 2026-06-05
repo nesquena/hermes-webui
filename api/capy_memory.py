@@ -576,6 +576,12 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_actions_variables_path_repo(origin_uri)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_actions_secrets_route_path_matches(raw_origin_text):
+        actions_secrets_origin = _github_actions_secrets_safe_origin(raw_origin_text)
+        if not actions_secrets_origin:
+            origin_uri = f"capy-memory://{source_id}"
+        else:
+            origin_uri = actions_secrets_origin
     display_name = _safe_public_text(
         record.get("title") or record.get("display_name") or record.get("name"),
         limit=200,
@@ -4006,6 +4012,145 @@ def _github_actions_variables_refresh_summary(origin_uri: str, payload: dict[str
             continue
         name = _safe_public_text(row.get("name"), limit=120)
         row_parts = [f"variable: {name}"]
+        created = _safe_iso_timestamp(row.get("created_at")) if row.get("created_at") is not None else ""
+        updated = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
+        if created:
+            row_parts.append(f"created: {created}")
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_actions_secrets_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "actions"
+        or path[5] != "secrets"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_actions_secrets_safe_origin(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if not _github_raw_hostname_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 6
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "actions"
+        or path[5] != "secrets"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return urlunsplit(("https", "api.github.com", parts.path, "", ""))
+
+
+def _github_actions_secrets_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 6
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "actions"
+            and lowered[5].startswith("secrets")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return any(segment.lower().startswith("secrets%") for segment in raw_path)
+
+
+def _github_actions_secrets_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_actions_secrets_route_path_matches(origin_uri)
+
+
+def _github_actions_secret_name_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    name = value.strip()
+    if not name or name != value:
+        return False
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]{0,99}", name):
+        return False
+    if _refresh_value_is_blocked(name) or _UNSAFE_KEY_RE.search(name):
+        return False
+    return True
+
+
+def _github_actions_secret_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if not _github_actions_secret_name_is_safe(row.get("name")):
+        return False
+    for field in ("created_at", "updated_at"):
+        raw_timestamp = row.get(field)
+        if raw_timestamp is not None and not _safe_iso_timestamp(raw_timestamp):
+            return False
+    for raw_value in (row.get("name"), row.get("created_at"), row.get("updated_at")):
+        if _refresh_value_is_blocked(raw_value):
+            return False
+    return True
+
+
+def _json_payload_is_github_actions_secrets_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_actions_secrets_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    secrets = payload.get("secrets")
+    if total_count is None or not isinstance(secrets, list) or total_count < len(secrets):
+        return False
+    return all(_github_actions_secret_row_is_safe(row) for row in secrets)
+
+
+def _github_actions_secrets_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_actions_secrets_path_repo(origin_uri) or "repository"
+    raw_secrets = payload.get("secrets")
+    secrets = raw_secrets if isinstance(raw_secrets, list) else []
+    total_count = _safe_optional_nonnegative_int(payload.get("total_count"))
+    visible_count = total_count if total_count is not None else len(secrets)
+    parts = [f"GitHub Actions private names for {repo}", f"private name count: {visible_count}"]
+    for row in secrets[:5]:
+        if not _github_actions_secret_row_is_safe(row):
+            continue
+        name = _safe_public_text(row.get("name"), limit=120)
+        row_parts = [f"private name: {name}"]
         created = _safe_iso_timestamp(row.get("created_at")) if row.get("created_at") is not None else ""
         updated = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
         if created:
@@ -7627,6 +7772,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_actions_variables_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    actions_secrets_repo = _github_actions_secrets_path_repo(origin_uri)
+    if actions_secrets_repo:
+        if not _json_payload_is_github_actions_secrets_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub Actions private names {actions_secrets_repo}",
+            "summary": _github_actions_secrets_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_actions_secrets_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     topics_repo = _github_topics_path_repo(origin_uri)
     if topics_repo:
         if not _json_payload_is_github_topics_metadata(origin_uri, payload):
@@ -7923,6 +8080,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_actions_variables_route_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_variables_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_actions_secrets_route_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_secrets_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_repository_events_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_repository_events_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -7937,6 +8097,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     secret_scanning_safe_origin = _github_secret_scanning_alerts_safe_origin(raw_origin_uri)
     if secret_scanning_safe_origin:
         safe_origin_uri = secret_scanning_safe_origin
+    actions_secrets_safe_origin = _github_actions_secrets_safe_origin(raw_origin_uri)
+    if actions_secrets_safe_origin:
+        safe_origin_uri = actions_secrets_safe_origin
     if not _source_refresh_allowed(safe_origin_uri):
         raise RuntimeError("refresh fetcher disabled")
     request_accept = "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8"
@@ -7998,6 +8161,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_actions_variables_path_matches(safe_origin_uri):
         if not _github_actions_variables_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_actions_secrets_path_matches(safe_origin_uri):
+        if not _github_actions_secrets_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_repository_events_path_matches(safe_origin_uri):
@@ -8087,6 +8254,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_actions_variables_path_repo(final_url)
             or _github_actions_variables_path_repo(final_url) != _github_actions_variables_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_secrets_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_actions_secrets_path_repo(final_url)
+            or _github_actions_secrets_path_repo(final_url) != _github_actions_secrets_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_dependabot_alerts_path_matches(safe_origin_uri) and (
@@ -8205,6 +8378,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_variables_path_matches(safe_origin_uri) and (
             not _github_actions_variables_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_secrets_path_matches(safe_origin_uri) and (
+            not _github_actions_secrets_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -8938,6 +9116,12 @@ def run_source_refresh_jobs(
             or not _github_actions_variables_path_repo(raw_origin_uri)
         ):
             origin_uri = f"capy-memory://{source_id}"
+        elif _github_actions_secrets_route_path_matches(raw_origin_uri):
+            actions_secrets_origin = _github_actions_secrets_safe_origin(raw_origin_uri)
+            if not actions_secrets_origin:
+                origin_uri = f"capy-memory://{source_id}"
+            else:
+                origin_uri = actions_secrets_origin
         elif _github_issue_labels_path_matches(raw_origin_uri) and not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com"):
             origin_uri = f"capy-memory://{source_id}"
         elif _github_collaborators_path_matches(raw_origin_uri) and (
