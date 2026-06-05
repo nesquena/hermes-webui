@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Context-window usage no longer falls back to 128K after a turn settles or a stale session reloads** when the live stream already resolved a larger model window; terminal usage snapshots now preserve the last known context metadata instead of overwriting it with missing values. (#3660, #3185)
+
 ## [v0.51.267] — 2026-06-04 — Release II (stage-r17 — TTS + CSRF forwarded-header security hardening)
 
 ### Security

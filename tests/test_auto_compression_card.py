@@ -266,7 +266,7 @@ def test_auto_compression_done_sse_refreshes_context_indicator_usage():
     block = _compressed_listener_block()
 
     assert "if(d.usage&&typeof _syncCtxIndicator==='function')" in block
-    assert "S.lastUsage={...(S.lastUsage||{}),...d.usage};" in block
+    assert "_mergeUsageForCtxIndicator(d.usage,S.lastUsage||{})" in block
     assert "_syncCtxIndicator(S.lastUsage);" in block
     assert block.index("_syncCtxIndicator(S.lastUsage);") < block.index("setCompressionUi")
 
