@@ -1073,10 +1073,37 @@ def _schedule_restart(delay: float = 2.0) -> None:
                 # `[sys.executable] + sys.argv` form is the canonical CPython
                 # re-exec idiom (same shape Flask/Django reloaders use) and
                 # is the correct path.
-                if getattr(sys, "frozen", False):
-                    os.execv(sys.executable, sys.argv)
+                #
+                # IMPORTANT: On Windows, os.execv() does NOT replace the
+                # current process — it spawns a new process while the old
+                # one keeps running.  This causes "address already in use"
+                # because the old process still holds the port.  On Windows
+                # we use subprocess.Popen() + os._exit() instead.
+                if sys.platform == 'win32':
+                    import subprocess
+                    if getattr(sys, "frozen", False):
+                        args = sys.argv
+                    else:
+                        args = [sys.executable] + sys.argv
+                    # Start new process detached, redirect all stdio to
+                    # avoid broken-pipe errors when the parent exits.
+                    subprocess.Popen(
+                        args,
+                        cwd=os.getcwd(),
+                        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+                        close_fds=True,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    # Exit immediately — the port is released as soon as
+                    # this process dies, allowing the new process to bind.
+                    os._exit(0)
                 else:
-                    os.execv(sys.executable, [sys.executable] + sys.argv)
+                    if getattr(sys, "frozen", False):
+                        os.execv(sys.executable, sys.argv)
+                    else:
+                        os.execv(sys.executable, [sys.executable] + sys.argv)
             except Exception:
                 # Last-resort: if execv fails for any reason, just exit so the
                 # process supervisor (start.sh / Docker) restarts us.
