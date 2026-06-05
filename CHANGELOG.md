@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.280] — 2026-06-05 — Release IV (stage-p3i — Windows self-update restart fix)
+
+### Fixed
+- **Self-update now restarts correctly on Windows.** `os.execv` does not replace the current process on Windows (it spawns a new one while the old keeps running), so the old process held port 8787 and the new process failed to bind ("address already in use"), surfacing as "Update failed" after the timeout. On Windows the restart now launches a detached new process (`subprocess.Popen` with `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`) and exits the old one immediately to release the port, plus a bounded bind-retry loop in `server_bind()` (up to 10s) to ride out the `SO_EXCLUSIVEADDRUSE` teardown window. POSIX behavior is unchanged (still `os.execv`). (#3647, @jja881)
+
 ## [v0.51.279] — 2026-06-05 — Release IU (stage-p3h — preserve Activity/streaming turn on mid-stream scroll)
 
 ### Fixed
