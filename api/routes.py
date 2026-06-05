@@ -8370,6 +8370,15 @@ def _handle_sessions_search(handler, parsed):
     qs = parse_qs(parsed.query)
     q = qs.get("q", [""])[0].lower().strip()
     content_search = qs.get("content", ["1"])[0] == "1"
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name()
+    all_profiles = _all_profiles_query_flag(parsed)
+    sessions = all_sessions()
+    if not all_profiles:
+        sessions = [
+            s for s in sessions
+            if _profiles_match(s.get("profile"), active_profile)
+        ]
     # Reject a malformed depth instead of letting int() raise ValueError and
     # surface as a confusing 500. Clamp to >= 0 so a negative value can't reach
     # the messages[:depth] slice below — messages[:-n] would silently exclude
@@ -8381,14 +8390,18 @@ def _handle_sessions_search(handler, parsed):
         depth = 5
     if not q:
         safe_sessions = []
-        for s in all_sessions():
+        for s in sessions:
             item = dict(s)
             if isinstance(item.get("title"), str):
                 item["title"] = _redact_text(item["title"])
             safe_sessions.append(item)
-        return j(handler, {"sessions": safe_sessions})
+        return j(handler, {
+            "sessions": safe_sessions,
+            "all_profiles": all_profiles,
+            "active_profile": active_profile,
+        })
     results = []
-    for s in all_sessions():
+    for s in sessions:
         title_match = q in (s.get("title") or "").lower()
         if title_match:
             item = dict(s, match_type="title")
@@ -8413,7 +8426,13 @@ def _handle_sessions_search(handler, parsed):
                         break
             except (KeyError, Exception):
                 pass
-    return j(handler, {"sessions": results, "query": q, "count": len(results)})
+    return j(handler, {
+        "sessions": results,
+        "query": q,
+        "count": len(results),
+        "all_profiles": all_profiles,
+        "active_profile": active_profile,
+    })
 
 
 def _handle_list_dir(handler, parsed):
