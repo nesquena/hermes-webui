@@ -245,15 +245,15 @@ def test_gateway_sessions_appear_when_enabled():
 
 
 def test_webui_state_db_session_without_sidecar_appears_when_agent_sessions_enabled():
-    """Regression: WebUI-origin rows in state.db can recover missing JSON sidecars."""
+    """Regression: state.db rows without JSON sidecars can be recovered via agent bridge."""
     conn = _ensure_state_db()
-    sid = 'webui_state_only_001'
+    sid = 'cli_state_only_001'
     try:
         _insert_agent_session_row(
             conn,
             session_id=sid,
-            source='webui',
-            title='Recovered WebUI Session',
+            source='cli',
+            title='Recovered CLI Session',
             model='openai/gpt-5',
             messages=2,
         )
@@ -265,10 +265,10 @@ def test_webui_state_db_session_without_sidecar_appears_when_agent_sessions_enab
         sessions = data.get('sessions', [])
         recovered = [s for s in sessions if s.get('session_id') == sid]
         assert len(recovered) == 1, (
-            "WebUI-origin sessions that exist in state.db but have no JSON sidecar "
+            "State.db sessions without a JSON sidecar "
             "should be surfaced through the agent-session bridge for recovery."
         )
-        assert recovered[0].get('source_tag') == 'webui'
+        assert recovered[0].get('source_tag') == 'cli'
         assert recovered[0].get('is_cli_session') is True
     finally:
         try:
@@ -780,7 +780,7 @@ def test_gateway_session_has_correct_metadata():
         assert gw.get('raw_source') == 'telegram'
         assert gw.get('session_source') == 'messaging'
         assert gw.get('source_label') == 'Telegram'
-        assert gw.get('is_cli_session') is True, "is_cli_session should be True for agent sessions"
+        assert gw.get('is_cli_session') is False, "is_cli_session should be False for messaging (telegram) sessions"
         assert gw.get('title') == 'Meta Test'
     finally:
         try:

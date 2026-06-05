@@ -574,12 +574,14 @@ def test_rfc_defines_slice4f_supervised_local_runner_client_gate():
     rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
 
     assert "#### Slice 4f: Supervised local runner client backend gate" in rfc
-    assert "Status as of 2026-05-28: client transport proposed in #3073 behind" in rfc
-    assert "it should be described as under review until a\nrelease PR actually ships it" in rfc
-    assert "replace the bounded 501 path under the existing\nfeature flag" in rfc
-    assert "durable runner-owned run id plus session-to-run lookup" in rfc
+    assert "Status as of 2026-05-31: shipped in v0.51.188 via #3073 / #3274" in rfc
+    assert "The client\ntransport is now implemented behind `HERMES_WEBUI_RUNNER_BASE_URL`" in rfc
+    assert "`HttpRunnerClient` rejects non-`http(s)` base URL schemes" in rfc
+    assert "uses an opener that\ndoes not follow redirects" in rfc
     assert "the configured\nrunner must emit events that are already compatible with the browser SSE event\nnames/payloads" in rfc
     assert "a later runner-owned normalization layer must translate\nHermes runtime families such as `token.delta`, `tool.started`, and `done`" in rfc
+    assert "After the configured runner-client boundary ships" in rfc
+    assert "configured external endpoint or fake-runner fixture" in rfc
     assert "cancel as the first required live control" in rfc
     assert "501 path replaced only when configured" in rfc
     assert "Restart/reattach proves ownership moved" in rfc
@@ -587,6 +589,24 @@ def test_rfc_defines_slice4f_supervised_local_runner_client_gate():
     assert "Successful chat-start responses remain limited\n   to the legacy-compatible field whitelist" in rfc
     assert "Unsupported runner controls return safe\n   `unsupported`, `not-active`, or `conflict` results" in rfc
     assert "no permanent WebUI-owned active-run discovery cache" in rfc
+
+
+def test_rfc_defines_slice4g_supervised_local_runner_process_gate():
+    routes = importlib.import_module("api.routes")
+    rfc = (routes.Path(__file__).parent.parent / "docs" / "rfcs" / "hermes-run-adapter-contract.md").read_text(encoding="utf-8")
+
+    assert "#### Slice 4g: Supervised local runner process harness gate" in rfc
+    assert "After #3073 / #3274, WebUI has an explicit configured-runner HTTP client" in rfc
+    assert "still does not ship the supervised runner process itself" in rfc
+    assert "own\n`AIAgent` execution outside the main WebUI request process" in rfc
+    assert "keep WebUI as a client of `HERMES_WEBUI_RUNNER_BASE_URL`" in rfc
+    assert "without WebUI process-global\n  environment mutation" in rfc
+    assert "Process ownership moved" in rfc
+    assert "Restart/reattach with a real runner" in rfc
+    assert "No runtime-surrogate globals in WebUI" in rfc
+    assert "Default-off and reversible" in rfc
+    assert "Runner health and failure are observable" in rfc
+    assert "no claim that this is the canonical Hermes Agent Runtime API" in rfc
 
 def test_runtime_runner_client_factory_stays_bounded_until_endpoint_configured(monkeypatch):
     routes = importlib.import_module("api.routes")

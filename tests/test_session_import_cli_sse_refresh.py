@@ -16,7 +16,10 @@ def test_sse_import_cli_guard_skips_shorter_transcript_overwrite():
     assert "const next = res.session.messages.filter(m => m && m.role);" in sse_block
     assert "if (next.length < prev) return;" in sse_block
     assert "if (prev > 0 && !_isCliImportRefreshPrefixMatch(S.messages, next)) return;" in sse_block
-    assert "S.messages = next;" in sse_block
+    # #3306 added an ephemeral-field carry-forward before the assignment, so the
+    # replace RHS is now `_nextToAssign` (= carry-forward of `next`). The guard
+    # invariants above are what this test protects; the wholesale replace remains.
+    assert "S.messages = _nextToAssign;" in sse_block
     assert "S.session.message_count = next.length;" in sse_block
     assert "renderMessages({preserveScroll:true});" in sse_block
 

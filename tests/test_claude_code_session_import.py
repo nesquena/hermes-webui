@@ -238,6 +238,41 @@ def test_read_only_source_badge_ui_guards_are_present():
     assert "topbar-source-badge" in panels_js
     assert "S.session.read_only || S.session.is_read_only" in panels_js
     assert 'data-source-key="claude_code"' in style_css
-    assert ".session-item.cli-session.read-only-session:hover::after" in style_css
+    assert ".session-item.read-only-session:hover .session-source-chip" in style_css
     assert "Read-only imported sessions cannot be deleted" in routes_py
     assert "Read-only imported sessions cannot be archived" in routes_py
+
+
+def test_messaging_source_badge_not_gated_on_is_cli_session():
+    # Messaging sessions (Telegram, WeChat, Discord) populate source_label/source_tag/raw_source
+    # but reach the chat pane with is_cli_session=false, so the topbar badge must not be gated on
+    # is_cli_session or it never renders for them (#3338).
+    ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    panels_js = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+
+    assert "S.session.is_cli_session&&(S.session.source_label" not in ui_js
+    assert "if (S.session.is_cli_session) sourceLabel" not in panels_js
+    assert "S.session.source_label||S.session.source_tag||S.session.raw_source" in ui_js
+    assert "S.session.source_label || S.session.source_tag || S.session.raw_source" in panels_js
+    # The native WebUI self-source must be suppressed so recovered sidecars
+    # (source_label 'WebUI' from api/session_recovery.py) don't badge the chat pane (#3338).
+    assert "/^webui$/i.test(sourceLabel)" in ui_js
+    assert "/^webui$/i.test(sourceLabel)" in panels_js
+
+
+def test_messaging_source_badge_in_sidebar_not_gated_on_is_cli_session():
+    sessions_js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    style_css = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+
+    assert "function _isMessagingSession" in sessions_js
+    assert sessions_js.count("if(s.is_cli_session||_isMessagingSession(s)){") == 2
+    assert "if(s.is_cli_session&&sourceLabel) metaBits.push(sourceLabel);" not in sessions_js
+    assert (
+        "if(sourceLabel&&(s.is_cli_session||_isMessagingSession(s))) metaBits.push(sourceLabel);"
+        in sessions_js
+    )
+    assert "session-source-chip" in sessions_js
+    assert ".session-source-chip" in style_css
+    assert '.session-source-chip[data-source-key="telegram"]' in style_css
+    assert '.session-source-chip[data-source-key="discord"]' in style_css
+    assert '.session-item.cli-session[data-source-key="telegram"]' in style_css

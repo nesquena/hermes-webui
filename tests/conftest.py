@@ -162,12 +162,15 @@ def _discover_python(agent_dir) -> str:
     if os.getenv('HERMES_WEBUI_PYTHON'):
         return os.getenv('HERMES_WEBUI_PYTHON')
     if agent_dir:
-        venv_py = agent_dir / 'venv' / 'bin' / 'python'
-        if venv_py.exists():
-            return str(venv_py)
-    local_venv = REPO_ROOT / '.venv' / 'bin' / 'python'
-    if local_venv.exists():
-        return str(local_venv)
+        for venv_dir in ('venv', '.venv'):
+            for subdir, binary in (('bin', 'python'), ('Scripts', 'python.exe')):
+                venv_py = agent_dir / venv_dir / subdir / binary
+                if venv_py.exists():
+                    return str(venv_py)
+    for subdir, binary in (('bin', 'python'), ('Scripts', 'python.exe')):
+        local_venv = REPO_ROOT / '.venv' / subdir / binary
+        if local_venv.exists():
+            return str(local_venv)
     return shutil.which('python3') or shutil.which('python') or 'python3'
 
 HERMES_AGENT = _discover_agent_dir()
@@ -600,6 +603,11 @@ def test_server():
     env["HERMES_WEBUI_TEST_NETWORK_BLOCK"] = "1"
     env.update({
         "HERMES_WEBUI_WORKSPACE_GIT_DESTRUCTIVE": "1",
+        # Small archive-extraction cap so the zip-bomb guard is exercisable
+        # against the out-of-process test server (the real 10x-upload default is
+        # ~200MB — impractical to exceed in a test). 5MB is far above any other
+        # test's archive payload, so only the bomb test trips it.
+        "HERMES_WEBUI_MAX_EXTRACTED_MB":  "5",
         "HERMES_WEBUI_PORT":              str(TEST_PORT),
         "HERMES_WEBUI_HOST":              "127.0.0.1",
         "HERMES_WEBUI_STATE_DIR":         str(TEST_STATE_DIR),

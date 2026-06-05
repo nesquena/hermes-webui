@@ -383,6 +383,7 @@ function _connectTerminalOutput(){
     try{text=(JSON.parse(ev.data)||{}).text||'';}
     catch(_){text=ev.data||'';}
     if(TERMINAL_UI.term&&text)TERMINAL_UI.term.write(text);
+    if(text&&window._terminalAutoExpandOnOutput&&TERMINAL_UI.open&&TERMINAL_UI.collapsed)expandComposerTerminal({focus:false});
   });
   source.addEventListener('terminal_closed',()=>{
     if(TERMINAL_UI.source!==source)return;
@@ -476,8 +477,9 @@ function collapseComposerTerminal(){
   syncTerminalButton();
 }
 
-function expandComposerTerminal(){
+function expandComposerTerminal(opts){
   if(!TERMINAL_UI.open)return;
+  const focus = !opts || opts.focus !== false;
   const {panel}= _terminalEls();
   const messages=_terminalMessagesEl();
   TERMINAL_UI.collapsed=false;
@@ -490,7 +492,7 @@ function expandComposerTerminal(){
   _resetTerminalHeightForViewport();
   requestAnimationFrame(()=>{
     _fitTerminal();
-    focusComposerTerminalInput();
+    if(focus) focusComposerTerminalInput();
     setTimeout(()=>{
       if(panel)panel.classList.remove('is-expanding-from-dock');
       if(messages)messages.classList.remove('terminal-expanding-from-dock');

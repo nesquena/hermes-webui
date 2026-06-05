@@ -11,19 +11,28 @@ from __future__ import annotations
 import errno
 import atexit
 import codecs
-import fcntl
 import os
 import queue
-import select
 import shutil
 import signal
 import struct
 import subprocess
-import termios
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_TERMINAL_SUPPORTED = sys.platform != "win32"
+
+if _TERMINAL_SUPPORTED:
+    import fcntl
+    import select
+    import termios
+else:
+    fcntl = None  # type: ignore[assignment]
+    select = None  # type: ignore[assignment]
+    termios = None  # type: ignore[assignment]
 
 
 def _set_nonblocking(fd: int) -> None:
@@ -175,7 +184,8 @@ def _ensure_spawn_supervisor() -> None:
         _spawn_supervisor_started = True
 
 
-_ensure_spawn_supervisor()
+if _TERMINAL_SUPPORTED:
+    _ensure_spawn_supervisor()
 
 
 # NOTE on parent-death-signal: a previous version of this module set
@@ -257,6 +267,8 @@ def _set_size(term: TerminalSession, rows: int, cols: int) -> None:
 
 def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int = 80, restart: bool = False) -> TerminalSession:
     """Start or return the embedded terminal for a WebUI session."""
+    if not _TERMINAL_SUPPORTED:
+        raise NotImplementedError("Embedded terminal is not supported on Windows")
     sid = str(session_id or "").strip()
     if not sid:
         raise ValueError("session_id is required")
@@ -346,6 +358,8 @@ def start_terminal(session_id: str, workspace: Path, rows: int = 24, cols: int =
 
 
 def get_terminal(session_id: str) -> TerminalSession | None:
+    if not _TERMINAL_SUPPORTED:
+        return None
     with _LOCK:
         term = _TERMINALS.get(str(session_id or ""))
         if term and term.is_alive():
@@ -354,6 +368,8 @@ def get_terminal(session_id: str) -> TerminalSession | None:
 
 
 def write_terminal(session_id: str, data: str) -> None:
+    if not _TERMINAL_SUPPORTED:
+        raise NotImplementedError("Embedded terminal is not supported on Windows")
     term = get_terminal(session_id)
     if not term or not term.is_alive():
         raise KeyError("terminal not running")
@@ -361,6 +377,8 @@ def write_terminal(session_id: str, data: str) -> None:
 
 
 def resize_terminal(session_id: str, rows: int, cols: int) -> None:
+    if not _TERMINAL_SUPPORTED:
+        raise NotImplementedError("Embedded terminal is not supported on Windows")
     term = get_terminal(session_id)
     if not term:
         raise KeyError("terminal not running")
@@ -368,6 +386,8 @@ def resize_terminal(session_id: str, rows: int, cols: int) -> None:
 
 
 def close_terminal(session_id: str) -> bool:
+    if not _TERMINAL_SUPPORTED:
+        return False
     sid = str(session_id or "")
     with _LOCK:
         term = _TERMINALS.pop(sid, None)
