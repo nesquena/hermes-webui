@@ -102,6 +102,54 @@ not current open/merged/superseded state: for live status, the tracking issue
 
 ## Product Model
 
+### Lifecycle flow
+
+The lifecycle below is a product-state model, not a backend schema or
+wire-event contract. At settle time, the visible reply state should be derived
+from durable transcript truth, available terminal evidence, and reply
+ownership. A turn should not be marked `completed` only because live activity
+or partial assistant prose existed earlier.
+
+```mermaid
+%%{init: {"theme": "neutral"}}%%
+flowchart TD
+    A([User sends message]) --> B["Turn created<br/>reply ownership established"]
+    B --> C["Live phase<br/>process prose + quiet tool activity"]
+    C --> D{Lifecycle event}
+
+    D -- stream continues --> C
+    D -- reload / reconnect / session switch --> E["Recovery and replay<br/>rebuild the same lifecycle from durable state"]
+    E --> F{Same turn recovered?}
+    F -- yes --> C
+    F -- not yet --> G["Restoring or degraded state<br/>do not mark completed from missing live data"]
+    G --> D
+
+    D -- user cancels --> H["Cancel requested<br/>settle only the owned reply"]
+    H --> I["Settle decision<br/>durable transcript truth + terminal evidence + reply ownership"]
+    D -- run ended / terminal evidence --> I
+
+    I --> J{Event belongs to<br/>the current visible reply?}
+    J -- no --> K["Ignore stale event<br/>do not mutate the current visible reply"]
+    J -- yes --> L{Final assistant answer present<br/>and terminal evidence is normal?}
+
+    L -- yes --> M["completed<br/>activity summary above final answer"]
+    L -- no --> N{Specific terminal outcome}
+    N -- cancelled --> O["cancelled<br/>user stopped the turn"]
+    N -- interrupted --> P["interrupted<br/>continuity lost before final answer"]
+    N -- compression_exhausted --> Q["compression_exhausted<br/>compression could not continue safely"]
+    N -- tool_limit_reached --> R["tool_limit_reached<br/>tool / retry / iteration ceiling hit"]
+    N -- no_response --> S["no_response<br/>no usable assistant final content"]
+    N -- other failure --> T["error<br/>fallback for other terminal failures"]
+
+    M --> U["Settled reply visible<br/>supporting activity collapsed;<br/>artifacts and workspace outputs findable"]
+    O --> U
+    P --> U
+    Q --> U
+    R --> U
+    S --> U
+    T --> U
+```
+
 ### Reply ownership
 
 One visible assistant reply belongs to one user turn and one active run/stream
