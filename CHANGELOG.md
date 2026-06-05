@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.274] — 2026-06-05 — Release IP (stage-p3c — symlink-swap TOCTOU hardening for file APIs)
+
+### Security
+- **Workspace file APIs are hardened against symlink-swap (TOCTOU) attacks.** Write, delete, rename, and recursive-delete operations now go through anchored directory-fd helpers (`open_anchored_write_fd`, `unlink_anchored`, `rmtree_anchored`, `rename_anchored`) that resolve the target relative to the workspace root and operate via `dir_fd` + `O_NOFOLLOW`, so a symlink swapped in between the path check and the operation can't redirect a write/delete outside the workspace. Falls back to the prior behavior on platforms without `dir_fd` support. (#3630, @rodboev; fixes #3450)
+
 ## [v0.51.273] — 2026-06-05 — Release IO (stage-p3b — cron-output traversal guard)
 
 ### Fixed
