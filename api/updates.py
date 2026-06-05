@@ -1147,6 +1147,72 @@ def apply_force_update(target: str) -> dict:
         _apply_lock.release()
 
 
+def apply_rebase_update(target: str) -> dict:
+    """Fetch then rebase local commits on top of the remote branch.
+
+    Preserves local commits while incorporating remote changes, equivalent to:
+      git fetch origin && git rebase origin/<branch>
+
+    Returns diverged/conflict info when the rebase cannot complete cleanly so
+    the caller can surface actionable messages to the user.
+    """
+    active_streams = _active_stream_count()
+    if active_streams:
+        return _restart_blocked_response(target, active_streams)
+
+    if not _apply_lock.acquire(blocking=False):
+        return {'ok': False, 'message': 'Update already in progress'}
+    try:
+        if target == 'webui':
+            path = REPO_ROOT
+        elif target == 'agent':
+            path = _AGENT_DIR
+        else:
+            return {'ok': False, 'message': f'Unknown target: {target}'}
+
+        if path is None or not (path / '.git').exists():
+            return {'ok': False, 'message': 'Not a git repository'}
+
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+        if not fetch_ok:
+            return {
+                'ok': False,
+                'message': 'Could not reach the remote repository. Check your connection.',
+            }
+
+        upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
+        compare_ref = upstream if (ok and upstream) else f'origin/{_detect_default_branch(path)}'
+
+        _, ok = _run_git(['rebase', compare_ref], path)
+        if not ok:
+            # Abort the failed rebase so the repo is left in a clean state.
+            _run_git(['rebase', '--abort'], path)
+            return {
+                'ok': False,
+                'message': (
+                    f'Rebase of local {target} commits onto {compare_ref} produced conflicts '
+                    'that could not be resolved automatically. '
+                    'Use "Force update" to discard local commits and reset to the remote version, '
+                    'or resolve the conflicts manually in the terminal.'
+                ),
+                'diverged': True,
+            }
+
+        with _cache_lock:
+            _update_cache['checked_at'] = 0
+
+        _schedule_restart()
+
+        return {
+            'ok': True,
+            'message': f'{target} rebased and updated successfully',
+            'target': target,
+            'restart_scheduled': True,
+        }
+    finally:
+        _apply_lock.release()
+
+
 def apply_update(target):
     """Stash, pull --ff-only, pop for the given target repo."""
     blocker_snapshot = _restart_blocker_snapshot()

@@ -990,7 +990,7 @@ def _aiagent_import_error_detail() -> str:
     lines.append("")
     lines.append('  Full troubleshooting: docs/troubleshooting.md ("AIAgent not available")')
     return "\n".join(lines)
-from api.models import get_session, title_from
+from api.models import get_session, load_projects, title_from
 from api.workspace import set_last_workspace
 
 # Fields that are safe to send to LLM provider APIs.
@@ -1551,6 +1551,13 @@ def _message_text(value) -> str:
     return _strip_thinking_markup(str(value or '').strip())
 
 
+_HERMES_WEBUI_CONTEXT_PREFIX_RE = re.compile(
+    r'^\s*\[HermesWebUIContext::v1\n'
+    r'project_id:\s*(?:null|"(?:\\.|[^"\\])*")\n'
+    r'project_name:\s*(?:null|"(?:\\.|[^"\\])*")\n'
+    r'workspace:\s*(?:null|"(?:\\.|[^"\\])*")\n'
+    r'\]\s*'
+)
 _WORKSPACE_PREFIX_RE = re.compile(r'^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*')
 _LEGACY_WORKSPACE_PREFIX_RE = re.compile(r'^\s*\[Workspace:[^\]]+\]\s*')
 _WORKSPACE_PREFIX_ANY_RE = re.compile(r'\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*')
@@ -1565,10 +1572,53 @@ def _workspace_context_prefix(path: str) -> str:
     return f"[Workspace::v1: {_escape_workspace_prefix_path(path)}]\n"
 
 
+def _json_or_null(value) -> str:
+    if value is None:
+        return 'null'
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _project_name_for_session_project(project_id) -> str | None:
+    if not project_id:
+        return None
+    try:
+        for project in load_projects():
+            if isinstance(project, dict) and project.get('project_id') == project_id:
+                name = project.get('name')
+                return str(name) if name is not None else None
+    except Exception:
+        logger.debug('Failed to resolve project name for WebUI context prefix', exc_info=True)
+    return None
+
+
+def _hermes_webui_context_prefix(*, project_id=None, project_name=None, workspace=None) -> str:
+    """Return WebUI project metadata prefix followed by the workspace sentinel."""
+    return (
+        "[HermesWebUIContext::v1\n"
+        f"project_id: {_json_or_null(project_id)}\n"
+        f"project_name: {_json_or_null(project_name)}\n"
+        f"workspace: {_json_or_null(workspace)}\n"
+        "]\n"
+        f"{_workspace_context_prefix(str(workspace or ''))}"
+    )
+
+
+def _webui_context_prefix_for_session(session) -> str:
+    workspace = str(getattr(session, 'workspace', '') or '')
+    project_id = getattr(session, 'project_id', None) or None
+    project_name = _project_name_for_session_project(project_id)
+    return _hermes_webui_context_prefix(
+        project_id=project_id,
+        project_name=project_name,
+        workspace=workspace,
+    )
+
+
 def _strip_workspace_prefix(text: str, *, include_legacy: bool = False) -> str:
-    """Remove WebUI-injected workspace tags without eating user-typed text."""
+    """Remove WebUI-injected context/workspace tags without eating user-typed text."""
     value = str(text or '')
-    stripped = _WORKSPACE_PREFIX_RE.sub('', value, count=1)
+    stripped = _HERMES_WEBUI_CONTEXT_PREFIX_RE.sub('', value, count=1)
+    stripped = _WORKSPACE_PREFIX_RE.sub('', stripped, count=1)
     if include_legacy and stripped == value:
         stripped = _LEGACY_WORKSPACE_PREFIX_RE.sub('', value, count=1)
     return stripped.strip()
@@ -5621,17 +5671,19 @@ def _run_agent_streaming(
 
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
+            context_prefix = _webui_context_prefix_for_session(s)
             workspace_system_msg = (
                 f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present."
+                "Every user message is prefixed with a [HermesWebUIContext::v1 ...] block "
+                "containing project_id, project_name, and workspace metadata, followed by "
+                "[Workspace::v1: /absolute/path] indicating the workspace the user selected "
+                "in the web UI at send time. This tag is the single authoritative source of "
+                "the active workspace and updates with every message. It overrides any prior "
+                "workspace mentioned in this system prompt, memory, or conversation history. "
+                "Always use the value from the most recent [Workspace::v1: ...] tag as your "
+                "default working directory for ALL file operations: write_file, read_file, "
+                "search_files, terminal workdir, and patch. Never fall back to a hardcoded path "
+                "when this tag is present."
             )
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
@@ -5738,7 +5790,7 @@ def _run_agent_streaming(
             _agent_msg_text = msg_text
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
-            user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
+            user_message = _build_native_multimodal_message(context_prefix, _agent_msg_text, attachments, workspace, cfg=_cfg)
             _persistent_state_before = _persistent_state_snapshot(_profile_home)
             result = agent.run_conversation(
                 user_message=user_message,

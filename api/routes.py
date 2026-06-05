@@ -7882,6 +7882,14 @@ def handle_post(handler, parsed) -> bool:
 
         return j(handler, apply_force_update(target))
 
+    if parsed.path == "/api/updates/rebase":
+        target = body.get("target", "")
+        if target not in ("webui", "agent"):
+            return bad(handler, 'target must be "webui" or "agent"')
+        from api.updates import apply_rebase_update
+
+        return j(handler, apply_rebase_update(target))
+
     if parsed.path == "/api/updates/summary":
         from api.updates import summarize_update_payload
 
@@ -11436,26 +11444,21 @@ def _handle_chat_sync(handler, body):
                 _restore_reasoning_metadata,
                 _sanitize_messages_for_api,
                 _context_messages_for_new_turn,
-                _workspace_context_prefix,
+                _webui_context_prefix_for_session,
             )
-            workspace_ctx = _workspace_context_prefix(str(s.workspace))
+            workspace_ctx = _webui_context_prefix_for_session(s)
             workspace_system_msg = (
                 f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace::v1: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace::v1: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present.\n\n"
-                f"{_WEBUI_PROGRESS_PROMPT}\n\n"
-                "WebUI external-notes/durable-memory policy: Do not copy or dump this browser transcript "
-                "into external notes or durable memory by default. Write or update durable "
-                "notes only for explicit captures, durable preferences, decisions, blockers/open "
-                "issues, runbook-worthy workflows, or other clearly reusable signals; otherwise "
-                "leave external notes and durable memory unchanged. When you do write or update a durable note, briefly tell "
-                "the user what note or section changed so the write is reviewable."
+                "Every user message is prefixed with a [HermesWebUIContext::v1 ...] block "
+                "containing project_id, project_name, and workspace metadata, followed by "
+                "[Workspace::v1: /absolute/path] indicating the workspace the user selected "
+                "in the web UI at send time. This tag is the single authoritative source of "
+                "the active workspace and updates with every message. It overrides any prior "
+                "workspace mentioned in this system prompt, memory, or conversation history. "
+                "Always use the value from the most recent [Workspace::v1: ...] tag as your "
+                "default working directory for ALL file operations: write_file, read_file, "
+                "search_files, terminal workdir, and patch. Never fall back to a hardcoded path "
+                "when this tag is present."
             )
 
             _previous_messages = list(s.messages or [])
