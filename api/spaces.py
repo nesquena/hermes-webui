@@ -1837,14 +1837,16 @@ def _shared_data_slot_prompt_preflight_receipt(key: str, item: dict[str, Any]) -
 
 
 def _shared_data_slot_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
-    """Return metadata-only evidence that shared-data reads remain preflight-gated.
+    """Return metadata-only evidence that shared-data access remains preflight-gated.
 
-    Shared data can become agent-visible advisory context. Read/list actions do
-    not carry a free-form prompt to classify, but they still cross the shared
-    context boundary and should surface the required prompt-injection gate in
-    product/tool receipts.
+    Shared data can become agent-visible advisory context. Read/list/delete
+    actions may not carry a free-form prompt to classify, but they still cross
+    the shared context boundary and should surface the required
+    prompt-injection gate in product/tool receipts before any mutation.
     """
     safe_action = _context_value(action, 120) or "space.data.read"
+    action_text = str(safe_action)
+    context_check = "shared_context_mutation" if action_text.endswith("data.delete") else "shared_context_read"
     return {
         "available": True,
         "action": safe_action,
@@ -1852,7 +1854,7 @@ def _shared_data_slot_required_prompt_preflight_receipt(action: str) -> dict[str
         "status": "required",
         "severity": "none",
         "categories": [],
-        "checks": ["shared_context_read", "prompt_injection_preflight_required"],
+        "checks": [context_check, "prompt_injection_preflight_required"],
         "metadata_only": True,
         "raw_prompt_stored": False,
         "local_only": True,
@@ -8307,10 +8309,17 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         }
     if name in {"space.data.delete", "space.current.data.delete"}:
         space_id = validate_space_id(_space_tool_current_id(data))
+        prompt_preflight = _shared_data_slot_required_prompt_preflight_receipt(name)
         result = delete_shared_data_slot(space_id, data.get("key"))
         progress_event = _record_space_tool_progress_event(result["space_id"], run_prefix="shared-slot.delete")
-        response = {"ok": True, "action": name, **result, "progress_event": progress_event}
-        autonomy_policy = _shared_data_slot_action_policy_receipt(name, None)
+        response = {
+            "ok": True,
+            "action": name,
+            **result,
+            "prompt_preflight": prompt_preflight,
+            "progress_event": progress_event,
+        }
+        autonomy_policy = _shared_data_slot_action_policy_receipt(name, prompt_preflight)
         response["autonomy_policy"] = autonomy_policy
         response["output_compaction"] = _space_tool_action_output_compaction_receipt(
             action=name,
