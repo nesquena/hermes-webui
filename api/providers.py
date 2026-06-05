@@ -1866,8 +1866,10 @@ def get_providers() -> dict[str, Any]:
         # follow-up to v0.51.19 #1812.)
         if pid == "openai-codex":
             live_ids = _read_live_provider_model_ids("openai-codex")
+            live_id_set = set(live_ids)
             for mid in _read_visible_codex_cache_model_ids():
-                if mid not in live_ids:
+                if mid not in live_id_set:
+                    live_id_set.add(mid)
                     live_ids.append(mid)
             live_models = _models_from_live_provider_ids(pid, live_ids)
             if live_models:
