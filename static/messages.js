@@ -3284,6 +3284,8 @@ function _startClarifyCountdown(pending) {
 
 function _stashClarifyDraft(reason) {
   if (reason !== "expired" && reason !== "terminal") return false;
+  const submit = $("clarifySubmit");
+  if (submit && submit.classList.contains("loading")) return false;
   const input = $("clarifyInput");
   const draft = String((input && input.value) || "").trim();
   if (!draft) return false;
