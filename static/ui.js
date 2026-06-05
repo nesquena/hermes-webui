@@ -8484,7 +8484,7 @@ function loadPdfInline(container){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
-          return pdfjsLib.getDocument({data:buf}).promise;
+          return pdfjsLib.getDocument({data:buf, isEvalSupported:false}).promise;
         })
         .then(pdf=>{
           if(!pdf) return;
@@ -8522,7 +8522,9 @@ function loadPdfInline(container){
       const _pdfBlob=new Blob([`import*as p from'${_pdfSrc}';p.GlobalWorkerOptions.workerSrc='${_pdfWorker}';window._pdfjsLib=p;window._pdfjsReady=true;window.dispatchEvent(new Event('pdfjs-ready'));`],{type:'application/javascript'});
       const s=document.createElement('script');
       s.type='module';
-      s.src=URL.createObjectURL(_pdfBlob);
+      const _pdfBlobUrl=URL.createObjectURL(_pdfBlob);
+      s.src=_pdfBlobUrl;
+      s.onload=()=>URL.revokeObjectURL(_pdfBlobUrl);
       document.head.appendChild(s);
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
