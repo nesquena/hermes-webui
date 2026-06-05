@@ -59,6 +59,14 @@ def test_frontend_matches_agent_command_aliases():
     assert "some(a=>String(a||'').toLowerCase()===needle)" in helper
 
 
+def test_frontend_can_execute_agent_commands_via_api_endpoint():
+    assert "async function executeAgentCommand" in COMMANDS_JS
+    assert "async function executeAgentPluginCommand" in COMMANDS_JS
+    assert "async function _runAgentCommandTransport" in COMMANDS_JS
+    assert "api('/api/commands/exec'" in COMMANDS_JS
+    assert COMMANDS_JS.count("api('/api/commands/exec'") == 1
+
+
 def test_cli_only_response_mentions_webui_and_cli_scope():
     assert "function cliOnlyCommandResponse" in COMMANDS_JS
     assert "Hermes CLI-only command" in COMMANDS_JS
@@ -169,6 +177,23 @@ def test_send_intercepts_cli_only_commands_before_agent_round_trip():
     assert "return;" in intercept
 
 
+def test_send_intercepts_reload_mcp_agent_command_before_agent_round_trip():
+    intercept_idx = MESSAGES_JS.find("Slash command intercept")
+    normal_send_idx = MESSAGES_JS.find("const activeSid=S.session.session_id", intercept_idx)
+    assert normal_send_idx != -1
+    intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
+
+    assert "const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'')" in intercept
+    assert "if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" in intercept
+    assert "executeAgentCommand(text,_agentCmd||{name:_agentCmdName})" in intercept
+
+
+def test_reload_mcp_webui_intercept_aliases_are_defined_in_js_whitelist():
+    assert "'reload-mcp'" in MESSAGES_JS
+    assert "'reload_mcp'" in MESSAGES_JS
+    assert "if(_agentCmd&&_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" not in MESSAGES_JS
+
+
 def test_unknown_slash_commands_still_fall_through_to_agent():
     """Only explicitly supported metadata-backed commands should be intercepted."""
     intercept_idx = MESSAGES_JS.find("Slash command intercept")
@@ -176,6 +201,7 @@ def test_unknown_slash_commands_still_fall_through_to_agent():
     intercept = MESSAGES_JS[intercept_idx:normal_send_idx]
 
     assert "if(_agentCmd&&_agentCmd.cli_only)" in intercept
+    assert "if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" in intercept
     assert "if(_agentCmd&&_agentCmd.category==='Plugin')" in intercept
     assert "if(_parsedCmd&&!_cmd)" in intercept
     assert "if(!_agentCmd" not in intercept

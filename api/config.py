@@ -39,6 +39,24 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Read a positive int from the environment, falling back on bad input.
+
+    Used for operator-tunable memory caps (issue #3506) so large installs can
+    shrink the agent/session caches without editing source. A missing, empty,
+    non-numeric, or below-``minimum`` value falls back to ``default`` so a typo
+    can never disable a cache bound entirely.
+    """
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
 # ── TLS/HTTPS config (optional, env-overridable) ────────────────────────────
 TLS_CERT = os.getenv("HERMES_WEBUI_TLS_CERT", "").strip() or None
 TLS_KEY = os.getenv("HERMES_WEBUI_TLS_KEY", "").strip() or None
@@ -184,9 +202,10 @@ def _discover_python(agent_dir: Path) -> str:
             return str(venv_py_win)
 
     # Local .venv inside this repo
-    local_venv = REPO_ROOT / ".venv" / "bin" / "python"
-    if local_venv.exists():
-        return str(local_venv)
+    for subdir, binary in (("bin", "python"), ("Scripts", "python.exe")):
+        local_venv = REPO_ROOT / ".venv" / subdir / binary
+        if local_venv.exists():
+            return str(local_venv)
 
     # Fall back to system python3
     import shutil
@@ -4809,7 +4828,10 @@ _INDEX_HTML_PATH = REPO_ROOT / "static" / "index.html"
 
 # ── Thread synchronisation ───────────────────────────────────────────────────
 LOCK = threading.Lock()
-SESSIONS_MAX = 100
+# Max compact Session objects held in the in-memory LRU (issue #3506). Lighter
+# than the agent cache (no live agent runtime), but still bounded and operator-
+# tunable via HERMES_WEBUI_SESSIONS_MAX for installs with hundreds of sessions.
+SESSIONS_MAX = _env_int("HERMES_WEBUI_SESSIONS_MAX", 100)
 CHAT_LOCK = threading.Lock()
 
 
@@ -4930,7 +4952,12 @@ def unregister_active_run(stream_id: str) -> None:
 # SESSION_AGENT_CACHE_LOCK for thread safety in multi-threaded ASGI servers.
 import collections
 SESSION_AGENT_CACHE: collections.OrderedDict = collections.OrderedDict()  # LRU cache
-SESSION_AGENT_CACHE_MAX = 50  # Maximum cached agents (each holds full conversation history)
+# Each cached agent pins a full conversation transcript in RAM, so this cap is
+# the dominant lever on WebUI resident memory (issue #3506). The default is kept
+# deliberately modest -- large/long sessions can each weigh tens of MB, so 50
+# live agents could pin >1 GB on a heavily multiplexed install. Operators can
+# tune it via HERMES_WEBUI_AGENT_CACHE_MAX without editing source.
+SESSION_AGENT_CACHE_MAX = _env_int("HERMES_WEBUI_AGENT_CACHE_MAX", 25)
 SESSION_AGENT_CACHE_LOCK = threading.Lock()
 
 
@@ -4952,11 +4979,14 @@ def _evict_session_agent(session_id: str) -> None:
         return
     should_close = True
     try:
-        from api.session_lifecycle import commit_session_memory, has_uncommitted_work, unregister_agent
+        from api.session_lifecycle import commit_session_memory, discard_session, has_uncommitted_work, unregister_agent
         if has_uncommitted_work(session_id):
             commit_session_memory(session_id, agent=agent, wait=True)
         if not has_uncommitted_work(session_id):
             unregister_agent(session_id)
+            # Bound the lifecycle dict: drop the entry now that the session has
+            # no uncommitted work and the agent handle is gone (issue #3506).
+            discard_session(session_id)
         else:
             should_close = False
     except Exception:

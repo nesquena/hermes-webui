@@ -1,0 +1,26 @@
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+UI_JS = (ROOT / "static" / "ui.js").read_text()
+
+
+def test_topbar_uses_session_total_for_lazy_loaded_transcripts():
+    assert "function _topbarMessageMetaText()" in UI_JS
+    assert "const isTruncated=!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated);" in UI_JS
+    # Truncated transcripts surface the server total as "loaded of total".
+    assert "return `${loadedCount} loaded of ${totalCount} messages`;" in UI_JS
+    # Fully-loaded transcripts use the tool-row-filtered loadedCount, NOT the
+    # raw server total (which counts role:"tool" rows the topbar excludes).
+    assert "return t('n_messages',loadedCount);" in UI_JS
+
+
+def test_load_earlier_indicator_names_server_side_older_count():
+    assert "const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;" in UI_JS
+    assert "Load earlier messages (${serverOlderCount} older)" in UI_JS
+
+
+def test_sync_topbar_does_not_count_only_loaded_tail_messages():
+    block = UI_JS[UI_JS.index("function syncTopbar(){") : UI_JS.index("function msgContent", UI_JS.index("function syncTopbar(){"))]
+    assert "const metaText=_topbarMessageMetaText();" in block
+    assert "t('n_messages',vis.length)" not in block
+    assert "S.messages.filter(m=>m&&m.role&&m.role!=='tool')" not in block

@@ -56,17 +56,19 @@ class TestSessionDBInjection(unittest.TestCase):
 
     def test_sessiondb_init_in_try_except(self):
         """SessionDB init must be wrapped in try/except for non-fatal failure handling."""
-        # Check that the try/except pattern surrounding SessionDB(db_path=...) is present.
+        # Check that SessionDB init is wrapped in the helper used by streaming.
+        helper_start = STREAMING_PY.find("def _build_session_db_for_stream")
+        helper_end = STREAMING_PY.find("\n\ndef _attempt_credential_self_heal", helper_start)
+        self.assertGreater(helper_start, -1, "session DB helper missing in streaming.py")
+        helper_src = STREAMING_PY[helper_start:helper_end]
         pattern = (
-            r"try:\s*\n"
-            r"\s*from hermes_state import SessionDB\s*\n"
-            r'\s*_state_db_path\s*=\s*\(Path\(_profile_home\)\s*/\s*"state\.db"\)\s*if\s*_profile_home\s*else\s*None\s*\n'
-            r"\s*_session_db\s*=\s*SessionDB\(db_path=_state_db_path\)"
+            r"def _build_session_db_for_stream"
+            r"[\s\S]*?try:\s*\n[\s\S]*?from hermes_state import SessionDB[\s\S]*?return SessionDB\(db_path=state_db_path\)[\s\S]*?except Exception as _db_err:"
         )
         self.assertRegex(
-            STREAMING_PY,
+            helper_src,
             pattern,
-            "SessionDB(db_path=...) init must be inside a try block for non-fatal error handling",
+            "SessionDB init helper must use try/except for non-fatal error handling",
         )
 
     def test_sessiondb_failure_logs_warning(self):
@@ -88,13 +90,18 @@ class TestSessionDBInjection(unittest.TestCase):
         )
 
     def test_session_db_default_is_none(self):
-        """_session_db must be initialized to None before the try block (safe default)."""
-        # Pattern: _session_db = None followed (eventually) by the try/SessionDB block
-        pattern = r"_session_db\s*=\s*None\s*\n\s*try:"
-        self.assertRegex(
-            STREAMING_PY,
+        """SessionDB should now be initialized through the helper call."""
+        pattern = "_state_db_path = (Path(_profile_home) / \"state.db\") if _profile_home else None"
+        helper_pattern = "_session_db = _build_session_db_for_stream(_state_db_path)"
+        self.assertIn(
             pattern,
-            "_session_db must default to None before try/except block (PR #356)",
+            STREAMING_PY,
+            "_state_db_path should be resolved from profile home in streaming.py",
+        )
+        self.assertIn(
+            helper_pattern,
+            STREAMING_PY,
+            "_session_db should be initialized via _build_session_db_for_stream in streaming.py",
         )
 
 

@@ -1404,9 +1404,10 @@
   .approval-btn.deny:hover{background:rgba(239,83,80,.12);border-color:var(--error);}
   .approval-btn.loading{opacity:.7;cursor:wait;}
   /* ── Clarify card ── */
-  .clarify-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;max-height:min(calc(100vh - 280px),420px);}
+  .clarify-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;max-height:clamp(180px,min(68vh,calc(100vh - 220px)),420px);}
   .clarify-card.visible{pointer-events:auto;}
-  .clarify-card .clarify-inner{max-height:min(calc(100vh - 280px),420px);overflow-y:auto;transform:translateY(100%);opacity:0;transition:transform .4s cubic-bezier(.32,.72,.16,1),opacity .25s ease,max-height .2s ease;}
+  .clarify-card .clarify-inner{max-height:clamp(180px,min(68vh,calc(100vh - 220px)),420px);overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;box-sizing:border-box;transform:translateY(100%);opacity:0;transition:transform .4s cubic-bezier(.32,.72,.16,1),opacity .25s ease,max-height .2s ease;}
+  @supports (height:100dvh){.clarify-card,.clarify-card .clarify-inner{max-height:clamp(180px,min(68dvh,calc(100dvh - 220px)),420px);}}
   .clarify-card.visible .clarify-inner{transform:translateY(0);opacity:1;}
   .clarify-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid var(--accent-bg-strong);border-radius:12px;padding:12px 14px 36px;box-shadow:0 1px 0 rgba(255,255,255,.02) inset;}
   .clarify-header{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:12px;font-weight:700;color:var(--blue);letter-spacing:.01em;}
@@ -1654,7 +1655,7 @@
   }
   .pre-header{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:8px 16px 8px;background:var(--input-bg);border-radius:10px 10px 0 0;border:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;}
   .pre-header::before{content:'';width:8px;height:8px;border-radius:50%;background:var(--muted);opacity:.4;}
-  .pre-header+pre{border-radius:0 0 10px 10px;border-top:none;margin-top:0;}
+  .msg-body .pre-header+pre{border-radius:0 0 10px 10px;border-top:none;margin-top:0;}
   /* Diff/patch viewer */
   .diff-block{margin:0;counter-reset:diff-line;}
   .diff-block .diff-line{display:block;padding:0 16px;min-height:1.4em;white-space:pre;}
@@ -2430,7 +2431,9 @@
     .approval-btn{padding:8px 12px;font-size:12px;min-height:44px;}
     .approval-kbd{display:none;}
     /* Clarify card */
-    .clarify-card{padding-left:10px;padding-right:10px;}
+    .clarify-card{padding-left:10px;padding-right:10px;max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
+    .clarify-card .clarify-inner{max-height:clamp(180px,min(62vh,calc(100vh - 180px)),360px);}
+    @supports (height:100dvh){.clarify-card,.clarify-card .clarify-inner{max-height:clamp(180px,min(62dvh,calc(100dvh - 180px)),360px);}}
     .clarify-inner{padding:12px 12px 13px;}
     .clarify-response{flex-direction:column;align-items:stretch;}
     .clarify-input,.clarify-submit{width:100%;min-height:44px;}
@@ -3302,12 +3305,12 @@ main.main > #mainPlugin{display:none;}
 .settings-section-title{font-size:18px;font-weight:600;letter-spacing:-.01em;color:var(--text);line-height:1.3;margin-bottom:4px;}
 .settings-section-meta{font-size:13px;color:var(--muted);line-height:1.55;}
 .settings-version-badge{display:inline-flex;align-items:center;padding:3px 8px;border-radius:999px;background:var(--surface);color:var(--muted);font-size:11px;font-weight:600;font-family:'SF Mono',ui-monospace,SFMono-Regular,Menlo,monospace;flex-shrink:0;align-self:flex-start;letter-spacing:.02em;}
-#checkUpdatesBlock{display:inline-flex;align-items:center;gap:6px;font-size:12px;flex-shrink:0;align-self:flex-start;}
+#checkUpdatesBlock{display:inline-flex;align-items:center;gap:0.5em;font-size:12px;flex-shrink:0;align-self:flex-start;flex-wrap:wrap;}
 #checkUpdatesBlock .btn-tiny{padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:11px;font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:5px;transition:border-color .15s,color .15s;}
 #checkUpdatesBlock .btn-tiny:hover{border-color:var(--accent);color:var(--accent);}
 #checkUpdatesBlock .btn-tiny:disabled{opacity:.5;cursor:default;}
 #checkUpdatesBlock .btn-tiny .spinner-xs{width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--text);border-radius:50%;animation:spin .6s linear infinite;display:none;}
-#checkUpdatesStatus{font-size:11px;font-weight:500;white-space:nowrap;}
+#checkUpdatesStatus{font-size:11px;font-weight:500;white-space:nowrap;flex-basis:100%;margin-top:0.25em;}
 
 /* Each logical form row is a card surface. Stack with comfortable gap. */
 #mainSettings .settings-field{margin-bottom:12px;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--sidebar);}
@@ -3844,38 +3847,42 @@ main.main > #mainPlugin{display:none;}
 
 /* ── CLI / Agent session items in sidebar ── */
 .session-item.cli-session {
-  padding-right: 40px; /* make room for the session actions trigger */
+  padding-right: 6px;
 }
-.session-item.cli-session::after {
-  content: attr(data-source);
+/* Source chip (pill) in the sidebar title row */
+.session-source-chip {
   font-size: 9px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: .04em;
   color: var(--accent-text);
-  opacity: .5;
-  margin-left: auto;
+  opacity: .65;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(128, 128, 128, 0.12);
+  background: color-mix(in srgb, var(--accent-text) 12%, transparent);
   flex-shrink: 0;
-  pointer-events: none; /* don't block clicks on session-actions beneath */
+  line-height: 1.4;
+  white-space: nowrap;
 }
-.session-item.cli-session:not(.read-only-session):hover::after {
-  display: none; /* hide badge on hover so the session menu trigger stays clear */
+.session-item:not(.read-only-session):hover .session-source-chip {
+  display: none;
 }
-.session-item.cli-session.read-only-session:hover::after {
-  opacity: .75;
+.session-item.read-only-session:hover .session-source-chip {
+  opacity: .85;
 }
-.session-item.cli-session.menu-open::after {
+.session-item.menu-open .session-source-chip {
   display: none;
 }
 /* Source-specific colors for gateway sessions */
 .session-item.cli-session[data-source-key="telegram"] { border-left-color: rgba(0, 136, 204, 0.55); }
-.session-item.cli-session[data-source-key="telegram"]::after { color: rgba(0, 136, 204, 0.55); }
+.session-source-chip[data-source-key="telegram"] { color: rgba(0, 136, 204, 0.85); background: rgba(0, 136, 204, 0.12); }
 .session-item.cli-session[data-source-key="discord"] { border-left-color: #5865F2; }
-.session-item.cli-session[data-source-key="discord"]::after { color: #5865F2; }
+.session-source-chip[data-source-key="discord"] { color: #5865F2; background: rgba(88, 101, 242, 0.12); }
 .session-item.cli-session[data-source-key="slack"] { border-left-color: #4A154B; }
-.session-item.cli-session[data-source-key="slack"]::after { color: #4A154B; }
+.session-source-chip[data-source-key="slack"] { color: #4A154B; background: rgba(74, 21, 75, 0.12); }
 .session-item.cli-session[data-source-key="claude_code"] { border-left-color: rgba(217, 119, 6, 0.65); }
-.session-item.cli-session[data-source-key="claude_code"]::after { color: rgba(217, 119, 6, 0.85); }
+.session-source-chip[data-source-key="claude_code"] { color: rgba(217, 119, 6, 0.85); background: rgba(217, 119, 6, 0.12); }
 
 /* ═══════════════════════════════════════════════════════════════════
    Messages redesign — additive overrides for the transcript area.

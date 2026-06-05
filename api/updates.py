@@ -1257,9 +1257,25 @@ def _apply_update_inner(target):
     if stashed:
         _, pop_ok = _run_git(['stash', 'pop'], path)
         if not pop_ok:
+            _, reset_ok = _run_git(['reset', '--merge'], path)
+            if not reset_ok:
+                return {
+                    'ok': False,
+                    'message': (
+                        'Updated successfully, but failed to clean up a '
+                        'stash-pop conflict. Manual intervention needed: '
+                        'run git reset --merge in ' + str(path)
+                    ),
+                    'stash_conflict': True,
+                }
             return {
                 'ok': False,
-                'message': 'Updated but stash pop failed -- manual merge needed',
+                'message': (
+                    f'{target} updated to the latest version, but your local '
+                    'modifications conflict with upstream changes. Your changes '
+                    'are preserved in stash@{0}. To re-apply them: '
+                    'git -C ' + str(path) + ' stash pop, then resolve conflicts.'
+                ),
                 'stash_conflict': True,
             }
 
