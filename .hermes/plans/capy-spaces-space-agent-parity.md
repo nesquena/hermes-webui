@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): add first-fit layout safety receipts`
+  - Added RED/GREEN backend coverage proving `space.spaces.buildCenteredFirstFitLayout` and `space.spaces.findFirstFitWidgetPlacement` now return metadata-only prompt-preflight, autonomy-policy, progress, and output-compaction receipts beside sanitized placement metadata.
+  - Hostile renderer/source/API-auth/script fixtures are classified through the layout prompt-preflight envelope without leaking raw prompt/source/renderer/html/script/secret-looking values into serialized tool responses.
+
 - `feat(capy-memory): mark public memory retrieval advisory`
   - Added RED/GREEN Memory Tree retrieval coverage proving `search_memory`, `/api/capy-memory/search`, `relevant_memory_for_space`, and `/api/spaces/memory` now expose explicit metadata-only advisory/no-authority envelopes.
   - Every public memory hit now carries `context_authority: untrusted_advisory`, `can_bypass_safety_gates: false`, and required gate labels for prompt-preflight, approval, sandbox preview, visual QA, and rollback/recovery, while hostile fixture strings remain absent from serialized output.

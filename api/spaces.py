@@ -7588,9 +7588,49 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name == "space.spaces.getrenderedwidgetsize":
         return {"ok": True, "action": name, **_space_tool_get_rendered_widget_size(data), "mode": "metadata-only"}
     if name == "space.spaces.buildcenteredfirstfitlayout":
-        return {"ok": True, "action": name, **_space_tool_build_centered_first_fit_layout(data), "mode": "metadata-only"}
+        first_fit_layout = _space_tool_build_centered_first_fit_layout(data)
+        prompt_preflight_receipt = _space_layout_resolve_prompt_preflight_receipt(first_fit_layout, data)
+        space_id = validate_space_id(_space_tool_current_id(data) or "layout-preview")
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.first_fit")
+        autonomy_policy = _space_layout_action_policy_receipt(name, prompt_preflight_receipt)
+        return {
+            "ok": True,
+            "action": name,
+            **first_fit_layout,
+            "mode": "metadata-only",
+            "prompt_preflight": prompt_preflight_receipt,
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=len(first_fit_layout.get("positions") or {}),
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
+        }
     if name == "space.spaces.findfirstfitwidgetplacement":
-        return {"ok": True, "action": name, **_space_tool_find_first_fit_widget_placement(data), "mode": "metadata-only"}
+        first_fit_placement = _space_tool_find_first_fit_widget_placement(data)
+        prompt_preflight_receipt = _space_layout_resolve_prompt_preflight_receipt(first_fit_placement, data)
+        space_id = validate_space_id(_space_tool_current_id(data) or "layout-preview")
+        progress_event = _record_space_tool_progress_event(space_id, run_prefix="layout.first_fit.placement")
+        autonomy_policy = _space_layout_action_policy_receipt(name, prompt_preflight_receipt)
+        return {
+            "ok": True,
+            "action": name,
+            **first_fit_placement,
+            "mode": "metadata-only",
+            "prompt_preflight": prompt_preflight_receipt,
+            "autonomy_policy": autonomy_policy,
+            "progress_event": progress_event,
+            "output_compaction": _space_tool_action_output_compaction_receipt(
+                action=name,
+                space_id=space_id,
+                widget_count=1,
+                autonomy_policy=autonomy_policy,
+                progress_event=progress_event,
+            ),
+        }
     if name == "space.spaces.resolvespacelayout":
         resolved_layout = _space_tool_resolve_space_layout(data)
         prompt_preflight_receipt = _space_layout_resolve_prompt_preflight_receipt(resolved_layout, data)
@@ -12964,6 +13004,8 @@ def _record_space_tool_progress_event(space_id: str, *, run_prefix: str) -> dict
         "recovery.module.repair",
         "recovery.module.repair_events",
         "layout.rearrange",
+        "layout.first_fit",
+        "layout.first_fit.placement",
         "layout.reposition",
         "layout.resolve",
         "layout.toggle",

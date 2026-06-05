@@ -3920,24 +3920,53 @@ def test_space_tool_adapter_supports_source_first_fit_layout_helpers_metadata_on
     )
     serialized = json.dumps([centered, placement]).lower()
 
-    assert centered == {
-        "ok": True,
-        "action": "space.spaces.buildcenteredfirstfitlayout",
-        "positions": {
-            "wide-card": {"col": -4, "row": -3},
-            "small-card": {"col": 2, "row": -3},
-            "tall-card": {"col": -4, "row": -1},
-        },
-        "mode": "metadata-only",
+    assert centered["ok"] is True
+    assert centered["action"] == "space.spaces.buildcenteredfirstfitlayout"
+    assert centered["positions"] == {
+        "wide-card": {"col": -4, "row": -3},
+        "small-card": {"col": 2, "row": -3},
+        "tall-card": {"col": -4, "row": -1},
     }
-    assert placement == {
-        "ok": True,
-        "action": "space.spaces.findfirstfitwidgetplacement",
-        "position": {"col": -1, "row": -1},
-        "token": "-1,-1",
-        "size": {"cols": 2, "rows": 2},
-        "mode": "metadata-only",
-    }
+    assert centered["mode"] == "metadata-only"
+    assert centered["prompt_preflight"]["boundary"] == "creator_commit"
+    assert centered["prompt_preflight"]["status"] == "block"
+    assert centered["prompt_preflight"]["metadata_only"] is True
+    assert centered["prompt_preflight"]["raw_prompt_stored"] is False
+    assert centered["autonomy_policy"]["action"] == "space.spaces.buildcenteredfirstfitlayout"
+    assert centered["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert centered["autonomy_policy"]["prompt_preflight_status"] == "block"
+    assert centered["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert centered["progress_event"]["event_type"] == "tool.completed"
+    assert centered["progress_event"]["run_id"] == "layout.first_fit:layout-preview"
+    assert centered["progress_event"]["redaction_status"] == "metadata_only"
+    assert centered["output_compaction"]["tool"] == "capy-spaces-tool-action"
+    assert centered["output_compaction"]["command"] == "space.spaces.buildcenteredfirstfitlayout"
+    assert "space_action: space.spaces.buildcenteredfirstfitlayout" in centered["output_compaction"]["text"]
+    assert "prompt_preflight_status: block" in centered["output_compaction"]["text"]
+    assert "progress_run_id: layout.first_fit:layout-preview" in centered["output_compaction"]["text"]
+
+    assert placement["ok"] is True
+    assert placement["action"] == "space.spaces.findfirstfitwidgetplacement"
+    assert placement["position"] == {"col": -1, "row": -1}
+    assert placement["token"] == "-1,-1"
+    assert placement["size"] == {"cols": 2, "rows": 2}
+    assert placement["mode"] == "metadata-only"
+    assert placement["prompt_preflight"]["boundary"] == "creator_commit"
+    assert placement["prompt_preflight"]["status"] == "block"
+    assert placement["prompt_preflight"]["metadata_only"] is True
+    assert placement["prompt_preflight"]["raw_prompt_stored"] is False
+    assert placement["autonomy_policy"]["action"] == "space.spaces.findfirstfitwidgetplacement"
+    assert placement["autonomy_policy"]["approval_gates"] == ["creator_commit"]
+    assert placement["autonomy_policy"]["prompt_preflight_status"] == "block"
+    assert placement["autonomy_policy"]["model_route_hint"] == "hint:fast"
+    assert placement["progress_event"]["event_type"] == "tool.completed"
+    assert placement["progress_event"]["run_id"] == "layout.first_fit.placement:layout-preview"
+    assert placement["progress_event"]["redaction_status"] == "metadata_only"
+    assert placement["output_compaction"]["tool"] == "capy-spaces-tool-action"
+    assert placement["output_compaction"]["command"] == "space.spaces.findfirstfitwidgetplacement"
+    assert "space_action: space.spaces.findfirstfitwidgetplacement" in placement["output_compaction"]["text"]
+    assert "prompt_preflight_status: block" in placement["output_compaction"]["text"]
+    assert "progress_run_id: layout.first_fit.placement:layout-preview" in placement["output_compaction"]["text"]
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
