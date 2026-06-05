@@ -1510,18 +1510,23 @@ def _check_csrf(handler) -> bool:
     if origin_value in _allowed_public_origins():
         origin_allowed = True
     if not origin_allowed:
-        # Allow same-origin: check Host, X-Forwarded-Host (reverse proxy), and
-        # X-Real-Host against the origin. Reverse proxies (Caddy, nginx) set
-        # X-Forwarded-Host to the client's original Host header.
+        # Allow same-origin Host by default. Forwarded host headers are only
+        # trustworthy behind a proxy that strips untrusted inbound copies.
         allowed_hosts = [
             h.strip()
-            for h in [
-                host,
-                handler.headers.get("X-Forwarded-Host", ""),
-                handler.headers.get("X-Real-Host", ""),
-            ]
+            for h in [host]
             if h.strip()
         ]
+        trust_forwarded_host = os.getenv("HERMES_WEBUI_TRUST_FORWARDED_HOST", "").strip().lower()
+        if trust_forwarded_host in ("1", "true", "yes", "on"):
+            allowed_hosts.extend(
+                h.strip()
+                for h in [
+                    handler.headers.get("X-Forwarded-Host", ""),
+                    handler.headers.get("X-Real-Host", ""),
+                ]
+                if h.strip()
+            )
         for allowed in allowed_hosts:
             allowed_name, allowed_port = _normalize_host_port(allowed)
             if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
