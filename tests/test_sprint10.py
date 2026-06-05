@@ -4,6 +4,8 @@ Sprint 10 Tests: server.py split, cancel endpoint, cron history, tool card polis
 import json, pathlib, urllib.error, urllib.request, urllib.parse
 from io import BytesIO
 
+from tests.conftest import requires_agent_modules
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
 from tests._pytest_port import BASE
@@ -126,6 +128,7 @@ def test_crons_output_limit_param(cleanup_test_sessions):
     assert status in (200, 404)
 
 
+@requires_agent_modules
 def test_crons_output_rejects_traversal_job_id(monkeypatch, tmp_path):
     """Cron output listing must not read markdown files outside OUTPUT_DIR."""
     from api.routes import _handle_cron_output
@@ -148,6 +151,7 @@ def test_crons_output_rejects_traversal_job_id(monkeypatch, tmp_path):
     assert "SECRET_MARKDOWN_TOKEN" not in handler.wfile.getvalue().decode("utf-8")
 
 
+@requires_agent_modules
 def test_crons_output_still_returns_valid_job_outputs(monkeypatch, tmp_path):
     """Valid job ids still list recent markdown output content."""
     from api.routes import _handle_cron_output
