@@ -6,13 +6,16 @@ SESSIONS_JS = ROOT / "static" / "sessions.js"
 STYLE_CSS = ROOT / "static" / "style.css"
 
 
-def test_sidebar_has_separate_webui_and_cli_session_source_tabs():
+def test_sidebar_has_all_webui_and_cli_session_source_tabs():
     src = SESSIONS_JS.read_text(encoding="utf-8")
     assert "let _sessionSourceFilter = 'webui'" in src
     assert "hermes-session-source-filter" in src
     assert "session-source-tabs" in src
+    assert "All sessions" in src
     assert "WebUI sessions" in src
     assert "CLI sessions" in src
+    assert "for(const filter of ['all','webui','cli'])" in src
+    assert "_sessionSourceFilter==='all'" in src
     assert "_sessionSourceFilter==='cli'" in src
 
 
