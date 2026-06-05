@@ -6184,15 +6184,22 @@ function isCompressionUiRunning(){
   const lock=_compressionSessionLock();
   return !!((state&&state.phase==='running') || (lock && S.session && lock===S.session.session_id));
 }
-function clearCompressionUi(){
-  window._compressionUi=null;
-  _clearCompressionElapsedTimer();
-  _setCompressionSessionLock(null);
+// Restore the composer placeholder saved when auto-compaction started. Safe to
+// call whenever compression leaves the running state, from any path (clear,
+// non-running setCompressionUi, or a direct window._compressionUi=null in the
+// SSE handler) — it no-ops when nothing was saved. (#3512)
+function _restoreCompressionPlaceholder(){
   const _input=$('msg');
   if(_input&&typeof _compressionPlaceholderSaved==='string'){
     _input.placeholder=_compressionPlaceholderSaved;
   }
   _compressionPlaceholderSaved=null;
+}
+function clearCompressionUi(){
+  window._compressionUi=null;
+  _clearCompressionElapsedTimer();
+  _setCompressionSessionLock(null);
+  _restoreCompressionPlaceholder();
   renderCompressionUi();
 }
 function setCompressionUi(state){
@@ -6215,6 +6222,9 @@ function setCompressionUi(state){
     }
   } else {
     _clearCompressionElapsedTimer();
+    // Leaving the running state (e.g. setCompressionUi(done)) must restore the
+    // placeholder too — not only clearCompressionUi(). (#3512 leak fix)
+    _restoreCompressionPlaceholder();
   }
   renderCompressionUi();
 }

@@ -2388,6 +2388,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // state in global transient UI makes later renderMessages() calls insert
           // a duplicate Automatic Compression card.
           window._compressionUi=null;
+          if(typeof _restoreCompressionPlaceholder==='function') _restoreCompressionPlaceholder();
           snapshotLiveTurn();
           return;
         }
@@ -2435,6 +2436,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           // completion state as global transient UI, otherwise every subsequent
           // render projects the same Auto Compression card again.
           window._compressionUi=null;
+          if(typeof _restoreCompressionPlaceholder==='function') _restoreCompressionPlaceholder();
           snapshotLiveTurn();
         }
       }
