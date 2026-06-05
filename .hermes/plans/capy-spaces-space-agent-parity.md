@@ -38,6 +38,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub environment variables metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub Actions environment variables API payloads (`/repos/{owner}/{repo}/environments/{environment_name}/variables`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from safe repository path, environment name, variable count, bounded variable names, and safe created/updated timestamps while omitting raw values, row/global URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
+  - JSON Feed bypass payloads and lookalike-host route-shaped URLs fail closed without creating vault records or performing unsafe fetches.
+
 - `feat(capy-memory): ingest GitHub environment private-name metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub environment private-name API payloads (`/repos/{owner}/{repo}/environments/{environment_name}/secrets`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, environment name, count, bounded safe names, and safe created/updated timestamps while omitting raw values, row/global URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
