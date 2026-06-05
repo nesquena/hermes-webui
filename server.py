@@ -619,6 +619,13 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
 
+    # Load plugin API routes (proxy handlers registered by plugins)
+    try:
+        from api.plugins import load_plugin_api_routes
+        load_plugin_api_routes()
+    except Exception as e:
+        print(f'[!!] WARNING: Plugin API route loading failed: {e}', flush=True)
+
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
 
@@ -659,6 +666,12 @@ def main() -> None:
             drain_all_on_shutdown()
         except Exception:
             logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
+        # Stop plugin subprocesses on shutdown
+        try:
+            from api.plugin_manager import kill_all_plugins
+            kill_all_plugins()
+        except Exception:
+            logger.debug("Failed to stop plugin subprocesses during shutdown")
 
 if __name__ == '__main__':
     main()

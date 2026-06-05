@@ -1452,12 +1452,97 @@ def _is_browser_unsafe_request(handler) -> bool:
 
 def _csrf_exempt_path(path: str) -> bool:
     """Paths that cannot or must not carry a session CSRF token."""
-    return path in {
+    if path in {
         "/api/auth/login",
         "/api/auth/passkey/options",
         "/api/auth/passkey/login",
         "/api/csp-report",
+    }:
+        return True
+    # Sandboxed iframes send origin 'null'; exempt plugin API from CSRF.
+    if path.startswith("/api/plugins/"):
+        return True
+    return False
+
+
+def _dispatch_plugin_subprocess(handler, plugin_name: str, sub_route: str, method: str, parsed) -> bool:
+    import base64
+    import binascii
+    import json as _json
+    import select
+    import time as _time
+
+    from api.plugin_manager import get_plugin_process, spawn_plugin, kill_plugin, get_plugin_pipe_lock
+    from api.plugins import get_plugin_root
+
+    MAX_PLUGIN_BODY_BYTES = 1 * 1024 * 1024
+    PIPE_TIMEOUT = 30
+
+    proc = get_plugin_process(plugin_name)
+    if proc is None:
+        root = get_plugin_root(plugin_name)
+        if root:
+            proc = spawn_plugin(plugin_name, root)
+    if proc is None or proc.poll() is not None:
+        return j(handler, {"error": "plugin unavailable"}, status=503)
+
+    body_bytes = b""
+    try:
+        length = int(handler.headers.get("Content-Length", 0))
+        if length > MAX_PLUGIN_BODY_BYTES:
+            return bad(handler, "request body too large", status=413)
+        if length > 0:
+            body_bytes = handler.rfile.read(length)
+    except (ValueError, OSError):
+        pass
+
+    req = {
+        "id": int(_time.time() * 1000) % 1000000,
+        "method": method,
+        "path": sub_route,
+        "query": parsed.query,
+        "headers": {
+            k: v for k, v in handler.headers.items()
+            if k.lower() not in ("cookie", "authorization")
+        },
     }
+    if body_bytes:
+        req["body_b64"] = base64.b64encode(body_bytes).decode("ascii")
+
+    lock = get_plugin_pipe_lock(plugin_name)
+    with lock:
+        try:
+            proc.stdin.write((_json.dumps(req) + "\n").encode("utf-8"))
+            proc.stdin.flush()
+            ready, _, _ = select.select([proc.stdout], [], [], PIPE_TIMEOUT)
+            if not ready:
+                kill_plugin(plugin_name)
+                return j(handler, {"error": "plugin timeout"}, status=504)
+            resp_line = proc.stdout.readline().decode("utf-8").strip()
+            resp = _json.loads(resp_line)
+        except (BrokenPipeError, OSError, _json.JSONDecodeError, ValueError) as exc:
+            logger.warning("Plugin subprocess %s failed: %s", plugin_name, exc)
+            kill_plugin(plugin_name)
+            return j(handler, {"error": "plugin crashed"}, status=502)
+
+    resp_status = resp.get("status", 200)
+    resp_headers = resp.get("headers", {})
+    try:
+        resp_body = base64.b64decode(resp["body_b64"]) if resp.get("body_b64") else b""
+    except (binascii.Error, KeyError, ValueError):
+        return j(handler, {"error": "plugin returned invalid response"}, status=502)
+
+    _allowed_resp = {"cache-control", "content-type", "etag", "last-modified"}
+    handler.send_response(resp_status)
+    for k, v in resp_headers.items():
+        kl = k.lower()
+        if kl in _allowed_resp or kl.startswith("x-"):
+            handler.send_header(k, v)
+    if "content-length" not in {hk.lower() for hk in resp_headers}:
+        handler.send_header("Content-Length", str(len(resp_body)))
+    handler.end_headers()
+    handler.wfile.write(resp_body)
+    return True
 
 
 _CSRF_FAILURE_ATTR = "_hermes_csrf_failure_reason"
@@ -4902,6 +4987,17 @@ def handle_get(handler, parsed) -> bool:
     # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
     if parsed.path == "/api/plugins":
         return _handle_plugins(handler, parsed)
+
+    if parsed.path.startswith("/api/plugins/"):
+        import urllib.parse
+        parts = parsed.path.split("/")
+        if len(parts) != 5:
+            return False
+        plugin_name = parts[3]
+        sub_route = "/" + urllib.parse.unquote(parts[4])
+        if ".." in sub_route:
+            return False
+        return _dispatch_plugin_subprocess(handler, plugin_name, sub_route, handler.command, parsed)
     if parsed.path == "/api/provider/quota":
         query = parse_qs(parsed.query)
         provider_id = (query.get("provider", [""])[0] or None)
@@ -6134,7 +6230,7 @@ def handle_get(handler, parsed) -> bool:
                     data = index_html.read_bytes()
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
-                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
                     handler.send_header("Content-Length", str(len(data)))
                     handler.end_headers()
                     handler.wfile.write(data)
@@ -6146,7 +6242,7 @@ def handle_get(handler, parsed) -> bool:
                     data = static_html.read_bytes()
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
-                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
                     handler.send_header("Content-Length", str(len(data)))
                     handler.end_headers()
                     handler.wfile.write(data)
@@ -6175,7 +6271,7 @@ def handle_get(handler, parsed) -> bool:
                     ).encode("utf-8")
                     handler.send_response(200)
                     handler.send_header("Content-Type", "text/html; charset=utf-8")
-                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups")
+                    handler.send_header("Content-Security-Policy", "sandbox allow-scripts allow-forms allow-popups allow-modals")
                     handler.send_header("Content-Length", str(len(html_content)))
                     handler.end_headers()
                     handler.wfile.write(html_content)
@@ -6209,6 +6305,17 @@ def handle_post(handler, parsed) -> bool:
         finally:
             if diag:
                 diag.finish()
+
+    if parsed.path.startswith("/api/plugins/"):
+        import urllib.parse
+        parts = parsed.path.split("/")
+        if len(parts) != 5:
+            return False
+        plugin_name = parts[3]
+        sub_route = "/" + urllib.parse.unquote(parts[4])
+        if ".." in sub_route:
+            return False
+        return _dispatch_plugin_subprocess(handler, plugin_name, sub_route, handler.command, parsed)
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
