@@ -104,6 +104,85 @@ def test_crons_output_limit_param(cleanup_test_sessions):
     # 404 or 200 with empty -- both acceptable for nonexistent job
     assert status in (200, 404)
 
+
+def test_crons_output_rejects_traversal_job_id(monkeypatch, tmp_path):
+    """Cron output listing must not read markdown files outside OUTPUT_DIR."""
+    from api.routes import _handle_cron_output
+    import cron.jobs
+    from io import BytesIO
+
+    class CaptureHandler:
+        headers = {}
+
+        def __init__(self):
+            self.status = None
+            self.response_headers = []
+            self.wfile = BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, name, value):
+            self.response_headers.append((name, value))
+
+        def end_headers(self):
+            pass
+
+    output_dir = tmp_path / "cron" / "output"
+    secret_dir = tmp_path / "memories"
+    output_dir.mkdir(parents=True)
+    secret_dir.mkdir()
+    (secret_dir / "MEMORY.md").write_text("SECRET_MARKDOWN_TOKEN\n", encoding="utf-8")
+    monkeypatch.setattr(cron.jobs, "OUTPUT_DIR", output_dir)
+
+    handler = CaptureHandler()
+    parsed = urllib.parse.urlparse("/api/crons/output?job_id=../../memories&limit=5")
+    _handle_cron_output(handler, parsed)
+
+    body = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert handler.status == 400
+    assert body == {"error": "invalid job_id"}
+    assert "SECRET_MARKDOWN_TOKEN" not in handler.wfile.getvalue().decode("utf-8")
+
+
+def test_crons_output_still_returns_valid_job_outputs(monkeypatch, tmp_path):
+    """Valid job ids still list recent markdown output content."""
+    from api.routes import _handle_cron_output
+    import cron.jobs
+    from io import BytesIO
+
+    class CaptureHandler:
+        headers = {}
+
+        def __init__(self):
+            self.status = None
+            self.response_headers = []
+            self.wfile = BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, name, value):
+            self.response_headers.append((name, value))
+
+        def end_headers(self):
+            pass
+
+    output_dir = tmp_path / "cron" / "output"
+    job_dir = output_dir / "job_123"
+    job_dir.mkdir(parents=True)
+    (job_dir / "run.md").write_text("# Cron Job\n\n## Response\nexpected output\n", encoding="utf-8")
+    monkeypatch.setattr(cron.jobs, "OUTPUT_DIR", output_dir)
+
+    handler = CaptureHandler()
+    parsed = urllib.parse.urlparse("/api/crons/output?job_id=job_123&limit=5")
+    _handle_cron_output(handler, parsed)
+
+    body = json.loads(handler.wfile.getvalue().decode("utf-8"))
+    assert handler.status == 200
+    assert body["job_id"] == "job_123"
+    assert body["outputs"] == [{"filename": "run.md", "content": "# Cron Job\n\n## Response\nexpected output\n"}]
+
 def test_cron_history_button_in_panels_js(cleanup_test_sessions):
     src, _ = get_text("/static/panels.js")
     # After the main-view refactor, cron runs load inline into the detail card
