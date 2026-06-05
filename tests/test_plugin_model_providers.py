@@ -160,6 +160,26 @@ class TestPluginModelProvidersSettings:
         assert "YANDEX_API_KEY=test-yandex-key-abcdef" in env_text
 
 
+class TestPluginOnlyExcludesStaticProviders:
+    def test_bundled_agent_profiles_are_not_plugin_only(self, monkeypatch):
+        """Agent bundled profiles must not hijack WebUI static/custom paths."""
+        _install_fake_yandex_plugin(monkeypatch)
+        from api.plugin_providers import (
+            effective_provider_display_name,
+            is_plugin_model_provider,
+            plugin_model_provider_ids,
+        )
+        from api.config import _PROVIDER_DISPLAY
+
+        assert is_plugin_model_provider("yandex") is True
+        assert "yandex" in plugin_model_provider_ids()
+        for static_pid in ("custom", "gemini", "nous", "anthropic"):
+            assert is_plugin_model_provider(static_pid) is False, static_pid
+            assert static_pid not in plugin_model_provider_ids()
+        assert effective_provider_display_name("custom", _PROVIDER_DISPLAY) == "Custom"
+        assert effective_provider_display_name("gemini", _PROVIDER_DISPLAY) == "Gemini"
+
+
 class TestPluginModelProvidersPanelFilter:
     def test_providers_panel_includes_plugin_model_providers(self):
         src = open("static/panels.js", encoding="utf-8").read()
