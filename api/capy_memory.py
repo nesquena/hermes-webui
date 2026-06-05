@@ -506,7 +506,7 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         origin_uri = f"capy-memory://{source_id}"
     if _github_security_advisories_path_matches(raw_origin_text) and (
         not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
-        or not _github_security_advisories_path_repo(raw_origin_text)
+        or not _github_security_advisories_path_repo(origin_uri)
     ):
         origin_uri = f"capy-memory://{source_id}"
     if _github_code_scanning_alerts_path_matches(raw_origin_text) and (
@@ -6777,8 +6777,10 @@ def _github_security_advisories_path_repo(origin_uri: str) -> str:
 
 _GITHUB_SECURITY_ADVISORY_SEVERITIES = {"low", "moderate", "medium", "high", "critical"}
 _GITHUB_SECURITY_ADVISORY_STATES = {"open", "closed", "published", "withdrawn", "draft"}
-_GITHUB_SECURITY_ADVISORY_TIMESTAMP_FIELDS = ("created_at", "updated_at", "published_at", "withdrawn_at")
+_GITHUB_SECURITY_ADVISORY_TIMESTAMP_FIELDS = ("created_at", "updated_at", "published_at", "withdrawn_at", "closed_at")
 _GITHUB_SECURITY_ADVISORY_ALLOWED_KEYS = {
+    "author",
+    "closed_at",
     "collaborating_teams",
     "collaborating_users",
     "created_at",
@@ -6792,6 +6794,7 @@ _GITHUB_SECURITY_ADVISORY_ALLOWED_KEYS = {
     "html_url",
     "identifiers",
     "private",
+    "publisher",
     "published_at",
     "repository",
     "severity",
@@ -6828,6 +6831,30 @@ _GITHUB_SECURITY_ADVISORY_UNSAFE_IGNORED_KEY_TOKENS = {
     "token",
     "widgetbody",
 }
+_GITHUB_SECURITY_ADVISORY_SAFE_USER_OBJECT_KEYS = {
+    "avatar_url",
+    "events_url",
+    "followers_url",
+    "following_url",
+    "gists_url",
+    "gravatar_id",
+    "html_url",
+    "id",
+    "login",
+    "node_id",
+    "organizations_url",
+    "received_events_url",
+    "repos_url",
+    "site_admin",
+    "starred_url",
+    "subscriptions_url",
+    "type",
+    "url",
+}
+_GITHUB_SECURITY_ADVISORY_SAFE_USER_URL_KEYS = {
+    key for key in _GITHUB_SECURITY_ADVISORY_SAFE_USER_OBJECT_KEYS if key == "url" or key.endswith("_url")
+}
+_GITHUB_SECURITY_ADVISORY_SAFE_USER_URL_HOSTS = {"api.github.com", "avatars.githubusercontent.com", "github.com"}
 
 
 def _github_security_advisory_ghsa_id_is_safe(value: Any) -> str:
@@ -6932,13 +6959,77 @@ def _github_security_advisory_ignored_value_is_safe(value: Any) -> bool:
     return not _refresh_value_is_blocked(value)
 
 
+def _github_security_advisory_safe_user_url_is_safe(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or text != value or _refresh_value_is_blocked(text):
+        return False
+    if re.search(
+        r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
+        r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
+        r"raw[_\s-]*prompt|system[_\s-]*prompt|developer[_\s-]*prompt|prompt[_\s-]*injection|ignore[_\s-]*previous[_\s-]*instructions|"
+        r"credential|password|authorization|javascript\s*:",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return False
+    host = (parts.hostname or "").strip().lower()
+    if parts.scheme != "https" or host not in _GITHUB_SECURITY_ADVISORY_SAFE_USER_URL_HOSTS:
+        return False
+    if parts.username or parts.password or "@" in (parts.netloc or "") or parts.fragment:
+        return False
+    if parts.query:
+        if host != "avatars.githubusercontent.com" or not re.fullmatch(r"v=[0-9]{1,12}", parts.query):
+            return False
+    return bool(parts.path and parts.path.startswith("/"))
+
+
+def _github_security_advisory_safe_user_object_is_safe(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict):
+        return False
+    if any(not isinstance(key, str) or key not in _GITHUB_SECURITY_ADVISORY_SAFE_USER_OBJECT_KEYS for key in value):
+        return False
+    for key, item in value.items():
+        if key in _GITHUB_SECURITY_ADVISORY_SAFE_USER_URL_KEYS:
+            if not _github_security_advisory_safe_user_url_is_safe(item):
+                return False
+            continue
+        if key == "site_admin":
+            if not isinstance(item, bool):
+                return False
+            continue
+        if key == "id":
+            if isinstance(item, bool) or not isinstance(item, int) or item < 0 or item > 10_000_000_000_000_000:
+                return False
+            continue
+        if key == "gravatar_id" and item == "":
+            continue
+        if item is None:
+            continue
+        if not isinstance(item, _PUBLIC_SCALAR_TYPES) or not _github_security_advisory_ignored_scalar_is_safe(item):
+            return False
+    return True
+
+
 def _github_security_advisory_row_is_safe(row: Any) -> bool:
     if not isinstance(row, dict):
         return False
     if any(key not in _GITHUB_SECURITY_ADVISORY_ALLOWED_KEYS for key in row):
         return False
-    if not all(_github_security_advisory_ignored_value_is_safe(value) for value in row.values()):
-        return False
+    for key, value in row.items():
+        if key in {"author", "publisher"}:
+            if not _github_security_advisory_safe_user_object_is_safe(value):
+                return False
+            continue
+        if not _github_security_advisory_ignored_value_is_safe(value):
+            return False
     if not _github_security_advisory_ghsa_id(row):
         return False
     if "cve_id" in row and row.get("cve_id") is not None and not _github_security_advisory_cve_id_is_safe(row.get("cve_id")):
@@ -8593,7 +8684,8 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_dependabot_alerts_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
     if _github_security_advisories_path_matches(raw_origin_uri):
-        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_security_advisories_path_repo(raw_origin_uri):
+        security_advisories_safe_origin = _safe_origin_uri(raw_origin_uri, source_id=source_id)
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_security_advisories_path_repo(security_advisories_safe_origin):
             raise RuntimeError("refresh fetcher disabled")
     if _github_code_scanning_alerts_path_matches(raw_origin_uri):
         if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_code_scanning_alerts_path_repo(raw_origin_uri):

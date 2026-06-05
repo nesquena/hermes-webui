@@ -20682,7 +20682,7 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_security_advisor
     receipt = register_source_reference({
         "source_id": "github-security-advisories-source-refresh",
         "title": "GitHub Security Advisories Source Refresh",
-        "origin_uri": "https://api.github.com/repos/capy/spaces/security-advisories?access_token=***#raw-prompt",
+        "origin_uri": "https://user:pass@api.github.com/repos/capy/spaces/security-advisories?access_token=***#raw-prompt",
     })
     github_security_advisories_body = json.dumps([
         {
@@ -20694,6 +20694,27 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_security_advisor
             "updated_at": "2026-06-02T11:00:00Z",
             "published_at": "2026-06-03T12:00:00Z",
             "withdrawn_at": None,
+            "closed_at": "2026-06-04T13:00:00Z",
+            "author": {
+                "login": "capy-maintainer",
+                "id": 123456,
+                "node_id": "U_kgDOExample",
+                "avatar_url": "https://avatars.githubusercontent.com/u/123456?v=4",
+                "url": "https://api.github.com/users/capy-maintainer",
+                "html_url": "https://github.com/capy-maintainer",
+                "type": "User",
+                "site_admin": False,
+            },
+            "publisher": {
+                "login": "capy-security",
+                "id": 654321,
+                "node_id": "U_kgDOPublisher",
+                "avatar_url": "https://avatars.githubusercontent.com/u/654321?v=4",
+                "url": "https://api.github.com/users/capy-security",
+                "html_url": "https://github.com/capy-security",
+                "type": "User",
+                "site_admin": False,
+            },
             "summary": "Raw advisory summary must not persist.",
             "description": "Raw advisory description must not persist.",
             "vulnerabilities": [{"package": {"name": "metadata-package"}}],
@@ -20800,6 +20821,10 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_security_advisor
         "secret_value_do_not_leak",
         "access_token",
         "raw-prompt",
+        "user:pass",
+        "capy-maintainer",
+        "capy-security",
+        "avatars.githubusercontent.com",
         "raw advisory summary",
         "raw advisory description",
         "vulnerabilities",
@@ -20809,6 +20834,78 @@ def test_run_source_refresh_jobs_default_fetcher_ingests_github_security_advisor
     ):
         assert unsafe not in serialized
         assert unsafe not in persisted
+
+
+def test_github_security_advisories_parser_allows_realistic_safe_ignored_author_publisher_closed_at():
+    row = {
+        "ghsa_id": "GHSA-real-1234-safe",
+        "cve_id": "CVE-2026-12345",
+        "severity": "high",
+        "state": "closed",
+        "created_at": "2026-06-01T10:00:00Z",
+        "updated_at": "2026-06-02T11:00:00Z",
+        "published_at": "2026-06-03T12:00:00Z",
+        "closed_at": "2026-06-04T13:00:00Z",
+        "withdrawn_at": None,
+        "author": {
+            "login": "capy-maintainer",
+            "id": 123456,
+            "node_id": "U_kgDOExample",
+            "avatar_url": "https://avatars.githubusercontent.com/u/123456?v=4",
+            "gravatar_id": "",
+            "url": "https://api.github.com/users/capy-maintainer",
+            "html_url": "https://github.com/capy-maintainer",
+            "followers_url": "https://api.github.com/users/capy-maintainer/followers",
+            "following_url": "https://api.github.com/users/capy-maintainer/following{/other_user}",
+            "gists_url": "https://api.github.com/users/capy-maintainer/gists{/gist_id}",
+            "starred_url": "https://api.github.com/users/capy-maintainer/starred{/owner}{/repo}",
+            "subscriptions_url": "https://api.github.com/users/capy-maintainer/subscriptions",
+            "organizations_url": "https://api.github.com/users/capy-maintainer/orgs",
+            "repos_url": "https://api.github.com/users/capy-maintainer/repos",
+            "events_url": "https://api.github.com/users/capy-maintainer/events{/privacy}",
+            "received_events_url": "https://api.github.com/users/capy-maintainer/received_events",
+            "type": "User",
+            "site_admin": False,
+        },
+        "publisher": {
+            "login": "capy-security",
+            "id": 654321,
+            "node_id": "U_kgDOPublisher",
+            "avatar_url": "https://avatars.githubusercontent.com/u/654321?v=4",
+            "url": "https://api.github.com/users/capy-security",
+            "html_url": "https://github.com/capy-security",
+            "type": "User",
+            "site_admin": False,
+        },
+        "summary": "Ignored advisory summary must not persist.",
+        "description": "Ignored advisory description must not persist.",
+        "vulnerabilities": [{"package": {"name": "safe-package"}}],
+        "url": "https://api.github.com/repos/capy/spaces/security-advisories/GHSA-real-1234-safe",
+        "html_url": "https://github.com/capy/spaces/security/advisories/GHSA-real-1234-safe",
+    }
+
+    assert capy_memory._json_payload_is_github_security_advisories_metadata(
+        "https://api.github.com/repos/capy/spaces/security-advisories",
+        [row],
+    )
+    summary = capy_memory._github_security_advisories_refresh_summary(
+        "https://api.github.com/repos/capy/spaces/security-advisories",
+        [row],
+    ).lower()
+    unsafe_serialized = json.dumps({"summary": summary}, sort_keys=True)
+
+    assert "ghsa-real-1234-safe" in summary
+    assert "ignored advisory summary" not in summary
+    assert "capy-maintainer" not in summary
+    assert "capy-security" not in summary
+    assert "avatars.githubusercontent.com" not in unsafe_serialized
+
+    unsafe_closed_at_row = dict(row)
+    unsafe_closed_at_row["closed_at"] = "not-an-iso-timestamp"
+    assert not capy_memory._json_payload_is_github_security_advisories_metadata(
+        "https://api.github.com/repos/capy/spaces/security-advisories",
+        [unsafe_closed_at_row],
+    )
 
 
 def test_run_source_refresh_jobs_default_fetcher_rejects_github_security_advisories_json_feed_bypass(tmp_path, monkeypatch):
