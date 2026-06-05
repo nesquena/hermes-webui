@@ -27,6 +27,10 @@ from urllib.parse import parse_qs, urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
 import api.paths as _paths
+from api.plugin_providers import (
+    effective_provider_display_name as _effective_provider_display_name,
+    is_plugin_model_provider as _is_plugin_model_provider,
+)
 
 HOME = _paths.HOME
 _hermes_home_has_webui_state = _paths._hermes_home_has_webui_state
@@ -3198,6 +3202,12 @@ def invalidate_models_cache():
     # Also delete the disk cache so the next cold build starts fresh.
     # Disk delete is outside the lock — file I/O shouldn't block other readers.
     _delete_models_cache_on_disk()
+    try:
+        from api.plugin_providers import invalidate_plugin_model_provider_cache
+
+        invalidate_plugin_model_provider_cache()
+    except Exception:
+        pass
 
 
 def invalidate_credential_pool_cache(provider_id: str):
@@ -3787,7 +3797,9 @@ def get_available_models() -> dict:
                 # aliases; ``isinstance(_provider_cfg, dict)`` accepts custom
                 # entries that supply their own models/api_key/base_url. (#2399)
                 _is_known_provider = (
-                    _canonical in _PROVIDER_MODELS or _canonical in _PROVIDER_DISPLAY
+                    _canonical in _PROVIDER_MODELS
+                    or _canonical in _PROVIDER_DISPLAY
+                    or _is_plugin_model_provider(_canonical)
                 )
                 _is_provider_config = isinstance(_provider_cfg, dict)
                 if not (_is_known_provider or _is_provider_config):
@@ -4242,7 +4254,7 @@ def get_available_models() -> dict:
                                 group["models_endpoint_error"] = _named_custom_errors[pid]
                             groups.append(group)
                     continue
-                provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
+                provider_name = _effective_provider_display_name(pid, _PROVIDER_DISPLAY)
                 if pid == "openrouter":
                     # OpenRouter has two model surfaces:
                     #   (1) curated tool-supporting catalog via hermes_cli.models.fetch_openrouter_models()
@@ -4545,7 +4557,11 @@ def get_available_models() -> dict:
                                 "models": models,
                             }
                         )
-                elif pid in _PROVIDER_MODELS or pid in _canonical_to_raw_provider_key:
+                elif (
+                    pid in _PROVIDER_MODELS
+                    or pid in _canonical_to_raw_provider_key
+                    or _is_plugin_model_provider(pid)
+                ):
                     # Look up provider_cfg using the original raw key from
                     # config.yaml so that mixed-case / underscore keys like
                     # ``CLIPpoxy`` or ``snake_case_provider`` still resolve

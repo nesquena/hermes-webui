@@ -43,8 +43,19 @@ from api.config import (
     invalidate_models_cache,
     reload_config,
 )
+from api.plugin_providers import (
+    effective_provider_display_name,
+    effective_provider_env_var,
+    is_plugin_model_provider,
+    plugin_model_provider_ids,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _provider_env_var_for(provider_id: str) -> str | None:
+    """Resolve the API-key env var for a provider (static table + plugin profiles)."""
+    return effective_provider_env_var(provider_id, _PROVIDER_ENV_VAR)
 
 
 def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
@@ -782,7 +793,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
     if (provider_id or "").strip().lower() != "openai":
         return False
     values: list[object] = []
-    env_var = _PROVIDER_ENV_VAR.get(provider_id)
+    env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
         env_values = _load_env_file(env_path)
@@ -923,7 +934,7 @@ def _provider_has_key(provider_id: str) -> bool:
     4. ``config.yaml → providers.<id>.api_key``
     5. ``config.yaml → custom_providers[].api_key`` (for custom providers)
     """
-    env_var = _PROVIDER_ENV_VAR.get(provider_id)
+    env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
         env_values = _load_env_file(env_path)
@@ -973,7 +984,7 @@ def _provider_has_key(provider_id: str) -> bool:
 def _get_provider_api_key(provider_id: str) -> str | None:
     """Return a configured provider API key without exposing it to callers."""
     provider_id = (provider_id or "").strip().lower()
-    env_var = _PROVIDER_ENV_VAR.get(provider_id)
+    env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
         env_values = _load_env_file(env_path)
@@ -1129,7 +1140,7 @@ def _account_usage_subprocess_env(home: Path, provider: str, api_key: str | None
         if value:
             env[key] = value
 
-    env_var = _PROVIDER_ENV_VAR.get((provider or "").strip().lower())
+    env_var = _provider_env_var_for((provider or "").strip().lower())
     if env_var and api_key:
         env[env_var] = api_key
 
@@ -1752,6 +1763,7 @@ def get_providers() -> dict[str, Any]:
 
     # Collect all known provider IDs from multiple sources
     known_ids = set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys())
+    known_ids.update(plugin_model_provider_ids())
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
@@ -1763,9 +1775,21 @@ def get_providers() -> dict[str, Any]:
     known_ids.update(_OAUTH_PROVIDERS)
 
     for pid in sorted(known_ids):
-        display_name = _PROVIDER_DISPLAY.get(pid, pid.replace("-", " ").title())
+        display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
         is_oauth = _provider_is_oauth(pid)
         has_key = _provider_has_key(pid)
+        plugin_auth_status: dict[str, Any] | None = None
+        if not has_key and is_plugin_model_provider(pid):
+            try:
+                from hermes_cli.auth import get_auth_status as _gas_plugin
+                _plugin_status = _gas_plugin(pid)
+                if isinstance(_plugin_status, dict) and (
+                    _plugin_status.get("logged_in") or _plugin_status.get("configured")
+                ):
+                    has_key = True
+                    plugin_auth_status = _plugin_status
+            except Exception:
+                logger.debug("Plugin provider auth check failed for %s", pid, exc_info=True)
 
         # Determine key source
         key_source = "none"
@@ -1797,7 +1821,7 @@ def get_providers() -> dict[str, Any]:
                 logger.debug("hermes_cli auth check failed for %s", pid, exc_info=True)
                 # keep has_key from _provider_has_key()
         elif has_key:
-            env_var = _PROVIDER_ENV_VAR.get(pid)
+            env_var = _provider_env_var_for(pid)
             if env_var:
                 env_path = _get_hermes_home() / ".env"
                 env_values = _load_env_file(env_path)
@@ -1821,19 +1845,29 @@ def get_providers() -> dict[str, Any]:
                             aliased = True
                             break
                     if not aliased:
-                        key_source = "config_yaml"
+                        _plugin_ks = (
+                            str(plugin_auth_status.get("key_source") or "").strip()
+                            if isinstance(plugin_auth_status, dict)
+                            else ""
+                        )
+                        key_source = _plugin_ks or "config_yaml"
             else:
-                key_source = "config_yaml"
-        elif pid not in _PROVIDER_ENV_VAR:
+                _plugin_ks = (
+                    str(plugin_auth_status.get("key_source") or "").strip()
+                    if isinstance(plugin_auth_status, dict)
+                    else ""
+                )
+                key_source = _plugin_ks or "config_yaml"
+        elif not _provider_env_var_for(pid):
             # Fallback: provider is not a known API-key provider and not in
             # the hardcoded _OAUTH_PROVIDERS set.  It may be a custom or
             # newly-added OAuth provider (e.g. Anthropic connected via OAuth).
             # Check live auth status so the Providers tab agrees with the
             # model picker (#1212).
             #
-            # IMPORTANT: we skip providers in _PROVIDER_ENV_VAR because they
-            # are pure API-key providers — calling get_auth_status() for every
-            # unconfigured API-key provider would add unnecessary latency
+            # IMPORTANT: we skip providers with a known API-key env var because
+            # they are pure API-key providers — calling get_auth_status() for
+            # every unconfigured API-key provider would add unnecessary latency
             # (network round-trip per provider) on the Settings page.
             # Validate pid looks like a real provider before probing
             import re as _re
@@ -1924,6 +1958,21 @@ def get_providers() -> dict[str, Any]:
                     models_total = len(models)
             except Exception:
                 logger.debug("Failed to load LM Studio models from hermes_cli")
+        if is_plugin_model_provider(pid):
+            try:
+                live_models = _models_from_live_provider_ids(
+                    pid,
+                    _read_live_provider_model_ids(pid),
+                )
+                if live_models:
+                    models = live_models
+                    models_total = len(models)
+            except Exception:
+                logger.debug(
+                    "Failed to load plugin model-provider catalog for %s",
+                    pid,
+                    exc_info=True,
+                )
         # Also include models from config.yaml providers section
         if isinstance(providers_cfg, dict):
             provider_cfg = providers_cfg.get(pid, {})
@@ -1941,11 +1990,13 @@ def get_providers() -> dict[str, Any]:
                 if pid != "nous":
                     models_total = len(models)
 
+        _is_plugin = is_plugin_model_provider(pid)
         providers.append({
             "id": pid,
             "display_name": display_name,
             "has_key": has_key,
-            "configurable": not is_oauth and pid in _PROVIDER_ENV_VAR,
+            "configurable": not is_oauth and bool(_provider_env_var_for(pid)),
+            "is_plugin_provider": _is_plugin,
             "is_oauth": is_oauth,
             "key_source": key_source,
             "auth_error": auth_error,
@@ -2042,11 +2093,11 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
                      f"Use `hermes model` in the terminal to configure it.",
         }
 
-    env_var = _PROVIDER_ENV_VAR.get(provider_id)
+    env_var = _provider_env_var_for(provider_id)
     if not env_var:
         return {
             "ok": False,
-            "error": f"Cannot configure API key for '{_PROVIDER_DISPLAY.get(provider_id, provider_id)}'. "
+            "error": f"Cannot configure API key for '{effective_provider_display_name(provider_id, _PROVIDER_DISPLAY)}'. "
                      f"This provider does not have a known env var mapping.",
         }
 
