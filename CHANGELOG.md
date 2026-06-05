@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.273] — 2026-06-05 — Release IO (stage-p3b — cron-output traversal guard)
+
+### Fixed
+- **The cron-output endpoint rejects traversal-shaped `job_id` values** (`/api/crons/output?job_id=…`) before resolving paths or globbing markdown, matching the boundary already enforced by the cron history/detail handlers. Prevents reading markdown files outside the cron output directory. (#3661, @rodboev)
+
 ## [v0.51.272] — 2026-06-05 — Release IN (stage-p3a — conflict-safe self-update recovery)
 
 ### Fixed
