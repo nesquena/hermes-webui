@@ -210,7 +210,24 @@ class QuietHTTPServer(ThreadingHTTPServer):
             self.allow_reuse_address = False
             SO_EXCLUSIVEADDRUSE = getattr(socket, 'SO_EXCLUSIVEADDRUSE', -5)
             self.socket.setsockopt(socket.SOL_SOCKET, SO_EXCLUSIVEADDRUSE, 1)
-        super().server_bind()
+            # Retry bind on Windows to handle the case where a previous
+            # process (e.g. during self-update) is still releasing the port.
+            # The old process calls os._exit(0) which starts tearing down
+            # its socket, but with SO_EXCLUSIVEADDRUSE the OS blocks new
+            # binds until the teardown completes.  Retry for up to 10 s.
+            max_retries = 20
+            retry_delay = 0.5
+            for attempt in range(max_retries):
+                try:
+                    super().server_bind()
+                    return
+                except OSError as e:
+                    if e.winerror == 10048 and attempt < max_retries - 1:  # WSAEADDRINUSE
+                        time.sleep(retry_delay)
+                    else:
+                        raise
+        else:
+            super().server_bind()
 
     def _handle_request_noblock(self):
         """Record accept-loop progress before dispatching a request handler.
