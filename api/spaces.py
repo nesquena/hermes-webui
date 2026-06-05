@@ -7041,14 +7041,34 @@ def _record_resolve_app_url_progress_event(action: str) -> dict[str, Any]:
         }
 
 
-def _space_path_helper_action_policy_receipt(action: str) -> dict[str, Any]:
+def _space_path_helper_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only evidence that logical path helpers require browser/development preflight."""
+    safe_action = _context_value(action, 120) or "space.spaces.buildspacepath"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": "browser_surface",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["path_helper_approval_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _space_path_helper_action_policy_receipt(action: str, preflight_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return metadata-only policy evidence for logical path helper responses."""
     from api.capy_policy import action_policy_receipt
 
+    status = "required"
+    if isinstance(preflight_receipt, dict):
+        status = str(preflight_receipt.get("status") or "required")
     return action_policy_receipt(
         action,
         approval_gates=["destructive_external_action"],
-        prompt_preflight_status="required",
+        prompt_preflight_status=status,
         model_route_hint="hint:fast",
     )
 
@@ -7562,12 +7582,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         path = _space_tool_build_source_path(name, data)
         progress_event = _record_space_tool_progress_event(space_id, run_prefix="path.helper")
-        autonomy_policy = _space_path_helper_action_policy_receipt(name)
+        prompt_preflight = _space_path_helper_required_prompt_preflight_receipt(name)
+        autonomy_policy = _space_path_helper_action_policy_receipt(name, prompt_preflight)
         return {
             "ok": True,
             "action": name,
             "path": path,
             "paths": {"mode": "metadata-only"},
+            "prompt_preflight": prompt_preflight,
             "autonomy_policy": autonomy_policy,
             "progress_event": progress_event,
             "output_compaction": _space_tool_action_output_compaction_receipt(

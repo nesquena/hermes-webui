@@ -3009,9 +3009,15 @@ def test_space_tool_path_helpers_return_policy_and_progress_receipts_metadata_on
         assert result["action"] == normalized_action
         assert result["path"] == expected_path
         assert result["paths"] == {"mode": "metadata-only"}
+        assert result["prompt_preflight"]["available"] is True
+        assert result["prompt_preflight"]["action"] == normalized_action
+        assert result["prompt_preflight"]["boundary"] == "browser_surface"
+        assert result["prompt_preflight"]["status"] == "required"
+        assert result["prompt_preflight"]["metadata_only"] is True
+        assert result["prompt_preflight"]["raw_prompt_stored"] is False
         assert result["autonomy_policy"]["action"] == normalized_action
         assert result["autonomy_policy"]["approval_gates"] == ["destructive_external_action"]
-        assert result["autonomy_policy"]["prompt_preflight_status"] == "required"
+        assert result["autonomy_policy"]["prompt_preflight_status"] == result["prompt_preflight"]["status"]
         assert result["autonomy_policy"]["model_route_hint"] == "hint:fast"
         assert result["autonomy_policy"]["metadata_only"] is True
         assert result["progress_event"]["event_type"] == "tool.completed"
