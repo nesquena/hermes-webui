@@ -131,25 +131,27 @@ def _load_plugin(plugin_name: str, plugin_dir: str):
     return mod
 
 
-def _send_error(request_id, status, message):
-    resp = {
-        "id": request_id,
-        "status": status,
-        "headers": {"content-type": "application/json; charset=utf-8"},
-        "body_b64": base64.b64encode(
-            json.dumps({"error": message}).encode()
-        ).decode("ascii"),
-    }
-    sys.stdout.write(json.dumps(resp) + "\n")
-    sys.stdout.flush()
-
-
 def main():
     plugin_name = os.environ.get("HERMES_PLUGIN_NAME", "unknown")
     plugin_dir = os.environ.get("HERMES_PLUGIN_DIR", "")
 
+    out = os.fdopen(os.dup(sys.stdout.fileno()), "w")
+    sys.stdout = sys.stderr
+
+    def send(data):
+        out.write(json.dumps(data) + "\n")
+        out.flush()
+
+    def err(status, message, request_id=0):
+        send({
+            "id": request_id,
+            "status": status,
+            "headers": {"content-type": "application/json; charset=utf-8"},
+            "body_b64": base64.b64encode(json.dumps({"error": message}).encode()).decode("ascii"),
+        })
+
     if not plugin_dir:
-        _send_error(0, 500, "HERMES_PLUGIN_DIR not set")
+        err(500, "HERMES_PLUGIN_DIR not set")
         return
 
     mod = _load_plugin(plugin_name, plugin_dir)
@@ -160,12 +162,10 @@ def main():
 
     routes = mod.register()
     if not isinstance(routes, dict):
-        _send_error(0, 500, "register() did not return a route map")
+        err(500, "register() did not return a route map")
         return
 
-    # Signal readiness to the parent process
-    sys.stdout.write(json.dumps({"ready": True, "routes": list(routes.keys())}) + "\n")
-    sys.stdout.flush()
+    send({"ready": True, "routes": list(routes.keys())})
 
     for line in sys.stdin:
         line = line.strip()
@@ -174,7 +174,7 @@ def main():
         try:
             req = json.loads(line)
         except json.JSONDecodeError:
-            _send_error(0, 400, "invalid JSON request")
+            err(400, "invalid JSON request")
             continue
 
         req_id = req.get("id", 0)
@@ -190,7 +190,7 @@ def main():
         method_handlers = routes.get(path, {})
         handler_fn = method_handlers.get(method)
         if handler_fn is None:
-            _send_error(req_id, 404, "not found")
+            err(404, "not found", request_id=req_id)
             continue
 
         try:
@@ -198,14 +198,13 @@ def main():
             handler_fn(ch, parsed)
             resp = ch.to_response(req_id)
         except Exception:
-            _send_error(req_id, 500, "plugin internal error")
+            err(500, "plugin internal error", request_id=req_id)
             sys.stderr.write(f"[plugin:{plugin_name}] handler error:\n")
             traceback.print_exc(file=sys.stderr)
             sys.stderr.flush()
             continue
 
-        sys.stdout.write(json.dumps(resp) + "\n")
-        sys.stdout.flush()
+        send(resp)
 
 
 if __name__ == "__main__":
