@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover - exercised by source tests instead
 
 _CREDENTIALS_FILE = STATE_DIR / "passkeys.json"
 _CHALLENGES_FILE = STATE_DIR / ".passkey_challenges.json"
-_CHALLENGE_TTL = 300
+_CHALLENGE_TTL = 90
 _MAX_CHALLENGES = 128
 _MAX_CHALLENGES_PER_CONTEXT = 8
 _CHALLENGES_LOCK = threading.Lock()
@@ -112,6 +112,8 @@ def passkeys_available() -> bool:
 
 
 def _load_challenges() -> dict[str, dict[str, Any]]:
+    # May prune and rewrite the challenge file; callers that mutate the store
+    # must hold _CHALLENGES_LOCK across load→mutate→write.
     raw = _json_load(_CHALLENGES_FILE, {})
     if not isinstance(raw, dict):
         return {}
@@ -125,15 +127,37 @@ def _load_challenges() -> dict[str, dict[str, Any]]:
     return clean
 
 
+def _oldest_challenge_key(data: dict[str, dict[str, Any]], keys: list[str]) -> str | None:
+    if not keys:
+        return None
+    return min(keys, key=lambda k: float(data.get(k, {}).get("ts", 0)))
+
+
+def _evict_oldest_challenges(data: dict[str, dict[str, Any]], kind: str, rp_id: str, origin: str) -> None:
+    """Keep the challenge store bounded while admitting the newest challenge."""
+    while True:
+        same_context = [
+            k for k, v in data.items()
+            if v.get("kind") == kind and v.get("rp_id") == rp_id and v.get("origin") == origin
+        ]
+        if len(same_context) < _MAX_CHALLENGES_PER_CONTEXT:
+            break
+        oldest = _oldest_challenge_key(data, same_context)
+        if oldest is None:
+            break
+        data.pop(oldest, None)
+
+    while len(data) >= _MAX_CHALLENGES:
+        oldest = _oldest_challenge_key(data, list(data))
+        if oldest is None:
+            break
+        data.pop(oldest, None)
+
+
 def _store_challenge(challenge: str, kind: str, rp_id: str, origin: str) -> None:
     with _CHALLENGES_LOCK:
         data = _load_challenges()
-        same_context = [
-            v for v in data.values()
-            if v.get("kind") == kind and v.get("rp_id") == rp_id and v.get("origin") == origin
-        ]
-        if len(same_context) >= _MAX_CHALLENGES_PER_CONTEXT or len(data) >= _MAX_CHALLENGES:
-            raise PasskeyRateLimitError("Too many pending passkey challenges. Try again in a minute.")
+        _evict_oldest_challenges(data, kind, rp_id, origin)
         data[challenge] = {"kind": kind, "rp_id": rp_id, "origin": origin, "ts": time.time()}
         _atomic_write_json(_CHALLENGES_FILE, data)
 
