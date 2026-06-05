@@ -8024,7 +8024,7 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/auth/passkey/options":
         from api.auth import _passkey_feature_flag_enabled, is_auth_enabled
-        from api.passkeys import PasskeyError, authentication_options
+        from api.passkeys import PasskeyError, PasskeyRateLimitError, authentication_options
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled. Set HERMES_WEBUI_PASSKEY=1 or webui_passkey_enabled: true to enable."}, status=404)
@@ -8032,6 +8032,8 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, {"error": "Auth not enabled"}, status=400)
         try:
             return j(handler, {"ok": True, "publicKey": authentication_options(handler)})
+        except PasskeyRateLimitError as e:
+            return bad(handler, str(e), status=429)
         except PasskeyError as e:
             return bad(handler, str(e), status=400)
 
@@ -8064,11 +8066,16 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/auth/passkey/register/options":
         from api.auth import _passkey_feature_flag_enabled
-        from api.passkeys import registration_options
+        from api.passkeys import PasskeyError, PasskeyRateLimitError, registration_options
 
         if not _passkey_feature_flag_enabled():
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
-        return j(handler, {"ok": True, "publicKey": registration_options(handler)})
+        try:
+            return j(handler, {"ok": True, "publicKey": registration_options(handler)})
+        except PasskeyRateLimitError as e:
+            return bad(handler, str(e), status=429)
+        except PasskeyError as e:
+            return bad(handler, str(e), status=400)
 
     if parsed.path == "/api/auth/passkey/register":
         from api.auth import _passkey_feature_flag_enabled
