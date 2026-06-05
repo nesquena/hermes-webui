@@ -10,10 +10,6 @@ a single key, losing tool calls during merge.
 """
 from __future__ import annotations
 
-import json
-
-import pytest
-
 from api.models import (
     _matching_visible_duplicate,
     _session_message_dedup_key,
