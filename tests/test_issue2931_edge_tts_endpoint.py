@@ -7,6 +7,8 @@ edge_tts import / Communicate call.
 """
 import io
 import json
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,6 +97,51 @@ def test_tts_rejects_unknown_voice():
     routes._handle_tts(h, None)
     assert h.status == 400
     assert "invalid voice" in (h.payload() or {}).get("error", "")
+
+
+def test_tts_rejects_invalid_rate_before_engine():
+    h = _post({"text": "hello", "voice": "en-US-AriaNeural", "rate": "<break/>"}, client="10.0.0.6")
+    routes._handle_tts(h, None)
+    assert h.status == 400
+    assert "invalid rate" in (h.payload() or {}).get("error", "")
+
+
+def test_tts_rejects_invalid_pitch_before_engine():
+    h = _post({"text": "hello", "voice": "en-US-AriaNeural", "pitch": "+500Hz"}, client="10.0.0.7")
+    routes._handle_tts(h, None)
+    assert h.status == 400
+    assert "invalid pitch" in (h.payload() or {}).get("error", "")
+
+
+def test_tts_accepts_ui_prosody_shape(monkeypatch):
+    captured = {}
+
+    class FakeCommunicate:
+        def __init__(self, text, voice, **kwargs):
+            captured["text"] = text
+            captured["voice"] = voice
+            captured["kwargs"] = kwargs
+
+        def stream_sync(self):
+            yield {"type": "audio", "data": b"abc"}
+
+    monkeypatch.setitem(sys.modules, "edge_tts", SimpleNamespace(Communicate=FakeCommunicate))
+
+    h = _post(
+        {
+            "text": "hello",
+            "voice": "en-US-AriaNeural",
+            "rate": "+10%",
+            "pitch": "-5Hz",
+        },
+        client="10.0.0.8",
+    )
+    routes._handle_tts(h, None)
+
+    assert h.status == 200
+    assert captured["text"] == "hello"
+    assert captured["voice"] == "en-US-AriaNeural"
+    assert captured["kwargs"] == {"rate": "+10%", "pitch": "-5Hz"}
 
 
 def test_tts_rate_limits_second_immediate_request():
