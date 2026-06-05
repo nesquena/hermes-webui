@@ -3,6 +3,15 @@
 
 ## [Unreleased]
 
+## [v0.51.270] — 2026-06-05 — Release IL (stage-u1 — un-hold batch: author-fixed PRs re-gated)
+
+### Fixed
+- **The pending passkey-challenge cap now evicts the oldest challenges instead of rejecting new ones**, so the anti-unbounded-growth bound can no longer be turned into a lockout DoS (filling the global or per-context cap previously blocked all legitimate registration/login until TTL expiry). (#3624, @Hinotoi-agent)
+- **Model-provider plugins (e.g. Yandex) are now surfaced in the WebUI providers panel** — env-var name and configured status only, never the value — without regressing existing custom-provider handling. (#3613, @pamnard)
+
+### Added
+- **`/use <skill>` slash command** forces a specific skill for the next turn. The directive resolves as part of the next real send (awaiting the in-flight `/api/skills` lookup) and clears only once consumed, so a fast follow-up send can't apply a stale directive to the wrong message. (#3517, @rodboev; implements #2977)
+
 ## [v0.51.269] — 2026-06-05 — Release IK (stage-b2 — sidebar perf + search scope + Windows ctl)
 
 ### Fixed
