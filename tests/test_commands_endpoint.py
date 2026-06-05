@@ -4,7 +4,8 @@ import urllib.error
 import urllib.request
 import threading
 import time
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -23,6 +24,40 @@ def _install_fake_mcp_tool(monkeypatch, shutdown, discover, servers=None, lock=N
     monkeypatch.setitem(sys.modules, "tools", tools_pkg)
     monkeypatch.setitem(sys.modules, "tools.mcp_tool", mcp_tool)
     return mcp_tool
+
+
+def _install_fake_codex_runtime_switch(monkeypatch):
+    import sys
+    hermes_cli_pkg = sys.modules.get("hermes_cli") or ModuleType("hermes_cli")
+    hermes_cli_pkg.__path__ = []
+    codex_runtime_switch = ModuleType("hermes_cli.codex_runtime_switch")
+    calls = []
+
+    def parse_args(arg_string):
+        calls.append(("parse_args", arg_string))
+        if arg_string in ("on", "codex_app_server"):
+            return "codex_app_server", []
+        if arg_string in ("", None):
+            return None, []
+        return None, [f"bad arg: {arg_string}"]
+
+    def apply(config, new_value, *, persist_callback=None):
+        calls.append(("apply", new_value, config.get("model", {}).get("openai_runtime")))
+        if new_value is not None:
+            config.setdefault("model", {})["openai_runtime"] = new_value
+            if persist_callback:
+                persist_callback(config)
+        return SimpleNamespace(
+            success=True,
+            message=f"codex runtime -> {new_value or config.get('model', {}).get('openai_runtime', 'auto')}",
+        )
+
+    codex_runtime_switch_any = cast(Any, codex_runtime_switch)
+    codex_runtime_switch_any.parse_args = parse_args
+    codex_runtime_switch_any.apply = apply
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli_pkg)
+    monkeypatch.setitem(sys.modules, "hermes_cli.codex_runtime_switch", codex_runtime_switch)
+    return calls
 
 
 def _get(path):
@@ -116,6 +151,66 @@ def test_commands_exec_runs_reload_mcp_alias():
     assert status == 200
     assert 'output' in body
     assert isinstance(body['output'], str)
+
+
+def test_codex_runtime_command_uses_shared_switch_and_persists(monkeypatch, tmp_path):
+    """`/codex-runtime` executes through the same shared switch as CLI/gateway."""
+    calls = _install_fake_codex_runtime_switch(monkeypatch)
+    saved = []
+
+    from api import config as webui_config
+    from api.commands import execute_agent_command
+
+    config_data = {"model": {"openai_runtime": "auto"}}
+    monkeypatch.setattr(webui_config, "get_config", lambda: config_data)
+    monkeypatch.setattr(webui_config, "_get_config_path", lambda: tmp_path / "config.yaml")
+    monkeypatch.setattr(
+        webui_config,
+        "_save_yaml_config_file",
+        lambda path, data: saved.append((path, data.copy())),
+    )
+    monkeypatch.setattr(webui_config, "reload_config", lambda: saved.append(("reload", None)))
+
+    output = execute_agent_command('/codex-runtime on')
+
+    assert output == "codex runtime -> codex_app_server"
+    assert config_data["model"]["openai_runtime"] == "codex_app_server"
+    assert calls == [
+        ("parse_args", "on"),
+        ("apply", "codex_app_server", "auto"),
+    ]
+    assert saved[0][0] == tmp_path / "config.yaml"
+    assert saved[0][1] == {"model": {"openai_runtime": "codex_app_server"}}
+    assert saved[1] == ("reload", None)
+
+
+def test_codex_runtime_command_accepts_underscore_alias(monkeypatch):
+    """Telegram/WebUI underscore spelling routes to the canonical command."""
+    calls = _install_fake_codex_runtime_switch(monkeypatch)
+
+    from api import config as webui_config
+    from api.commands import execute_agent_command
+
+    monkeypatch.setattr(webui_config, "get_config", lambda: {"model": {"openai_runtime": "auto"}})
+    monkeypatch.setattr(webui_config, "_save_yaml_config_file", lambda path, data: None)
+    monkeypatch.setattr(webui_config, "reload_config", lambda: None)
+
+    output = execute_agent_command('/codex_runtime codex_app_server')
+
+    assert output == "codex runtime -> codex_app_server"
+    assert calls[0] == ("parse_args", "codex_app_server")
+
+
+def test_codex_runtime_invalid_argument_returns_switch_message(monkeypatch):
+    """Argument validation stays in the shared switch and returns user text."""
+    calls = _install_fake_codex_runtime_switch(monkeypatch)
+
+    from api.commands import execute_agent_command
+
+    output = execute_agent_command('/codex-runtime nope')
+
+    assert output == "bad arg: nope"
+    assert calls == [("parse_args", "nope")]
 
 
 def test_reload_mcp_error_is_generic(monkeypatch):

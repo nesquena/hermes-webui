@@ -24,13 +24,15 @@ _NEVER_EXPOSE: frozenset[str] = frozenset({
 # Narrow agent-side execution allowlist for /api/commands/exec.
 _AGENT_COMMAND_ALIASES = {
     'reload_mcp': 'reload-mcp',
+    'codex_runtime': 'codex-runtime',
 }
-_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp'})
+_ALLOWED_AGENT_COMMANDS = frozenset({'reload-mcp', 'codex-runtime'})
 _RELOAD_MCP_LOCK = threading.Lock()
+_CODEX_RUNTIME_LOCK = threading.Lock()
 
 
-def _normalize_agent_command_name(command: str) -> str:
-    """Normalize slash text to a canonical command name."""
+def _parse_agent_command(command: str) -> tuple[str, str]:
+    """Return ``(canonical_name, arg_string)`` from slash-command text."""
 
     raw = str(command or "").strip()
     if not raw:
@@ -42,7 +44,14 @@ def _normalize_agent_command_name(command: str) -> str:
     if not cmd_base:
         raise ValueError("command is required")
 
-    return _AGENT_COMMAND_ALIASES.get(cmd_base, cmd_base)
+    return _AGENT_COMMAND_ALIASES.get(cmd_base, cmd_base), cmd_parts[1] if len(cmd_parts) > 1 else ""
+
+
+def _normalize_agent_command_name(command: str) -> str:
+    """Normalize slash text to a canonical command name."""
+
+    canonical, _arg_string = _parse_agent_command(command)
+    return canonical
 
 
 def list_commands(_registry=None) -> list[dict[str, Any]]:
@@ -105,14 +114,49 @@ def list_commands(_registry=None) -> list[dict[str, Any]]:
 def execute_agent_command(command: str) -> str:
     """Execute a narrow allowlist of agent-side runtime commands."""
 
-    canonical = _normalize_agent_command_name(command)
+    canonical, arg_string = _parse_agent_command(command)
     if canonical not in _ALLOWED_AGENT_COMMANDS:
         raise KeyError(canonical)
 
     if canonical == 'reload-mcp':
         return _run_reload_mcp_command()
+    if canonical == 'codex-runtime':
+        return _run_codex_runtime_command(arg_string)
 
     raise KeyError(canonical)
+
+
+def _run_codex_runtime_command(arg_string: str) -> str:
+    """Execute Hermes' shared Codex runtime switch for the active profile."""
+    try:
+        from hermes_cli.codex_runtime_switch import apply, parse_args
+    except Exception as exc:
+        logger.warning("Codex runtime switch unavailable", exc_info=True)
+        raise RuntimeError("Codex runtime switch unavailable") from exc
+
+    new_value, errors = parse_args(arg_string)
+    if errors:
+        return "\n".join(str(error) for error in errors)
+
+    with _CODEX_RUNTIME_LOCK:
+        try:
+            from api import config as webui_config
+
+            active_config = webui_config.get_config()
+
+            def _persist_config(config_data: dict) -> None:
+                webui_config._save_yaml_config_file(
+                    webui_config._get_config_path(),
+                    config_data,
+                )
+                webui_config.reload_config()
+
+            status = apply(active_config, new_value, persist_callback=_persist_config)
+        except Exception as exc:
+            logger.warning("Failed to execute /codex-runtime", exc_info=True)
+            raise RuntimeError("Failed to update Codex runtime") from exc
+
+    return str(getattr(status, "message", "") or "(no output)")
 
 
 def _run_reload_mcp_command() -> str:
