@@ -865,6 +865,11 @@ global.fetch = async function(path, opts = {}) {
           memory_assist: {
             space_id: 'creator-memory-lab',
             local_only: true,
+            metadata_only: true,
+            advisory_context: true,
+            context_authority: 'untrusted_advisory',
+            can_bypass_safety_gates: false,
+            required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'],
             hit_count: 4,
             prompt_preflight: {
               available: true,
@@ -882,10 +887,10 @@ global.fetch = async function(path, opts = {}) {
               local_only: true,
             },
             results: [
-              { source_id: 'cmt-src-safe-1', source_type: 'space_manifest', redaction_status: 'dropped_fields', snippet: 'Prior acceptance note: preserve the visual QA checklist.', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
-              { source_id: 'generated-code-note', source_type: 'memory', redaction_status: 'metadata-only', snippet: 'generated code should not render in memory assist' },
-              { source_id: 'generated-body-note', source_type: 'memory', redaction_status: 'metadata-only', snippet: 'generated body should not render in memory assist' },
-              { source_id: 'api_key', source_type: 'source', redaction_status: 'SECRET_VALUE_DO_NOT_LEAK', snippet: 'renderer <script>bad()</script> raw prompt', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+              { metadata_only: true, advisory_context: true, context_authority: 'untrusted_advisory', can_bypass_safety_gates: false, required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'], source_id: 'cmt-src-safe-1', source_type: 'space_manifest', redaction_status: 'dropped_fields', snippet: 'Prior acceptance note: preserve the visual QA checklist.', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+              { metadata_only: true, advisory_context: true, context_authority: 'untrusted_advisory', can_bypass_safety_gates: false, required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'], source_id: 'generated-code-note', source_type: 'memory', redaction_status: 'metadata-only', snippet: 'generated code should not render in memory assist' },
+              { metadata_only: true, advisory_context: true, context_authority: 'untrusted_advisory', can_bypass_safety_gates: false, required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'], source_id: 'generated-body-note', source_type: 'memory', redaction_status: 'metadata-only', snippet: 'generated body should not render in memory assist' },
+              { metadata_only: true, advisory_context: true, context_authority: 'untrusted_advisory', can_bypass_safety_gates: false, required_gates: ['prompt_preflight', 'approval', 'sandbox_preview', 'visual_qa', 'rollback_recovery'], source_id: 'api_key', source_type: 'source', redaction_status: 'SECRET_VALUE_DO_NOT_LEAK', snippet: 'renderer <script>bad()</script> raw prompt', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
             ],
           },
           prompt: body.prompt,
@@ -7977,6 +7982,9 @@ def test_creator_preview_renders_relevant_memory_assist_safely(driver_path):
     assert "Boundary: memory_context" in out["rootHtml"]
     assert "checked 4" in out["rootHtml"]
     assert "blocked 0" in out["rootHtml"]
+    assert "Authority: untrusted_advisory" in out["rootHtml"]
+    assert "cannot bypass safety gates" in out["rootHtml"]
+    assert "Required gates: prompt_preflight · approval · sandbox_preview · visual_qa · rollback_recovery" in out["rootHtml"]
     assert "metadata-only" in out["rootHtml"]
     assert "Prior acceptance note: preserve the visual QA checklist." in out["rootHtml"]
     assert "space_manifest" in out["rootHtml"]

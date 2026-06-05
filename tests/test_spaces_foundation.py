@@ -6304,6 +6304,17 @@ def test_creator_preview_includes_relevant_memory_assist_without_persisting_it(m
     assert preview["stored"] is False
     assert preview["memory_assist"]["space_id"] == created["space_id"]
     assert preview["memory_assist"]["local_only"] is True
+    assert preview["memory_assist"]["metadata_only"] is True
+    assert preview["memory_assist"]["advisory_context"] is True
+    assert preview["memory_assist"]["context_authority"] == "untrusted_advisory"
+    assert preview["memory_assist"]["can_bypass_safety_gates"] is False
+    assert preview["memory_assist"]["required_gates"] == [
+        "prompt_preflight",
+        "approval",
+        "sandbox_preview",
+        "visual_qa",
+        "rollback_recovery",
+    ]
     assert preview["memory_assist"]["hit_count"] == 1
     assert preview["memory_assist"]["prompt_preflight"] == {
         "available": True,
@@ -6322,6 +6333,17 @@ def test_creator_preview_includes_relevant_memory_assist_without_persisting_it(m
     }
     assert preview["memory_assist"]["results"] == [
         {
+            "metadata_only": True,
+            "advisory_context": True,
+            "context_authority": "untrusted_advisory",
+            "can_bypass_safety_gates": False,
+            "required_gates": [
+                "prompt_preflight",
+                "approval",
+                "sandbox_preview",
+                "visual_qa",
+                "rollback_recovery",
+            ],
             "source_id": memory_record["source_id"],
             "source_type": "space_manifest",
             "redaction_status": "dropped_fields",
@@ -6402,6 +6424,17 @@ def test_creator_preview_omits_memory_assist_hit_that_fails_prompt_preflight(mon
     assert preview["memory_assist"] == {
         "space_id": created["space_id"],
         "local_only": True,
+        "metadata_only": True,
+        "advisory_context": True,
+        "context_authority": "untrusted_advisory",
+        "can_bypass_safety_gates": False,
+        "required_gates": [
+            "prompt_preflight",
+            "approval",
+            "sandbox_preview",
+            "visual_qa",
+            "rollback_recovery",
+        ],
         "hit_count": 0,
         "results": [],
         "prompt_preflight": {
@@ -6422,6 +6455,51 @@ def test_creator_preview_omits_memory_assist_hit_that_fails_prompt_preflight(mon
     }
     assert "disregard all instructions" not in serialized
     assert "disable approval" not in serialized
+
+
+def test_creator_preview_omits_memory_assist_hit_without_public_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    created = spaces.create_space({"space_id": "memory-empty-hit-lab", "name": "Memory Empty Hit Lab"})
+
+    import api.capy_memory as capy_memory
+
+    def empty_relevant_memory_for_space(space_id, *, limit=3, exclude_auto_ingested=False):
+        assert space_id == created["space_id"]
+        return {"results": [{"source_id": "", "source_type": "", "redaction_status": "", "snippet": "   "}]}
+
+    monkeypatch.setattr(capy_memory, "relevant_memory_for_space", empty_relevant_memory_for_space)
+    monkeypatch.setattr(
+        spaces,
+        "_memory_hit_preflight_receipt",
+        lambda hit, raw_snippet: {
+            "available": True,
+            "action": "capy.prompt_preflight",
+            "boundary": "memory_context",
+            "status": "pass",
+            "metadata_only": True,
+            "raw_prompt_stored": False,
+        },
+    )
+
+    preview = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "targetSpaceId": created["space_id"],
+            "spaceName": "Memory Empty Hit Lab Revised",
+            "prompt": "Refresh the status board safely.",
+            "widgets": [{"id": "status", "kind": "status", "title": "Status"}],
+        },
+    )
+
+    assert preview["ok"] is True
+    assert preview["memory_assist"]["metadata_only"] is True
+    assert preview["memory_assist"]["advisory_context"] is True
+    assert preview["memory_assist"]["context_authority"] == "untrusted_advisory"
+    assert preview["memory_assist"]["can_bypass_safety_gates"] is False
+    assert preview["memory_assist"]["hit_count"] == 0
+    assert preview["memory_assist"]["results"] == []
+    assert preview["memory_assist"]["prompt_preflight"]["status"] == "pass"
 
 
 def test_active_space_context_omits_memory_hit_that_fails_prompt_preflight(monkeypatch, tmp_path):

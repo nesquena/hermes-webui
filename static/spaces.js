@@ -1221,6 +1221,21 @@
     if (!assist || !Array.isArray(assist.results)) return '';
     const preflight = assist.prompt_preflight && typeof assist.prompt_preflight === 'object' && !Array.isArray(assist.prompt_preflight) ? assist.prompt_preflight : null;
     let preflightRow = '';
+    let advisoryRow = '';
+    const authority = safeDisplayMetadataText(assist.context_authority || '', '');
+    const requiredGates = Array.isArray(assist.required_gates) ? assist.required_gates.slice(0, 8).map(function(gate){
+      return safeDisplayMetadataText(gate, '');
+    }).filter(Boolean) : [];
+    if (assist.metadata_only === true || assist.advisory_context === true || authority || assist.can_bypass_safety_gates === false || requiredGates.length) {
+      const trustFlags = [];
+      if (assist.metadata_only === true) trustFlags.push('metadata-only');
+      if (assist.advisory_context === true) trustFlags.push('advisory context only');
+      if (authority) trustFlags.push('Authority: '+authority);
+      if (assist.can_bypass_safety_gates === false) trustFlags.push('cannot bypass safety gates');
+      if (requiredGates.length) trustFlags.push('Required gates: '+requiredGates.join(' · '));
+      advisoryRow = '<div class="capy-spaces-widget"><div><strong>Memory trust boundary</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(trustFlags.join(' · '))+'</div></div></div>';
+    }
     if (preflight) {
       const status = safeDisplayMetadataText(preflight.status || 'unknown', 'unknown') || 'unknown';
       const boundary = safeDisplayMetadataText(preflight.boundary || 'unknown', 'unknown') || 'unknown';
@@ -1238,16 +1253,18 @@
       const sourceId = safeCreatorIdText(hit.source_id || '');
       const sourceType = safeCreatorSummaryText(hit.source_type || 'memory') || '';
       const redactionStatus = safeCreatorSummaryText(hit.redaction_status || 'metadata-only') || 'metadata-only';
+      const authority = safeDisplayMetadataText(hit.context_authority || '', '');
       const snippet = safeCreatorSummaryText(hit.snippet || '') || '';
       if (!sourceId && !sourceType && !snippet) return '';
+      const details = [sourceType, redactionStatus, authority, sourceId].filter(Boolean).join(' · ');
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(snippet || sourceId || sourceType || 'Memory slice')+'</strong>' +
-        '<div class="capy-spaces-muted">'+escapeHtml([sourceType, redactionStatus, sourceId].filter(Boolean).join(' · '))+'</div></div></div>';
+        '<div class="capy-spaces-muted">'+escapeHtml(details)+'</div></div></div>';
     }).filter(Boolean).join('');
-    if (!rows && !preflightRow) return '';
+    if (!rows && !preflightRow && !advisoryRow) return '';
     const count = Math.max(0, Number(assist.hit_count || assist.results.length || 0));
     return '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>Memory assist</strong>' +
       '<div class="capy-spaces-muted">'+escapeHtml(String(count || assist.results.length))+' relevant metadata slice(s) · advisory context only</div>' +
-      '</div></div>'+preflightRow+rows+'</div>';
+      '</div></div>'+advisoryRow+preflightRow+rows+'</div>';
   }
 
   function renderPromptPreflightEvidence(receipt){

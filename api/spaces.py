@@ -2677,7 +2677,32 @@ def _memory_preflight_public_summary(
     }
 
 
-def _safe_advisory_memory_hit(hit: Any) -> tuple[dict[str, str] | None, bool, dict[str, Any] | None]:
+def _memory_advisory_public_envelope() -> dict[str, Any]:
+    try:
+        from api.capy_memory import _memory_advisory_envelope
+
+        envelope = _memory_advisory_envelope()
+    except Exception:
+        envelope = {}
+    raw_gates = envelope.get("required_gates") if isinstance(envelope, dict) else None
+    gates: list[str] = []
+    if isinstance(raw_gates, list):
+        for gate in raw_gates:
+            safe_gate = _active_context_value(gate, 80)
+            if safe_gate and safe_gate != "[REDACTED]" and safe_gate not in gates:
+                gates.append(safe_gate)
+    if not gates:
+        gates = ["prompt_preflight", "approval", "sandbox_preview", "visual_qa", "rollback_recovery"]
+    return {
+        "metadata_only": True,
+        "advisory_context": True,
+        "context_authority": "untrusted_advisory",
+        "can_bypass_safety_gates": False,
+        "required_gates": gates,
+    }
+
+
+def _safe_advisory_memory_hit(hit: Any) -> tuple[dict[str, Any] | None, bool, dict[str, Any] | None]:
     """Return a public advisory memory hit plus whether prompt preflight blocked it."""
     if not isinstance(hit, dict) or _memory_hit_is_auto_ingested(hit):
         return None, False, None
@@ -2688,14 +2713,15 @@ def _safe_advisory_memory_hit(hit: Any) -> tuple[dict[str, str] | None, bool, di
     preflight_receipt = _memory_hit_preflight_receipt(hit, raw_snippet)
     if not _memory_preflight_receipt_passes(preflight_receipt):
         return None, True, preflight_receipt
-    safe_hit = {
+    public_fields = {
         "source_id": _active_context_value(hit.get("source_id"), 160),
         "source_type": _active_context_value(hit.get("source_type"), 80),
         "redaction_status": _active_context_value(hit.get("redaction_status"), 80),
         "snippet": _active_context_value(raw_snippet, 700),
     }
-    if not any(safe_hit.values()) or any(value == "[REDACTED]" for value in safe_hit.values()):
+    if not any(public_fields.values()) or any(value == "[REDACTED]" for value in public_fields.values()):
         return None, False, preflight_receipt
+    safe_hit = {**_memory_advisory_public_envelope(), **public_fields}
     return safe_hit, False, preflight_receipt
 
 
@@ -2720,7 +2746,7 @@ def _space_memory_assist_for_creator(space_id: str | None, *, limit: int = 3) ->
         raw_hits = relevant_memory_for_space(sid, limit=bounded_limit, exclude_auto_ingested=True).get("results") or []
     except Exception:
         raw_hits = []
-    results: list[dict[str, str]] = []
+    results: list[dict[str, Any]] = []
     checked_count = 0
     passed_count = 0
     blocked_count = 0
@@ -2749,7 +2775,13 @@ def _space_memory_assist_for_creator(space_id: str | None, *, limit: int = 3) ->
     )
     if not results and preflight_summary is None:
         return None
-    response: dict[str, Any] = {"space_id": sid, "local_only": True, "hit_count": len(results), "results": results}
+    response: dict[str, Any] = {
+        **_memory_advisory_public_envelope(),
+        "space_id": sid,
+        "local_only": True,
+        "hit_count": len(results),
+        "results": results,
+    }
     if preflight_summary is not None:
         response["prompt_preflight"] = preflight_summary
     return response

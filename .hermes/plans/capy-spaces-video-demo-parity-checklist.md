@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- Creator-preview Memory assist now preserves and displays the Memory Tree advisory/no-authority envelope at both the card and per-hit levels, including `untrusted_advisory` authority, cannot-bypass-safety-gates status, and required prompt-preflight/approval/sandbox-preview/visual-QA/rollback-recovery gates while omitting empty or hostile memory hits.
+
 - Public Memory Tree retrieval now returns explicit advisory/no-authority metadata on `search_memory`, `/api/capy-memory/search`, `relevant_memory_for_space`, and `/api/spaces/memory` payloads and hits, making retrieved snippets visibly metadata-only, untrusted advisory context that cannot bypass prompt-preflight, approval, sandbox-preview, visual-QA, or rollback/recovery gates.
 
 - GitHub pull-request list source-refresh now fail-closes non-canonical raw authorities before URL normalization, preventing uppercase-host PR-list route variants from being fetched or persisted and keeping query/fragment/API-auth/raw-prompt markers out of receipts, search output, and vault rows.

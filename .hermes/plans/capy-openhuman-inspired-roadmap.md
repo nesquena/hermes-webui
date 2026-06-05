@@ -138,6 +138,7 @@ Delivered:
 - Production boundaries now call the canonicalizers automatically for Space manifest/revision writes (including rollback/restore anchors), widget events, recovery/repair events, and creator visual-QA commit reports.
 - Active-space context now includes cited advisory relevant-memory slices only through a prompt-preflighted, metadata-only envelope with compaction, context status, progress-event, and action-policy evidence.
 - Public Memory Tree retrieval payloads (`search_memory`, `/api/capy-memory/search`, `relevant_memory_for_space`, and `/api/spaces/memory`) now carry explicit machine-readable advisory/no-authority fields (`metadata_only`, `advisory_context`, `context_authority: untrusted_advisory`, `can_bypass_safety_gates: false`, and required gate labels), so downstream Spaces/tool consumers cannot treat retrieved snippets as trusted instructions or gate bypasses.
+- Creator preview `memory_assist` now preserves that same advisory/no-authority envelope at the wrapper and per-hit levels and renders a visible Memory trust boundary in `static/spaces.js`, so memory-informed creator drafts remain explicitly unable to bypass prompt-preflight, approval, sandbox preview, visual QA, or rollback/recovery gates.
 
 Remaining:
 - Extend the same preflighted advisory-memory envelope to remaining source/tool/browser/development boundaries where memory can influence actions.
