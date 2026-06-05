@@ -18400,6 +18400,22 @@ layout:
     assert exported["autonomy_policy"]["model_route_hint"] == "hint:reasoning"
     assert exported["autonomy_policy"]["metadata_only"] is True
 
+    export_prompt_preflight = exported["prompt_preflight"]
+    assert export_prompt_preflight["available"] is True
+    assert export_prompt_preflight["action"] == "capy.prompt_preflight"
+    assert export_prompt_preflight["boundary"] == "space_agent_package_export"
+    assert export_prompt_preflight["status"] == "required"
+    assert export_prompt_preflight["severity"] == "none"
+    assert export_prompt_preflight["categories"] == []
+    assert export_prompt_preflight["metadata_only"] is True
+    assert export_prompt_preflight["raw_prompt_stored"] is False
+    assert export_prompt_preflight["local_only"] is True
+    assert "sanitized metadata only" in export_prompt_preflight["reason"]
+    export_receipt_text = json.dumps(export_prompt_preflight, sort_keys=True).lower()
+    assert "space_yaml" not in export_receipt_text
+    assert "archive_b64" not in export_receipt_text
+    assert "use safe typed apis" not in export_receipt_text
+
     compaction = exported["output_compaction"]
     assert compaction["tool"] == "capy-spaces-package-export"
     assert compaction["command"] == "space.agent.export"
@@ -18410,6 +18426,7 @@ layout:
     compaction_text = json.dumps(compaction, sort_keys=True).lower()
     assert "format: space-agent-yaml" in compaction_text
     assert "widget_count: 1" in compaction_text
+    assert "prompt_preflight_status: required" in compaction_text
     assert "progress_run_id: package.export:package-progress-lab" in compaction_text
     assert "space_yaml" not in compaction_text
     assert "archive_b64" not in compaction_text

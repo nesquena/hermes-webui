@@ -2460,6 +2460,7 @@ global.fetch = async function(path, opts = {}) {
       filename: (body.space_id || 'lab') + '-space-agent.' + (body.format === 'zip' ? 'zip' : 'yaml'),
       space_yaml: 'id: lab\nname: Lab\nrenderer: <script>bad()</script>\napi_key: SECRET',
       widgets: {'widgets/weather.yaml': 'id: weather\nscript: <script>bad()</script>\ntoken: SECRET'},
+      prompt_preflight: { available: true, action: 'capy.prompt_preflight', boundary: 'space_agent_package_export', status: 'required', severity: 'none', categories: [], metadata_only: true, raw_prompt_stored: false, local_only: true, reason: 'Package export uses sanitized metadata only; no package body is preflighted or stored.', raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', space_yaml: 'id: lab', archive_b64: 'SECRET_ARCHIVE', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       progress_event: { event_id: 'evt-export-package', event_type: 'tool.completed', family: 'tool', run_id: 'package.export:' + (body.space_id || 'lab'), redaction_status: 'metadata_only', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       autonomy_policy: { available: true, action: 'space.agent.export', mode: 'supervised', label: 'Supervised', approval_required: true, approval_gates: ['creator_commit', 'generated_widget_execution'], prompt_preflight_status: 'required', model_route_hint: 'hint:reasoning', metadata_only: true, local_only: true, raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       output_compaction: { tool: 'capy-spaces-package-export', command: 'space.agent.export', exit_status: 0, original_chars: 7200, compacted_chars: 260, compacted: true, rules_applied: ['retain_artifact_handles'], redaction_status: 'metadata_only', redacted_count: 0, retained_artifact_handles: [{ kind: 'space-agent-package', handle: 'package.export:' + (body.space_id || 'lab'), label: (body.format === 'zip' ? 'space-agent-zip' : 'space-agent-yaml') + ' export' }], retained_citations: [], text: 'format: ' + (body.format === 'zip' ? 'space-agent-zip' : 'space-agent-yaml') + '\nwidget_count: 3\nprogress_run_id: package.export:' + (body.space_id || 'lab') + '\nspace_yaml archive_b64 renderer api_key SECRET_VALUE_DO_NOT_LEAK <script>bad()</script>' },
@@ -7543,6 +7544,9 @@ def test_spaces_ui_export_yaml_posts_space_id_and_renders_safe_metadata_only(dri
     assert "retain_artifact_handles" in out["rootHtml"]
     assert "Action policy" in out["rootHtml"]
     assert "space.agent.export" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Boundary: space_agent_package_export" in out["rootHtml"]
+    assert "raw prompt not stored" in out["rootHtml"]
     assert "Prompt preflight: required" in out["rootHtml"]
     assert "space_yaml" not in out["rootHtml"]
     assert "widgets/weather.yaml" not in out["rootHtml"]

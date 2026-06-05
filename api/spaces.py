@@ -9670,13 +9670,33 @@ def _space_agent_import_action_policy_receipt(action: str, preflight_receipt: di
     )
 
 
-def _space_agent_export_action_policy_receipt() -> dict[str, Any]:
+def _space_agent_export_required_prompt_preflight_receipt() -> dict[str, Any]:
+    """Return metadata-only required-preflight evidence for package exports.
+
+    Export responses can include raw sanitized package YAML/ZIP payloads for the
+    user to download, but safety receipts must never echo those package bodies.
+    """
+    return {
+        "available": True,
+        "action": "capy.prompt_preflight",
+        "boundary": "space_agent_package_export",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+        "reason": "Package export uses sanitized metadata only; no package body is preflighted or stored.",
+    }
+
+
+def _space_agent_export_action_policy_receipt(preflight_receipt: dict[str, Any] | None = None) -> dict[str, Any]:
     from api.capy_policy import action_policy_receipt
 
     return action_policy_receipt(
         "space.agent.export",
         approval_gates=["creator_commit", "generated_widget_execution"],
-        prompt_preflight_status="required",
+        prompt_preflight_status=(preflight_receipt or {}).get("status") if preflight_receipt else "required",
         model_route_hint="hint:reasoning",
     )
 
@@ -9697,6 +9717,7 @@ def _space_agent_export_output_compaction_receipt(
     safe_widget_count = max(0, int(widget_count or 0))
     policy_action = _context_value((autonomy_policy_receipt or {}).get("action"), 120) or "space.agent.export"
     model_route_hint = _context_value((autonomy_policy_receipt or {}).get("model_route_hint"), 80) or "hint:reasoning"
+    prompt_preflight_status = _context_value((autonomy_policy_receipt or {}).get("prompt_preflight_status"), 40) or "required"
     progress_run_id = _context_value((progress_event or {}).get("run_id"), 160) or "package.export:[REDACTED]"
     lines = [
         "Capy Spaces package export metadata-only receipt",
@@ -9706,6 +9727,7 @@ def _space_agent_export_output_compaction_receipt(
         "exit_status: 0",
         f"policy_action: {policy_action}",
         f"model_route_hint: {model_route_hint}",
+        f"prompt_preflight_status: {prompt_preflight_status}",
         f"progress_run_id: {progress_run_id}",
         "payload: sanitized package metadata only",
     ]
@@ -10008,8 +10030,10 @@ def export_space_agent_package(space_id: str, *, format: str = "yaml") -> dict[s
         }
     else:
         raise ValueError("Unsupported export format")
-    autonomy_policy_receipt = _space_agent_export_action_policy_receipt()
+    prompt_preflight_receipt = _space_agent_export_required_prompt_preflight_receipt()
+    autonomy_policy_receipt = _space_agent_export_action_policy_receipt(prompt_preflight_receipt)
     progress_event = _record_space_tool_progress_event(sid, run_prefix="package.export")
+    response["prompt_preflight"] = prompt_preflight_receipt
     response["autonomy_policy"] = autonomy_policy_receipt
     response["progress_event"] = progress_event
     response["output_compaction"] = _space_agent_export_output_compaction_receipt(
