@@ -99,6 +99,7 @@ function fetch(url, opts) { calls.fetches.push({url: String(url), body: opts && 
 
 for (const name of [
   'assistantDisplayName',
+  '_topbarLoadedMessageCount', '_topbarMessageMetaText',
   '_getOptionProviderId', '_providerFromModelValue', '_modelStateForSelect',
   '_findModelInDropdown', '_refreshOpenModelDropdown', '_applyModelToDropdown',
   '_modelStateFromAppliedDropdown', '_persistSessionModelCorrection',

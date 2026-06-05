@@ -137,6 +137,14 @@ def _persisted_session_ids_snapshot() -> frozenset[str]:
     return ids
 
 
+def _session_dir_has_persisted_session_files() -> bool:
+    """Return True when the current session dir has at least one session JSON file."""
+    try:
+        return any(not p.name.startswith('_') for p in SESSION_DIR.glob('*.json'))
+    except Exception:
+        return False
+
+
 def _rebuild_session_index_background() -> None:
     try:
         _write_session_index(updates=None)
@@ -2825,6 +2833,8 @@ def all_sessions(diag=None):
             with LOCK:
                 in_memory_ids = set(SESSIONS.keys())
             persisted_ids = _persisted_session_ids_snapshot()
+            if not index and _session_dir_has_persisted_session_files():
+                raise ValueError("empty session index while session files exist")
             index = [
                 s for s in index
                 if (
@@ -2839,6 +2849,8 @@ def all_sessions(diag=None):
                     )
                 )
             ]
+            if not index and _session_dir_has_persisted_session_files():
+                raise ValueError("session index has no live rows while session files exist")
             backfilled = []
             for i, s in enumerate(index):
                 if 'last_message_at' not in s:

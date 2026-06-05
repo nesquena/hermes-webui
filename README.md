@@ -337,6 +337,8 @@ Full list of environment variables:
 | `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` | *(unset)* | Optional comma-separated same-origin stylesheet URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_HOME` | Windows: `%LOCALAPPDATA%\hermes`; POSIX: `~/.hermes` | Base directory for Hermes state (affects all paths) |
 | `HERMES_CONFIG_PATH` | `$HERMES_HOME/config.yaml` | Path to Hermes config file |
+| `HERMES_WEBUI_AGENT_CACHE_MAX` | `25` | Max live agent instances kept warm in the in-memory LRU. Each pins a full conversation transcript, so this is the dominant lever on resident memory — lower it on installs with many long sessions to cap RAM (at the cost of more cold reloads) |
+| `HERMES_WEBUI_SESSIONS_MAX` | `100` | Max compact `Session` objects held in the in-memory LRU. Lighter than the agent cache; lower it on installs with hundreds of sessions |
 
 ---
 
@@ -537,11 +539,17 @@ Full design notes and the endpoint catalog are in [`ARCHITECTURE.md`](ARCHITECTU
 
 ## Compatibility
 
-The WebUI is tested against the current hermes-agent release at the time of each WebUI release. Until [#2491](https://github.com/nesquena/hermes-webui/issues/2491) lands a stable agent API, the WebUI imports agent Python modules directly (`api/config.py`, `api/providers.py`, `api/streaming.py`), so version skew can cause silent import errors or incorrect behaviour.
+The version shown in the WebUI runtime status is the **WebUI version only** (build/image/tag currently running). It is not a full compatibility map.
 
-**Upgrade both together.** When you update WebUI, update hermes-agent to the same release date. Running a pinned older agent against a newer WebUI (or vice versa) is untested and unsupported until #2491.
+The WebUI is still coupled to Hermes Agent internals for runtime execution, provider/model access, and state/schema usage until the stable agent boundary work in [#1925](https://github.com/nesquena/hermes-webui/issues/1925) and [#2491](https://github.com/nesquena/hermes-webui/issues/2491) land. In practice, the WebUI imports Agent modules directly (`api/config.py`, `api/providers.py`, `api/streaming.py`) and reads Agent state layout directly, so version skew can cause import or behavior drift.
 
-**Docker users: pin both image tags** rather than using `latest` on one and a fixed tag on the other. When upgrading the multi-container setup, follow the agent-image upgrade procedure in [`docs/docker.md`](docs/docker.md) (which requires dropping the `hermes-agent-src` volume before recreating). The current agent/WebUI coupling is tracked in [`docs/rfcs/agent-source-boundary.md`](docs/rfcs/agent-source-boundary.md).
+**Compatibility policy**
+- WebUI release branches are tested against the matching Hermes Agent release available at that WebUI release time.
+- **Upgrade both together**: upgrade or pin WebUI and hermes-agent together (same release train/version/date), especially before enabling production traffic.
+- Running pinned older/newer combinations is **untested and unsupported** until the stable API boundary work in [#1925](https://github.com/nesquena/hermes-webui/issues/1925) / [#2491](https://github.com/nesquena/hermes-webui/issues/2491) is in place.
+- Record the full `hermes-agent` + `hermes-webui` versions in issue reports when upgrade mismatches are suspected.
+
+**Docker users**: pin both image tags (or corresponding pinned source revisions) rather than using `latest` on one side and a fixed tag on the other. When upgrading the multi-container setup, follow the agent-image upgrade procedure in [`docs/docker.md`](docs/docker.md) (which requires dropping the `hermes-agent-src` volume before recreating). The current source-boundary status is tracked in [`docs/rfcs/agent-source-boundary.md`](docs/rfcs/agent-source-boundary.md).
 
 ---
 

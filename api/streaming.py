@@ -43,6 +43,7 @@ from api.helpers import redact_session_data, _redact_text
 from api.compression_anchor import is_context_compression_marker, visible_messages_for_anchor
 from api.metering import meter
 from api.run_journal import RunJournalWriter
+from api.todo_state import emit_todo_state
 from api.turn_journal import append_turn_journal_event_for_stream
 from api.usage import prompt_cache_hit_percent
 from api.models import (
@@ -62,6 +63,68 @@ from api.models import (
 _ENV_LOCK = threading.Lock()
 
 _KEYLESS_CUSTOM_API_KEY = "dummy-key"
+
+_PERSISTENT_MEMORY_FILES = (
+    ("memory", ("memories", "MEMORY.md")),
+    ("user", ("memories", "USER.md")),
+    ("soul", ("SOUL.md",)),
+)
+
+
+def _file_signature(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+        return (int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        return None
+
+
+def _persistent_state_snapshot(profile_home: str | None) -> dict:
+    """Capture lightweight memory/skill file signatures for save toasts."""
+    if not profile_home:
+        return {"memory": {}, "skills": {}}
+    root = Path(profile_home)
+    memory = {}
+    for key, parts in _PERSISTENT_MEMORY_FILES:
+        sig = _file_signature(root.joinpath(*parts))
+        if sig is not None:
+            memory[key] = sig
+    skills = {}
+    skills_dir = root / "skills"
+    try:
+        for skill_md in skills_dir.rglob("SKILL.md"):
+            try:
+                rel = str(skill_md.relative_to(skills_dir)).replace("\\", "/")
+            except ValueError:
+                rel = str(skill_md)
+            sig = _file_signature(skill_md)
+            if sig is not None:
+                skills[rel] = sig
+    except OSError:
+        pass
+    return {"memory": memory, "skills": skills}
+
+
+def _persistent_state_changes(before: dict | None, after: dict | None) -> dict:
+    before = before or {"memory": {}, "skills": {}}
+    after = after or {"memory": {}, "skills": {}}
+    memory_before = before.get("memory") or {}
+    memory_after = after.get("memory") or {}
+    skills_before = before.get("skills") or {}
+    skills_after = after.get("skills") or {}
+    memory_changed = any(memory_before.get(key) != sig for key, sig in memory_after.items())
+    skills = []
+    for rel, sig in skills_after.items():
+        old_sig = skills_before.get(rel)
+        if old_sig == sig:
+            continue
+        name = Path(rel).parent.name or Path(rel).stem
+        skills.append({
+            "name": name,
+            "path": rel,
+            "action": "created" if old_sig is None else "updated",
+        })
+    return {"memory_saved": memory_changed, "skills": skills[:10]}
 
 
 def _resolve_custom_provider_runtime_overrides(
@@ -592,6 +655,33 @@ def _prefill_messages_with_webui_context(prefill_context: dict, config_data: Opt
     templates (Mistral, Gemma) reject with a Jinja 500.
     """
     return list(prefill_context.get("messages") or [])
+
+
+def _normalize_prefill_messages_before_user_turn(prefill_messages: list[dict]) -> list[dict]:
+    """Ensure WebUI prefill does not end with user role before an appended turn.
+
+    Some upstream prefill sources can end with `role: user` (for example,
+    session context or recall snippets). WebUI always appends the current user
+    turn after prefill in the streaming path, so a terminal user role creates an
+    adjacent user/user sequence that strict chat templates (Gemma, Mistral/Jinja)
+    reject.
+
+    To keep behavior scoped, only consecutive terminal user messages are removed
+    just before that boundary; earlier roles remain untouched.
+    """
+    sanitized = list(prefill_messages or [])
+    n_dropped = 0
+    while sanitized:
+        last_message = sanitized[-1]
+        if not isinstance(last_message, dict):
+            break
+        if str(last_message.get("role") or "").strip().lower() != "user":
+            break
+        sanitized.pop()
+        n_dropped += 1
+    if n_dropped:
+        logger.debug("Dropped %d trailing user message(s) from prefill", n_dropped)
+    return sanitized
 
 
 def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
@@ -2684,7 +2774,35 @@ def _sanitize_messages_for_api(messages, *, cfg: dict = None):
             sanitized['content'] = _strip_native_image_parts_from_content(sanitized.get('content'))
         if sanitized.get('role'):
             clean.append(sanitized)
-    return clean
+
+    # Third pass: strip orphaned tool_calls from assistant messages — calls whose id
+    # has no matching tool-role response in the clean list.  Strict providers (DeepSeek,
+    # newer OpenAI) reject with 400 when an assistant message references a tool call that
+    # was never answered (e.g. session aborted before results flushed).
+    answered_ids: set = set()
+    for msg in clean:
+        if msg.get('role') == 'tool':
+            tid = msg.get('tool_call_id') or ''
+            if tid:
+                answered_ids.add(tid)
+
+    filtered_clean = []
+    for msg in clean:
+        if msg.get('role') == 'assistant' and msg.get('tool_calls'):
+            kept = [
+                tc for tc in msg['tool_calls']
+                if isinstance(tc, dict) and
+                (tc.get('id') or tc.get('call_id') or '') in answered_ids
+            ]
+            if not kept:
+                # All calls orphaned: drop tool_calls key; if no content, drop message.
+                msg = {k: v for k, v in msg.items() if k != 'tool_calls'}
+                if not str(msg.get('content') or '').strip():
+                    continue
+            else:
+                msg = dict(msg, tool_calls=kept)
+        filtered_clean.append(msg)
+    return filtered_clean
 
 
 def _api_safe_message_positions(messages):
@@ -2718,7 +2836,32 @@ def _api_safe_message_positions(messages):
         sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
         if sanitized.get('role'):
             out.append((idx, sanitized))
-    return out
+
+    # Third pass: strip orphaned tool_calls from assistant messages (mirrors
+    # _sanitize_messages_for_api pass 3).
+    answered_ids: set = set()
+    for _idx, msg in out:
+        if msg.get('role') == 'tool':
+            tid = msg.get('tool_call_id') or ''
+            if tid:
+                answered_ids.add(tid)
+
+    filtered_out = []
+    for idx, msg in out:
+        if msg.get('role') == 'assistant' and msg.get('tool_calls'):
+            kept = [
+                tc for tc in msg['tool_calls']
+                if isinstance(tc, dict) and
+                (tc.get('id') or tc.get('call_id') or '') in answered_ids
+            ]
+            if not kept:
+                msg = {k: v for k, v in msg.items() if k != 'tool_calls'}
+                if not str(msg.get('content') or '').strip():
+                    continue
+            else:
+                msg = dict(msg, tool_calls=kept)
+        filtered_out.append((idx, msg))
+    return filtered_out
 
 
 def _deduplicate_context_messages(messages):
@@ -3760,6 +3903,36 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
         )
 
 
+def _build_session_db_for_stream(state_db_path):
+    """Build a per-request SessionDB handle for WebUI session search.
+
+    Returns ``None`` if the helper module or constructor fails so callers can
+    continue without session_search rather than propagating a hard failure.
+    """
+    try:
+        from hermes_state import SessionDB
+        return SessionDB(db_path=state_db_path)
+    except Exception as _db_err:
+        print(f"[webui] WARNING: SessionDB init failed - session_search will be unavailable: {_db_err}", flush=True)
+        return None
+
+
+def _replace_session_db_in_kwargs(agent_kwargs, state_db_path):
+    """Build a fresh SessionDB and replace ``agent_kwargs['session_db']`` safely."""
+    if not isinstance(agent_kwargs, dict):
+        return None
+
+    _old_session_db = agent_kwargs.get("session_db")
+    _next_session_db = _build_session_db_for_stream(state_db_path)
+    if _old_session_db is not None and _old_session_db is not _next_session_db:
+        try:
+            _old_session_db.close()
+        except Exception:
+            logger.debug("Failed to close previous session_db handle during self-heal")
+    agent_kwargs["session_db"] = _next_session_db
+    return _next_session_db
+
+
 def _attempt_credential_self_heal(
     provider_id, session_id, _agent_lock_ref,
 ):
@@ -3857,6 +4030,12 @@ def _lifecycle_unregister_agent(session_id: str) -> None:
     unregister_agent(session_id)
 
 
+def _lifecycle_discard_session(session_id: str) -> bool:
+    from api.session_lifecycle import discard_session
+
+    return discard_session(session_id)
+
+
 def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
     """Commit and tear down an evicted cached agent at a WebUI session boundary.
 
@@ -3876,6 +4055,10 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
         _lifecycle_commit_session_memory(session_id, agent=agent, wait=True)
         if not _lifecycle_has_uncommitted_work(session_id):
             _lifecycle_unregister_agent(session_id)
+            # Drop the lifecycle dict entry now that the LRU-evicted agent is
+            # gone and no uncommitted work remains, so the dict tracks only live
+            # sessions instead of growing unbounded (issue #3506).
+            _lifecycle_discard_session(session_id)
         else:
             should_close_evicted_agent = False
     except Exception:
@@ -4841,6 +5024,35 @@ def _run_agent_streaming(
                         'duration': cb_kwargs.get('duration'),
                         'is_error': bool(cb_kwargs.get('is_error', False)),
                     })
+                    # Mirror the todo tool's in-memory state into a
+                    # dedicated SSE event so the Todos panel can update
+                    # in real-time without waiting for the turn to
+                    # settle. The helper guards on name=='todo', sends
+                    # the full snapshot (idempotent under SSE replay)
+                    # and swallows internal errors so emission never
+                    # breaks tool delivery. Prefer the structured
+                    # `result` kwarg from modern Hermes builds; fall
+                    # back to the truncated `preview` only when the
+                    # callback was invoked without one (older builds).
+                    #
+                    # Graceful degradation on old builds: `preview` is a
+                    # truncated snippet, so its JSON is usually unparseable.
+                    # parse_todo_tool_result() then returns None and NO
+                    # todo_state event is emitted — live panel updates are
+                    # silently unavailable on pre-`result` builds. This is
+                    # intended: the panel still hydrates via cold-load on the
+                    # next session GET; it just won't update mid-stream.
+                    emit_todo_state(
+                        put,
+                        name=name,
+                        function_result=(
+                            cb_kwargs.get('result')
+                            if cb_kwargs.get('result') is not None
+                            else preview
+                        ),
+                        session_id=session_id,
+                        stream_id=stream_id,
+                    )
                     _tool_stats = meter().get_stats()
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
@@ -4909,6 +5121,20 @@ def _run_agent_streaming(
                             'tid': tool_call_id,
                             'is_error': False,
                         })
+                        # Mirror the todo tool's in-memory state into
+                        # a dedicated SSE event so the Todos panel can
+                        # update in real-time without waiting for the
+                        # turn to settle. See the legacy path above
+                        # for the contract; the helper handles the
+                        # name guard, payload shape, and swallow-all
+                        # error policy.
+                        emit_todo_state(
+                            put,
+                            name=name,
+                            function_result=function_result,
+                            session_id=session_id,
+                            stream_id=stream_id,
+                        )
                     _tool_stats = meter().get_stats()
                     _tool_stats['session_id'] = session_id
                     _tool_stats['usage'] = _live_usage_snapshot()
@@ -4921,13 +5147,8 @@ def _run_agent_streaming(
                 raise ImportError(_aiagent_import_error_detail())
 
             # Initialize SessionDB so session_search works in WebUI sessions
-            _session_db = None
-            try:
-                from hermes_state import SessionDB
-                _state_db_path = (Path(_profile_home) / "state.db") if _profile_home else None
-                _session_db = SessionDB(db_path=_state_db_path)
-            except Exception as _db_err:
-                print(f"[webui] WARNING: SessionDB init failed — session_search will be unavailable: {_db_err}", flush=True)
+            _state_db_path = (Path(_profile_home) / "state.db") if _profile_home else None
+            _session_db = _build_session_db_for_stream(_state_db_path)
             resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
                 model_with_provider_context(model, provider_context)
             )
@@ -4973,6 +5194,7 @@ def _run_agent_streaming(
                 _cfg = _get_config()
             _prefill_context = _load_webui_prefill_context(_cfg)
             _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
+            _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)
             put('context_status', {
                 'session_id': session_id,
                 'prefill': _public_prefill_context_status(_prefill_context),
@@ -5304,13 +5526,44 @@ def _run_agent_streaming(
                     except Exception:
                         logger.debug("Lifecycle register_agent failed for new session %s", session_id, exc_info=True)
                     _evicted_items = []
+                    # Snapshot the set of session_ids with a LIVE agent worker
+                    # BEFORE taking SESSION_AGENT_CACHE_LOCK, so LRU eviction never
+                    # closes an agent mid-run AND we never nest ACTIVE_RUNS_LOCK
+                    # inside SESSION_AGENT_CACHE_LOCK (avoids any lock-ordering
+                    # deadlock). A cancel/reconnect can drop STREAMS while the
+                    # worker is still unwinding or blocked in a provider call, so
+                    # ACTIVE_RUNS (worker lifecycle) is the authoritative liveness
+                    # signal, not STREAMS. (#3536 review round 2)
+                    _active_sids = set()
+                    try:
+                        from api.config import ACTIVE_RUNS, ACTIVE_RUNS_LOCK
+                        with ACTIVE_RUNS_LOCK:
+                            for _entry in (ACTIVE_RUNS or {}).values():
+                                _sid = (_entry or {}).get("session_id")
+                                if _sid:
+                                    _active_sids.add(_sid)
+                    except Exception:
+                        _active_sids = set()
                     with SESSION_AGENT_CACHE_LOCK:
                         SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)
                         SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
                         from api.config import SESSION_AGENT_CACHE_MAX
+                        # Evict the oldest INACTIVE entries first. Walk LRU order
+                        # (front = oldest); skip any session with a live run. If
+                        # every over-cap entry is active, leave the cache
+                        # temporarily above cap rather than close a live worker's
+                        # agent — a later insertion/finalization trims it once the
+                        # run ends.
                         while len(SESSION_AGENT_CACHE) > SESSION_AGENT_CACHE_MAX:
-                            evicted_sid, evicted_entry = SESSION_AGENT_CACHE.popitem(last=False)
-                            _evicted_items.append((evicted_sid, evicted_entry))
+                            _evictable_sid = None
+                            for _sid in list(SESSION_AGENT_CACHE.keys()):
+                                if _sid not in _active_sids:
+                                    _evictable_sid = _sid
+                                    break
+                            if _evictable_sid is None:
+                                break  # all over-cap entries are active; defer
+                            evicted_entry = SESSION_AGENT_CACHE.pop(_evictable_sid)
+                            _evicted_items.append((_evictable_sid, evicted_entry))
                     # Commit and close evicted agents outside the cache lock so
                     # concurrent cache users are not blocked by provider I/O.
                     for _evicted_sid, _evicted_entry in _evicted_items:
@@ -5457,6 +5710,7 @@ def _run_agent_streaming(
             if _process_notifications:
                 _agent_msg_text = "\n\n".join([*_process_notifications, msg_text]).strip()
             user_message = _build_native_multimodal_message(workspace_ctx, _agent_msg_text, attachments, workspace, cfg=_cfg)
+            _persistent_state_before = _persistent_state_snapshot(_profile_home)
             result = agent.run_conversation(
                 user_message=user_message,
                 system_message=workspace_system_msg,
@@ -5669,6 +5923,7 @@ def _run_agent_streaming(
                             _agent_kwargs['base_url'] = resolved_base_url
                             _agent_kwargs['model'] = resolved_model
                             _agent_kwargs['provider'] = resolved_provider
+                            _replace_session_db_in_kwargs(_agent_kwargs, _state_db_path)
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                             agent = _AIAgent(**_agent_kwargs)
@@ -6355,6 +6610,26 @@ def _run_agent_streaming(
                         mark_turn_completed(s.session_id, agent=agent)
                     except Exception:
                         logger.debug("Memory lifecycle mark failed for session %s", s.session_id, exc_info=True)
+                try:
+                    _persistent_changes = _persistent_state_changes(
+                        _persistent_state_before,
+                        _persistent_state_snapshot(_profile_home),
+                    )
+                    if _persistent_changes.get("memory_saved"):
+                        put("state_saved", {
+                            "session_id": session_id,
+                            "kind": "memory",
+                            "action": "saved",
+                        })
+                    for _skill_change in _persistent_changes.get("skills") or []:
+                        put("state_saved", {
+                            "session_id": session_id,
+                            "kind": "skill",
+                            "action": _skill_change.get("action") or "updated",
+                            "name": _skill_change.get("name") or "",
+                        })
+                except Exception:
+                    logger.debug("Persistent state change detection failed for session %s", s.session_id, exc_info=True)
             # Sync to state.db for /insights (opt-in setting)
             try:
                 from api.config import load_settings as _load_settings
@@ -6734,6 +7009,7 @@ def _run_agent_streaming(
                     _heal_kwargs['base_url'] = resolved_base_url
                     _heal_kwargs['model'] = resolved_model
                     _heal_kwargs['provider'] = resolved_provider
+                    _replace_session_db_in_kwargs(_heal_kwargs, _state_db_path)
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                     _heal_agent = _AIAgent(**_heal_kwargs)

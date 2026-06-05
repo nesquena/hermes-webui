@@ -5902,6 +5902,10 @@ def handle_get(handler, parsed) -> bool:
         #           setup is probably not configured with a gateway
         health = build_agent_health_payload()
         alive = health.get("alive")
+        details = health.get("details") if isinstance(health.get("details"), dict) else {}
+        health_reason = details.get("reason")
+        health_state = details.get("state")
+        health_gateway_state = details.get("gateway_state")
         if alive is True:
             running = True
             configured = True
@@ -5924,10 +5928,9 @@ def handle_get(handler, parsed) -> bool:
             # configured" rather than nagging (#1944). So stale-stopped falls
             # through to the identity_map signal like the genuinely-unconfigured
             # case.
-            details = health.get("details") or {}
             gateway_running_metadata = (
-                details.get("reason") == "gateway_stale_running_state"
-                or details.get("gateway_state") == "running"
+                health_reason == "gateway_stale_running_state"
+                or health_gateway_state == "running"
             )
             configured = True if gateway_running_metadata else bool(identity_map)
             running = bool(identity_map)
@@ -5963,6 +5966,11 @@ def handle_get(handler, parsed) -> bool:
             "platforms": platforms,
             "last_active": last_active,
             "session_count": len(identity_map),
+            "health": {
+                "state": health_state,
+                "reason": health_reason,
+                "gateway_state": health_gateway_state,
+            },
         })
 
     # ── MCP Servers (GET) ──
@@ -6409,6 +6417,14 @@ def handle_post(handler, parsed) -> bool:
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
         return j(handler, result)
+
+    if parsed.path == "/api/models/refresh":
+        provider_id = (body.get("provider") or "").strip().lower()
+        if not provider_id:
+            return bad(handler, "provider is required")
+        from api.config import invalidate_provider_models_cache
+        invalidate_provider_models_cache(provider_id)
+        return j(handler, {"ok": True, "provider": provider_id})
 
     if parsed.path == "/api/reasoning":
         # CLI-parity /reasoning handler — writes to the same config.yaml keys
@@ -7197,11 +7213,21 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Commands (POST) ──
     if parsed.path == "/api/commands/exec":
-        from api.commands import execute_plugin_command
+        from api.commands import execute_agent_command, execute_plugin_command
 
         command = str(body.get("command", "") or "").strip()
         if not command:
             return bad(handler, "command is required")
+
+        try:
+            return j(handler, {"output": execute_agent_command(command)})
+        except KeyError:
+            pass
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except RuntimeError as e:
+            return bad(handler, _sanitize_error(e), 500)
+
         try:
             return j(handler, {"output": execute_plugin_command(command)})
         except ValueError as e:
@@ -8921,9 +8947,11 @@ def _handle_tts(handler, parsed):
     only its own thread during Microsoft network I/O + streaming; other clients
     are unaffected. Combined with early auth, a strict per-client 2 s rate
     limit, 5000-char cap, and voice allowlist, the blocking cost is bounded and
-    intentional. Streaming chunks directly via stream_sync() keeps memory
-    usage low. A cross-thread pool + queue would add complexity and wfile
-    thread-safety issues with no practical gain under the current model.
+    intentional. All audio chunks are buffered before sending so that a
+    Content-Length header can be included. The 5000-char cap bounds audio to
+    roughly 1-5 MB, making full buffering safe. Without Content-Length the
+    HTTP/1.0 server leaves the response open until a ~31 s timeout fires, and
+    the browser cannot play the blob mid-stream.
     If the HTTP layer ever moves to asyncio we can adopt edge_tts's native
     async API at that time.
     """
@@ -9029,17 +9057,27 @@ def _handle_tts(handler, parsed):
 
         comm = edge_tts.Communicate(text, voice, **kwargs)
 
-        handler.send_response(200)
-        handler.send_header("Content-Type", "audio/mpeg")
-        handler.send_header("Cache-Control", "no-store")
-        handler.end_headers()
-
+        # Buffer all audio chunks before responding so Content-Length is known.
+        # Without it the HTTP/1.0 server holds the connection open until a ~31 s
+        # timeout fires and the browser cannot play the resulting blob.
+        audio_buf = bytearray()
         for chunk in comm.stream_sync():
             if chunk.get("type") == "audio" and chunk.get("data"):
-                try:
-                    handler.wfile.write(chunk["data"])
-                except (BrokenPipeError, ConnectionResetError):
-                    return True
+                audio_buf.extend(chunk["data"])
+
+        if not audio_buf:
+            from api.helpers import bad as _bad
+            return _bad(handler, "TTS produced no audio", 500)
+
+        handler.send_response(200)
+        handler.send_header("Content-Type", "audio/mpeg")
+        handler.send_header("Content-Length", str(len(audio_buf)))
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        try:
+            handler.wfile.write(audio_buf)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         return True
 
     except BrokenPipeError:
@@ -12224,14 +12262,28 @@ def _handle_file_reveal(handler, body):
             # what was missing).
             return bad(handler, f"File not found: {target}", 404)
 
+        target_str = str(target)
+
+        # Optional Docker host/container path translation (mirrors _handle_file_open_vscode).
+        from api.config import get_config as _get_cfg  # noqa: PLC0415
+        vscode_cfg = _get_cfg().get("vscode", {})
+        if not isinstance(vscode_cfg, dict):
+            vscode_cfg = {}
+        container_prefix = vscode_cfg.get("container_path_prefix", "")
+        host_prefix = vscode_cfg.get("host_path_prefix", "")
+        if container_prefix and host_prefix:
+            _norm = container_prefix.rstrip('/') + '/'
+            if target_str.startswith(_norm) or target_str == container_prefix.rstrip('/'):
+                target_str = host_prefix + target_str[len(container_prefix):]
+
         system = platform.system()
         if system == "Darwin":
-            subprocess.Popen(["open", "-R", str(target)])
+            subprocess.Popen(["open", "-R", target_str])
         elif system == "Windows":
-            subprocess.Popen(["explorer.exe", "/select," + str(target)])
+            subprocess.Popen(["explorer.exe", "/select," + target_str])
         else:
             # Linux / other — open parent directory
-            subprocess.Popen(["xdg-open", str(target.parent)])
+            subprocess.Popen(["xdg-open", str(Path(target_str).parent)])
 
         return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError, OSError) as e:
@@ -12304,8 +12356,10 @@ def _handle_file_open_vscode(handler, body):
             vscode_cfg = {}
         container_prefix = vscode_cfg.get("container_path_prefix", "")
         host_prefix = vscode_cfg.get("host_path_prefix", "")
-        if container_prefix and host_prefix and target_str.startswith(container_prefix):
-            target_str = host_prefix + target_str[len(container_prefix):]
+        if container_prefix and host_prefix:
+            _norm = container_prefix.rstrip('/') + '/'
+            if target_str.startswith(_norm) or target_str == container_prefix.rstrip('/'):
+                target_str = host_prefix + target_str[len(container_prefix):]
 
         cmd = vscode_cfg.get("command", "code")
         # Resolve the command to an absolute path so subprocess.Popen finds it

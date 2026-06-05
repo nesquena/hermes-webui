@@ -89,6 +89,16 @@ def wait_for_file_text(path: Path, timeout: float = 3.0) -> str:
     raise AssertionError(f"File was not written: {path}")
 
 
+def _kill_tree(pid: int) -> None:
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+    else:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
 def assert_process_exits(pid: int, timeout: float = 3.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -97,6 +107,7 @@ def assert_process_exits(pid: int, timeout: float = 3.0) -> None:
         except ProcessLookupError:
             return
         time.sleep(0.05)
+    _kill_tree(pid)
     raise AssertionError(f"process {pid} did not exit")
 
 
