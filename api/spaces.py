@@ -9765,6 +9765,7 @@ def _space_agent_import_output_compaction_receipt(
     safe_widget_count = max(0, int(widget_count or 0))
     policy_action = _context_value((autonomy_policy_receipt or {}).get("action"), 120) or "space.agent.import"
     model_route_hint = _context_value((autonomy_policy_receipt or {}).get("model_route_hint"), 80) or "hint:reasoning"
+    prompt_preflight_status = _context_value((autonomy_policy_receipt or {}).get("prompt_preflight_status"), 40) or "pass"
     progress_run_id = _context_value((progress_event or {}).get("run_id"), 160) or "package.import:[REDACTED]"
     lines = [
         "Capy Spaces package import metadata-only receipt",
@@ -9774,6 +9775,7 @@ def _space_agent_import_output_compaction_receipt(
         "exit_status: 0",
         f"policy_action: {policy_action}",
         f"model_route_hint: {model_route_hint}",
+        f"prompt_preflight_status: {prompt_preflight_status}",
         f"progress_run_id: {progress_run_id}",
         "payload: sanitized package metadata only",
     ]

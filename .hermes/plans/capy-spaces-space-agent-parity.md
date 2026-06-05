@@ -38,6 +38,10 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(spaces): preserve package import preflight compaction`
+  - Added RED/GREEN backend coverage proving Space Agent package import `output_compaction` receipts now preserve the prompt-preflight status already present in the metadata-only action-policy receipt.
+  - Kept package-import compaction evidence bounded to safe package format, Space id, widget count, policy/model-route/progress metadata, and prompt-preflight status while omitting package YAML, generated widget bodies, renderer/source/API-auth fields, scripts, and secret-looking fixture values.
+
 - `feat(spaces): preserve creator memory advisory envelope`
   - Added RED/GREEN backend and real-`static/spaces.js` coverage proving creator-preview `memory_assist` now keeps the same metadata-only advisory/no-authority envelope as public Memory Tree retrieval at both the top level and per-hit level.
   - The creator memory-assist UI now renders a visible `Memory trust boundary` row with `context_authority: untrusted_advisory`, required gate labels, and `can_bypass_safety_gates: false`, while empty public-memory hits and hostile renderer/API-auth/script fixtures remain omitted.

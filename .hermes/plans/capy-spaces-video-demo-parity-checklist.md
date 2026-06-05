@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- Space Agent package import compaction receipts now preserve the metadata-only import prompt-preflight status alongside package format, Space id, widget count, policy/model-route, and progress evidence, matching export receipt parity without rendering package YAML, generated widget bodies, renderer/source/API-auth fields, scripts, or secret-looking fixture values.
+
 - Creator-preview Memory assist now preserves and displays the Memory Tree advisory/no-authority envelope at both the card and per-hit levels, including `untrusted_advisory` authority, cannot-bypass-safety-gates status, and required prompt-preflight/approval/sandbox-preview/visual-QA/rollback-recovery gates while omitting empty or hostile memory hits.
 
 - Public Memory Tree retrieval now returns explicit advisory/no-authority metadata on `search_memory`, `/api/capy-memory/search`, `relevant_memory_for_space`, and `/api/spaces/memory` payloads and hits, making retrieved snippets visibly metadata-only, untrusted advisory context that cannot bypass prompt-preflight, approval, sandbox-preview, visual-QA, or rollback/recovery gates.

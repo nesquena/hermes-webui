@@ -18378,6 +18378,7 @@ layout:
     import_compaction_text = json.dumps(import_compaction, sort_keys=True).lower()
     assert "package_format: space-agent-yaml" in import_compaction_text
     assert "widget_count: 1" in import_compaction_text
+    assert "prompt_preflight_status: pass" in import_compaction_text
     assert "progress_run_id: package.import:package-progress-lab" in import_compaction_text
     assert "space_yaml" not in import_compaction_text
     assert "archive_b64" not in import_compaction_text
