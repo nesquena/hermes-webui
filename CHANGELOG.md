@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+- Workspace panel Git controls now expose the backend Git workflow in the UI: branch/status badges, staged and unstaged change groups, diff preview, stage/unstage/discard actions, branch switching, push/pull/fetch controls, and commit flows from the Changes tab. (#2668, @stocky789)
+
 ## [v0.51.252] — 2026-06-03 — Release HT (stage-q24 — selection-bleed fix + compatibility docs)
 
 ### Fixed

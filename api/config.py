@@ -469,15 +469,35 @@ def _workspace_candidates(raw: str | Path | None = None) -> list[Path]:
 
 
 def _mode_allows(path: Path, required_bits: int) -> bool:
-    """Return permission-bit access, independent of root's os.access bypass."""
+    """Return whether POSIX mode bits grant this process the requested access."""
     try:
-        mode = path.stat().st_mode
+        stat_result = path.stat()
     except OSError:
         return False
+
+    mode = stat_result.st_mode
     user_bits = (mode >> 6) & 0b111
     group_bits = (mode >> 3) & 0b111
     other_bits = mode & 0b111
-    return any((bits & required_bits) == required_bits for bits in (user_bits, group_bits, other_bits))
+
+    if hasattr(os, "geteuid") and hasattr(os, "getgroups"):
+        euid = os.geteuid()
+        groups = set(os.getgroups())
+        if hasattr(os, "getegid"):
+            groups.add(os.getegid())
+        if euid == stat_result.st_uid:
+            bits = user_bits
+        elif stat_result.st_gid in groups:
+            bits = group_bits
+        else:
+            bits = other_bits
+    else:
+        # Windows does not expose POSIX identity/group semantics here; keep the
+        # old mode-bit fallback as a conservative approximation for tests and
+        # optional workspace discovery.
+        bits = user_bits | group_bits | other_bits
+
+    return (bits & required_bits) == required_bits
 
 
 def _is_autocreatable_workspace_path(path: Path) -> bool:

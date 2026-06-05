@@ -1,5 +1,6 @@
 import json
 import pathlib
+import re
 import subprocess
 import types
 import uuid
@@ -1066,6 +1067,12 @@ def test_workspace_git_static_contracts():
         assert token in index
 
     i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    locale_headers = list(re.finditer(r"^\s{2}([a-z][a-z0-9_-]*):\s*\{", i18n, re.MULTILINE))
+    assert locale_headers
+    locale_blocks = []
+    for index, match in enumerate(locale_headers):
+        end = locale_headers[index + 1].start() if index + 1 < len(locale_headers) else len(i18n)
+        locale_blocks.append((match.group(1), i18n[match.start():end]))
     for key in [
         "git_files",
         "git_changes",
@@ -1086,10 +1093,12 @@ def test_workspace_git_static_contracts():
         "git_stashed",
         "git_diff_unified",
         "git_diff_split",
+        "git_tracked",
+        "git_select_files",
+        "git_commit_message_privacy",
     ]:
-        assert i18n.count(f"{key}:") >= 11
-    for key in ["git_tracked", "git_select_files", "git_commit_message_privacy"]:
-        assert i18n.count(f"{key}:") >= 11
+        missing = [name for name, block in locale_blocks if not re.search(rf"^\s{{4}}{re.escape(key)}:", block, re.MULTILINE)]
+        assert not missing, f"{key} missing from locales: {missing}"
 
 def test_git_env_scrub_removes_redirecting_vars_and_preserves_temp_index(monkeypatch):
     from api.workspace_git import _clean_git_env
