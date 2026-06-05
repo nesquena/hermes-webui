@@ -151,6 +151,8 @@ def _safe_streaming_event_type(event_type, *, status=None, is_error: bool = Fals
         return "tool.failed", "tool"
     if event_type == "tool.started":
         return "tool.started", "tool"
+    if event_type == "tool.args.delta":
+        return "tool.args.delta", "tool"
     if event_type == "text.delta":
         return "text.delta", "text"
     if event_type == "thinking.delta":
@@ -2856,6 +2858,21 @@ def _run_agent_streaming(
                     put('progress_event', {
                         'event_type': subagent_receipt.get('event_type') or 'subagent.progress',
                         'family': 'subagent',
+                        'redaction_status': 'metadata_only',
+                    })
+                    return
+
+                if event_type == 'tool.args.delta':
+                    args_receipt = _record_streaming_tool_progress_event(
+                        event_type='tool.args.delta',
+                        stream_id=stream_id,
+                        tool_name=name,
+                        preview=preview,
+                        args=args,
+                    )
+                    put('progress_event', {
+                        'event_type': args_receipt.get('event_type') or 'tool.args.delta',
+                        'family': 'tool',
                         'redaction_status': 'metadata_only',
                     })
                     return

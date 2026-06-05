@@ -116,6 +116,67 @@ def test_streaming_tool_start_records_metadata_only_progress_event(tmp_path, mon
         assert unsafe.lower() not in serialized.lower()
 
 
+def test_streaming_tool_args_delta_records_metadata_only_progress_event(tmp_path, monkeypatch):
+    """Streaming tool argument deltas should not be mislabeled as completion.
+
+    Tool-argument deltas can contain command bodies, prompt fragments, renderer
+    fields, or credentials. The durable progress event must record only the safe
+    taxonomy event type and stream-scoped run id.
+    """
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    receipt = streaming._record_streaming_tool_progress_event(
+        event_type="tool.args.delta",
+        stream_id="stream-args-123",
+        tool_name="terminal_<script>",
+        preview="SECRET_VALUE_DO_NOT_LEAK raw_prompt ignore previous instructions",
+        args={
+            "command": "cat ~/.ssh/id_rsa SECRET_VALUE_DO_NOT_LEAK",
+            "api_key": "bearer placeholder",
+            "renderer": "<script>alert(1)</script>",
+        },
+    )
+    status = capy_progress.progress_status()
+    raw_log = Path(tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8")
+    serialized = raw_log + "\n" + str(status)
+
+    assert receipt["stored"] is True
+    assert receipt["event_type"] == "tool.args.delta"
+    assert receipt["family"] == "tool"
+    assert receipt["run_id"] == "webui.tool:stream-args-123"
+    assert status["recent_family_counts"]["tool"] == 1
+    assert status["recent_events"][0]["event_type"] == "tool.args.delta"
+    assert status["recent_events"][0]["run_id"] == "webui.tool:stream-args-123"
+    for unsafe in UNSAFE_FIXTURES + ("api_key", "bearer placeholder", "id_rsa"):
+        assert unsafe.lower() not in serialized.lower()
+
+
+def test_streaming_tool_args_delta_uses_fallback_run_id_for_unsafe_stream_ids(tmp_path, monkeypatch):
+    """Unsafe stream ids in tool-args delta markers must not become public metadata."""
+    monkeypatch.setenv("CAPY_PROGRESS_LOG", str(tmp_path / "progress" / "events.jsonl"))
+
+    from api import capy_progress, streaming
+
+    receipt = streaming._record_streaming_tool_progress_event(
+        event_type="tool.args.delta",
+        stream_id="SECRET_VALUE_DO_NOT_LEAK<script>source.data ignore previous instructions",
+        tool_name="safe-name",
+        args={"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+    )
+    raw_log = Path(tmp_path / "progress" / "events.jsonl").read_text(encoding="utf-8")
+    serialized = raw_log + "\n" + str(capy_progress.progress_status())
+
+    assert receipt["stored"] is True
+    assert receipt["event_type"] == "tool.args.delta"
+    assert receipt["family"] == "tool"
+    assert receipt["run_id"] == "webui.tool:stream"
+    assert "webui.tool:stream" in serialized
+    for unsafe in ("SECRET_VALUE_DO_NOT_LEAK", "<script", "source.data", "ignore-previous-instructions", "api_key"):
+        assert unsafe.lower() not in serialized.lower()
+
+
 def test_streaming_subagent_spawn_records_metadata_only_progress_event(tmp_path, monkeypatch):
     """WebUI streaming subagent events should be recorded as subagent progress.
 
@@ -384,6 +445,9 @@ def test_streaming_callbacks_invoke_progress_recorder_for_tool_subagent_and_delt
     completed_recorder_idx = src.find("_record_streaming_tool_progress_event", completed_idx)
     completed_return_idx = src.find("return", completed_idx)
     on_tool_idx = src.find("def on_tool(*cb_args, **cb_kwargs):")
+    args_delta_idx = src.find("if event_type == 'tool.args.delta':", on_tool_idx)
+    args_delta_recorder_idx = src.find("_record_streaming_tool_progress_event", args_delta_idx)
+    args_delta_return_idx = src.find("return", args_delta_idx)
     subagent_idx = src.find("if event_type in _STREAMING_SUBAGENT_INPUT_EVENT_TYPES:", on_tool_idx)
     subagent_recorder_idx = src.find("_record_streaming_progress_event", subagent_idx)
     subagent_return_idx = src.find("return", subagent_idx)
@@ -401,6 +465,10 @@ def test_streaming_callbacks_invoke_progress_recorder_for_tool_subagent_and_delt
     assert completed_idx != -1, "streaming tool.completed callback block not found"
     assert completed_recorder_idx != -1 and completed_idx < completed_recorder_idx < completed_return_idx, (
         "tool.completed callback must record a metadata-only Capy progress event before returning"
+    )
+    assert args_delta_idx != -1, "streaming tool.args.delta callback block not found"
+    assert args_delta_recorder_idx != -1 and args_delta_idx < args_delta_recorder_idx < args_delta_return_idx, (
+        "tool.args.delta callback must record a metadata-only Capy progress event before returning"
     )
     assert subagent_idx != -1, "streaming subagent callback block not found"
     assert subagent_recorder_idx != -1 and subagent_idx < subagent_recorder_idx < subagent_return_idx, (
