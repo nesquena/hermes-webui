@@ -504,6 +504,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_dependabot_alerts_path_repo(raw_origin_text)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_security_advisories_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_security_advisories_path_repo(raw_origin_text)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_code_scanning_alerts_path_matches(raw_origin_text) and (
         not _github_raw_authority_is_exact(raw_origin_text, "api.github.com")
         or not _github_code_scanning_alerts_path_repo(raw_origin_text)
@@ -6729,6 +6734,258 @@ def _github_dependabot_alerts_refresh_summary(origin_uri: str, payload: list[Any
     return _bounded_refresh_summary("; ".join(parts))
 
 
+def _github_security_advisories_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if not (parts.hostname or "").strip():
+        return False
+
+    def _matches_security_advisories_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        lowered = [segment.lower() for segment in path]
+        return (
+            len(path) >= 5
+            and path[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4].startswith("security-advisories")
+        )
+
+    return _matches_security_advisories_shape(parts.path) or _matches_security_advisories_shape(unquote(parts.path))
+
+
+def _github_security_advisories_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or parts.netloc != "api.github.com":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "security-advisories"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+_GITHUB_SECURITY_ADVISORY_SEVERITIES = {"low", "moderate", "medium", "high", "critical"}
+_GITHUB_SECURITY_ADVISORY_STATES = {"open", "closed", "published", "withdrawn", "draft"}
+_GITHUB_SECURITY_ADVISORY_TIMESTAMP_FIELDS = ("created_at", "updated_at", "published_at", "withdrawn_at")
+_GITHUB_SECURITY_ADVISORY_ALLOWED_KEYS = {
+    "collaborating_teams",
+    "collaborating_users",
+    "created_at",
+    "credits",
+    "credits_detailed",
+    "cve_id",
+    "cwes",
+    "cvss",
+    "description",
+    "ghsa_id",
+    "html_url",
+    "identifiers",
+    "private",
+    "published_at",
+    "repository",
+    "severity",
+    "state",
+    "submission",
+    "summary",
+    "updated_at",
+    "url",
+    "vulnerabilities",
+    "withdrawn_at",
+}
+_GITHUB_SECURITY_ADVISORY_UNSAFE_IGNORED_KEY_TOKENS = {
+    "api",
+    "apiauth",
+    "auth",
+    "authorization",
+    "bearer",
+    "body",
+    "code",
+    "credential",
+    "data",
+    "generatedbody",
+    "generatedcode",
+    "html",
+    "password",
+    "private",
+    "rawcontent",
+    "rawprompt",
+    "renderer",
+    "rendercode",
+    "script",
+    "secret",
+    "source",
+    "token",
+    "widgetbody",
+}
+
+
+def _github_security_advisory_ghsa_id_is_safe(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if text != value:
+        return ""
+    if not re.fullmatch(r"GHSA-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}", text):
+        return ""
+    if _refresh_value_is_blocked(text):
+        return ""
+    return text
+
+
+def _github_security_advisory_cve_id_is_safe(value: Any) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if text != value:
+        return ""
+    if not re.fullmatch(r"CVE-[0-9]{4}-[0-9]{4,19}", text):
+        return ""
+    if _refresh_value_is_blocked(text):
+        return ""
+    return text
+
+
+def _github_security_advisory_identifier_value(row: dict[str, Any], identifier_type: str) -> str:
+    identifiers = row.get("identifiers")
+    if not isinstance(identifiers, list):
+        return ""
+    for item in identifiers:
+        if not isinstance(item, dict):
+            return ""
+        raw_type = item.get("type")
+        if not isinstance(raw_type, str):
+            return ""
+        if raw_type.strip().upper() != identifier_type:
+            continue
+        if identifier_type == "GHSA":
+            return _github_security_advisory_ghsa_id_is_safe(item.get("value"))
+        if identifier_type == "CVE":
+            return _github_security_advisory_cve_id_is_safe(item.get("value"))
+    return ""
+
+
+def _github_security_advisory_ghsa_id(row: dict[str, Any]) -> str:
+    return _github_security_advisory_ghsa_id_is_safe(row.get("ghsa_id")) or _github_security_advisory_identifier_value(row, "GHSA")
+
+
+def _github_security_advisory_cve_id(row: dict[str, Any]) -> str:
+    return _github_security_advisory_cve_id_is_safe(row.get("cve_id")) or _github_security_advisory_identifier_value(row, "CVE")
+
+
+def _github_security_advisory_ignored_key_is_safe(key: str) -> bool:
+    if _refresh_value_is_blocked(key):
+        return False
+    collapsed = re.sub(r"[^a-z0-9]+", "", key.lower())
+    if collapsed in _GITHUB_SECURITY_ADVISORY_UNSAFE_IGNORED_KEY_TOKENS:
+        return False
+    camel_spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", key)
+    camel_spaced = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", camel_spaced)
+    tokens = [token for token in re.split(r"[^a-z0-9]+", camel_spaced.lower()) if token]
+    return not any(token in _GITHUB_SECURITY_ADVISORY_UNSAFE_IGNORED_KEY_TOKENS for token in tokens)
+
+
+def _github_security_advisory_ignored_scalar_is_safe(value: Any) -> bool:
+    if value is None or isinstance(value, bool) or (not isinstance(value, bool) and isinstance(value, int)):
+        return True
+    if isinstance(value, float):
+        return True
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if text != value:
+        return False
+    return not re.search(
+        r"SECRET_VALUE_DO_NOT_LEAK|<\s*/?\s*script\b|<[^>]+>|bearer\b|api[ _-]?key|api[ _-]?auth|"
+        r"\b(?:sk|pk)-(?:live|test)(?:[-_][A-Za-z0-9]+)*\b|gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|"
+        r"raw[_\s-]*prompt|system[_\s-]*prompt|developer[_\s-]*prompt|prompt[_\s-]*injection|ignore[_\s-]*previous[_\s-]*instructions|"
+        r"credential|password|authorization|/users/|/private/|javascript\s*:",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
+def _github_security_advisory_ignored_value_is_safe(value: Any) -> bool:
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str)
+            and _github_security_advisory_ignored_key_is_safe(key)
+            and _github_security_advisory_ignored_value_is_safe(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return all(_github_security_advisory_ignored_value_is_safe(item) for item in value)
+    if isinstance(value, _PUBLIC_SCALAR_TYPES):
+        return _github_security_advisory_ignored_scalar_is_safe(value)
+    return not _refresh_value_is_blocked(value)
+
+
+def _github_security_advisory_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if any(key not in _GITHUB_SECURITY_ADVISORY_ALLOWED_KEYS for key in row):
+        return False
+    if not all(_github_security_advisory_ignored_value_is_safe(value) for value in row.values()):
+        return False
+    if not _github_security_advisory_ghsa_id(row):
+        return False
+    if "cve_id" in row and row.get("cve_id") is not None and not _github_security_advisory_cve_id_is_safe(row.get("cve_id")):
+        return False
+    if str(row.get("severity") or "").lower() not in _GITHUB_SECURITY_ADVISORY_SEVERITIES:
+        return False
+    if str(row.get("state") or "").lower() not in _GITHUB_SECURITY_ADVISORY_STATES:
+        return False
+    for field in _GITHUB_SECURITY_ADVISORY_TIMESTAMP_FIELDS:
+        if field in row and row.get(field) is not None and not _safe_iso_timestamp(row.get(field)):
+            return False
+    return True
+
+
+def _json_payload_is_github_security_advisories_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_security_advisories_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list):
+        return False
+    return all(_github_security_advisory_row_is_safe(row) for row in payload)
+
+
+def _github_security_advisories_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_security_advisories_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_security_advisory_row_is_safe(row)]
+    parts = [f"GitHub security advisories for {repo}", f"advisory count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        row_parts = [
+            f"advisory GHSA: {_github_security_advisory_ghsa_id(row)}",
+            f"CVE: {_github_security_advisory_cve_id(row) or 'none'}",
+            f"severity: {str(row.get('severity')).lower()}",
+            f"state: {str(row.get('state')).lower()}",
+        ]
+        timestamp_labels = {
+            "created_at": "created",
+            "updated_at": "updated",
+            "published_at": "published",
+            "withdrawn_at": "withdrawn",
+        }
+        for field, label in timestamp_labels.items():
+            timestamp = _safe_iso_timestamp(row.get(field))
+            if timestamp:
+                row_parts.append(f"{label}: {timestamp}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_code_scanning_alerts_path_matches(origin_uri: str) -> bool:
     try:
         parts = urlsplit(origin_uri)
@@ -7845,6 +8102,20 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_dependabot_alerts_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    security_advisories_repo = _github_security_advisories_path_repo(origin_uri)
+    if security_advisories_repo:
+        if not _json_payload_is_github_security_advisories_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        title = f"GitHub security advisories {security_advisories_repo}"
+        summary = _github_security_advisories_refresh_summary(origin_uri, payload)
+        return {
+            "metadata_only": True,
+            "title": title,
+            "summary": summary,
+            "origin_uri": f"github security advisories {security_advisories_repo}",
+        }
+    if _github_security_advisories_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     code_scanning_alerts_repo = _github_code_scanning_alerts_path_repo(origin_uri)
     if code_scanning_alerts_repo:
         if not _json_payload_is_github_code_scanning_alerts_metadata(origin_uri, payload):
@@ -8321,6 +8592,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_dependabot_alerts_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_dependabot_alerts_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_security_advisories_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_security_advisories_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_code_scanning_alerts_path_matches(raw_origin_uri):
         if not _github_raw_authority_is_exact(raw_origin_uri, "api.github.com") or not _github_code_scanning_alerts_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -8516,6 +8790,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_dependabot_alerts_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_security_advisories_path_matches(safe_origin_uri):
+        if not _github_security_advisories_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_code_scanning_alerts_path_matches(safe_origin_uri):
         if not _github_code_scanning_alerts_path_repo(safe_origin_uri) or not _github_raw_authority_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -8599,6 +8877,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_dependabot_alerts_path_repo(final_url)
             or _github_dependabot_alerts_path_repo(final_url) != _github_dependabot_alerts_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_security_advisories_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_security_advisories_path_repo(final_url)
+            or _github_security_advisories_path_repo(final_url) != _github_security_advisories_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_code_scanning_alerts_path_matches(safe_origin_uri) and (
@@ -8771,6 +9055,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_dependabot_alerts_path_matches(safe_origin_uri) and (
             not _github_dependabot_alerts_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_security_advisories_path_matches(safe_origin_uri) and (
+            not _github_security_advisories_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
