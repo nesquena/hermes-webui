@@ -3,6 +3,21 @@
 
 ## [Unreleased]
 
+## [v0.51.268] — 2026-06-05 — Release IJ (stage-b1 — low-risk perf + provider/clarify fixes)
+
+### Fixed
+- **The DeepSeek reasoning-effort heuristic is now position-independent**, so the reasoning-effort selector correctly appears for V/R-series DeepSeek models even when a custom aggregator prepends a provider slug to the id (e.g. `@custom:name:DeepSeek-V4-Flash` → `my-provider-deepseek-v4-flash`). Non-reasoning variants (`deepseek-chat`, `deepseek-coder`) stay correctly excluded, and a provider slug that happens to start with `v`/`r` (e.g. `vertex`) no longer falsely triggers the version guard. (#3650, @happy5318)
+- **The clarify draft is no longer stashed while a clarify submission is in flight**, preventing a just-submitted answer from being re-stashed as a leftover draft when the prompt resolves. (#3651, @Carry00)
+
+### Performance
+- **Codex live-model cache merge now uses O(1) set membership** instead of repeated list scans when reconciling the visible Codex model cache against live ids. (#3656, @pamnard)
+- **Session lineage child fetch is batched into a single query** (parents fetched with one `IN (...)` query and grouped in memory) instead of one SQLite query per parent segment. (#3659, @pamnard)
+- **Orphan CLI-sidecar existence probes are batched** into chunked `IN (...)` queries via a new `agent_session_rows_existing()` helper, replacing the per-row `agent_session_row_exists()` connection in the sidebar prune path. Degrades safely to "assume present" on any error so a transient failure never prunes a real session. (#3657, @pamnard)
+
+### Internal
+- **Added a static-analysis contract test pinning the DOM-INFLIGHT reattach persistence invariant** (#3040): every `INFLIGHT[activeSid]` write in `send()` is paired with a `saveInflightState()` call so a reconnect/session-switch reseeds from durable state. (#3572, @rodboev)
+- **Added a regression test asserting `MiniMax-M3` is present in the MiniMax fallback model catalog.** (#3627, @rodboev)
+
 ## [v0.51.267] — 2026-06-04 — Release II (stage-r17 — TTS + CSRF forwarded-header security hardening)
 
 ### Security
