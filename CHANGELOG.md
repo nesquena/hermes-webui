@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.271] — 2026-06-05 — Release IM (stage-m1 — named custom provider binding)
+
+### Fixed
+- **A named custom provider binding (`@custom:name:model`) is preserved when starting a chat** instead of being overridden by the bare-model family fallback, so a session pinned to a specific named custom endpoint routes to that endpoint. Live model `<option>`/`<optgroup>` entries also carry their provider via `data-provider` for accurate selection. (#3626, @rodboev)
+
 ### Tests
 - **Regression test locking the approval/clarify card re-show invariant on session switch** (#3668). Switching away from a session blocked on a `clarify`/`approval` prompt and switching back must re-show the card for the returning session — the prompts are cached per-session in memory and re-rendered by `_renderPendingPromptsForActiveSession()` on every `loadSession()`, with `startClarifyPolling`/`startApprovalPolling` + the SSE `initial` event covering the uncached (fresh-reload) path. A node-driver test runs the real extracted JS through the switch-away→switch-back sequence (RED/GREEN-validated against a simulated over-broad teardown). This behavior shipped in v0.51.19 (#1829); the test prevents a future regression. (#3668)
 
