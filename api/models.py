@@ -4114,6 +4114,8 @@ def get_state_db_session_messages(sid, *, stitch_continuations: bool = False, pr
                     'content': row['content'],
                     'timestamp': row['timestamp'],
                 }
+                if 'id' in row.keys() and row['id'] not in (None, ''):
+                    msg['id'] = row['id']
                 for col in optional:
                     if col not in row.keys():
                         continue

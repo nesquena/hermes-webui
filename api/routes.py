@@ -3376,33 +3376,158 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     snapshot parent plus a child continuation sidecar. The frontend computes
     fork keep-counts against this merged display list, so branch/fork must slice
     the same list rather than the sidecar-only ``session.messages`` array.
+
+    Treat the sidecar as the authoritative repaired ordering when both sources
+    exist: preserve it verbatim, then add only CLI/state rows that are not
+    provable mirrors. Stable ``id``/``message_id`` values and exact
+    ``(visible-key, timestamp)`` matches are proof; visible text alone is not,
+    because users can legitimately repeat the same prompt.
     """
     cli_messages = list(cli_messages or [])
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
-    if cli_messages:
-        if sidecar_messages and sidecar_messages != cli_messages:
-            if len(sidecar_messages) >= len(cli_messages):
-                return merge_session_messages_append_only(
-                    sidecar_messages,
-                    cli_messages,
-                    truncation_watermark=getattr(session, "truncation_watermark", None),
-                )
-            merged_messages = []
-            seen_message_keys = set()
-            for msg in sorted(list(cli_messages) + list(sidecar_messages), key=lambda m: (
-                float(m.get("timestamp") or 0),
-                str(m.get("role") or ""),
-                str(m.get("content") or ""),
-            )):
-                key = _session_message_merge_key(msg)
-                if key in seen_message_keys:
-                    continue
-                seen_message_keys.add(key)
-                merged_messages.append(msg)
-            return merged_messages
-        return sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
-    return sidecar_messages
+    if not cli_messages:
+        return sidecar_messages
+    if not sidecar_messages:
+        return cli_messages
+    if sidecar_messages == cli_messages:
+        return sidecar_messages
 
+    def _visible_subsequence(needle, haystack) -> bool:
+        if not needle:
+            return True
+        pos = 0
+        haystack_keys = [_session_message_visible_key(msg) for msg in haystack]
+        for msg in needle:
+            key = _session_message_visible_key(msg)
+            while pos < len(haystack_keys) and haystack_keys[pos] != key:
+                pos += 1
+            if pos >= len(haystack_keys):
+                return False
+            pos += 1
+        return True
+
+    if len(sidecar_messages) >= len(cli_messages) and _visible_subsequence(cli_messages, sidecar_messages):
+        return sidecar_messages
+
+    def _stable_message_id(msg) -> str:
+        if not isinstance(msg, dict):
+            return ""
+        return str(msg.get("id") or msg.get("message_id") or "")
+
+    sidecar_exact_ids = {}
+    for msg in sidecar_messages:
+        ts = _message_timestamp_as_float(msg)
+        if ts is None:
+            continue
+        exact_key = (_session_message_visible_key(msg), ts)
+        msg_id = _stable_message_id(msg)
+        sidecar_exact_ids.setdefault(exact_key, set())
+        if msg_id:
+            sidecar_exact_ids[exact_key].add(msg_id)
+    sidecar_exact_keys = set(sidecar_exact_ids)
+    sidecar_ids = {msg_id for msg in sidecar_messages if (msg_id := _stable_message_id(msg))}
+    sidecar_timestamps = [
+        ts for msg in sidecar_messages
+        if (ts := _message_timestamp_as_float(msg)) is not None
+    ]
+    if not sidecar_timestamps:
+        return merge_session_messages_append_only(
+            sidecar_messages,
+            cli_messages,
+            truncation_watermark=getattr(session, "truncation_watermark", None),
+        )
+    first_sidecar_ts = min(sidecar_timestamps)
+    last_sidecar_ts = max(sidecar_timestamps)
+
+    prefix = []
+    in_window_distinct = []
+    suffix = []
+    seen_ids = set(sidecar_ids)
+    seen_exact_keys = set(sidecar_exact_keys)
+    for msg in cli_messages:
+        key = _session_message_visible_key(msg)
+        msg_id = _stable_message_id(msg)
+        timestamp = _message_timestamp_as_float(msg)
+        if timestamp is None:
+            continue
+        exact_key = (key, timestamp)
+        if msg_id and msg_id in seen_ids:
+            continue
+        exact_sidecar_ids = sidecar_exact_ids.get(exact_key, set())
+        if exact_key in seen_exact_keys and not (msg_id and exact_sidecar_ids and msg_id not in exact_sidecar_ids):
+            continue
+        if timestamp < first_sidecar_ts:
+            prefix.append(msg)
+        elif timestamp > last_sidecar_ts:
+            suffix.append(msg)
+        else:
+            in_window_distinct.append(msg)
+        seen_exact_keys.add(exact_key)
+        if msg_id:
+            seen_ids.add(msg_id)
+
+    def _proven_same_message(left, right) -> bool:
+        left_id = _stable_message_id(left)
+        right_id = _stable_message_id(right)
+        if left_id and right_id and left_id == right_id:
+            return True
+        left_ts = _message_timestamp_as_float(left)
+        right_ts = _message_timestamp_as_float(right)
+        return (
+            left_ts is not None
+            and right_ts is not None
+            and left_ts == right_ts
+            and _session_message_visible_key(left) == _session_message_visible_key(right)
+        )
+
+    def _drop_replayed_prefix(rows, replay_messages):
+        if not rows or not replay_messages:
+            return rows
+        max_n = min(len(rows), len(replay_messages))
+        for n in range(max_n, 0, -1):
+            row_segment = rows[:n]
+            replay_segment = replay_messages[-n:]
+            if all(_proven_same_message(row, replay) for row, replay in zip(row_segment, replay_segment, strict=True)):
+                return rows[n:]
+        return rows
+
+    def _drop_replayed_suffix(rows, replay_messages):
+        if not rows or not replay_messages:
+            return rows
+        max_n = min(len(rows), len(replay_messages))
+        for n in range(max_n, 0, -1):
+            row_segment = rows[-n:]
+            replay_segment = replay_messages[:n]
+            if all(_proven_same_message(row, replay) for row, replay in zip(row_segment, replay_segment, strict=True)):
+                return rows[:-n]
+        return rows
+
+    # State/CLI stores may replay an ordered sidecar edge outside the repaired
+    # sidecar timestamp window. Drop only a proven replay segment: stable ID or
+    # exact timestamp/content identity. Visible text alone is not proof.
+    prefix = _drop_replayed_suffix(prefix, sidecar_messages)
+    suffix = _drop_replayed_prefix(suffix, sidecar_messages)
+
+    def sort_key(m):
+        return (
+            float(m.get("timestamp") or 0),
+            str(m.get("role") or ""),
+            str(m.get("content") or ""),
+        )
+
+    prefix.sort(key=sort_key)
+    suffix.sort(key=sort_key)
+    in_window_distinct.sort(key=sort_key)
+    merged_sidecar = []
+    pending_window = list(in_window_distinct)
+    for sidecar_msg in sidecar_messages:
+        sidecar_ts = _message_timestamp_as_float(sidecar_msg)
+        if sidecar_ts is not None:
+            while pending_window and (_message_timestamp_as_float(pending_window[0]) or 0) <= sidecar_ts:
+                merged_sidecar.append(pending_window.pop(0))
+        merged_sidecar.append(sidecar_msg)
+    merged_sidecar.extend(pending_window)
+    return prefix + merged_sidecar + suffix
 
 def _message_summary(messages) -> dict:
     messages = list(messages or [])
@@ -3778,6 +3903,7 @@ from api.models import (
     _active_stream_ids,
     _session_message_merge_key,
     _session_message_visible_key,
+    _message_timestamp_as_float,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
