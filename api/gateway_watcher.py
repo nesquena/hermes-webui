@@ -145,8 +145,10 @@ def _cheap_change_fingerprint(db_path: Path) -> str | None:
 
 # ── DB resolution (shared pattern with state_sync.py) ──────────────────────
 
-def _get_state_db_path() -> Path:
+def _get_state_db_path(hermes_home: Path | None = None) -> Path:
     """Resolve state.db path for the active profile."""
+    if hermes_home is not None:
+        return Path(hermes_home).expanduser().resolve() / 'state.db'
     try:
         from api.profiles import get_active_hermes_home
         hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
@@ -155,11 +157,11 @@ def _get_state_db_path() -> Path:
     return hermes_home / 'state.db'
 
 
-def _get_agent_sessions_from_db() -> list:
+def _get_agent_sessions_from_db(db_path: Path | None = None) -> list:
     """Read all non-webui sessions from state.db.
     Returns list of session dicts, or empty list on any error.
     """
-    db_path = _get_state_db_path()
+    db_path = Path(db_path) if db_path is not None else _get_state_db_path()
     if not db_path.exists():
         return []
 
@@ -200,11 +202,24 @@ class GatewayWatcher:
     POLL_INTERVAL = 5  # seconds between polls
     SUBSCRIBER_TIMEOUT = 30  # seconds before sending keepalive comment
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        hermes_home: Path | None = None,
+        profile_name: str | None = None,
+        state_db_path: Path | None = None,
+    ):
         self._subscribers: list[queue.Queue] = []
         self._sub_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._hermes_home = Path(hermes_home).expanduser().resolve() if hermes_home else None
+        self._state_db_path = (
+            Path(state_db_path).expanduser().resolve()
+            if state_db_path is not None
+            else _get_state_db_path(self._hermes_home) if self._hermes_home is not None else _get_state_db_path()
+        )
+        self.profile_name = profile_name or ""
         self._last_hash: str = ''
         self._last_sessions: list = []
         # Cheap sessions-only fingerprint from the previous poll. When it is
@@ -303,7 +318,7 @@ class GatewayWatcher:
                 # of message rows every 5 seconds (issue #3506). A None
                 # fingerprint (error / unreadable db) forces the full read so we
                 # never silently skip a real change.
-                db_path = _get_state_db_path()
+                db_path = self._state_db_path
                 cheap_fp = _cheap_change_fingerprint(db_path) if db_path.exists() else ''
                 if cheap_fp is not None and cheap_fp == self._last_cheap_fp:
                     # Nothing changed in the sidebar-visible session set; skip
@@ -311,7 +326,7 @@ class GatewayWatcher:
                     pass
                 else:
                     # Phase 2: only now pay for the full projection.
-                    sessions = _get_agent_sessions_from_db()
+                    sessions = _get_agent_sessions_from_db(db_path)
                     current_hash = _snapshot_hash(sessions)
                     if cheap_fp is not None:
                         self._last_cheap_fp = cheap_fp
@@ -341,7 +356,16 @@ def start_watcher():
     global _watcher
     with _watcher_lock:
         if _watcher is None:
-            _watcher = GatewayWatcher()
+            hermes_home = None
+            try:
+                from api.profiles import get_active_profile_name, get_hermes_home_for_profile
+                profile_name = get_active_profile_name()
+                if profile_name:
+                    hermes_home = get_hermes_home_for_profile(profile_name)
+            except Exception:
+                profile_name = ""
+                hermes_home = None
+            _watcher = GatewayWatcher(profile_name=profile_name, hermes_home=hermes_home)
             _watcher.start()
 
 
@@ -352,6 +376,20 @@ def stop_watcher():
         if _watcher is not None:
             _watcher.stop()
             _watcher = None
+
+
+def restart_watcher_for_profile(name: str):
+    """Restart the global watcher pinned to the target profile home."""
+    global _watcher
+    from api.profiles import get_hermes_home_for_profile
+
+    hermes_home = get_hermes_home_for_profile(name)
+    with _watcher_lock:
+        if _watcher is not None:
+            _watcher.stop()
+        _watcher = GatewayWatcher(profile_name=name, hermes_home=hermes_home)
+        _watcher.start()
+        return _watcher
 
 
 def get_watcher() -> GatewayWatcher | None:
