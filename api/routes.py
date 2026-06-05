@@ -181,7 +181,7 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
 # (mcp_server.py) can import it without duplicating the visibility model.
 # Re-exported here so existing `_profiles_match(...)` call sites in this
 # module keep resolving without per-call-site refactors.
-from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
+from api.profiles import _profiles_match, get_active_hermes_home  # noqa: F401, E402  (re-export)
 
 
 def _all_profiles_query_flag(parsed_url) -> bool:
@@ -4675,6 +4675,122 @@ def _handle_shutdown(handler) -> bool:
     return True
 
 
+_RESTART_LOCK = threading.Lock()
+
+
+def _handle_health_restart(handler) -> bool:
+    """Restart the Hermes messaging gateway service."""
+    # Acquire the lock to prevent concurrent restart invocations
+    if not _RESTART_LOCK.acquire(blocking=False):
+        logger.warning("Gateway restart already in progress, rejecting concurrent request.")
+        return j(
+            handler,
+            {"ok": False, "error": "Restart already in progress. Please wait a moment and try again."},
+            status=429
+        )
+
+    lock_released = False
+    try:
+        # 1. Resolve HERMES_HOME for the active profile
+        active_home = get_active_hermes_home()
+
+        # 2. Build the environment dictionary with the correct HERMES_HOME
+        env = os.environ.copy()
+        env["HERMES_HOME"] = str(active_home)
+
+        # 3. Resolve the path to the hermes CLI binary
+        hermes_cmd = shutil.which("hermes")
+        if not hermes_cmd:
+            sys_exe = Path(sys.executable)
+            sibling = sys_exe.parent / "hermes"
+            if sibling.exists():
+                hermes_cmd = str(sibling)
+            else:
+                hermes_cmd = "hermes"
+
+        # 4. Run the restart command
+        logger.info("Restarting gateway service via CLI command: %s gateway restart (HERMES_HOME=%s)", hermes_cmd, active_home)
+        
+        proc = subprocess.Popen(
+            [hermes_cmd, "gateway", "restart"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env
+        )
+        try:
+            # Wait up to 2.0 seconds for the restart command to complete quickly
+            stdout, stderr = proc.communicate(timeout=2.0)
+            # Since it finished quickly, we can release the lock now
+            _RESTART_LOCK.release()
+            lock_released = True
+
+            if proc.returncode == 0:
+                logger.info("Gateway service restarted successfully: %s", stdout)
+                return j(handler, {"ok": True, "message": "Gateway service restarted successfully"})
+            else:
+                logger.error("Gateway service restart failed with code %d: %s", proc.returncode, stderr)
+                return j(
+                    handler,
+                    {"ok": False, "error": f"Restart failed: {stderr.strip() or stdout.strip()}"},
+                    status=500
+                )
+        except subprocess.TimeoutExpired:
+            # If the process doesn't finish within 2 seconds, it is likely draining
+            # in-flight agent runs. We let it continue running in the background.
+            logger.info("Gateway restart is taking longer than 2.0s (likely draining in-flight runs). Letting it run in the background.")
+
+            # Start background threads to consume the stdout/stderr streams to prevent
+            # the child process from blocking on pipe buffer limits when printing logs.
+            import threading
+
+            def consume_stream(stream):
+                try:
+                    while stream.read(4096):
+                        pass
+                except Exception:
+                    pass
+
+            def wait_and_release():
+                try:
+                    proc.wait(timeout=240.0)
+                except subprocess.TimeoutExpired:
+                    logger.error("Gateway restart process timed out after 240.0s. Terminating process.")
+                    try:
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5.0)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            try:
+                                proc.wait(timeout=5.0)
+                            except subprocess.TimeoutExpired:
+                                logger.error("Gateway restart process refused to die even after SIGKILL.")
+                    except Exception as e:
+                        logger.exception("Failed to terminate timed out gateway restart process: %s", e)
+                finally:
+                    try:
+                        _RESTART_LOCK.release()
+                    except RuntimeError:
+                        # Already released or similar
+                        pass
+
+            threading.Thread(target=consume_stream, args=(proc.stdout,), daemon=True).start()
+            threading.Thread(target=consume_stream, args=(proc.stderr,), daemon=True).start()
+            # This thread will release the lock when the child process exits
+            threading.Thread(target=wait_and_release, daemon=True).start()
+            
+            # Lock will be released by wait_and_release thread
+            lock_released = True
+
+            return j(handler, {"ok": True, "message": "Gateway service restart initiated (in progress)"})
+    except Exception as exc:
+        if not lock_released:
+            _RESTART_LOCK.release()
+        logger.exception("Failed to run gateway restart command")
+        return j(handler, {"ok": False, "error": f"Internal error running restart: {type(exc).__name__}: {exc}"}, status=500)
+
+
 def _serve_manifest(handler) -> bool:
     """Serve static/manifest.json with the correct PWA Content-Type.
 
@@ -6217,6 +6333,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/shutdown":
         return _handle_shutdown(handler)
+
+    if parsed.path == "/api/health/restart":
+        return _handle_health_restart(handler)
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
