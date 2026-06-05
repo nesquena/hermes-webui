@@ -3834,6 +3834,7 @@ function setComposerStatus(t){
 }
 
 let _composerLockState=null;
+let _compressionPlaceholderSaved=null;
 
 function lockComposerForClarify(placeholderText){
   const input=$('msg');
@@ -3905,6 +3906,7 @@ function getComposerPrimaryAction(){
   if(!isBusy) return hasContent?'send':'disabled';
   if(!hasContent){
     if(S.activeStreamId&&typeof cancelStream==='function') return 'stop';
+    if(compressionRunning) return 'queue';
     return 'disabled';
   }
   const explicitAction=_getExplicitBusyCommandAction(msg&&msg.value);
@@ -3949,10 +3951,10 @@ function updateSendBtn(){
   let _btnTitle;
   if(action==='disabled'){
     const _dmsg=$('msg');
-    const _dcompr=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
     if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
-    else if(_dcompr) _btnTitle=_tt('composer_disabled_compression','Waiting for compression to finish');
     else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
+  }else if(action==='queue'&&typeof isCompressionUiRunning==='function'&&isCompressionUiRunning()){
+    _btnTitle=_tt('composer_compression_will_queue','Type a message — it will queue and send after compression');
   }else{
     const _tmap={send:'Send message',queue:'Queue message',interrupt:'Interrupt and send',steer:'Steer current response',stop:'Stop generation'};
     _btnTitle=_tt('composer_'+action,_tmap[action]||'Send message');
@@ -6186,6 +6188,11 @@ function clearCompressionUi(){
   window._compressionUi=null;
   _clearCompressionElapsedTimer();
   _setCompressionSessionLock(null);
+  const _input=$('msg');
+  if(_input&&typeof _compressionPlaceholderSaved==='string'){
+    _input.placeholder=_compressionPlaceholderSaved;
+  }
+  _compressionPlaceholderSaved=null;
   renderCompressionUi();
 }
 function setCompressionUi(state){
@@ -6199,8 +6206,16 @@ function setCompressionUi(state){
   }
   window._compressionUi=nextState;
   if(nextState.sessionId) _setCompressionSessionLock(nextState.sessionId);
-  if(nextState.automatic&&nextState.phase==='running') _startCompressionElapsedTimer();
-  else _clearCompressionElapsedTimer();
+  if(nextState.automatic&&nextState.phase==='running'){
+    _startCompressionElapsedTimer();
+    const _input=$('msg');
+    if(_input&&_compressionPlaceholderSaved===null){
+      _compressionPlaceholderSaved=_input.placeholder;
+      _input.placeholder=typeof t==='function'?t('composer_compression_will_queue')||'Type a message — it will queue and send after compression':'Type a message — it will queue and send after compression';
+    }
+  } else {
+    _clearCompressionElapsedTimer();
+  }
   renderCompressionUi();
 }
 function _compressionCardsHtml(state){

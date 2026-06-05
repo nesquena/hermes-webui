@@ -276,3 +276,23 @@ def test_messaging_source_badge_in_sidebar_not_gated_on_is_cli_session():
     assert '.session-source-chip[data-source-key="telegram"]' in style_css
     assert '.session-source-chip[data-source-key="discord"]' in style_css
     assert '.session-item.cli-session[data-source-key="telegram"]' in style_css
+
+
+def test_compression_queue_discoverability_ux():
+    ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    i18n_js = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+
+    # Old misleading tooltip key must be gone from the compression branch
+    assert "composer_disabled_compression','Waiting for compression to finish'" not in ui_js
+
+    # New will-queue key must be present in ui.js (tooltip and placeholder)
+    assert "composer_compression_will_queue" in ui_js
+
+    # getComposerPrimaryAction must return 'queue' for compressionRunning+no-content
+    assert "if(compressionRunning) return 'queue';" in ui_js
+
+    # clearCompressionUi must restore the placeholder
+    assert "_compressionPlaceholderSaved" in ui_js
+
+    # New i18n key must appear in all 11 locales (count occurrences)
+    assert i18n_js.count("composer_compression_will_queue") >= 11
