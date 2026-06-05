@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,11 +31,18 @@ except Exception:  # pragma: no cover - exercised by source tests instead
 _CREDENTIALS_FILE = STATE_DIR / "passkeys.json"
 _CHALLENGES_FILE = STATE_DIR / ".passkey_challenges.json"
 _CHALLENGE_TTL = 300
+_MAX_CHALLENGES = 128
+_MAX_CHALLENGES_PER_CONTEXT = 8
+_CHALLENGES_LOCK = threading.Lock()
 _RP_NAME = "Hermes WebUI"
 
 
 class PasskeyError(ValueError):
     """Raised for user-correctable WebAuthn failures."""
+
+
+class PasskeyRateLimitError(PasskeyError):
+    """Raised when too many outstanding WebAuthn challenges are pending."""
 
 
 def _b64u(data: bytes) -> str:
@@ -118,15 +126,23 @@ def _load_challenges() -> dict[str, dict[str, Any]]:
 
 
 def _store_challenge(challenge: str, kind: str, rp_id: str, origin: str) -> None:
-    data = _load_challenges()
-    data[challenge] = {"kind": kind, "rp_id": rp_id, "origin": origin, "ts": time.time()}
-    _atomic_write_json(_CHALLENGES_FILE, data)
+    with _CHALLENGES_LOCK:
+        data = _load_challenges()
+        same_context = [
+            v for v in data.values()
+            if v.get("kind") == kind and v.get("rp_id") == rp_id and v.get("origin") == origin
+        ]
+        if len(same_context) >= _MAX_CHALLENGES_PER_CONTEXT or len(data) >= _MAX_CHALLENGES:
+            raise PasskeyRateLimitError("Too many pending passkey challenges. Try again in a minute.")
+        data[challenge] = {"kind": kind, "rp_id": rp_id, "origin": origin, "ts": time.time()}
+        _atomic_write_json(_CHALLENGES_FILE, data)
 
 
 def _consume_challenge(challenge: str, kind: str) -> dict[str, Any]:
-    data = _load_challenges()
-    entry = data.pop(challenge, None)
-    _atomic_write_json(_CHALLENGES_FILE, data)
+    with _CHALLENGES_LOCK:
+        data = _load_challenges()
+        entry = data.pop(challenge, None)
+        _atomic_write_json(_CHALLENGES_FILE, data)
     if not entry or entry.get("kind") != kind:
         raise PasskeyError("Passkey challenge expired. Try again.")
     return entry

@@ -2,7 +2,9 @@ import base64
 import json
 import hashlib
 
+import pytest
 from cryptography.hazmat.primitives import hashes
+
 from cryptography.hazmat.primitives.asymmetric import ec
 
 
@@ -131,6 +133,27 @@ def test_passkey_login_verifies_signature_and_updates_usage(monkeypatch, tmp_pat
     [cred] = passkeys.registered_credentials()
     assert cred["sign_count"] == 2
     assert cred["last_used_at"] is not None
+
+
+def test_passkey_options_caps_outstanding_challenges_per_context(monkeypatch, tmp_path):
+    passkeys = _set_paths(monkeypatch, tmp_path)
+    passkeys._save_credentials([{"id": b64u(b"credential-3"), "label": "This device"}])
+    monkeypatch.setattr(passkeys, "_MAX_CHALLENGES_PER_CONTEXT", 2)
+
+    first = passkeys.authentication_options(FakeHandler())
+    second = passkeys.authentication_options(FakeHandler())
+
+    with pytest.raises(passkeys.PasskeyRateLimitError, match="Too many pending passkey challenges"):
+        passkeys.authentication_options(FakeHandler())
+
+    pending = json.loads((tmp_path / ".passkey_challenges.json").read_text(encoding="utf-8"))
+    assert set(pending) == {first["challenge"], second["challenge"]}
+
+
+def test_passkey_options_rate_limit_errors_return_429_source_contract():
+    routes = open("api/routes.py", encoding="utf-8").read()
+    assert "PasskeyRateLimitError" in routes
+    assert "status=429" in routes
 
 
 def test_auth_status_reports_passkey_availability_source_contract():
