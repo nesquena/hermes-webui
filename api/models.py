@@ -2723,6 +2723,71 @@ def _active_state_db_path() -> Path:
     return hermes_home / 'state.db'
 
 
+def _agent_state_db_path(*, profile=None) -> Path | None:
+    """Return agent ``state.db`` for *profile*, or ``None`` when unavailable."""
+    if isinstance(profile, str) and profile:
+        db_path = _get_profile_home(profile) / 'state.db'
+        if not db_path.exists():
+            db_path = _active_state_db_path()
+    else:
+        db_path = _active_state_db_path()
+    if not db_path.exists():
+        return None
+    return db_path
+
+
+def agent_session_rows_existing(
+    session_ids: list[str] | set[str] | frozenset[str],
+    *,
+    profile=None,
+) -> frozenset[str]:
+    """Return session ids confirmed present in the agent ``sessions`` table.
+
+    Used by the sidebar orphan-prune path (#3238) to batch existence probes
+    instead of opening one SQLite connection per candidate row.
+
+    Degrades safely to ``frozenset(wanted)`` (assume all present) on any error,
+    when the DB is missing, or when the ``sessions`` table is absent — matching
+    ``agent_session_row_exists()`` so a transient failure never causes pruning.
+    """
+    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
+    if not wanted:
+        return frozenset()
+    try:
+        import sqlite3
+    except ImportError:
+        return frozenset(wanted)
+    db_path = _agent_state_db_path(profile=profile)
+    if db_path is None:
+        return frozenset(wanted)
+    try:
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            cols = {str(row[1]) for row in cur.fetchall()}
+            if 'id' not in cols:
+                return frozenset(wanted)
+            existing: set[str] = set()
+            ids = list(wanted)
+            chunk_size = 500
+            for i in range(0, len(ids), chunk_size):
+                chunk = ids[i:i + chunk_size]
+                placeholders = ','.join('?' * len(chunk))
+                cur.execute(
+                    f"SELECT id FROM sessions WHERE id IN ({placeholders})",
+                    chunk,
+                )
+                existing.update(str(row[0]).strip() for row in cur.fetchall())
+            return frozenset(existing)
+    except Exception:
+        logger.debug(
+            "agent_session_rows_existing probe failed for %d ids",
+            len(wanted),
+            exc_info=True,
+        )
+        return frozenset(wanted)
+
+
 def agent_session_row_exists(session_id: str, *, profile=None) -> bool:
     """Return True if ``session_id`` still has a backing row in the agent state.db.
 
@@ -2739,31 +2804,7 @@ def agent_session_row_exists(session_id: str, *, profile=None) -> bool:
     sid = str(session_id or "").strip()
     if not sid:
         return False
-    try:
-        import sqlite3
-    except ImportError:
-        return True
-    if isinstance(profile, str) and profile:
-        db_path = _get_profile_home(profile) / 'state.db'
-        if not db_path.exists():
-            db_path = _active_state_db_path()
-    else:
-        db_path = _active_state_db_path()
-    if not db_path.exists():
-        # No agent DB at all on this instance — can't claim the row is gone.
-        return True
-    try:
-        with closing(sqlite3.connect(str(db_path))) as conn:
-            cur = conn.cursor()
-            cur.execute("PRAGMA table_info(sessions)")
-            cols = {str(row[1]) for row in cur.fetchall()}
-            if 'id' not in cols:
-                return True
-            cur.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (sid,))
-            return cur.fetchone() is not None
-    except Exception:
-        logger.debug("agent_session_row_exists probe failed for %s", sid, exc_info=True)
-        return True
+    return sid in agent_session_rows_existing([sid], profile=profile)
 
 
 def _sidebar_title_is_generic_webui(title: str | None) -> bool:
