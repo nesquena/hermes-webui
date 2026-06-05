@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.272] — 2026-06-05 — Release IN (stage-p3a — conflict-safe self-update recovery)
+
+### Fixed
+- **Self-update conflict recovery no longer risks losing local changes.** The update path now stashes with a named entry (`stash push -m hermes-update-autostash`) and restores with `stash apply` (keeping the stash if the drop fails) instead of `stash pop`. On a restore conflict it resets the working tree to HEAD to clear conflict markers but **preserves your changes in the git stash**, and returns a clear `stash_conflict` message telling you exactly how to inspect/re-apply them — replacing the previous `stash pop` → `reset --merge` path that could discard local modifications. (#3667, @rodboev)
+
 ## [v0.51.271] — 2026-06-05 — Release IM (stage-m1 — named custom provider binding)
 
 ### Fixed
