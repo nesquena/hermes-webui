@@ -5804,7 +5804,7 @@ def handle_post(handler, parsed) -> bool:
                 handler,
                 capy_spaces.disable_space_for_recovery(
                     space_id,
-                    reason=body.get("reason") or "disabled from recovery",
+                    reason=body.get("reason"),
                 ),
             )
         except RuntimeError as e:
@@ -5825,7 +5825,7 @@ def handle_post(handler, parsed) -> bool:
                 handler,
                 capy_spaces.enable_space_for_recovery(
                     space_id,
-                    reason=body.get("reason") or "enabled from recovery",
+                    reason=body.get("reason"),
                 ),
             )
         except RuntimeError as e:
@@ -5872,7 +5872,7 @@ def handle_post(handler, parsed) -> bool:
                 capy_spaces.disable_widget_for_recovery(
                     space_id,
                     widget_id,
-                    reason=body.get("reason") or "disabled from recovery",
+                    reason=body.get("reason"),
                 ),
             )
         except RuntimeError as e:
@@ -5895,7 +5895,7 @@ def handle_post(handler, parsed) -> bool:
                 capy_spaces.enable_widget_for_recovery(
                     space_id,
                     widget_id,
-                    reason=body.get("reason") or "enabled from recovery",
+                    reason=body.get("reason"),
                 ),
             )
         except RuntimeError as e:
@@ -5942,7 +5942,7 @@ def handle_post(handler, parsed) -> bool:
                 handler,
                 capy_spaces.disable_module_for_recovery(
                     module_id,
-                    reason=body.get("reason") or "disabled from recovery",
+                    reason=body.get("reason"),
                 ),
             )
         except RuntimeError as e:
@@ -5963,7 +5963,7 @@ def handle_post(handler, parsed) -> bool:
                 handler,
                 capy_spaces.enable_module_for_recovery(
                     module_id,
-                    reason=body.get("reason") or "enabled from recovery",
+                    reason=body.get("reason"),
                 ),
             )
         except RuntimeError as e:
