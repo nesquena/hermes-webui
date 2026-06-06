@@ -1139,8 +1139,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(targetText===currentText) return true;
     _restoredReconnectDisplayActive=false;
     assistantBody.classList.remove('stream-fade-active');
-    assistantBody.innerHTML=renderMd ? renderMd(target) : esc(target);
-    _sanitizeSmdLinks(assistantBody);
+    assistantBody.innerHTML='';
     return false;
   }
 

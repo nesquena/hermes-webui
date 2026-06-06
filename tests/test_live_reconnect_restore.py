@@ -60,7 +60,10 @@ def test_restored_reconnect_display_deactivates_after_new_text_arrives():
     assert "let _restoredReconnectDisplayActive=restoredLiveTurn;" in messages_src[option_pos : option_pos + 140]
     assert "if(!_restoredReconnectDisplayActive||!assistantBody) return false;" in helper_block
     assert "_restoredReconnectDisplayActive=false;" in helper_block
-    assert "return false;" in helper_block[helper_block.index("_restoredReconnectDisplayActive=false;") :]
+    divergent_block = helper_block[helper_block.index("_restoredReconnectDisplayActive=false;") :]
+    assert "assistantBody.innerHTML='';" in divergent_block
+    assert "renderMd(target)" not in helper_block
+    assert "return false;" in divergent_block
 
 
 def test_live_tool_replay_helper_is_idempotent_for_restored_tids():
