@@ -2258,11 +2258,11 @@ function renderModelDropdown(){
     }
     return 500;
   };
-  const _renderProviderEndpointHint=(groupMetaEntry)=>{
-    if(!groupMetaEntry||!groupMetaEntry.label||!groupMetaEntry.modelsEndpointError) return;
+  const _renderProviderEndpointHint=(entry)=>{
+    if(!entry||!entry.label||!entry.modelsEndpointError) return;
     const hint=document.createElement('div');
     hint.className='model-provider-hint';
-    hint.textContent=groupMetaEntry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
+    hint.textContent=entry.modelsEndpointError.message||'Models endpoint could not be reached for this provider.';
     dd.appendChild(hint);
   };
   const _expandOverflowGroup=(groupMetaEntry)=>{

@@ -5967,11 +5967,17 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                     elif pid == "custom" and cfg_base_url:
                         # Anonymous custom endpoint: /v1/models probe may have
                         # failed (e.g. llama-server, lightweight relay), but the
-                        # chat endpoint itself may still work.  Add the group
+                        # chat endpoint itself may still work. Add the group
                         # with an empty model list so the user can type a model
                         # ID manually rather than being blocked by a silent
                         # probe failure (#2542).
-                        _append_picker_group(provider_name, pid, [], allow_empty=True)
+                        groups.append(
+                            {
+                                "provider": provider_name,
+                                "provider_id": pid,
+                                "models": [],
+                            }
+                        )
         else:
             if default_model:
                 label = _get_label_for_model(default_model, groups)
