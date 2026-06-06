@@ -3,6 +3,14 @@
 
 ## [Unreleased]
 
+## [v0.51.287] — 2026-06-06 — Release JC (stage-r22 — WeCom session classification + worker-profile picker hiding)
+
+### Fixed
+- **WeCom gateway sessions are now classified as messaging conversations.** Rows arriving with raw sources `wecom` / `wecom_callback` are normalized into the messaging category (alongside weixin/telegram/discord/slack/email) and given proper "WeCom" / "WeCom Callback" display names, so they group and surface correctly in the sidebar. (#3653, @franksong2702)
+
+### Changed
+- **Worker profiles are hidden from the chat profile picker.** Worker profiles (used for orchestrator/Kanban dispatch) are no longer offered as normal human chat targets in the picker, while still appearing in the profile management view with a "Hidden from chat" badge. The active profile is never hidden. (#3662, @Chukwuebuka-20)
+
 ## [v0.51.286] — 2026-06-06 — Release JB (stage-r21 — sidebar tab reordering)
 
 ### Added
