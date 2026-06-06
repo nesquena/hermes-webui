@@ -4170,6 +4170,29 @@ function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtual
   });
 }
 
+// Top-level so BOTH the sidebar visibility predicate (_sidebarRowHasVisibleMessages,
+// reached via renderSessionListFromCache -> _partitionSidebarSessionRows) and the
+// per-row renderer (_renderOneSession, nested in renderSessionListFromCache) can call
+// it. It was previously declared INSIDE renderSessionListFromCache and relied on
+// function hoisting — but hoisting is scoped to the enclosing function, so the
+// top-level _sidebarRowHasVisibleMessages threw "ReferenceError: _sessionAttentionState
+// is not defined" on every cache render, crashing the sidebar (#3696, regressed in
+// #3672 when _sidebarRowHasVisibleMessages was extracted to top level). Pure function
+// (only its arg `s` plus the i18n global `t`), so hoisting it is safe.
+function _sessionAttentionState(s){
+  const attention=s&&s.attention&&typeof s.attention==='object'?s.attention:null;
+  if(!attention||!attention.kind||!Number.isFinite(Number(attention.count))||Number(attention.count)<=0)return null;
+  const kind=String(attention.kind)==='approval'?'approval':(String(attention.kind)==='clarify'?'clarify':'attention');
+  const count=Math.max(1,Number(attention.count)||1);
+  const labelKey=kind==='approval'?'session_attention_approval':(kind==='clarify'?'session_attention_clarify':'session_attention_generic');
+  const titleKey=kind==='approval'?'session_attention_approval_title':(kind==='clarify'?'session_attention_clarify_title':'session_attention_generic_title');
+  const fallback=kind==='approval'?(count===1?'Approval':`${count} approvals`):(kind==='clarify'?(count===1?'Question':`${count} questions`):(count===1?'Attention':`${count} items`));
+  const titleFallback=kind==='approval'?'Waiting for permission decision':(kind==='clarify'?'Waiting for your answer':'Waiting for user action');
+  const label=(typeof t==='function')?t(labelKey,count):fallback;
+  const title=(typeof t==='function')?t(titleKey,count):titleFallback;
+  return {kind,count,severity:String(attention.severity||''),label,title};
+}
+
 function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
   return (s.message_count||0)>0 ||
     _sessionAttentionState(s) ||
@@ -4523,20 +4546,6 @@ function renderSessionListFromCache(){
   const reflowTimeout=animateRefresh?SESSION_LIST_FLIP_TIMEOUT_MS:SESSION_REFLOW_TIMEOUT_MS;
   _pendingSessionReflowPositions=null;
   _playSessionRowsReflowFromPositions(reflowBefore,reflowTimeout,_sessionPrefersReducedMotion);
-  // Note: declared after the groups loop but available via function hoisting.
-  function _sessionAttentionState(s){
-    const attention=s&&s.attention&&typeof s.attention==='object'?s.attention:null;
-    if(!attention||!attention.kind||!Number.isFinite(Number(attention.count))||Number(attention.count)<=0)return null;
-    const kind=String(attention.kind)==='approval'?'approval':(String(attention.kind)==='clarify'?'clarify':'attention');
-    const count=Math.max(1,Number(attention.count)||1);
-    const labelKey=kind==='approval'?'session_attention_approval':(kind==='clarify'?'session_attention_clarify':'session_attention_generic');
-    const titleKey=kind==='approval'?'session_attention_approval_title':(kind==='clarify'?'session_attention_clarify_title':'session_attention_generic_title');
-    const fallback=kind==='approval'?(count===1?'Approval':`${count} approvals`):(kind==='clarify'?(count===1?'Question':`${count} questions`):(count===1?'Attention':`${count} items`));
-    const titleFallback=kind==='approval'?'Waiting for permission decision':(kind==='clarify'?'Waiting for your answer':'Waiting for user action');
-    const label=(typeof t==='function')?t(labelKey,count):fallback;
-    const title=(typeof t==='function')?t(titleKey,count):titleFallback;
-    return {kind,count,severity:String(attention.severity||''),label,title};
-  }
 
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');

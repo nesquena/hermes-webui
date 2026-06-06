@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Sidebar no longer crashes with `ReferenceError: _sessionAttentionState is not defined`.** The session-attention helper was declared *inside* `renderSessionListFromCache()` and relied on function hoisting, but the top-level `_sidebarRowHasVisibleMessages` (reached via `renderSessionListFromCache` → `_partitionSidebarSessionRows`) called it bare — and hoisting is scoped to the enclosing function, so every sidebar cache-render threw and the session list went blank. `_sessionAttentionState` is now a top-level function reachable by both call sites. Regressed in #3672 (v0.51.269). (#3696)
+
+### Internal
+- **New static-JS scope/undefined-reference gate (`scripts/scope_undef_gate.py`).** Models the WebUI's classic-`<script>` shared global scope and runs ESLint `no-undef` per file, flagging a function that is defined only *nested* but called from a sibling/top-level scope — the brick class behind #3696 that `node --check`, source-presence tests, and the existing `no-const-assign` runtime gate all miss. Wired into the CI `lint` job alongside the `no-const-assign`/`no-import-assign` runtime gate, with an in-suite test (`tests/test_static_js_scope_undef.py`) and a focused structural regression test (`tests/test_issue3696_session_attention_scope.py`). (#3696)
+
 ## [v0.51.288] — 2026-06-06 — Release JD (stage-r24 — collapsible approval card)
 
 ### Added
