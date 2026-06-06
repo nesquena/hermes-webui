@@ -965,7 +965,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _ownsActiveStreamOrBackground(){
     return !_isActiveSession() || S.activeStreamId===streamId;
   }
-  function _bailOutOfTerminalEventsFromStaleStream(){
+  function _bailOutOfTerminalEventsFromStaleStream(source){
     if(_ownsActiveStreamOrBackground()) return false;
     _closeSource(source);
     return true;
@@ -2522,7 +2522,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       if(_streamFinalized) return;
-      if(_bailOutOfTerminalEventsFromStaleStream()) return;
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       // Set _streamFinalized IMMEDIATELY — before any fade delay. Without this,
       // a stream_end event arriving during the fade window sees
       // _streamFinalized=false, calls _restoreSettledSession(), and overwrites
@@ -2746,7 +2746,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource(source);
         return;
       }
-      if(_bailOutOfTerminalEventsFromStaleStream()) return;
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
@@ -2877,7 +2877,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('apperror',e=>{
-      if(_bailOutOfTerminalEventsFromStaleStream()) return;
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
@@ -2953,7 +2953,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('error',async e=>{
-      if(_bailOutOfTerminalEventsFromStaleStream() && !_streamFinalized){
+      if(_bailOutOfTerminalEventsFromStaleStream(source) && !_streamFinalized){
         return;
       }
       if(_terminalStateReached || _streamFinalized){
@@ -3006,7 +3006,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('cancel',e=>{
-      if(_bailOutOfTerminalEventsFromStaleStream()) return;
+      if(_bailOutOfTerminalEventsFromStaleStream(source)) return;
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
