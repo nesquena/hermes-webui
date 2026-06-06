@@ -7593,12 +7593,33 @@ function renderMessages(options){
       // the set of turn nodes that have any tool card so the inline branch can
       // skip turns that already own an Activity group.
       const turnsWithActivityGroup=new Set();
+      // Per-turn merged thinking: a tool-bearing turn's Activity group must carry
+      // ALL of that turn's thinking — including a trailing thinking-only sibling
+      // whose inline card we suppress below (#3709 A1). Rendering only the tool
+      // message's own assistantThinking entry would silently DROP a sibling's
+      // distinct reasoning. Aggregate every assistantThinking entry by turn,
+      // de-duped and in index order, and render that once in the group.
+      const turnThinkingParts=new Map(); // turnNode -> [text,...]
+      const _addTurnThinking=(idx)=>{
+        if(!assistantThinking.has(idx)) return;
+        const seg=assistantSegments.get(idx);
+        const turn=seg?seg.closest('.assistant-turn'):null;
+        if(!turn) return;
+        const txt=String(assistantThinking.get(idx)||'').trim();
+        if(!txt) return;
+        const arr=turnThinkingParts.get(turn)||[];
+        if(!arr.includes(txt)) arr.push(txt);
+        turnThinkingParts.set(turn, arr);
+      };
       for(const tcIdx of Object.keys(byAssistant).map(k=>parseInt(k))){
         if(!(byAssistant[tcIdx]||[]).length) continue;
         const tcSeg=assistantSegments.get(tcIdx);
         const tcTurn=tcSeg?tcSeg.closest('.assistant-turn'):null;
         if(tcTurn) turnsWithActivityGroup.add(tcTurn);
       }
+      // Aggregate thinking for every assistant idx that has it (tool-bearing or not).
+      for(const tIdx of assistantThinking.keys()) _addTurnThinking(tIdx);
+      const _renderedTurnThinking=new Set();
       const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
       for(const aIdx of activityIdxs){
         const cards=byAssistant[aIdx]||[];
@@ -7607,7 +7628,8 @@ function renderMessages(options){
           // has no Activity group at all (#3592 — a genuinely thinking-only turn
           // must not bury its thinking in a collapsed group). If a sibling
           // tool-message in the same turn built a group, that group carries the
-          // turn's thinking — don't emit a duplicate inline card here (#3709 A).
+          // turn's thinking (including THIS message's, via turnThinkingParts) —
+          // don't emit a duplicate inline card here (#3709 A).
           const anchorRow=assistantSegments.get(aIdx);
           const anchorTurn=anchorRow?anchorRow.closest('.assistant-turn'):null;
           if(anchorRow&&window._showThinking!==false&&!(anchorTurn&&turnsWithActivityGroup.has(anchorTurn))){
@@ -7635,9 +7657,13 @@ function renderMessages(options){
         if(sourceMsg._turnDuration!==undefined) group.setAttribute('data-turn-duration', String(sourceMsg._turnDuration));
         const body=group&&group.querySelector('.tool-call-group-body');
         if(!body) continue;
-        const thinkingText=assistantThinking.get(aIdx);
-        if(thinkingText){
-          body.appendChild(_thinkingActivityNode(thinkingText, false));
+        // Render the TURN's merged thinking once (covers this message's own
+        // thinking + any suppressed thinking-only sibling in the same turn, #3709).
+        const groupTurn=anchorRow?anchorRow.closest('.assistant-turn'):null;
+        const mergedThinking=(groupTurn&&turnThinkingParts.get(groupTurn)||[]).join('\n\n').trim();
+        if(mergedThinking&&!(groupTurn&&_renderedTurnThinking.has(groupTurn))){
+          body.appendChild(_thinkingActivityNode(mergedThinking, false));
+          if(groupTurn) _renderedTurnThinking.add(groupTurn);
         }
         for(const tc of cards){
           body.appendChild(buildToolCard(tc));

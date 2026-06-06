@@ -136,3 +136,30 @@ def test_turn_level_echo_strip_exists():
         "the turn-level visible text must be passed to "
         "_stripVisibleAssistantEchoFromThinking"
     )
+
+
+def test_suppressed_sibling_thinking_merged_into_group_not_dropped():
+    """When the A1 gate suppresses a thinking-only sibling's inline card (because
+    its turn has an Activity group), that sibling's thinking must NOT be lost — the
+    group must render the TURN's merged thinking, not only the tool message's own
+    entry. (Codex re-gate finding: rendering only assistantThinking.get(aIdx) for
+    the tool index dropped a distinct sibling's reasoning.)"""
+    body = _render_messages_body()
+    # A per-turn thinking aggregation must exist...
+    assert "turnThinkingParts" in body, (
+        "must aggregate thinking per turn so a suppressed sibling's reasoning is "
+        "carried into the Activity group, not dropped (#3709 / Codex re-gate)"
+    )
+    # ...and the Activity group must render the MERGED text, de-duped, once per turn.
+    assert "mergedThinking" in body, (
+        "the Activity group must render the turn's merged thinking"
+    )
+    assert "_renderedTurnThinking" in body, (
+        "merged thinking must render once per turn (guard against double-emit when "
+        "a turn has multiple tool messages)"
+    )
+    # The group node must be built from the merged text, not the single-index entry.
+    assert re.search(
+        r"_thinkingActivityNode\(\s*mergedThinking\s*,",
+        body,
+    ), "the Activity group thinking node must be built from mergedThinking"
