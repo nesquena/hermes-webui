@@ -537,6 +537,8 @@ const LOCALES = {
     settings_update_check_failed: 'Update check failed',
     settings_label_workspace_panel_open: 'Keep workspace panel open by default',
     settings_desc_workspace_panel_open: 'When enabled, the workspace / file browser panel opens automatically with each new session. You can still close it manually at any time.',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: 'Show session jump buttons',
     settings_desc_session_jump_buttons: 'Show floating Start and End buttons while reading long session histories.',
 
@@ -1881,6 +1883,8 @@ const LOCALES = {
     settings_update_check_failed: 'Verifica aggiornamenti fallita',
     settings_label_workspace_panel_open: 'Mantieni il pannello workspace aperto per impostazione predefinita',
     settings_desc_workspace_panel_open: 'Se abilitato, il pannello workspace/esplora file si apre automaticamente a ogni nuova sessione. Puoi comunque chiuderlo manualmente in qualsiasi momento.',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: 'Mostra pulsanti salto sessione',
     settings_desc_session_jump_buttons: 'Mostra pulsanti fluttuanti Inizio e Fine durante la lettura di sessioni lunghe.',
 
@@ -3217,6 +3221,8 @@ const LOCALES = {
     settings_updates_disabled: 'アップデート確認は無効です',
     settings_label_workspace_panel_open: 'ワークスペースパネルをデフォルトで開いておく',
     settings_desc_workspace_panel_open: '有効にすると、新しいセッションごとにワークスペース/ファイルブラウザパネルが自動で開きます。手動でいつでも閉じられます。',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: 'セッションジャンプボタンを表示',
     settings_desc_session_jump_buttons: '長いセッション履歴を読むときに、浮動表示の「開始」と「末尾」ボタンを表示します。',
 
@@ -5133,6 +5139,8 @@ const LOCALES = {
     settings_update_check_failed: 'Ошибка проверки обновлений',
     settings_label_workspace_panel_open: 'Открывать панель рабочей области по умолчанию',
     settings_desc_workspace_panel_open: 'При включении панель файлов будет открываться автоматически в каждой новой сессии.',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: 'Показывать кнопки перехода по сессии',
     settings_desc_session_jump_buttons: 'Показывать плавающие кнопки «Начало» и «Конец» при чтении длинных историй сессий.',
 
@@ -6394,6 +6402,8 @@ const LOCALES = {
     settings_update_check_failed: 'Error al comprobar actualizaciones',
     settings_label_workspace_panel_open: 'Mantener panel de espacio abierto',
     settings_desc_workspace_panel_open: 'Al activar, el panel de archivos se abre automáticamente en cada nueva sesión. Aún puedes cerrarlo manualmente.',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: 'Mostrar botones de salto de sesión',
     settings_desc_session_jump_buttons: 'Muestra botones flotantes de Inicio y Fin al leer historiales de sesión largos.',
 
@@ -7368,6 +7378,8 @@ const LOCALES = {
     settings_update_check_failed: 'Update-Prüfung fehlgeschlagen',
     settings_label_workspace_panel_open: 'Arbeitsbereich-Panel standardmäßig öffnen',
     settings_desc_workspace_panel_open: 'Wenn aktiviert, wird der Datei-Browser bei jeder neuen Sitzung automatisch geöffnet. Er kann jederzeit manuell geschlossen werden.',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: 'Sitzungs-Sprungtasten anzeigen',
     settings_desc_session_jump_buttons: 'Zeigt beim Lesen langer Sitzungsverläufe schwebende Anfang- und Ende-Tasten an.',
 
@@ -8951,6 +8963,8 @@ const LOCALES = {
     settings_update_check_failed: '更新检查失败',
     settings_label_workspace_panel_open: '默认保持工作区面板打开',
     settings_desc_workspace_panel_open: '启用后，工作区/文件浏览器面板会在每次新会话时自动打开。您仍可随时手动关闭。',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: '显示会话跳转按钮',
     settings_desc_session_jump_buttons: '阅读较长会话历史时显示悬浮的开头和结尾按钮。',
 
@@ -9646,6 +9660,8 @@ const LOCALES = {
     settings_update_check_failed: '更新檢查失敗',
     settings_label_workspace_panel_open: '預設保持工作區面板開啟',
     settings_desc_workspace_panel_open: '啟用後，工作區／檔案瀏覽器面板會在每次新對話時自動開啟。仍可隨時手動關閉。',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: '顯示對話跳轉按鈕',
     settings_desc_session_jump_buttons: '閱讀較長對話記錄時，顯示浮動的開頭與結尾按鈕。',
 
@@ -10873,6 +10889,8 @@ const LOCALES = {
     settings_update_check_failed: 'Falha ao verificar updates',
     settings_label_workspace_panel_open: 'Manter painel workspace aberto por padrão',
     settings_desc_workspace_panel_open: 'Quando ativo, o painel workspace abre automaticamente com cada nova sessão.',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: 'Mostrar botões de salto da sessão',
     settings_desc_session_jump_buttons: 'Mostra botões flutuantes Início e Fim ao ler históricos longos de sessão.',
 
@@ -12110,6 +12128,8 @@ const LOCALES = {
     settings_update_check_failed: 'Update check failed',
     settings_label_workspace_panel_open: '기본으로 워크스페이스 패널 열기',
     settings_desc_workspace_panel_open: '활성화하면 새 세션마다 워크스페이스/파일 브라우저 패널이 자동으로 열립니다. 언제든지 수동으로 닫을 수 있습니다.',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: '세션 이동 버튼 표시',
     settings_desc_session_jump_buttons: '긴 세션 기록을 읽을 때 떠 있는 시작 및 끝 버튼을 표시합니다.',
 
@@ -13366,6 +13386,8 @@ const LOCALES = {
     settings_update_check_failed: 'La vérification de la mise à jour a échoué',
     settings_label_workspace_panel_open: 'Garder le panneau de l\'espace de travail ouvert par défaut',
     settings_desc_workspace_panel_open: 'Lorsqu\'il est activé, le panneau de l\'espace de travail/navigateur de fichiers s\'ouvre automatiquement à chaque nouvelle session. Vous pouvez toujours le fermer manuellement à tout moment.',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: 'Afficher les boutons de saut de session',
     settings_desc_session_jump_buttons: 'Affichez les boutons flottants de début et de fin lors de la lecture de longs historiques de session.',
     settings_label_session_endless_scroll: 'Charger les anciens messages en faisant défiler vers le haut',
@@ -14719,6 +14741,8 @@ const LOCALES = {
     settings_update_check_failed: 'Güncelleme kontrolü başarısız oldu',
     settings_label_workspace_panel_open: 'Çalışma alanı panelini varsayılan olarak açık tut',
     settings_desc_workspace_panel_open: 'Etkinleştirildiğinde, çalışma alanı / dosya tarayıcı paneli her yeni oturumda otomatik olarak açılır. Yine de istediğiniz zaman manuel olarak kapatabilirsiniz.',
+    settings_label_interleaved_transcript_bubbles: 'Interleaved transcript bubbles',
+    settings_desc_interleaved_transcript_bubbles: 'Render assistant turns as separate comment and action bubbles instead of a single block.',
     settings_label_session_jump_buttons: 'Oturum atlama düğmelerini göster',
     settings_desc_session_jump_buttons: 'Uzun oturum geçmişlerini okurken kayan Başlat ve Bitir düğmelerini gösterin.',
 

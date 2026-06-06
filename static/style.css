@@ -4014,6 +4014,13 @@ main.main > #mainPlugin{display:none;}
 .status-card-value{color:var(--text);word-break:break-word;font-family:var(--font-mono);}
 @media (max-width:700px){.status-card{margin-left:0;}.status-card-head{flex-direction:column;}.status-card-session-copy{max-width:100%;}.status-card-grid{grid-template-columns:1fr;}.status-card-label{padding-bottom:2px;border-top:1px solid var(--border-subtle);}.status-card-value{padding-top:2px;border-top:0;}}
 .assistant-segment-anchor { display: none; }
+.interleaved-bubble{border-radius:var(--radius-card);margin:4px 0 4px var(--msg-rail);padding:8px 12px;max-width:var(--msg-max);}
+.interleaved-bubble-comment{background:var(--surface-subtle);border:1px solid var(--border-subtle);}
+.interleaved-bubble-thinking{background:transparent;}
+.interleaved-bubble-cli-action{background:var(--surface);border:1px solid var(--border);font-family:var(--font-mono);font-size:12px;}
+.interleaved-action-label{color:var(--accent-text);font-weight:600;font-size:12px;}
+.interleaved-bubble-result{background:var(--code-bg);border:1px solid var(--border-subtle);}
+.interleaved-result-snippet pre{margin:0;font-size:11px;color:var(--pre-text);white-space:pre-wrap;overflow-wrap:anywhere;}
 
 /* ── Classic conversation layout: user right, half-width; assistant left ── */
 .msg-row[data-role="user"] { align-self: flex-end; max-width: 60%; }

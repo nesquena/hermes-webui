@@ -6088,6 +6088,45 @@ function _thinkingCardHtml(text, open){
   const classes=`thinking-card${open?' open':''}`;
   return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
+function isInterleavedTranscriptBubbles(){
+  return window._interleavedTranscriptBubbles===true;
+}
+
+/**
+ * Generator: yields {type, content} sub-parts from one assistant message.
+ *   type: 'comment'    — prose text (string)
+ *   type: 'thinking'   — reasoning/thinking text (string)
+ *   type: 'cli-action' — tool call (tc object from tool_calls / content tool_use)
+ *   type: 'result'     — tool result snippet (string, may be empty)
+ */
+function* walkMessageParts(m, toolResultsByTid){
+  if(!m||m.role!=='assistant') return;
+  const thinking=m.reasoning_content||m.reasoning||m.thinking||m._reasoning||'';
+  if(thinking) yield {type:'thinking', content:thinking};
+  // Anthropic content-array format
+  if(Array.isArray(m.content)){
+    for(const part of m.content){
+      if(!part||typeof part!=='object') continue;
+      if(part.type==='text'&&part.text) yield {type:'comment', content:part.text};
+      if(part.type==='tool_use'){
+        yield {type:'cli-action', content:part};
+        const result=(toolResultsByTid&&toolResultsByTid[part.id])||'';
+        if(result) yield {type:'result', content:result};
+      }
+    }
+    return;
+  }
+  // OpenAI / top-level format
+  const text=typeof m.content==='string'?m.content:'';
+  if(text) yield {type:'comment', content:text};
+  for(const tc of (m.tool_calls||[])){
+    yield {type:'cli-action', content:tc};
+    const tid=tc.id||tc.call_id||'';
+    const result=(toolResultsByTid&&tid&&toolResultsByTid[tid])||'';
+    if(result) yield {type:'result', content:result};
+  }
+}
+
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
 }
@@ -7342,34 +7381,73 @@ function renderMessages(options){
       currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
       inner.appendChild(currentAssistantTurn);
     }
-    const seg=document.createElement('div');
-    seg.className='assistant-segment';
-    seg.dataset.msgIdx=rawIdx;
-    seg.dataset.rawText=String(content).trim();
-    if(m._live){
-      currentAssistantTurn.id='liveAssistantTurn';
-      // Stamp the session id on the live turn so finalizeThinkingCard()
-      // and other late callbacks can verify they're operating on the
-      // right session's DOM (the user may have switched tabs/sessions
-      // while this stream is still streaming). See #1366.
-      if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
-      seg.setAttribute('data-live-assistant','1');
+    if(isInterleavedTranscriptBubbles()&&!m._live){
+      // Interleaved mode: one bubble per sub-part
+      const toolResultsByTid={};
+      S.messages.forEach(rm=>{
+        if(!rm) return;
+        if(rm.role==='tool'){
+          const tid=rm.tool_call_id||rm.tool_use_id||'';
+          if(tid) toolResultsByTid[tid]=_cliToolResultSnippet(rm.content);
+          return;
+        }
+        if(Array.isArray(rm.content)){
+          rm.content.forEach(p=>{
+            if(!p||typeof p!=='object'||p.type!=='tool_result') return;
+            const tid=p.tool_use_id||'';
+            if(!tid) return;
+            const raw=typeof p.content==='string'?p.content:Array.isArray(p.content)?p.content.map(c=>c&&c.text?c.text:'').join(''):'';
+            toolResultsByTid[tid]=_cliToolResultSnippet(raw);
+          });
+        }
+      });
+      for(const part of walkMessageParts(m, toolResultsByTid)){
+        const bubble=document.createElement('div');
+        bubble.className='assistant-segment interleaved-bubble interleaved-bubble-'+part.type;
+        if(part.type==='comment'){
+          const html=renderMd(part.content);
+          bubble.insertAdjacentHTML('beforeend',`<div class="msg-body">${html}</div>`);
+        } else if(part.type==='thinking'){
+          if(window._showThinking!==false) bubble.insertAdjacentHTML('beforeend', _thinkingCardHtml(part.content));
+        } else if(part.type==='cli-action'){
+          const name=(part.content&&(part.content.name||(part.content.function&&part.content.function.name)))||'tool';
+          bubble.insertAdjacentHTML('beforeend',`<div class="interleaved-action-label">${esc(name)}</div>`);
+        } else if(part.type==='result'){
+          bubble.insertAdjacentHTML('beforeend',`<div class="interleaved-result-snippet"><pre>${esc(part.content)}</pre></div>`);
+        }
+        _assistantTurnBlocks(currentAssistantTurn).appendChild(bubble);
+      }
+      assistantSegments.set(rawIdx, _assistantTurnBlocks(currentAssistantTurn).lastElementChild||document.createElement('div'));
+    } else {
+      const seg=document.createElement('div');
+      seg.className='assistant-segment';
+      seg.dataset.msgIdx=rawIdx;
+      seg.dataset.rawText=String(content).trim();
+      if(m._live){
+        currentAssistantTurn.id='liveAssistantTurn';
+        // Stamp the session id on the live turn so finalizeThinkingCard()
+        // and other late callbacks can verify they're operating on the
+        // right session's DOM (the user may have switched tabs/sessions
+        // while this stream is still streaming). See #1366.
+        if(S.session) currentAssistantTurn.dataset.sessionId=S.session.session_id;
+        seg.setAttribute('data-live-assistant','1');
+      }
+      if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
+      if(thinkingText&&window._showThinking!==false){
+        if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
+        else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
+      }
+      const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml);
+      if(statusHtml){
+        seg.insertAdjacentHTML('beforeend', statusHtml);
+      }else if(hasVisibleBody){
+        seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+      }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
+        seg.classList.add('assistant-segment-anchor');
+      }
+      _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
+      assistantSegments.set(rawIdx, seg);
     }
-    if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
-    if(thinkingText&&window._showThinking!==false){
-      if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
-      else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
-    }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml);
-    if(statusHtml){
-      seg.insertAdjacentHTML('beforeend', statusHtml);
-    }else if(hasVisibleBody){
-      seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
-    }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
-      seg.classList.add('assistant-segment-anchor');
-    }
-    _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
-    assistantSegments.set(rawIdx, seg);
   }
 
   function _insertCompressionLikeNode(node, anchorIndex){

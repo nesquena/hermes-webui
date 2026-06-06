@@ -5105,6 +5105,7 @@ _SETTINGS_DEFAULTS = {
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "simplified_tool_calling": True,  # render tools/thinking as compact inline timeline activity
+    "interleaved_transcript_bubbles": False,  # render assistant turns as interleaved comment/action bubbles (default off)
     "terminal_auto_expand_on_output": False,  # auto-expand terminal panel when output arrives while collapsed
     "api_redact_enabled": True,  # redact sensitive data (API keys, secrets) from API responses
     "dashboard_plugins": {},  # plugin_name -> bool, opt-in per plugin (default off per PF-10b)
@@ -5260,6 +5261,7 @@ _SETTINGS_BOOL_KEYS = {
     "session_jump_buttons",
     "session_endless_scroll",
     "activity_feed_expanded_default",
+    "interleaved_transcript_bubbles",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")

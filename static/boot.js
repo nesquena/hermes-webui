@@ -1723,6 +1723,7 @@ function applyBotName(){
     window._whatsNewSummaryEnabled=!!s.whats_new_summary_enabled;
     window._showThinking=s.show_thinking!==false;
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
+    window._interleavedTranscriptBubbles=!!s.interleaved_transcript_bubbles;
     window._terminalAutoExpandOnOutput=!!s.terminal_auto_expand_on_output;
     window._activityFeedExpandedDefault=!!s.activity_feed_expanded_default;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
@@ -1821,6 +1822,7 @@ function applyBotName(){
     window._whatsNewSummaryEnabled=false;
     window._showThinking=true;
     window._simplifiedToolCalling=true;
+    window._interleavedTranscriptBubbles=false;
     window._terminalAutoExpandOnOutput=false;
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
