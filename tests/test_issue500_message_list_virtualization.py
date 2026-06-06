@@ -112,6 +112,8 @@ def test_render_messages_uses_virtual_window_and_spacer_measurement_path():
     assert "_messageVirtualSpacer(virtualWindow.topPad,'before')" in render_body
     assert "_messageVirtualSpacer(virtualWindow.bottomPad,'after')" in render_body
     assert "_updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);" in render_body
+    assert "const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));" in render_body
+    assert "if(virtualWindow.virtualized&&renderableRawIdxs.has(key)&&!renderedRawIdxs.has(key)) continue;" in render_body
     assert "if(hasServerOlder){" in render_body
     assert "_showEarlierRenderedMessages();" not in render_body
     top_spacer_idx = render_body.index("_messageVirtualSpacer(virtualWindow.topPad,'before')")
@@ -182,6 +184,30 @@ console.log(JSON.stringify({
     metrics = json.loads(_run_node(source))
     assert metrics["renderWindowSize"] == 240
     assert metrics["keepTailCount"] == 50
+
+
+def test_virtual_prepended_height_delta_uses_prefix_cache_only_when_virtualized():
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let virtualized = true;
+let _messageVirtualHeightCache = [0, 220, 180, 120];
+let _messageVirtualEstimatedRowHeight = 140;
+function _getVisibleMessagesWithIdx(){
+  return [{rawIdx: 0}, {rawIdx: 1}, {rawIdx: 2}, {rawIdx: 3}];
+}
+function _messageVirtualKeepTailCount(){ return 2; }
+function _currentMessageVirtualWindow(){
+  return {virtualized};
+}
+eval(extractFunc('_messageVirtualPrependedHeightDelta'));
+const active = _messageVirtualPrependedHeightDelta(3);
+virtualized = false;
+const inactive = _messageVirtualPrependedHeightDelta(3);
+console.log(JSON.stringify({active, inactive}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["active"] == 540
+    assert metrics["inactive"] is None
 
 
 def test_height_cache_preserves_measured_prefix_across_append_only_growth():
