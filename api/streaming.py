@@ -250,6 +250,7 @@ _GATEWAY_ROUTING_ATTEMPT_KEYS = {
 
 
 def _clean_gateway_routing_scalar(value):
+    """Clean gateway routing scalar."""
     if value is None:
         return None
     if isinstance(value, (str, int, float, bool)):
@@ -261,6 +262,7 @@ def _clean_gateway_routing_scalar(value):
 
 
 def _find_gateway_metadata_payload(payload):
+    """Find gateway metadata payload."""
     if not isinstance(payload, dict):
         return None
     if any(k in payload for k in _GATEWAY_ROUTING_TOP_LEVEL_KEYS) or isinstance(payload.get('routing'), list):
@@ -344,6 +346,7 @@ def _normalize_gateway_routing_metadata(payload, requested_model=None, requested
 
 
 def _extract_gateway_routing_metadata(agent, result, requested_model=None, requested_provider=None):
+    """Extract gateway routing metadata."""
     candidates = []
     if isinstance(result, dict):
         candidates.extend([
@@ -394,6 +397,7 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
 
 
 def _attachment_name(att) -> str:
+    """Attachment name."""
     if isinstance(att, dict):
         return str(att.get('name') or att.get('filename') or att.get('path') or '').strip()
     return str(att or '').strip()
@@ -602,6 +606,7 @@ def _sanitize_generated_title(text: str) -> str:
 
 
 def _looks_invalid_generated_title(text: str) -> bool:
+    """Looks invalid generated title."""
     s = str(text or '')
     if not s.strip():
         return True
@@ -636,10 +641,12 @@ _LEGACY_WORKSPACE_PREFIX_RE = re.compile(r'^\s*\[Workspace:[^\]]+\]\s*')
 
 
 def _escape_workspace_prefix_path(path: str) -> str:
+    """Escape workspace prefix path."""
     return str(path or '').replace('\\', '\\\\').replace(']', '\\]')
 
 
 def _workspace_context_prefix(path: str) -> str:
+    """Workspace context prefix."""
     return f"[Workspace::v1: {_escape_workspace_prefix_path(path)}]\n"
 
 
@@ -752,6 +759,7 @@ def _is_provisional_title(current_title: str, messages) -> bool:
 
 
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
+    """Title prompts."""
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
     prompts = [
         (
@@ -777,6 +785,7 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
 
 
 def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -> bool:
+    """Is minimax route."""
     text = ' '.join([
         str(provider or '').lower(),
         str(model or '').lower(),
@@ -828,14 +837,17 @@ def _title_completion_budget(provider: str = '', model: str = '', base_url: str 
     # content.  Keep the budget high enough for MiniMax/Kimi-style reasoning
     # responses without making title generation depend on provider-specific
     # one-off branches.
+    """Title completion budget."""
     return 512
 
 
 def _title_retry_completion_budget(provider: str = '', model: str = '', base_url: str = '') -> int:
+    """Title retry completion budget."""
     return max(1024, _title_completion_budget(provider, model, base_url) * 2)
 
 
 def _title_retry_status(status: str) -> bool:
+    """Title retry status."""
     return status in {
         'llm_length',
         'llm_length_aux',
@@ -845,6 +857,7 @@ def _title_retry_status(status: str) -> bool:
 
 
 def _safe_obj_value(obj, key: str):
+    """Safe obj value."""
     if obj is None:
         return None
     if isinstance(obj, dict):
@@ -858,6 +871,7 @@ def _safe_obj_value(obj, key: str):
 
 
 def _safe_text_value(value) -> str:
+    """Safe text value."""
     if value is None:
         return ''
     if value.__class__.__module__.startswith('unittest.mock'):
@@ -1088,6 +1102,7 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
 
 
 def _put_title_status(put_event, session_id: str, status: str, reason: str = '', title: str = '', raw_preview: str = '') -> None:
+    """Put title status."""
     payload = {'session_id': session_id, 'status': status}
     if reason:
         payload['reason'] = reason
@@ -1119,9 +1134,11 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     combined_raw = f"{user_text} {assistant_text}".strip()
 
     def _contains_latin(text: str) -> bool:
+        """Contains latin."""
         return bool(re.search(r'[A-Za-z]', text or ''))
 
     def _extract_named_topic(text: str) -> str:
+        """Extract named topic."""
         m = re.search(r'"([^"\n]{2,24})"', text)
         if m:
             return (m.group(1) or '').strip()
@@ -1449,11 +1466,13 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     prev_safe = _api_safe_message_positions(previous_messages)
 
     def _safe_projection(msg):
+        """Safe projection."""
         if not isinstance(msg, dict):
             return None
         return {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
 
     def _reasoning_only_assistant(msg):
+        """Reasoning only assistant."""
         if not isinstance(msg, dict) or msg.get('role') != 'assistant' or not msg.get('reasoning'):
             return False
         if msg.get('tool_calls'):
@@ -1494,6 +1513,7 @@ def _session_context_messages(session):
 
 
 def _message_identity(msg):
+    """Message identity."""
     if not isinstance(msg, dict):
         return None
     role = str(msg.get('role') or '')
@@ -1516,6 +1536,7 @@ def _message_identity(msg):
 
 
 def _messages_have_prefix(messages, prefix):
+    """Messages have prefix."""
     if len(messages or []) < len(prefix or []):
         return False
     for idx, expected in enumerate(prefix or []):
@@ -1525,6 +1546,7 @@ def _messages_have_prefix(messages, prefix):
 
 
 def _is_context_compression_marker(msg):
+    """Is context compression marker."""
     if not isinstance(msg, dict):
         return False
     text = _message_text(msg.get('content', '')).lower()
@@ -1537,6 +1559,7 @@ def _is_context_compression_marker(msg):
 
 
 def _find_current_user_turn(messages, msg_text):
+    """Find current user turn."""
     needle = " ".join(str(msg_text or '').split())
     fallback = None
     for idx, msg in enumerate(messages or []):
@@ -1941,6 +1964,7 @@ def _run_agent_streaming(
     _metering_stop = threading.Event()
 
     def _metering_ticker():
+        """Metering ticker."""
         while True:
             interval = meter().get_interval()
             if interval >= 10.0:
@@ -1956,6 +1980,7 @@ def _run_agent_streaming(
 
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
+        """Put."""
         if cancel_event.is_set() and event not in ('cancel', 'error'):
             return
         try:
@@ -2082,6 +2107,7 @@ def _run_agent_streaming(
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
+                """Approval notify cb."""
                 put('approval', approval_data)
             _reg_notify(session_id, _approval_notify_cb)
             _approval_registered = True
@@ -2097,6 +2123,7 @@ def _run_agent_streaming(
             )
 
             def _clarify_notify_cb(clarify_data):
+                """Clarify notify cb."""
                 put('clarify', clarify_data)
 
             _reg_clarify_notify(session_id, _clarify_notify_cb)
@@ -2160,6 +2187,7 @@ def _run_agent_streaming(
             _metering_reasoning_deltas = [0]
 
             def _emit_metering():
+                """Emit metering."""
                 now = time.monotonic()
                 if now - _metering_last_emit[0] < 0.1:
                     return
@@ -2171,6 +2199,7 @@ def _run_agent_streaming(
                 put('metering', stats)
 
             def on_token(text):
+                """Handle token event."""
                 nonlocal _token_sent
                 if text is None:
                     return  # end-of-stream sentinel
@@ -2187,6 +2216,7 @@ def _run_agent_streaming(
                 _emit_metering()
 
             def on_reasoning(text):
+                """Handle reasoning event."""
                 nonlocal _reasoning_text
                 if text is None:
                     return
@@ -2201,6 +2231,7 @@ def _run_agent_streaming(
                 _emit_metering()
 
             def on_interim_assistant(text, **cb_kwargs):
+                """Handle interim assistant event."""
                 if text is None:
                     return
                 visible = str(text).strip()
@@ -2217,6 +2248,7 @@ def _run_agent_streaming(
             _checkpoint_activity = [0]
 
             def on_tool(*cb_args, **cb_kwargs):
+                """Handle tool event."""
                 nonlocal _reasoning_text
                 event_type = None
                 name = None
@@ -2692,6 +2724,7 @@ def _run_agent_streaming(
             # (_checkpoint_activity is already initialised before on_tool().)
 
             def _periodic_checkpoint():
+                """Periodic checkpoint."""
                 last_saved_activity = 0
                 while not _checkpoint_stop.wait(15):
                     try:

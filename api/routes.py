@@ -113,6 +113,7 @@ def _active_skills_dir() -> Path:
 
 
 def _skill_path_within(base_dir: Path, candidate: Path) -> bool:
+    """Skill path within."""
     try:
         candidate.resolve().relative_to(base_dir.resolve())
         return True
@@ -121,6 +122,7 @@ def _skill_path_within(base_dir: Path, candidate: Path) -> bool:
 
 
 def _skill_category_from_path(skill_md: Path, skills_dirs: list[Path]) -> str | None:
+    """Skill category from path."""
     for skills_dir in skills_dirs:
         try:
             rel_path = skill_md.relative_to(skills_dir)
@@ -134,6 +136,7 @@ def _skill_category_from_path(skill_md: Path, skills_dirs: list[Path]) -> str | 
 
 
 def _active_skill_search_dirs(skills_dir: Path) -> list[Path]:
+    """Active skill search dirs."""
     dirs = [skills_dir]
     try:
         from agent.skill_utils import get_external_skills_dirs
@@ -276,6 +279,7 @@ def _find_skill_in_dir(name: str, skills_dir: Path) -> tuple[Path | None, Path |
 
 
 def _skill_not_found_payload(name: str, skills_dir: Path) -> dict:
+    """Skill not found payload."""
     available = [s["name"] for s in _skills_list_from_dir(skills_dir).get("skills", [])[:20]]
     return {
         "success": False,
@@ -286,6 +290,7 @@ def _skill_not_found_payload(name: str, skills_dir: Path) -> dict:
 
 
 def _skill_view_from_active_dir(name: str) -> dict:
+    """Skill view from active dir."""
     from tools.skills_tool import skill_view as _skill_view
 
     skills_dir = _active_skills_dir()
@@ -329,14 +334,17 @@ _SSE_HEARTBEAT_INTERVAL_SECONDS = 5
 
 
 def _normalize_messaging_source(raw_source) -> str:
+    """Normalize messaging source."""
     return str(raw_source or "").strip().lower()
 
 
 def _is_known_messaging_source(raw_source) -> bool:
+    """Is known messaging source."""
     return _normalize_messaging_source(raw_source) in _MESSAGING_RAW_SOURCES
 
 
 def _safe_first(*values):
+    """Safe first."""
     for value in values:
         if value is None:
             continue
@@ -347,6 +355,7 @@ def _safe_first(*values):
 
 
 def _gateway_session_metadata_path():
+    """Gateway session metadata path."""
     try:
         from api.profiles import get_active_hermes_home
         hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
@@ -356,6 +365,7 @@ def _gateway_session_metadata_path():
 
 
 def _load_gateway_session_identity_map() -> dict[str, dict]:
+    """Load gateway session identity map."""
     path = _gateway_session_metadata_path()
     if not path.exists():
         return {}
@@ -403,11 +413,13 @@ def _load_gateway_session_identity_map() -> dict[str, dict]:
 
 
 def _mark_cron_running(job_id: str):
+    """Mark cron running."""
     with _RUNNING_CRON_LOCK:
         _RUNNING_CRON_JOBS[job_id] = time.time()
 
 
 def _mark_cron_done(job_id: str):
+    """Mark cron done."""
     with _RUNNING_CRON_LOCK:
         _RUNNING_CRON_JOBS.pop(job_id, None)
 
@@ -470,10 +482,12 @@ def _cron_job_for_api(job: dict) -> dict:
 
 
 def _cron_jobs_for_api(jobs) -> list[dict]:
+    """Cron jobs for api."""
     return [_cron_job_for_api(job) for job in (jobs or [])]
 
 
 def _available_cron_profile_names() -> set[str]:
+    """Available cron profile names."""
     from api.profiles import list_profiles_api
 
     names = {"default"}
@@ -488,6 +502,7 @@ def _available_cron_profile_names() -> set[str]:
 
 
 def _normalize_cron_profile_value(value) -> str | None:
+    """Normalize cron profile value."""
     if value is None:
         return None
     profile = str(value).strip()
@@ -523,6 +538,7 @@ def _cron_job_subprocess_main(job, execution_profile_home, result_queue):
     """Run one cron job inside a child process pinned to a profile home."""
     try:
         def _run():
+            """Run."""
             from cron.scheduler import run_job
 
             return run_job(job)
@@ -641,6 +657,7 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
     execution_profile_home = execution_profile_home or profile_home
 
     def _with_cron_home(home, fn):
+        """With cron home."""
         if home is None:
             return fn()
         from api.profiles import cron_profile_context_for_home
@@ -656,6 +673,7 @@ def _run_cron_tracked(job, profile_home=None, execution_profile_home=None):
         # Persist output and run metadata back to the job's owning cron store,
         # even when the selected execution profile is different.
         def _persist_success():
+            """Persist success."""
             save_job_output(job_id, output)
 
             # Match the scheduled cron path: an apparently successful run with no
@@ -708,6 +726,7 @@ _LIVE_MODELS_CACHE_LOCK = threading.RLock()
 
 
 def _active_profile_for_live_models_cache() -> str:
+    """Active profile for live models cache."""
     try:
         from api.profiles import get_active_profile_name
 
@@ -721,10 +740,12 @@ def _active_profile_for_live_models_cache() -> str:
 
 
 def _live_models_cache_key(provider: str) -> tuple[str, str]:
+    """Live models cache key."""
     return (_active_profile_for_live_models_cache(), provider)
 
 
 def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
+    """Get cached live models."""
     now = time.monotonic()
     with _LIVE_MODELS_CACHE_LOCK:
         cached = _LIVE_MODELS_CACHE.get(key)
@@ -738,11 +759,13 @@ def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
 
 
 def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
+    """Set cached live models."""
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
 
 
 def _clear_live_models_cache() -> None:
+    """Clear live models cache."""
     with _LIVE_MODELS_CACHE_LOCK:
         _LIVE_MODELS_CACHE.clear()
 
@@ -1019,6 +1042,7 @@ def _check_csrf(handler) -> bool:
 
 
 def _normalize_provider_id(value: str | None) -> str:
+    """Normalize provider id."""
     raw = str(value or "").strip().lower()
     if not raw:
         return ""
@@ -1042,6 +1066,7 @@ def _normalize_provider_id(value: str | None) -> str:
 
 
 def _catalog_provider_id_sets(catalog: dict) -> tuple[set[str], set[str]]:
+    """Catalog provider id sets."""
     raw_provider_ids: set[str] = set()
     normalized_provider_ids: set[str] = set()
     for group in catalog.get("groups") or []:
@@ -1061,6 +1086,7 @@ def _catalog_has_provider(
     raw_provider_ids: set[str],
     normalized_provider_ids: set[str],
 ) -> bool:
+    """Catalog has provider."""
     return (
         provider_raw in raw_provider_ids
         or (provider_normalized and provider_normalized in raw_provider_ids)
@@ -1072,6 +1098,7 @@ def _model_matches_active_provider_family(
     model: str,
     active_provider: str,
 ) -> bool:
+    """Model matches active provider family."""
     model_lower = model.lower()
     for bare_prefix in ("gpt", "claude", "gemini"):
         if model_lower.startswith(bare_prefix):
@@ -1080,6 +1107,7 @@ def _model_matches_active_provider_family(
 
 
 def _catalog_model_id_matches(candidate: str, model: str) -> bool:
+    """Catalog model id matches."""
     candidate = str(candidate or "").strip()
     if candidate.startswith("@") and ":" in candidate:
         candidate = candidate.rsplit(":", 1)[1]
@@ -1089,6 +1117,7 @@ def _catalog_model_id_matches(candidate: str, model: str) -> bool:
 
 
 def _clean_session_model_provider(value: str | None) -> str | None:
+    """Clean session model provider."""
     provider = str(value or "").strip().lower()
     if not provider or provider == "default":
         return None
@@ -1098,6 +1127,7 @@ def _clean_session_model_provider(value: str | None) -> str | None:
 
 
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
+    """Split provider qualified model."""
     model = str(model or "").strip()
     if model.startswith("@") and ":" in model:
         provider_hint, bare_model = model[1:].rsplit(":", 1)
@@ -1303,6 +1333,7 @@ def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
 
 
 def _normalize_session_model_in_place(session) -> str:
+    """Normalize session model in place."""
     original_model = getattr(session, "model", None) or ""
     original_provider = _clean_session_model_provider(
         getattr(session, "model_provider", None)
@@ -1340,6 +1371,7 @@ def _resolve_effective_session_model_for_display(session) -> str:
     return effective_model or original_model
 
 def _resolve_effective_session_model_provider_for_display(session) -> str | None:
+    """Resolve effective session model provider for display."""
     original_model = getattr(session, "model", None) or ""
     _model, provider, _changed = _resolve_compatible_session_model_state(
         original_model or None,
@@ -1353,6 +1385,7 @@ def _session_model_state_from_request(
     requested_provider: str | None,
     current_provider: str | None = None,
 ) -> tuple[str | None, str | None]:
+    """Session model state from request."""
     model_value = str(model).strip() if model is not None else None
     provider = (
         _clean_session_model_provider(requested_provider)
@@ -1373,6 +1406,7 @@ def _session_model_state_from_request(
 
 
 def _lookup_gateway_session_identity(session_id: str) -> dict:
+    """Lookup gateway session identity."""
     if not session_id:
         return {}
     metadata = _load_gateway_session_identity_map().get(str(session_id))
@@ -1380,6 +1414,7 @@ def _lookup_gateway_session_identity(session_id: str) -> dict:
 
 
 def _lookup_cli_session_metadata(session_id: str) -> dict:
+    """Lookup cli session metadata."""
     if not session_id:
         return {}
     try:
@@ -1392,6 +1427,7 @@ def _lookup_cli_session_metadata(session_id: str) -> dict:
 
 
 def _messaging_session_identity(session: dict, raw_source: str) -> str:
+    """Messaging session identity."""
     metadata = _lookup_gateway_session_identity(session.get("session_id"))
     session_key = _safe_first(
         metadata.get("session_key"),
@@ -1430,6 +1466,7 @@ def _messaging_session_identity(session: dict, raw_source: str) -> str:
 
 
 def _session_messaging_raw_source(session: dict) -> str:
+    """Session messaging raw source."""
     raw = _safe_first(
         session.get("raw_source"),
         session.get("source_tag"),
@@ -1442,6 +1479,7 @@ def _session_messaging_raw_source(session: dict) -> str:
 
 
 def _has_durable_messaging_identity(session: dict) -> bool:
+    """Has durable messaging identity."""
     metadata = _lookup_gateway_session_identity(session.get("session_id"))
     return bool(_safe_first(
         metadata.get("session_key"),
@@ -1456,6 +1494,7 @@ def _has_durable_messaging_identity(session: dict) -> bool:
 
 
 def _numeric_count(value) -> int:
+    """Numeric count."""
     try:
         return int(float(_safe_first(value, 0) or 0))
     except (TypeError, ValueError):
@@ -1532,6 +1571,7 @@ def _is_messaging_session_id(sid: str) -> bool:
 
 
 def _session_sort_timestamp(session: dict) -> float:
+    """Session sort timestamp."""
     return float(
         _safe_first(
             session.get("last_message_at"),
@@ -1644,6 +1684,7 @@ def _merge_cli_sidebar_metadata(ui_session: dict, cli_meta: dict) -> dict:
 
 
 def _messaging_source_key(session: dict) -> str | None:
+    """Messaging source key."""
     raw = _session_messaging_raw_source(session)
     if not _is_known_messaging_source(raw):
         return None
@@ -2050,6 +2091,7 @@ _LOG_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _normalize_logs_tail(raw_tail) -> int:
+    """Normalize logs tail."""
     try:
         tail = int(str(raw_tail or "").strip())
     except (TypeError, ValueError):
@@ -2119,6 +2161,7 @@ _LLM_WIKI_PAGE_DIRS = ("entities", "concepts", "comparisons", "queries")
 
 
 def _llm_wiki_active_hermes_home() -> Path:
+    """Llm wiki active hermes home."""
     try:
         from api.profiles import get_active_hermes_home
         return Path(get_active_hermes_home()).expanduser()
@@ -2127,6 +2170,7 @@ def _llm_wiki_active_hermes_home() -> Path:
 
 
 def _llm_wiki_env_file_path(hermes_home: Path) -> str | None:
+    """Llm wiki env file path."""
     env_path = hermes_home / ".env"
     if not env_path.exists() or not env_path.is_file():
         return None
@@ -2146,6 +2190,7 @@ def _llm_wiki_env_file_path(hermes_home: Path) -> str | None:
 
 
 def _llm_wiki_get_config_path_value(config: dict, dotted_key: str) -> str | None:
+    """Llm wiki get config path value."""
     if not isinstance(config, dict):
         return None
     if dotted_key in config and config.get(dotted_key):
@@ -2159,6 +2204,7 @@ def _llm_wiki_get_config_path_value(config: dict, dotted_key: str) -> str | None
 
 
 def _llm_wiki_config_path() -> str | None:
+    """Llm wiki config path."""
     try:
         from api.config import get_config as _get_cfg
         cfg = _get_cfg()
@@ -2180,6 +2226,7 @@ _LLM_WIKI_FORBIDDEN_ROOTS = frozenset(
 
 
 def _llm_wiki_resolve_path() -> tuple[Path, str, bool]:
+    """Llm wiki resolve path."""
     hermes_home = _llm_wiki_active_hermes_home()
     raw = os.getenv("WIKI_PATH") or _llm_wiki_env_file_path(hermes_home)
     source = "WIKI_PATH" if raw else "default"
@@ -2195,6 +2242,7 @@ def _llm_wiki_resolve_path() -> tuple[Path, str, bool]:
 
 
 def _llm_wiki_safe_iso(ts: float | None) -> str | None:
+    """Llm wiki safe iso."""
     if not ts:
         return None
     try:
@@ -2205,6 +2253,7 @@ def _llm_wiki_safe_iso(ts: float | None) -> str | None:
 
 
 def _llm_wiki_count_files(root: Path) -> int:
+    """Llm wiki count files."""
     if not root.exists() or not root.is_dir():
         return 0
     # Defense in depth: refuse to walk forbidden system roots even if WIKI_PATH
@@ -2230,6 +2279,7 @@ def _llm_wiki_count_files(root: Path) -> int:
 
 
 def _llm_wiki_page_files(wiki_path: Path) -> list[Path]:
+    """Llm wiki page files."""
     pages: list[Path] = []
     # Defense in depth: refuse forbidden system roots.
     try:
@@ -2321,6 +2371,7 @@ def _build_llm_wiki_status() -> dict:
 
 
 def _handle_llm_wiki_status(handler, parsed) -> bool:
+    """Handle llm wiki status."""
     j(handler, _build_llm_wiki_status())
     return True
 
@@ -2344,12 +2395,14 @@ def _handle_insights(handler, parsed) -> bool:
     cutoff = first_day_ts
 
     def _safe_usage_int(value) -> int:
+        """Safe usage int."""
         try:
             return max(int(float(value or 0)), 0)
         except (TypeError, ValueError):
             return 0
 
     def _safe_cost_float(value) -> float:
+        """Safe cost float."""
         if value is None:
             return 0.0
         try:
@@ -2362,6 +2415,7 @@ def _handle_insights(handler, parsed) -> bool:
             return 0.0
 
     def _session_usage_ts(session: dict) -> float:
+        """Session usage ts."""
         return session.get("updated_at", session.get("created_at", 0)) or session.get("created_at", 0) or 0
 
     # Walk session index (fast, no full JSON parse)
@@ -2501,6 +2555,7 @@ def _handle_insights(handler, parsed) -> bool:
 
 
 def _accept_loop_health(handler) -> dict:
+    """Accept loop health."""
     server = getattr(handler, "server", None)
     return {
         "requests_total": int(getattr(server, "accept_loop_requests_total", 0) or 0),
@@ -2509,6 +2564,7 @@ def _accept_loop_health(handler) -> dict:
 
 
 def _streams_lock_health(timeout_seconds: float = 0.5) -> dict:
+    """Streams lock health."""
     t0 = time.time()
     acquired = STREAMS_LOCK.acquire(timeout=timeout_seconds)
     elapsed_ms = round((time.time() - t0) * 1000, 1)
@@ -2606,6 +2662,7 @@ def _deep_health_checks(stream_check: dict | None = None) -> tuple[dict, bool]:
 
 
 def _handle_health(handler, parsed):
+    """Handle health."""
     deep = parse_qs(parsed.query or "").get("deep", [""])[0].lower() in {"1", "true", "yes", "on"}
     stream_check = _streams_lock_health()
     payload = {
@@ -2708,6 +2765,7 @@ def _plugin_visibility_payload(manager=None) -> dict:
 
 
 def _handle_plugins(handler, parsed) -> bool:
+    """Handle plugins."""
     try:
         return j(handler, _plugin_visibility_payload())
     except Exception as exc:
@@ -5017,6 +5075,7 @@ _TEXT_MIME_TYPES = {"text/css", "application/javascript", "text/html", "image/sv
 
 
 def _serve_static(handler, parsed):
+    """Serve static."""
     static_root = (Path(__file__).parent.parent / "static").resolve()
     # Strip the leading '/static/' prefix, then resolve and sandbox
     rel = parsed.path[len("/static/") :]
@@ -5041,6 +5100,7 @@ def _serve_static(handler, parsed):
 
 
 def _handle_session_export(handler, parsed):
+    """Handle session export."""
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id is required")
@@ -5063,6 +5123,7 @@ def _handle_session_export(handler, parsed):
 
 
 def _handle_sessions_search(handler, parsed):
+    """Handle sessions search."""
     qs = parse_qs(parsed.query)
     q = qs.get("q", [""])[0].lower().strip()
     content_search = qs.get("content", ["1"])[0] == "1"
@@ -5108,6 +5169,7 @@ def _handle_sessions_search(handler, parsed):
 
 
 def _handle_list_dir(handler, parsed):
+    """Handle list dir."""
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
     if not sid:
@@ -5141,6 +5203,7 @@ def _handle_list_dir(handler, parsed):
 
 
 def _handle_sse_stream(handler, parsed):
+    """Handle sse stream."""
     stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
     stream = STREAMS.get(stream_id)
     if stream is None:
@@ -5175,6 +5238,7 @@ def _handle_sse_stream(handler, parsed):
 
 
 def _terminal_session_and_workspace(body_or_query):
+    """Terminal session and workspace."""
     sid = str(body_or_query.get("session_id", "")).strip()
     if not sid:
         raise ValueError("session_id required")
@@ -5187,6 +5251,7 @@ def _terminal_session_and_workspace(body_or_query):
 
 
 def _handle_terminal_start(handler, body):
+    """Handle terminal start."""
     try:
         sid, workspace = _terminal_session_and_workspace(body)
         from api.terminal import start_terminal
@@ -5215,6 +5280,7 @@ def _handle_terminal_start(handler, body):
 
 
 def _handle_terminal_input(handler, body):
+    """Handle terminal input."""
     try:
         require(body, "session_id")
         data = str(body.get("data", ""))
@@ -5232,6 +5298,7 @@ def _handle_terminal_input(handler, body):
 
 
 def _handle_terminal_resize(handler, body):
+    """Handle terminal resize."""
     try:
         require(body, "session_id")
         from api.terminal import resize_terminal
@@ -5250,6 +5317,7 @@ def _handle_terminal_resize(handler, body):
 
 
 def _handle_terminal_close(handler, body):
+    """Handle terminal close."""
     try:
         require(body, "session_id")
         from api.terminal import close_terminal
@@ -5260,6 +5328,7 @@ def _handle_terminal_close(handler, body):
 
 
 def _handle_terminal_output(handler, parsed):
+    """Handle terminal output."""
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
     if not sid:
@@ -5295,6 +5364,7 @@ def _handle_terminal_output(handler, parsed):
 
 
 def _gateway_sse_probe_payload(settings, watcher):
+    """Gateway sse probe payload."""
     enabled = bool(settings.get('show_cli_sessions'))
     # Use the public is_alive() accessor where available (current GatewayWatcher);
     # fall back to the private _thread check for any older in-memory instance
@@ -5582,6 +5652,7 @@ def _handle_media(handler, parsed):
 
 
 def _handle_file_raw(handler, parsed):
+    """Handle file raw."""
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
     if not sid:
@@ -5618,6 +5689,7 @@ def _handle_file_raw(handler, parsed):
 
 
 def _handle_file_read(handler, parsed):
+    """Handle file read."""
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
     if not sid:
@@ -5636,6 +5708,7 @@ def _handle_file_read(handler, parsed):
 
 
 def _handle_approval_pending(handler, parsed):
+    """Handle approval pending."""
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
     with _lock:
         queue = _pending.get(sid)
@@ -5735,6 +5808,7 @@ def _handle_approval_inject(handler, parsed):
 
 
 def _handle_clarify_pending(handler, parsed):
+    """Handle clarify pending."""
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
     pending = get_clarify_pending(sid)
     if pending:
@@ -5878,6 +5952,7 @@ def _handle_live_models(handler, parsed):
             return j(handler, cached)
 
         def _finish(payload: dict):
+            """Finish."""
             _set_cached_live_models(cache_key, payload)
             return j(handler, payload)
 
@@ -6156,6 +6231,7 @@ def _cron_output_snippet(text: str, limit: int = 600) -> str:
 
 
 def _handle_cron_output(handler, parsed):
+    """Handle cron output."""
     from cron.jobs import OUTPUT_DIR as CRON_OUT
 
     qs = parse_qs(parsed.query)
@@ -6228,6 +6304,7 @@ def _handle_cron_recent(handler, parsed):
 
 
 def _handle_memory_read(handler):
+    """Handle memory read."""
     try:
         from api.profiles import get_active_hermes_home
 
@@ -6263,6 +6340,7 @@ def _handle_memory_read(handler):
 
 
 def _handle_sessions_cleanup(handler, body, zero_only=False):
+    """Handle sessions cleanup."""
     cleaned = 0
     for p in SESSION_DIR.glob("*.json"):
         if p.name.startswith("_"):
@@ -6699,6 +6777,7 @@ def _handle_goal_command(handler, body):
 
 
 def _handle_chat_start(handler, body, diag=None):
+    """Handle chat start."""
     try:
         diag.stage("validate_session_id") if diag else None
         try:
@@ -6970,6 +7049,7 @@ def _handle_chat_sync(handler, body):
 
 
 def _handle_cron_create(handler, body):
+    """Handle cron create."""
     try:
         require(body, "prompt", "schedule")
     except ValueError as e:
@@ -6994,6 +7074,7 @@ def _handle_cron_create(handler, body):
 
 
 def _handle_cron_update(handler, body):
+    """Handle cron update."""
     try:
         require(body, "job_id")
     except ValueError as e:
@@ -7018,6 +7099,7 @@ def _handle_cron_update(handler, body):
 
 
 def _handle_cron_delete(handler, body):
+    """Handle cron delete."""
     try:
         require(body, "job_id")
     except ValueError as e:
@@ -7031,6 +7113,7 @@ def _handle_cron_delete(handler, body):
 
 
 def _handle_cron_run(handler, body):
+    """Handle cron run."""
     job_id = body.get("job_id", "")
     if not job_id:
         return bad(handler, "job_id required")
@@ -7066,6 +7149,7 @@ def _handle_cron_run(handler, body):
 
 
 def _handle_cron_pause(handler, body):
+    """Handle cron pause."""
     job_id = body.get("job_id", "")
     if not job_id:
         return bad(handler, "job_id required")
@@ -7078,6 +7162,7 @@ def _handle_cron_pause(handler, body):
 
 
 def _handle_cron_resume(handler, body):
+    """Handle cron resume."""
     job_id = body.get("job_id", "")
     if not job_id:
         return bad(handler, "job_id required")
@@ -7090,6 +7175,7 @@ def _handle_cron_resume(handler, body):
 
 
 def _handle_file_delete(handler, body):
+    """Handle file delete."""
     try:
         require(body, "session_id", "path")
     except ValueError as e:
@@ -7114,6 +7200,7 @@ def _handle_file_delete(handler, body):
 
 
 def _handle_file_save(handler, body):
+    """Handle file save."""
     try:
         require(body, "session_id", "path")
     except ValueError as e:
@@ -7137,6 +7224,7 @@ def _handle_file_save(handler, body):
 
 
 def _handle_file_create(handler, body):
+    """Handle file create."""
     try:
         require(body, "session_id", "path")
     except ValueError as e:
@@ -7159,6 +7247,7 @@ def _handle_file_create(handler, body):
 
 
 def _handle_file_rename(handler, body):
+    """Handle file rename."""
     try:
         require(body, "session_id", "path", "new_name")
     except ValueError as e:
@@ -7185,6 +7274,7 @@ def _handle_file_rename(handler, body):
 
 
 def _handle_create_dir(handler, body):
+    """Handle create dir."""
     try:
         require(body, "session_id", "path")
     except ValueError as e:
@@ -7206,6 +7296,7 @@ def _handle_create_dir(handler, body):
 
 
 def _handle_file_reveal(handler, body):
+    """Handle file reveal."""
     try:
         require(body, "session_id", "path")
     except ValueError as e:
@@ -7275,6 +7366,7 @@ def _handle_workspace_add(handler, body):
     # Doing this at the route entry means every downstream check (blocked
     # system path, validate_workspace_to_add, duplicate detection) sees the
     # cleaned form.
+    """Handle workspace add."""
     path_str = _strip_surrounding_quotes(body.get("path", "").strip())
     name = body.get("name", "").strip()
     auto_create = body.get("create", False)
@@ -7308,6 +7400,7 @@ def _handle_workspace_add(handler, body):
 
 
 def _handle_workspace_remove(handler, body):
+    """Handle workspace remove."""
     path_str = body.get("path", "").strip()
     if not path_str:
         return bad(handler, "path is required")
@@ -7318,6 +7411,7 @@ def _handle_workspace_remove(handler, body):
 
 
 def _handle_workspace_rename(handler, body):
+    """Handle workspace rename."""
     path_str = body.get("path", "").strip()
     name = body.get("name", "").strip()
     if not path_str or not name:
@@ -7362,6 +7456,7 @@ def _handle_workspace_reorder(handler, body):
 
 
 def _handle_approval_respond(handler, body):
+    """Handle approval respond."""
     sid = body.get("session_id", "")
     if not sid:
         return bad(handler, "session_id is required")
@@ -7421,6 +7516,7 @@ def _handle_approval_respond(handler, body):
 
 
 def _handle_clarify_respond(handler, body):
+    """Handle clarify respond."""
     sid = body.get("session_id", "")
     if not sid:
         return bad(handler, "session_id is required")
@@ -7437,7 +7533,9 @@ def _handle_clarify_respond(handler, body):
 
 
 def _handle_session_compress(handler, body):
+    """Handle session compress."""
     def _visible_messages_for_anchor(messages):
+        """Visible messages for anchor."""
         out = []
         for m in messages or []:
             if not isinstance(m, dict):
@@ -7483,6 +7581,7 @@ def _handle_session_compress(handler, body):
         return out
 
     def _anchor_message_key(m):
+        """Anchor message key."""
         if not isinstance(m, dict):
             return None
         role = str(m.get("role") or "")
@@ -7577,6 +7676,7 @@ def _handle_session_compress(handler, body):
             return summary
 
         def _estimate_messages_tokens_rough(msgs):
+            """Estimate messages tokens rough."""
             try:
                 from agent.model_metadata import estimate_messages_tokens_rough
 
@@ -7591,6 +7691,7 @@ def _handle_session_compress(handler, body):
             after_tokens,
             focus_topic=None,
         ):
+            """Summarize manual compression."""
             try:
                 from agent.manual_compression_feedback import summarize_manual_compression
 
@@ -8018,6 +8119,7 @@ def _handle_handoff_summary(handler, body):
         return bad(handler, "Not enough messages to summarize.", 400)
 
     def _extract_handoff_text(raw_content):
+        """Extract handoff text."""
         if isinstance(raw_content, list):
             return " ".join(
                 str(p.get("text") or p.get("content") or "")
@@ -8027,6 +8129,7 @@ def _handle_handoff_summary(handler, body):
         return str(raw_content or "").strip()
 
     def _contains_chinese(text):
+        """Contains chinese."""
         return any("\u4e00" <= ch <= "\u9fff" for ch in str(text))
 
     transcript_is_chinese = any(
@@ -8049,6 +8152,7 @@ def _handle_handoff_summary(handler, body):
         assistant_points = []
 
         def _summarize_snippet(raw_text, max_len=78):
+            """Summarize snippet."""
             text = " ".join(str(raw_text or "").split()).strip()
             if not text:
                 return ""
@@ -8114,6 +8218,7 @@ def _handle_handoff_summary(handler, body):
         return bool(re.search(r"\b(and|or|but|so|because|if|when)$", last_line, re.IGNORECASE))
 
     def _agent_summary_incomplete(summary_result):
+        """Agent summary incomplete."""
         if not isinstance(summary_result, dict):
             return True
         reason = (summary_result.get("finish_reason") or "").strip().lower()
@@ -8125,6 +8230,7 @@ def _handle_handoff_summary(handler, body):
         return _summary_output_incomplete(summary_result.get("text", ""))
 
     def _resolve_handoff_channel_label():
+        """Resolve handoff channel label."""
         channel_label = None
         try:
             from api.models import get_session as _get_session, get_cli_sessions
@@ -8384,6 +8490,7 @@ def _handle_handoff_summary(handler, body):
 
 
 def _handle_skill_save(handler, body):
+    """Handle skill save."""
     try:
         require(body, "name", "content")
     except ValueError as e:
@@ -8412,6 +8519,7 @@ def _handle_skill_save(handler, body):
 
 
 def _handle_skill_delete(handler, body):
+    """Handle skill delete."""
     try:
         require(body, "name")
     except ValueError as e:
@@ -8431,6 +8539,7 @@ def _handle_skill_delete(handler, body):
 
 
 def _handle_memory_write(handler, body):
+    """Handle memory write."""
     try:
         require(body, "section", "content")
     except ValueError as e:
@@ -8470,6 +8579,7 @@ def _normalize_message_for_import_refresh(message: object) -> object:
 
 
 def _message_has_cli_tool_metadata(message: object) -> bool:
+    """Message has cli tool metadata."""
     if not isinstance(message, dict):
         return False
     if message.get("role") == "assistant" and message.get("tool_calls"):
@@ -8480,6 +8590,7 @@ def _message_has_cli_tool_metadata(message: object) -> bool:
 
 
 def _strip_cli_tool_metadata_for_refresh(message: object) -> object:
+    """Strip cli tool metadata for refresh."""
     if not isinstance(message, dict):
         return _normalize_message_for_import_refresh(message)
     normalized = _normalize_message_for_import_refresh(message)
@@ -8904,6 +9015,7 @@ def _mcp_schema_summary(schema, *, limit: int = 12) -> list[dict]:
 
 
 def _mcp_tool_schema_from_payload(tool):
+    """Mcp tool schema from payload."""
     if not isinstance(tool, dict):
         return {}
     for key in ("parameters", "inputSchema", "input_schema", "schema"):

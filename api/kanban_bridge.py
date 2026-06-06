@@ -25,6 +25,7 @@ _TASK_PREFIX = "/api/kanban/tasks/"
 
 
 def _kb():
+    """Kb."""
     from hermes_cli import kanban_db as kb
 
     return kb
@@ -78,12 +79,14 @@ def _normalise_board_or_raise(raw):
 
 
 def _conn(board=None):
+    """Conn."""
     kb = _kb()
     kb.init_db(board=board)
     return kb.connect(board=board)
 
 
 def _obj_dict(value):
+    """Obj dict."""
     if value is None:
         return None
     if is_dataclass(value):
@@ -94,6 +97,7 @@ def _obj_dict(value):
 
 
 def _task_dict(task):
+    """Task dict."""
     data = _obj_dict(task)
     if not data:
         return data
@@ -108,6 +112,7 @@ def _task_dict(task):
 
 
 def _latest_event_id(conn) -> int:
+    """Latest event id."""
     try:
         row = conn.execute("SELECT COALESCE(MAX(id), 0) AS latest FROM task_events").fetchone()
         return int(row["latest"] or 0)
@@ -116,6 +121,7 @@ def _latest_event_id(conn) -> int:
 
 
 def _bool_query(parsed, name: str, default: bool = False) -> bool:
+    """Bool query."""
     raw = (parse_qs(parsed.query or "").get(name) or [None])[0]
     if raw is None:
         return default
@@ -123,11 +129,13 @@ def _bool_query(parsed, name: str, default: bool = False) -> bool:
 
 
 def _str_query(parsed, name: str):
+    """Str query."""
     raw = (parse_qs(parsed.query or "").get(name) or [None])[0]
     return str(raw).strip() or None if raw is not None else None
 
 
 def _int_query(parsed, name: str, default=None, *, minimum=None, maximum=None):
+    """Int query."""
     raw = _str_query(parsed, name)
     if raw is None:
         return default
@@ -143,6 +151,7 @@ def _int_query(parsed, name: str, default=None, *, minimum=None, maximum=None):
 
 
 def _task_link_counts(conn, tasks):
+    """Task link counts."""
     counts = {task.id: {"parents": 0, "children": 0} for task in tasks}
     try:
         rows = conn.execute("SELECT parent_id, child_id FROM task_links").fetchall()
@@ -155,6 +164,7 @@ def _task_link_counts(conn, tasks):
 
 
 def _comment_counts(conn):
+    """Comment counts."""
     try:
         rows = conn.execute(
             "SELECT task_id, COUNT(*) AS n FROM task_comments GROUP BY task_id"
@@ -165,6 +175,7 @@ def _comment_counts(conn):
 
 
 def _board_payload(parsed):
+    """Board payload."""
     board = _resolve_board(parsed)
     kb = _kb()
     tenant = _str_query(parsed, "tenant")
@@ -197,6 +208,7 @@ def _board_payload(parsed):
         comment_counts = _comment_counts(conn)
 
         def row(task):
+            """Row."""
             data = _task_dict(task)
             data["link_counts"] = link_counts.get(task.id, {"parents": 0, "children": 0})
             data["comment_count"] = comment_counts.get(task.id, 0)
@@ -230,6 +242,7 @@ def _board_payload(parsed):
 
 
 def _validate_status(status: str) -> str:
+    """Validate status."""
     value = str(status or "").strip().lower()
     allowed = set(BOARD_COLUMNS) | {"archived"}
     if value not in allowed:
@@ -304,6 +317,7 @@ def _set_status_direct(conn, task_id: str, new_status: str) -> bool:
 
 
 def _create_task_payload(body: dict, *, board=None):
+    """Create task payload."""
     title = str(body.get("title") or "").strip()
     if not title:
         raise ValueError("title is required")
@@ -336,6 +350,7 @@ def _create_task_payload(body: dict, *, board=None):
 
 
 def _patch_task(conn, task_id: str, body: dict):
+    """Patch task."""
     kb = _kb()
     task = kb.get_task(conn, task_id)
     if not task:
@@ -425,6 +440,7 @@ def _patch_task(conn, task_id: str, body: dict):
 
 
 def _patch_task_payload(task_id: str, body: dict, *, board=None):
+    """Patch task payload."""
     task_id = str(task_id or "").strip()
     if not task_id:
         raise ValueError("task_id is required")
@@ -435,6 +451,7 @@ def _patch_task_payload(task_id: str, body: dict, *, board=None):
 
 
 def _comment_payload(task_id: str, body: dict, *, board=None):
+    """Comment payload."""
     task_id = str(task_id or "").strip()
     comment_body = str(body.get("body") or "").strip()
     if not task_id:
@@ -450,6 +467,7 @@ def _comment_payload(task_id: str, body: dict, *, board=None):
 
 
 def _link_tasks_payload(body: dict, *, unlink: bool = False, board=None):
+    """Link tasks payload."""
     parent_id = str(body.get("parent_id") or "").strip()
     child_id = str(body.get("child_id") or "").strip()
     if not parent_id or not child_id:
@@ -467,6 +485,7 @@ def _link_tasks_payload(body: dict, *, unlink: bool = False, board=None):
         return {"ok": True, "parent_id": parent_id, "child_id": child_id, "read_only": False}
 
 def _links_for(conn, task_id: str) -> dict:
+    """Links for."""
     kb = _kb()
     return {
         "parents": kb.parent_ids(conn, task_id),
@@ -475,6 +494,7 @@ def _links_for(conn, task_id: str) -> dict:
 
 
 def _task_detail_payload(task_id: str, *, board=None):
+    """Task detail payload."""
     kb = _kb()
     with _conn(board=board) as conn:
         task = kb.get_task(conn, task_id)
@@ -491,6 +511,7 @@ def _task_detail_payload(task_id: str, *, board=None):
 
 
 def _events_payload(parsed):
+    """Events payload."""
     board = _resolve_board(parsed)
     since = _int_query(parsed, "since", 0, minimum=0)
     limit = _int_query(parsed, "limit", 200, minimum=1, maximum=200)
@@ -523,6 +544,7 @@ def _events_payload(parsed):
 
 
 def _config_payload(*, board=None):
+    """Config payload."""
     kb = _kb()
     try:
         with _conn(board=board) as conn:
@@ -551,6 +573,7 @@ def _config_payload(*, board=None):
 
 
 def _stats_payload(*, board=None):
+    """Stats payload."""
     kb = _kb()
     with _conn(board=board) as conn:
         if hasattr(kb, "board_stats"):
@@ -569,6 +592,7 @@ def _stats_payload(*, board=None):
 
 
 def _assignees_payload(*, board=None):
+    """Assignees payload."""
     kb = _kb()
     with _conn(board=board) as conn:
         try:
@@ -582,6 +606,7 @@ def _assignees_payload(*, board=None):
 
 
 def _task_log_payload(parsed, task_id: str):
+    """Task log payload."""
     board = _resolve_board(parsed)
     kb = _kb()
     tail = _int_query(parsed, "tail", None, minimum=1, maximum=2_000_000)
@@ -607,6 +632,7 @@ def _task_log_payload(parsed, task_id: str):
 
 
 def _bulk_tasks_payload(body: dict, *, board=None):
+    """Bulk tasks payload."""
     ids = [str(i).strip() for i in (body.get("ids") or []) if str(i).strip()]
     if not ids:
         raise ValueError("ids is required")
@@ -644,6 +670,7 @@ def _bulk_tasks_payload(body: dict, *, board=None):
 
 
 def _dispatch_payload(parsed):
+    """Dispatch payload."""
     board = _resolve_board(parsed)
     kb = _kb()
     dry_run = _bool_query(parsed, "dry_run", False)
@@ -661,6 +688,7 @@ def _dispatch_payload(parsed):
 
 
 def _task_action_payload(task_id: str, body: dict, action: str, *, board=None):
+    """Task action payload."""
     kb = _kb()
     task_id = str(task_id or "").strip()
     if not task_id:
