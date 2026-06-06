@@ -2823,6 +2823,50 @@ body.resizing .sidebar{transition:none!important;}
 .tool-worklog-list .tool-card-result pre{
   margin:0;
 }
+.tool-worklog-list > .agent-activity-thinking{
+  margin:0;
+}
+.tool-worklog-list > .agent-activity-thinking .thinking-card,
+:root[data-skin] .tool-worklog-list > .agent-activity-thinking .thinking-card,
+:root[data-skin] .tool-worklog-list > .agent-activity-thinking .thinking-card:hover{
+  margin:0;
+  max-width:none;
+  border:0;
+  border-radius:0;
+  background:transparent;
+}
+.tool-worklog-list > .agent-activity-thinking .thinking-card-header{
+  gap:7px;
+  padding:3px 8px;
+  margin-left:-8px;
+  border-radius:7px;
+  color:var(--muted);
+  font-size:var(--message-body-font-size);
+  font-weight:400;
+  line-height:var(--message-body-line-height);
+  opacity:.56;
+}
+.tool-worklog-list > .agent-activity-thinking .thinking-card-header:hover{
+  background:var(--hover-bg);
+  color:var(--text);
+  opacity:1;
+}
+.tool-worklog-list > .agent-activity-thinking .thinking-card-label{
+  font-weight:400;
+  letter-spacing:0;
+}
+.tool-worklog-list > .agent-activity-thinking .thinking-card-icon,
+.tool-worklog-list > .agent-activity-thinking .thinking-copy-btn,
+.tool-worklog-list > .agent-activity-thinking .thinking-card-toggle{
+  color:var(--muted);
+  opacity:.4;
+}
+.tool-worklog-list > .agent-activity-thinking .thinking-card.open .thinking-card-body{
+  margin-top:4px;
+  border-top-color:transparent;
+  border-radius:8px;
+  background:var(--code-bg);
+}
 .wl-reason{
   color:var(--text);
   font-size:var(--message-body-font-size);

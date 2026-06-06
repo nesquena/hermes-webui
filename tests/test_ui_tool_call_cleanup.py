@@ -480,3 +480,33 @@ class TestToolCardDesignTokens:
         assert ".tool-card-name{" in css_min and "font-size:var(--message-body-font-size)" in css_min
         assert "font-size:var(--message-body-font-size)" in title_rule
         assert "font-family:var(--font-mono)" in title_rule
+
+    def test_worklog_thinking_card_uses_quiet_tool_row_hierarchy(self):
+        selector = ".tool-worklog-list > .agent-activity-thinking .thinking-card,"
+        assert selector in CSS, "Worklog Thinking Card quiet override missing"
+        card_rule = re.sub(r"\s+", "", CSS.split(selector, 1)[1].split("}", 1)[0])
+        header_rule = re.sub(
+            r"\s+",
+            "",
+            CSS.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-header{", 1)[1].split("}", 1)[0],
+        )
+        label_rule = re.sub(
+            r"\s+",
+            "",
+            CSS.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-label{", 1)[1].split("}", 1)[0],
+        )
+        icon_rule = re.sub(
+            r"\s+",
+            "",
+            CSS.split(".tool-worklog-list > .agent-activity-thinking .thinking-card-icon,", 1)[1].split("}", 1)[0],
+        )
+
+        assert "background:transparent" in card_rule
+        assert "border:0" in card_rule
+        assert "border-radius:0" in card_rule
+        assert "color:var(--muted)" in header_rule
+        assert "font-size:var(--message-body-font-size)" in header_rule
+        assert "font-weight:400" in header_rule
+        assert "font-weight:400" in label_rule
+        assert "letter-spacing:0" in label_rule
+        assert "color:var(--muted)" in icon_rule
