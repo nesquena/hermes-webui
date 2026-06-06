@@ -7585,6 +7585,21 @@ function renderMessages(options){
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const anchorInsertAfter = new Map();
     if(isSimplifiedToolCalling()){
+      // Shared anchor resolver: maps an activity index to the assistant segment
+      // its Activity group will anchor on. The group-render path falls back to a
+      // nearby earlier segment when an index has no directly-rendered segment
+      // (legacy/rebased assistant_msg_idx). The inline-suppression precompute MUST
+      // use the SAME resolution, or a fallback-anchored group's turn won't be in
+      // turnsWithActivityGroup and the thinking renders twice (Codex re-gate).
+      const _anchorRowForActivityIdx=(aIdx)=>{
+        let row=assistantSegments.get(aIdx)||null;
+        if(!row&&assistantIdxs.length){
+          if(aIdx<assistantIdxs[0]) return null;
+          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+          row=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+        }
+        return row;
+      };
       // #3709: a turn (one .assistant-turn, spanning every assistant segment
       // between two user messages) can contain BOTH a tool-bearing message and a
       // trailing thinking-only message. The tool message builds an Activity group
@@ -7602,7 +7617,7 @@ function renderMessages(options){
       const turnThinkingParts=new Map(); // turnNode -> [text,...]
       const _addTurnThinking=(idx)=>{
         if(!assistantThinking.has(idx)) return;
-        const seg=assistantSegments.get(idx);
+        const seg=_anchorRowForActivityIdx(idx);
         const turn=seg?seg.closest('.assistant-turn'):null;
         if(!turn) return;
         const txt=String(assistantThinking.get(idx)||'').trim();
@@ -7613,7 +7628,7 @@ function renderMessages(options){
       };
       for(const tcIdx of Object.keys(byAssistant).map(k=>parseInt(k))){
         if(!(byAssistant[tcIdx]||[]).length) continue;
-        const tcSeg=assistantSegments.get(tcIdx);
+        const tcSeg=_anchorRowForActivityIdx(tcIdx);
         const tcTurn=tcSeg?tcSeg.closest('.assistant-turn'):null;
         if(tcTurn) turnsWithActivityGroup.add(tcTurn);
       }
@@ -7630,7 +7645,7 @@ function renderMessages(options){
           // tool-message in the same turn built a group, that group carries the
           // turn's thinking (including THIS message's, via turnThinkingParts) —
           // don't emit a duplicate inline card here (#3709 A).
-          const anchorRow=assistantSegments.get(aIdx);
+          const anchorRow=_anchorRowForActivityIdx(aIdx);
           const anchorTurn=anchorRow?anchorRow.closest('.assistant-turn'):null;
           if(anchorRow&&window._showThinking!==false&&!(anchorTurn&&turnsWithActivityGroup.has(anchorTurn))){
             // Insert the thinking card BEFORE the answer body + msg-foot footer
@@ -7643,12 +7658,7 @@ function renderMessages(options){
           }
           continue;
         }
-        let anchorRow=assistantSegments.get(aIdx)||null;
-        if(!anchorRow&&assistantIdxs.length){
-          if(aIdx<assistantIdxs[0]) continue;
-          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
-        }
+        let anchorRow=_anchorRowForActivityIdx(aIdx);
         if(!anchorRow) continue;
         const anchorParent=anchorRow.parentElement;
         let insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
