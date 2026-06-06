@@ -637,7 +637,7 @@ def test_creator_preview_invokes_configured_reasoning_route_with_metadata_only_d
     assert invocation["resolved_provider"] == "openrouter"
     assert invocation["resolved_model"] == "openai/gpt-creator-safe"
     assert invocation["metadata_only"] is True
-    assert invocation["local_only"] is True
+    assert invocation["local_only"] is False
     assert invocation["raw_prompt_stored"] is False
     assert invocation["draft_prompt_stored"] is False
     assert invocation["model_output_stored"] is False
@@ -650,6 +650,641 @@ def test_creator_preview_invokes_configured_reasoning_route_with_metadata_only_d
     assert "renderer" not in serialized
     assert "generated widget source" not in serialized
     assert "ignore previous" not in serialized
+
+
+def test_creator_preview_default_invoker_calls_configured_reasoning_route_metadata_only(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    monkeypatch.setenv(
+        "CAPY_MODEL_ROUTING_HINTS",
+        json.dumps({"hint:reasoning": {"provider": "openrouter", "model": "openai/gpt-creator-safe"}}),
+    )
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.config as config
+    import api.oauth as oauth
+
+    provider_requests = []
+    model_requests = []
+    agent_inits = []
+    api_calls = []
+
+    def fake_resolve_model_provider(model=None):
+        model_requests.append(model)
+        return "openai/gpt-creator-safe", "openrouter", None
+
+    monkeypatch.setattr(config, "resolve_model_provider", fake_resolve_model_provider)
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda resolver, requested=None: resolver(requested=requested),
+    )
+
+    fake_runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
+
+    def fake_resolve_runtime_provider(requested=None):
+        provider_requests.append(requested)
+        return {"api_key": "fake-test-key", "provider": requested or "openrouter", "base_url": None}
+
+    setattr(fake_runtime_provider, "resolve_runtime_provider", fake_resolve_runtime_provider)
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_provider)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider)
+
+    class _FakeCompletions:
+        def create(self, **kwargs):
+            api_calls.append(kwargs)
+            return types.SimpleNamespace(
+                choices=[
+                    types.SimpleNamespace(
+                        message=types.SimpleNamespace(content="safe metadata route response")
+                    )
+                ]
+            )
+
+    class _FakeAgent:
+        def __init__(self, **kwargs):
+            agent_inits.append(kwargs)
+            self.model = kwargs.get("model")
+            self.provider = kwargs.get("provider")
+
+        def _build_api_kwargs(self, messages):
+            return {
+                "messages": messages,
+                "tools": [{"name": "must_not_be_sent"}],
+                "tool_choice": "auto",
+                "parallel_tool_calls": True,
+                "temperature": 0.9,
+            }
+
+        def _ensure_primary_openai_client(self, reason=None):
+            return types.SimpleNamespace(chat=types.SimpleNamespace(completions=_FakeCompletions()))
+
+        def release_clients(self):
+            agent_inits.append({"released": True})
+
+    fake_run_agent = types.ModuleType("run_agent")
+    setattr(fake_run_agent, "AIAgent", _FakeAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    result = spaces.run_space_tool(
+        "space.creator.preview",
+        {
+            "prompt": "Build a safe operations card for model routing.",
+            "spaceName": "Default Route Lab",
+            "widgets": [
+                {
+                    "widgetId": "default-route-status",
+                    "title": "Default Route Status",
+                    "kind": "status",
+                    "renderer": "<script>bad()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                    "source": "generated widget source SECRET_VALUE_DO_NOT_LEAK",
+                }
+            ],
+        },
+    )
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert model_requests == ["@openrouter:openai/gpt-creator-safe"]
+    assert provider_requests == ["openrouter"]
+    assert agent_inits[0]["model"] == "openai/gpt-creator-safe"
+    assert agent_inits[0]["provider"] == "openrouter"
+    assert agent_inits[0]["api_key"] == "fake-test-key"
+    assert agent_inits[0]["platform"] == "webui"
+    assert agent_inits[0]["quiet_mode"] is True
+    assert agent_inits[0]["enabled_toolsets"] == []
+    assert api_calls, "default creator-preview invoker should call the configured provider route"
+    api_kwargs = api_calls[0]
+    assert "tools" not in api_kwargs
+    assert "tool_choice" not in api_kwargs
+    assert "parallel_tool_calls" not in api_kwargs
+    assert api_kwargs["temperature"] == 0.2
+    assert api_kwargs["timeout"] == 30.0
+    assert api_kwargs.get("max_tokens") == 400 or api_kwargs.get("max_completion_tokens") == 400
+    prompt_text = "\n".join(message["content"] for message in api_kwargs["messages"])
+    assert "creator preview metadata-only draft" in prompt_text
+    assert "space_id: default-route-lab" in prompt_text
+    assert "widget: default-route-status" in prompt_text
+    assert "Build a safe operations card" not in prompt_text
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in prompt_text
+    assert "<script" not in prompt_text
+    assert "renderer" not in prompt_text.lower()
+    assert "api_key" not in prompt_text.lower()
+
+    invocation = result["model_route_invocation"]
+    assert invocation["status"] == "completed"
+    assert invocation["output_chars"] == len("safe metadata route response")
+    assert invocation["metadata_only"] is True
+    assert invocation["raw_prompt_stored"] is False
+    assert invocation["draft_prompt_stored"] is False
+    assert invocation["model_output_stored"] is False
+    assert {"released": True} in agent_inits
+    assert "safe metadata route response" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "renderer" not in serialized
+    assert "generated widget source" not in serialized
+
+
+def test_creator_preview_default_invoker_calls_custom_base_url_without_api_key(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    monkeypatch.setenv(
+        "CAPY_MODEL_ROUTING_HINTS",
+        json.dumps({"hint:reasoning": {"provider": "custom:local-lab", "model": "local/creator-safe"}}),
+    )
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.config as config
+    import api.oauth as oauth
+
+    agent_inits = []
+    api_calls = []
+
+    monkeypatch.setattr(
+        config,
+        "resolve_model_provider",
+        lambda model=None: ("local/creator-safe", "custom:local-lab", None),
+    )
+    monkeypatch.setattr(
+        config,
+        "resolve_custom_provider_connection",
+        lambda provider: (None, "http://127.0.0.1:11434/v1"),
+    )
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda resolver, requested=None: {"api_key": None, "provider": requested, "base_url": None},
+    )
+    fake_runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(fake_runtime_provider, "resolve_runtime_provider", lambda requested=None: {})
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_provider)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider)
+
+    class _FakeCompletions:
+        def create(self, **kwargs):
+            api_calls.append(kwargs)
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="local metadata response"))]
+            )
+
+    class _FakeAgent:
+        def __init__(self, **kwargs):
+            agent_inits.append(kwargs)
+
+        def _build_api_kwargs(self, messages):
+            return {"messages": messages, "tools": [{"name": "must_not_be_sent"}]}
+
+        def _ensure_primary_openai_client(self, reason=None):
+            return types.SimpleNamespace(chat=types.SimpleNamespace(completions=_FakeCompletions()))
+
+        def release_clients(self):
+            agent_inits.append({"released": True})
+
+    fake_run_agent = types.ModuleType("run_agent")
+    setattr(fake_run_agent, "AIAgent", _FakeAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    result = spaces.run_space_tool(
+        "space.creator.preview",
+        {"prompt": "Build a safe local route card.", "spaceName": "Local Route Lab"},
+    )
+
+    assert agent_inits[0]["provider"] == "custom"
+    assert agent_inits[0]["base_url"] == "http://127.0.0.1:11434/v1"
+    assert agent_inits[0]["api_key"] == "dummy-key"
+    assert api_calls, "custom OpenAI-compatible providers with a base URL should not require an API key"
+    assert result["model_route_invocation"]["status"] == "completed"
+    assert result["model_route_invocation"]["output_chars"] == len("local metadata response")
+    assert result["model_route_invocation"]["local_only"] is False
+    assert {"released": True} in agent_inits
+
+
+def test_creator_preview_default_invoker_uses_codex_responses_mode_safely(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    monkeypatch.setenv(
+        "CAPY_MODEL_ROUTING_HINTS",
+        json.dumps({"hint:reasoning": {"provider": "openai", "model": "gpt-creator-safe"}}),
+    )
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.config as config
+    import api.oauth as oauth
+
+    codex_calls = []
+    agent_inits = []
+
+    monkeypatch.setattr(config, "resolve_model_provider", lambda model=None: ("gpt-creator-safe", "openai", None))
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda resolver, requested=None: resolver(requested=requested),
+    )
+    fake_runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(
+        fake_runtime_provider,
+        "resolve_runtime_provider",
+        lambda requested=None: {"api_key": "fake-test-key", "provider": requested, "base_url": None, "api_mode": "codex_responses"},
+    )
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_provider)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider)
+
+    class _FakeAgent:
+        def __init__(self, **kwargs):
+            agent_inits.append(kwargs)
+            self.api_mode = kwargs.get("api_mode")
+
+        def _build_api_kwargs(self, messages):
+            return {
+                "messages": messages,
+                "tools": [{"name": "must_not_be_sent"}],
+                "tool_choice": "auto",
+                "parallel_tool_calls": True,
+            }
+
+        def _run_codex_stream(self, kwargs):
+            codex_calls.append(kwargs)
+            return object()
+
+        def _ensure_primary_openai_client(self, reason=None):  # pragma: no cover - should not be used
+            raise AssertionError("codex_responses mode should not use chat completions")
+
+        def release_clients(self):
+            agent_inits.append({"released": True})
+
+    fake_codex_adapter = types.ModuleType("agent.codex_responses_adapter")
+    setattr(
+        fake_codex_adapter,
+        "_normalize_codex_response",
+        lambda response: (types.SimpleNamespace(content="codex metadata response"), None),
+    )
+    fake_agent_pkg = types.ModuleType("agent")
+    setattr(fake_agent_pkg, "codex_responses_adapter", fake_codex_adapter)
+    monkeypatch.setitem(sys.modules, "agent", fake_agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.codex_responses_adapter", fake_codex_adapter)
+
+    fake_run_agent = types.ModuleType("run_agent")
+    setattr(fake_run_agent, "AIAgent", _FakeAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    result = spaces.run_space_tool(
+        "space.creator.preview",
+        {"prompt": "Build a safe codex route card.", "spaceName": "Codex Route Lab"},
+    )
+
+    assert agent_inits[0]["api_mode"] == "codex_responses"
+    assert codex_calls
+    assert "tools" not in codex_calls[0]
+    assert "tool_choice" not in codex_calls[0]
+    assert "parallel_tool_calls" not in codex_calls[0]
+    assert codex_calls[0]["max_output_tokens"] == 400
+    assert result["model_route_invocation"]["status"] == "completed"
+    assert result["model_route_invocation"]["output_chars"] == len("codex metadata response")
+    assert {"released": True} in agent_inits
+
+
+def test_creator_preview_default_invoker_resolves_runtime_with_target_model(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    monkeypatch.setenv(
+        "CAPY_MODEL_ROUTING_HINTS",
+        json.dumps({"hint:reasoning": {"provider": "openai", "model": "gpt-creator-safe"}}),
+    )
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.config as config
+    import api.oauth as oauth
+
+    runtime_requests = []
+    api_calls = []
+
+    monkeypatch.setattr(config, "resolve_model_provider", lambda model=None: ("gpt-creator-safe", "openai", None))
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda resolver, **kwargs: resolver(**kwargs),
+    )
+    fake_runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
+
+    def fake_resolve_runtime_provider(*, requested=None, target_model=None):
+        runtime_requests.append({"requested": requested, "target_model": target_model})
+        return {"api_key": "fake-test-key", "provider": requested, "base_url": None}
+
+    setattr(fake_runtime_provider, "resolve_runtime_provider", fake_resolve_runtime_provider)
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_provider)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider)
+
+    class _FakeCompletions:
+        def create(self, **kwargs):
+            api_calls.append(kwargs)
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="target model response"))]
+            )
+
+    class _FakeAgent:
+        def __init__(self, **kwargs):
+            self.api_mode = kwargs.get("api_mode")
+
+        def _build_api_kwargs(self, messages):
+            return {"messages": messages}
+
+        def _ensure_primary_openai_client(self, reason=None):
+            return types.SimpleNamespace(chat=types.SimpleNamespace(completions=_FakeCompletions()))
+
+        def release_clients(self):
+            pass
+
+    fake_run_agent = types.ModuleType("run_agent")
+    setattr(fake_run_agent, "AIAgent", _FakeAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    result = spaces.run_space_tool(
+        "space.creator.preview",
+        {"prompt": "Build a safe target route card.", "spaceName": "Target Route Lab"},
+    )
+
+    assert runtime_requests == [{"requested": "openai", "target_model": "gpt-creator-safe"}]
+    assert api_calls
+    assert result["model_route_invocation"]["status"] == "completed"
+
+
+def test_creator_preview_default_invoker_rejects_unsupported_api_mode(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    monkeypatch.setenv(
+        "CAPY_MODEL_ROUTING_HINTS",
+        json.dumps({"hint:reasoning": {"provider": "bedrock", "model": "anthropic.creator-safe"}}),
+    )
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.config as config
+    import api.oauth as oauth
+
+    agent_inits = []
+    chat_calls = []
+
+    monkeypatch.setattr(config, "resolve_model_provider", lambda model=None: ("anthropic.creator-safe", "bedrock", None))
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda resolver, requested=None: resolver(requested=requested),
+    )
+    fake_runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(
+        fake_runtime_provider,
+        "resolve_runtime_provider",
+        lambda requested=None: {"api_key": "fake-test-key", "provider": requested, "base_url": "https://bedrock-runtime.test", "api_mode": "bedrock_converse"},
+    )
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_provider)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider)
+
+    class _FakeAgent:
+        def __init__(self, **kwargs):
+            agent_inits.append(kwargs)
+            self.api_mode = kwargs.get("api_mode")
+
+        def _build_api_kwargs(self, messages):
+            return {"messages": messages}
+
+        def _ensure_primary_openai_client(self, reason=None):
+            chat_calls.append(reason)
+            raise AssertionError("unsupported api_mode must not fall through to chat completions")
+
+        def release_clients(self):
+            agent_inits.append({"released": True})
+
+    fake_run_agent = types.ModuleType("run_agent")
+    setattr(fake_run_agent, "AIAgent", _FakeAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    result = spaces.run_space_tool(
+        "space.creator.preview",
+        {"prompt": "Build a safe unsupported route card.", "spaceName": "Unsupported Route Lab"},
+    )
+
+    assert result["model_route_invocation"]["status"] == "not_configured"
+    assert chat_calls == []
+    assert agent_inits == []
+
+
+def test_creator_preview_default_invoker_rejects_raw_unknown_api_mode_before_agent_normalizes(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    monkeypatch.setenv(
+        "CAPY_MODEL_ROUTING_HINTS",
+        json.dumps({"hint:reasoning": {"provider": "openai", "model": "gpt-creator-safe"}}),
+    )
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.config as config
+    import api.oauth as oauth
+
+    agent_inits = []
+    chat_calls = []
+
+    monkeypatch.setattr(config, "resolve_model_provider", lambda model=None: ("gpt-creator-safe", "openai", None))
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda resolver, requested=None: resolver(requested=requested),
+    )
+    fake_runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(
+        fake_runtime_provider,
+        "resolve_runtime_provider",
+        lambda requested=None: {"api_key": "fake-test-key", "provider": requested, "base_url": None, "api_mode": "totally_unsupported_mode"},
+    )
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_provider)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider)
+
+    class _FakeAgent:
+        def __init__(self, **kwargs):
+            agent_inits.append(kwargs)
+            self.api_mode = "chat_completions"
+
+        def _build_api_kwargs(self, messages):
+            return {"messages": messages}
+
+        def _ensure_primary_openai_client(self, reason=None):
+            chat_calls.append(reason)
+            return types.SimpleNamespace(
+                chat=types.SimpleNamespace(
+                    completions=types.SimpleNamespace(
+                        create=lambda **_kwargs: types.SimpleNamespace(
+                            choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="should not run"))]
+                        )
+                    )
+                )
+            )
+
+        def release_clients(self):
+            agent_inits.append({"released": True})
+
+    fake_run_agent = types.ModuleType("run_agent")
+    setattr(fake_run_agent, "AIAgent", _FakeAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    result = spaces.run_space_tool(
+        "space.creator.preview",
+        {"prompt": "Build a safe raw unsupported route card.", "spaceName": "Raw Unsupported Route Lab"},
+    )
+
+    assert result["model_route_invocation"]["status"] == "not_configured"
+    assert chat_calls == []
+    assert agent_inits == []
+
+
+def test_creator_preview_default_invoker_uses_anthropic_messages_mode_safely(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    monkeypatch.setenv(
+        "CAPY_MODEL_ROUTING_HINTS",
+        json.dumps({"hint:reasoning": {"provider": "anthropic", "model": "claude-creator-safe"}}),
+    )
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.config as config
+    import api.oauth as oauth
+
+    anthropic_calls = []
+    agent_inits = []
+
+    monkeypatch.setattr(config, "resolve_model_provider", lambda model=None: ("claude-creator-safe", "anthropic", None))
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda resolver, requested=None: resolver(requested=requested),
+    )
+    fake_runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(
+        fake_runtime_provider,
+        "resolve_runtime_provider",
+        lambda requested=None: {"api_key": "fake-test-key", "provider": requested, "base_url": None, "api_mode": "anthropic_messages"},
+    )
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_provider)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider)
+
+    fake_anthropic_adapter = types.ModuleType("agent.anthropic_adapter")
+
+    def fake_build_anthropic_kwargs(**kwargs):
+        anthropic_calls.append(kwargs)
+        return {"anthropic": True, **kwargs}
+
+    def fake_normalize_anthropic_response(response, strip_tool_prefix=False):
+        return types.SimpleNamespace(content="anthropic metadata response"), None
+
+    setattr(fake_anthropic_adapter, "build_anthropic_kwargs", fake_build_anthropic_kwargs)
+    setattr(fake_anthropic_adapter, "normalize_anthropic_response", fake_normalize_anthropic_response)
+    fake_agent_pkg = types.ModuleType("agent")
+    setattr(fake_agent_pkg, "anthropic_adapter", fake_anthropic_adapter)
+    monkeypatch.setitem(sys.modules, "agent", fake_agent_pkg)
+    monkeypatch.setitem(sys.modules, "agent.anthropic_adapter", fake_anthropic_adapter)
+
+    class _FakeAgent:
+        def __init__(self, **kwargs):
+            agent_inits.append(kwargs)
+            self.api_mode = kwargs.get("api_mode")
+            self.model = kwargs.get("model")
+            self._is_anthropic_oauth = False
+            self._anthropic_base_url = None
+
+        def _anthropic_preserve_dots(self):
+            return False
+
+        def _anthropic_messages_create(self, kwargs):
+            anthropic_calls.append({"create": kwargs})
+            return object()
+
+        def _ensure_primary_openai_client(self, reason=None):  # pragma: no cover - should not be used
+            raise AssertionError("anthropic_messages mode should not use chat completions")
+
+        def release_clients(self):
+            agent_inits.append({"released": True})
+
+    fake_run_agent = types.ModuleType("run_agent")
+    setattr(fake_run_agent, "AIAgent", _FakeAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
+
+    result = spaces.run_space_tool(
+        "space.creator.preview",
+        {"prompt": "Build a safe anthropic route card.", "spaceName": "Anthropic Route Lab"},
+    )
+
+    assert agent_inits[0]["api_mode"] == "anthropic_messages"
+    assert anthropic_calls[0]["max_tokens"] == 400
+    assert anthropic_calls[0]["tools"] is None
+    assert anthropic_calls[0]["reasoning_config"] == {"enabled": False}
+    assert anthropic_calls[1]["create"]["anthropic"] is True
+    assert result["model_route_invocation"]["status"] == "completed"
+    assert result["model_route_invocation"]["output_chars"] == len("anthropic metadata response")
+    assert {"released": True} in agent_inits
+
+
+def test_creator_preview_provider_only_route_does_not_call_placeholder_model(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    monkeypatch.setenv(
+        "CAPY_MODEL_ROUTING_HINTS",
+        json.dumps({"hint:reasoning": {"provider": "openrouter"}}),
+    )
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    import api.config as config
+
+    model_requests = []
+    monkeypatch.setattr(config, "resolve_model_provider", lambda model=None: model_requests.append(model) or (model, "openrouter", None))
+    fake_runtime_provider = types.ModuleType("hermes_cli.runtime_provider")
+    setattr(fake_runtime_provider, "resolve_runtime_provider", lambda requested=None: {"api_key": "fake-test-key"})
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    setattr(fake_hermes_cli, "runtime_provider", fake_runtime_provider)
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider)
+
+    result = spaces.run_space_tool(
+        "space.creator.preview",
+        {"prompt": "Build a safe partial route card.", "spaceName": "Partial Route Lab"},
+    )
+
+    assert model_requests == []
+    assert result["model_route_invocation"]["status"] == "not_configured"
+
+
+def test_creator_model_invocation_prompt_redacts_unsafe_widget_metadata_markers(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    draft_prompt, draft_summary = spaces._space_creator_model_invocation_prompt(
+        {
+            "space": {"space_id": "unsafe-widget-metadata-lab"},
+            "widget_details": [
+                {"id": "unsafe-widget", "kind": "source", "title": "Script source api auth SECRET_VALUE_DO_NOT_LEAK"}
+            ],
+            "memory_assist": {"hit_count": 1},
+        }
+    )
+    lowered = draft_prompt.lower()
+
+    assert draft_summary["widget_count"] == 1
+    assert "widget: unsafe-widget" in draft_prompt
+    assert "source" not in lowered
+    assert "script" not in lowered
+    assert "api auth" not in lowered
+    assert "secret_value_do_not_leak" not in lowered
 
 
 def test_creator_preview_coerces_malformed_model_invocation_counts_safely(monkeypatch, tmp_path):
