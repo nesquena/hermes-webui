@@ -7162,6 +7162,39 @@ function renderMessages(options){
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
     else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
   }
+  // #3709 (defect B): build a per-turn combined visible-answer text so the
+  // thinking echo-strip can de-dupe a thinking-only message (whose own visible
+  // body is empty) against the answer prose carried by a SIBLING message in the
+  // same turn. A turn = the run of assistant messages between two user messages.
+  // Map every assistant rawIdx in a run to the run's combined visible text.
+  const _turnVisibleTextByRawIdx=new Map();
+  {
+    let _run=[]; let _runText=[];
+    const _flush=()=>{
+      if(_run.length){
+        const combined=_runText.join('\n\n');
+        for(const ri of _run) _turnVisibleTextByRawIdx.set(ri, combined);
+      }
+      _run=[]; _runText=[];
+    };
+    for(const entry of renderVisWithIdx){
+      const em=entry&&entry.m; const role=em&&em.role;
+      if(role==='assistant'){
+        _run.push(entry.rawIdx);
+        // Visible prose = content with any leading <think>…</think> /channel-thought
+        // block stripped (the same blocks the per-message extractor removes below).
+        let vis=typeof em.content==='string'?em.content:'';
+        vis=vis.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'')
+               .replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'')
+               .replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trim();
+        if(vis) _runText.push(vis);
+      }else{
+        _flush();
+      }
+    }
+    _flush();
+  }
+
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
@@ -7233,6 +7266,13 @@ function renderMessages(options){
     const displayContent=isUser?_stripAttachedFilesMarkerForDisplay(_stripWorkspaceDisplayPrefix(content)):content;
     if(thinkingText&&!isUser){
       thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent);
+      // #3709 (defect B): if this message's own visible body didn't strip the
+      // echo (e.g. a thinking-only message whose answer prose lives on a sibling
+      // message in the same turn), also strip against the turn's combined answer.
+      const turnVisible=_turnVisibleTextByRawIdx.get(rawIdx);
+      if(thinkingText&&turnVisible&&turnVisible!==displayContent){
+        thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, turnVisible);
+      }
     }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     const nextRendered=renderVisWithIdx[vi+1];
@@ -7545,13 +7585,39 @@ function renderMessages(options){
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const anchorInsertAfter = new Map();
     if(isSimplifiedToolCalling()){
+      // #3709: a turn (one .assistant-turn, spanning every assistant segment
+      // between two user messages) can contain BOTH a tool-bearing message and a
+      // trailing thinking-only message. The tool message builds an Activity group
+      // that already carries the turn's thinking at its top; if the thinking-only
+      // sibling ALSO renders its thinking inline, the card shows twice. Precompute
+      // the set of turn nodes that have any tool card so the inline branch can
+      // skip turns that already own an Activity group.
+      const turnsWithActivityGroup=new Set();
+      for(const tcIdx of Object.keys(byAssistant).map(k=>parseInt(k))){
+        if(!(byAssistant[tcIdx]||[]).length) continue;
+        const tcSeg=assistantSegments.get(tcIdx);
+        const tcTurn=tcSeg?tcSeg.closest('.assistant-turn'):null;
+        if(tcTurn) turnsWithActivityGroup.add(tcTurn);
+      }
       const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
       for(const aIdx of activityIdxs){
         const cards=byAssistant[aIdx]||[];
         if(!cards.length&&assistantThinking.has(aIdx)){
+          // Thinking-only message. Render its thinking inline ONLY when the turn
+          // has no Activity group at all (#3592 — a genuinely thinking-only turn
+          // must not bury its thinking in a collapsed group). If a sibling
+          // tool-message in the same turn built a group, that group carries the
+          // turn's thinking — don't emit a duplicate inline card here (#3709 A).
           const anchorRow=assistantSegments.get(aIdx);
-          if(anchorRow&&window._showThinking!==false){
-            anchorRow.insertAdjacentHTML('beforeend',_thinkingCardHtml(assistantThinking.get(aIdx)));
+          const anchorTurn=anchorRow?anchorRow.closest('.assistant-turn'):null;
+          if(anchorRow&&window._showThinking!==false&&!(anchorTurn&&turnsWithActivityGroup.has(anchorTurn))){
+            // Insert the thinking card BEFORE the answer body + msg-foot footer
+            // (the segment already has them appended), so it reads above the
+            // answer rather than orphaned below the "Done in …" line (#3709 A2).
+            const bodyEl=anchorRow.querySelector('.msg-body,.msg-foot');
+            const cardHtml=_thinkingCardHtml(assistantThinking.get(aIdx));
+            if(bodyEl) bodyEl.insertAdjacentHTML('beforebegin',cardHtml);
+            else anchorRow.insertAdjacentHTML('beforeend',cardHtml);
           }
           continue;
         }
