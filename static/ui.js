@@ -1928,7 +1928,7 @@ function renderModelDropdown(){
       if(shouldRenderHeading){
         const heading=document.createElement('div');
         heading.className='model-group';
-        const count=meta.modelCount||0;
+        const count=meta.hiddenCount?0:(meta.modelCount||0);
         heading.textContent=count>1?`${meta.label} (${count})`:meta.label;
         dd.appendChild(heading);
         _renderProviderEndpointHint(meta);

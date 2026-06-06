@@ -360,22 +360,25 @@ def _dropdown_driver_path(tmp_path_factory):
     return str(path)
 
 
-def _run_dropdown_driver(driver_path: str) -> dict:
-    groups = [
-        {
-            "provider": "OpenRouter",
-            "provider_id": "openrouter",
-            "models": [
-                {"id": "openrouter/visible-one", "label": "Visible One"},
-                {"id": "openrouter/visible-two", "label": "Visible Two"},
+def _run_dropdown_driver(driver_path: str, payload: dict | None = None) -> dict:
+    if payload is None:
+        payload = {
+            "groups": [
+                {
+                    "provider": "OpenRouter",
+                    "provider_id": "openrouter",
+                    "models": [
+                        {"id": "openrouter/visible-one", "label": "Visible One"},
+                        {"id": "openrouter/visible-two", "label": "Visible Two"},
+                    ],
+                    "extra_models": [
+                        {"id": "openrouter/overflow-one", "label": "Overflow One"},
+                        {"id": "openrouter/overflow-two", "label": "Overflow Two"},
+                    ],
+                }
             ],
-            "extra_models": [
-                {"id": "openrouter/overflow-one", "label": "Overflow One"},
-                {"id": "openrouter/overflow-two", "label": "Overflow Two"},
-            ],
+            "searchTerm": "overflow-two",
         }
-    ]
-    payload = {"groups": groups, "searchTerm": "overflow-two"}
     result = subprocess.run(
         [NODE, driver_path, str(REPO / "static" / "ui.js"), json.dumps(payload)],
         capture_output=True,
@@ -409,4 +412,36 @@ def test_runtime_picker_shows_generic_expander_and_searches_hidden_overflow(_dro
     )
     assert out["hiddenDatasetAfterExpand"] == "[]", (
         "After expansion the optgroup should no longer advertise a hidden overflow tail."
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_runtime_picker_preserves_backend_decorated_nous_heading_without_double_count(
+    _dropdown_driver_path,
+):
+    payload = {
+        "groups": [
+            {
+                "provider": "Nous (2 of 4)",
+                "provider_id": "nous",
+                "models": [
+                    {"id": "@nous:visible-one", "label": "Visible One"},
+                    {"id": "@nous:visible-two", "label": "Visible Two"},
+                ],
+                "extra_models": [
+                    {"id": "@nous:hidden-one", "label": "Hidden One"},
+                    {"id": "@nous:hidden-two", "label": "Hidden Two"},
+                ],
+            }
+        ],
+        "searchTerm": "",
+    }
+    out = _run_dropdown_driver(_dropdown_driver_path, payload)
+
+    heading_html = "\n".join(item["html"] for item in out["initial"])
+    assert "Nous (2 of 4) (4)" not in heading_html, (
+        "Backend-decorated Nous headings must not get a second frontend count suffix."
+    )
+    assert "Nous (2 of 4)" in heading_html, (
+        "The picker should preserve the backend-crafted Nous heading verbatim when overflow exists."
     )
