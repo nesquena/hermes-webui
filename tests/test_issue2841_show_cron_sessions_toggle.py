@@ -70,8 +70,14 @@ def test_settings_show_cron_sessions_in_html():
 
 def test_panels_save_wiring():
     src = _read("static/panels.js")
-    assert "show_cron_sessions=showCronCb.checked" in src, (
-        "save wiring payload.show_cron_sessions=showCronCb.checked must appear in static/panels.js"
+    # Both save paths (autosave _preferencesPayloadFromUi + explicit saveSettings)
+    # must gate cron sessions on the CLI-sessions checkbox so neither can persist
+    # show_cron_sessions=true while show_cli_sessions=false (#3514).
+    assert "payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked)" in src, (
+        "autosave wiring must gate show_cron_sessions on settingsShowCliSessions in static/panels.js"
+    )
+    assert "body.show_cron_sessions=showCliSessions&&showCronSessions" in src, (
+        "explicit saveSettings() must gate show_cron_sessions on showCliSessions in static/panels.js"
     )
 
 

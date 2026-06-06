@@ -6021,7 +6021,10 @@ function _preferencesPayloadFromUi(){
   const showCliCb=$('settingsShowCliSessions');
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
   const showCronCb=$('settingsShowCronSessions');
-  if(showCronCb) payload.show_cron_sessions=showCronCb.checked;
+  // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
+  // identically to the explicit saveSettings() path, so neither save route can
+  // persist show_cron_sessions=true while show_cli_sessions=false. (#3514)
+  if(showCronCb) payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked);
   const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
