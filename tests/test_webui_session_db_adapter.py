@@ -1,9 +1,11 @@
 import json
+from pathlib import Path
 
 import pytest
 
 import api.config as config
 import api.models as models
+import api.webui_session_db as session_db
 from api.webui_session_db import WebUIJsonSessionDB
 
 
@@ -130,3 +132,18 @@ def test_unified_session_db_flag_default_remains_false(monkeypatch, tmp_path):
     assert config.get_config()["experimental"]["unified_session_db"] is False
     assert config.is_unified_session_db_enabled() is False
     assert config.is_unified_session_db_enabled({"experimental": {"unified_session_db": True}}) is True
+
+
+def test_adapter_docs_pin_runtime_wiring_preconditions():
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "architecture" / "unified-session-db.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Runtime Wiring Preconditions" in doc
+    assert "per-session mutation locks" in doc
+    assert "in-memory `Session` cache and `_index.json`" in doc
+    assert "pending first turns" in doc
+    assert "test/migration helpers, not runtime persistence replacements" in doc
+    assert "Runtime wiring must add Session lock/cache/index parity" in (
+        session_db.WebUIJsonSessionDB.update_metadata.__doc__ or ""
+    )

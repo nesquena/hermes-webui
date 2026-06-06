@@ -118,7 +118,12 @@ class WebUIJsonSessionDB:
         return copy.deepcopy(data)
 
     def update_metadata(self, sid: str, fields: dict[str, Any]) -> dict[str, Any]:
-        """Persist allowlisted metadata fields while preserving messages."""
+        """Persist allowlisted metadata fields while preserving messages.
+
+        This dormant adapter method is for migration experiments and tests only.
+        Runtime wiring must add Session lock/cache/index parity before using it
+        from live WebUI routes.
+        """
         if not isinstance(fields, dict):
             raise TypeError("fields must be a dict")
         unsafe = sorted((set(fields) & _UNSAFE_FIELDS) | (set(fields) - _METADATA_FIELDS))

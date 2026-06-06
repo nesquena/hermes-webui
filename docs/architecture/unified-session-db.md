@@ -42,6 +42,22 @@ experimental:
 No UI exposes this flag, and no runtime session route switches to the adapter in
 this slice.
 
+## Runtime Wiring Preconditions
+
+Before any route uses this adapter for live metadata changes, a follow-up PR must
+prove parity with the existing `Session.save()` path:
+
+- take the same per-session mutation locks used by streaming and session routes,
+  so metadata writes cannot replace a newer transcript with a stale copy;
+- refresh or invalidate the in-memory `Session` cache and `_index.json`, so
+  sidebar rows and later `Session.save()` calls cannot overwrite adapter changes;
+- match `Session.compact()` sidebar semantics for pending first turns,
+  `has_pending_user_message`, `pending_started_at`, and real non-tool
+  `last_message_at` ordering.
+
+Until those invariants are implemented, `update_metadata()` and `archive()` are
+test/migration helpers, not runtime persistence replacements.
+
 ## Planned Migration Sequence
 
 1. Land the dormant JSON adapter and contract tests.
