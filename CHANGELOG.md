@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.301] — 2026-06-06 — Release JQ (stage-3710 — hide test-helper console windows on Windows)
+
+### Changed
+- **Developer experience (Windows):** the test suite's long-lived helper subprocesses (main test server, browser-smoke server, TLS helper, and the `ctl` test helpers) now spawn with `CREATE_NO_WINDOW` on Windows, so a local `pytest` run no longer pops up several focus-stealing console windows. Windows-only (`sys.platform == "win32"` guard); no behavior change on macOS/Linux. (#3710 fixes #3706, @rodboev)
+
 ## [v0.51.300] — 2026-06-06 — Release JP (stage-3726 — context-length indicator honors provider per-model overrides)
 
 ### Fixed
