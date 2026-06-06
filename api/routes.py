@@ -3026,6 +3026,7 @@ from api.workspace import (
     validate_workspace_to_add,
     _is_blocked_system_path,
     _strip_surrounding_quotes,
+    _is_remote_terminal_backend,
     _workspace_blocked_roots,
 )
 from api.upload import handle_upload, handle_upload_extract, handle_transcribe, handle_workspace_upload
@@ -5588,7 +5589,12 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/workspaces":
         return j(
-            handler, {"workspaces": load_workspaces(), "last": get_last_workspace()}
+            handler,
+            {
+                "workspaces": load_workspaces(),
+                "last": get_last_workspace(),
+                "terminal_remote_backend": _terminal_remote_backend_enabled(),
+            },
         )
 
     if parsed.path == "/api/workspaces/suggest":
@@ -8751,7 +8757,7 @@ def _handle_sse_stream(handler, parsed):
     return True
 
 
-def _terminal_session_and_workspace(body_or_query):
+def _terminal_session_lookup(body_or_query):
     sid = str(body_or_query.get("session_id", "")).strip()
     if not sid:
         raise ValueError("session_id required")
@@ -8759,13 +8765,33 @@ def _terminal_session_and_workspace(body_or_query):
         s = get_session(sid)
     except KeyError:
         raise KeyError("Session not found")
-    workspace = resolve_trusted_workspace(getattr(s, "workspace", "") or "")
-    return sid, workspace
+    return sid, s
+
+
+_REMOTE_TERMINAL_BACKEND_UNSUPPORTED_ERROR = "remote_terminal_backend_unsupported"
+_REMOTE_TERMINAL_BACKEND_UNSUPPORTED_MESSAGE = (
+    "Embedded terminal is only supported for local terminal backends."
+)
+
+
+def _terminal_remote_backend_enabled() -> bool:
+    terminal_cfg = get_config().get("terminal", {})
+    return _is_remote_terminal_backend(terminal_cfg)
 
 
 def _handle_terminal_start(handler, body):
     try:
-        sid, workspace = _terminal_session_and_workspace(body)
+        sid, session = _terminal_session_lookup(body)
+        if _terminal_remote_backend_enabled():
+            return j(
+                handler,
+                {
+                    "error": _REMOTE_TERMINAL_BACKEND_UNSUPPORTED_ERROR,
+                    "message": _REMOTE_TERMINAL_BACKEND_UNSUPPORTED_MESSAGE,
+                },
+                status=400,
+            )
+        workspace = resolve_trusted_workspace(getattr(session, "workspace", "") or "")
         from api.terminal import start_terminal
         term = start_terminal(
             sid,

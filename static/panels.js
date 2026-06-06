@@ -4394,8 +4394,10 @@ function syncWorkspaceDisplays(){
 async function loadWorkspaceList(){
   try{
     const data = await api('/api/workspaces');
+    if(typeof syncTerminalBackendState==='function') syncTerminalBackendState(data);
     _workspaceList = data.workspaces || [];
     syncWorkspaceDisplays();
+    if(typeof syncTerminalButton==='function') syncTerminalButton();
     return data;
   }catch(e){ return {workspaces:[], last:''}; }
 }
