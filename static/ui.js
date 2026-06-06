@@ -613,6 +613,20 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     keepTailCount,
   });
 }
+function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
+  const count=Math.max(0, Number(prependedRenderableCount)||0);
+  if(count<=0) return null;
+  const visWithIdx=_getVisibleMessagesWithIdx();
+  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
+  if(!virtualWindow||!virtualWindow.virtualized) return null;
+  const limit=Math.min(count,_messageVirtualHeightCache.length);
+  let total=0;
+  for(let i=0;i<limit;i++){
+    const cached=Number(_messageVirtualHeightCache[i]);
+    total+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualEstimatedRowHeight;
+  }
+  return Math.max(0,Math.round(total));
+}
 function _messageVirtualKeepTailCount(){
   return Math.min(_currentMessageRenderWindowSize(), MESSAGE_RENDER_WINDOW_DEFAULT);
 }
@@ -798,6 +812,8 @@ async function jumpToSessionStart(){
       if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
     }
     _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+    container.scrollTop=0;
+    _messageVirtualWindowKey='';
     // During streaming, skip renderMessages — it rebuilds the DOM but tool card
     // insertion is blocked by !S.busy, losing Activity until "done" fires.
     if(!(S.busy||S.activeStreamId)){
@@ -9407,6 +9423,7 @@ function renderMessages(options){
   const questionRawIdxByAssistantRawIdx=new Map();
   let lastQuestionRawIdx=-1;
   const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
+  const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));
   for(const entry of visWithIdx){
     const role=entry&&entry.m&&entry.m.role;
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
@@ -9985,6 +10002,7 @@ function renderMessages(options){
     for(const tc of (S.toolCalls||[])){
       if(!tc) continue;
       const aIdx=tc.assistant_msg_idx!==undefined?parseInt(tc.assistant_msg_idx):-1;
+      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const segmentSeq=normalizeToken(tc.activitySegmentSeq);
       const burstId=normalizeToken(tc.activityBurstId);
       const key=segmentSeq?`segment:${segmentSeq}`:(burstId?`burst:${burstId}`:`assistant:${aIdx}`);
@@ -9993,6 +10011,7 @@ function renderMessages(options){
       entry.includeAnchorReason=true;
     }
     for(const aIdx of assistantThinking.keys()){
+      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       const seg=assistantSegments.get(aIdx);
       const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
       const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
@@ -10002,6 +10021,7 @@ function renderMessages(options){
     }
     for(const [aIdx,seg] of assistantSegments){
       if(!seg||!seg.classList||!seg.classList.contains('assistant-segment-worklog-source')) continue;
+      if(virtualWindow.virtualized&&renderableRawIdxs.has(aIdx)&&!renderedRawIdxs.has(aIdx)) continue;
       if(!_worklogReasonHtmlFromAnchor(seg)) continue;
       const segmentSeq=seg&&seg.getAttribute('data-live-segment-seq')||'';
       const burstId=seg&&seg.getAttribute('data-activity-burst-id')||'';
