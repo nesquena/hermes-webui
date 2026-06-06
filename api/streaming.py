@@ -832,12 +832,12 @@ def _aux_title_timeout(default: float = 15.0) -> float:
         return default
 
 def _title_completion_budget(provider: str = '', model: str = '', base_url: str = '') -> int:
+    """Return the max_tokens budget for a title generation completion."""
     # Title generation is a small auxiliary task, but reasoning models may
     # spend a surprising amount of the completion budget before emitting final
     # content.  Keep the budget high enough for MiniMax/Kimi-style reasoning
     # responses without making title generation depend on provider-specific
     # one-off branches.
-    """Return the max_tokens budget for a title generation completion."""
     return 512
 
 
@@ -1983,6 +1983,7 @@ def _run_agent_streaming(
             logger.debug("Failed to put event to queue")
 
     def _agent_status_callback(kind, message):
+        """Bridge Agent lifecycle compression status into WebUI SSE."""
         _message = str(message or '').strip()
         _kind = str(kind or '').strip().lower()
         if not _message:
@@ -2100,7 +2101,6 @@ def _run_agent_streaming(
                 unregister_gateway_notify as _unreg_notify,
             )
             def _approval_notify_cb(approval_data):
-                """Approval notify cb."""
                 put('approval', approval_data)
             _reg_notify(session_id, _approval_notify_cb)
             _approval_registered = True
@@ -2116,7 +2116,6 @@ def _run_agent_streaming(
             )
 
             def _clarify_notify_cb(clarify_data):
-                """Clarify notify cb."""
                 put('clarify', clarify_data)
 
             _reg_clarify_notify(session_id, _clarify_notify_cb)
@@ -2180,7 +2179,6 @@ def _run_agent_streaming(
             _metering_reasoning_deltas = [0]
 
             def _emit_metering():
-                """Emit metering."""
                 now = time.monotonic()
                 if now - _metering_last_emit[0] < 0.1:
                     return
@@ -2192,7 +2190,6 @@ def _run_agent_streaming(
                 put('metering', stats)
 
             def on_token(text):
-                """Handle token event."""
                 nonlocal _token_sent
                 if text is None:
                     return  # end-of-stream sentinel
@@ -2209,7 +2206,6 @@ def _run_agent_streaming(
                 _emit_metering()
 
             def on_reasoning(text):
-                """Handle reasoning event."""
                 nonlocal _reasoning_text
                 if text is None:
                     return
@@ -2224,7 +2220,6 @@ def _run_agent_streaming(
                 _emit_metering()
 
             def on_interim_assistant(text, **cb_kwargs):
-                """Handle interim assistant event."""
                 if text is None:
                     return
                 visible = str(text).strip()
@@ -2241,7 +2236,6 @@ def _run_agent_streaming(
             _checkpoint_activity = [0]
 
             def on_tool(*cb_args, **cb_kwargs):
-                """Handle tool event."""
                 nonlocal _reasoning_text
                 event_type = None
                 name = None
@@ -2717,7 +2711,6 @@ def _run_agent_streaming(
             # (_checkpoint_activity is already initialised before on_tool().)
 
             def _periodic_checkpoint():
-                """Periodic checkpoint."""
                 last_saved_activity = 0
                 while not _checkpoint_stop.wait(15):
                     try:
