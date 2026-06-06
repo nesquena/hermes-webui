@@ -1839,6 +1839,21 @@ global.fetch = async function(path, opts = {}) {
         renderer: '<script>bad()</script>',
         api_key: 'SECRET_VALUE_DO_NOT_LEAK',
       },
+      output_compaction: {
+        tool: 'capy-spaces-widget-event',
+        command: 'space.widget.event',
+        exit_status: 0,
+        original_chars: 924,
+        compacted_chars: 312,
+        redaction_status: 'metadata_only',
+        rules_applied: ['cap_section_chars', 'redact_unsafe_markers', 'retain_artifact_handles'],
+        retained_artifact_handles: [
+          { kind: 'event', handle: 'event:lab:evt1', label: 'Queued widget event metadata' },
+        ],
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       renderer: '<script>bad()</script>',
       api_key: 'SECRET_VALUE_DO_NOT_LEAK',
     });
@@ -4942,6 +4957,13 @@ def test_spaces_ui_sandbox_postmessage_agent_prompt_requires_approval_and_queues
     assert "Widget event progress" in out["rootHtml"]
     assert "tool.completed" in out["rootHtml"]
     assert "metadata-only progress receipt" in out["rootHtml"]
+    assert "Compaction evidence" in out["rootHtml"]
+    assert "Original output: 924 chars" in out["rootHtml"]
+    assert "Compacted output: 312 chars" in out["rootHtml"]
+    assert "capy-spaces-widget-event" in out["rootHtml"]
+    assert "Command: space.widget.event" in out["rootHtml"]
+    assert "Artifacts: 1" in out["rootHtml"]
+    assert "event:lab:evt1" in out["rootHtml"]
     assert "Mode: Supervised · Approval required: yes · Prompt preflight: pass" in out["rootHtml"]
     assert "Gates: Generated widget execution approval" in out["rootHtml"]
     assert "Model route hint: hint:reasoning" in out["rootHtml"]

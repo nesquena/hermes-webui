@@ -140,7 +140,8 @@
       '<div class="capy-spaces-muted">Prompt bodies and generated widget code stay redacted.</div>' +
       renderPromptPreflightEvidence(result && result.prompt_preflight) +
       renderActionPolicyEvidence(result && result.autonomy_policy) +
-      renderPackageProgressEvidence(result && result.progress_event, 'Widget event progress') + '</div>';
+      renderPackageProgressEvidence(result && result.progress_event, 'Widget event progress') +
+      renderCompactionEvidence(result && (result.output_compaction || result.compaction)) + '</div>';
   }
 
   function renderSpacesList(spaces, demos, memoryStatus, sourceCatalog, policyStatus, progressStatus){
