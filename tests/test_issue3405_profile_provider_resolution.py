@@ -358,6 +358,28 @@ class TestReadProfileModelConfig:
 class TestStreamingWorkerEnrichment:
     """Tests for profile-aware provider/model enrichment in the streaming worker."""
 
+    def test_streaming_enrichment_skips_non_profile_session(self, tmp_path):
+        from api.streaming import _apply_profile_home_context_to_streaming_model
+
+        # Even if the default home has a model provider configured, a session
+        # without an explicit profile must not inherit that provider context.
+        model_cfg = tmp_path / "config.yaml"
+        model_cfg.write_text(
+            "model:\n  provider: openai-codex\n  default: gpt-5.5\n",
+            encoding="utf-8",
+        )
+
+        model, provider_context, changed = _apply_profile_home_context_to_streaming_model(
+            "openai/gpt-5.4-mini",
+            None,
+            str(tmp_path),
+            has_profile=False,
+        )
+
+        assert model == "openai/gpt-5.4-mini"
+        assert provider_context is None
+        assert changed is False
+
     def test_stale_model_substituted_in_streaming(self):
         """The streaming worker should substitute a stale model when the
         profile provider does not match the model's family."""

@@ -167,6 +167,43 @@ def _apply_profile_provider_context_to_streaming_model(
     return model, provider_context, False
 
 
+def _apply_profile_home_context_to_streaming_model(
+    model: str | None,
+    provider_context: str | None,
+    profile_home: str | None,
+    has_profile: bool,
+) -> tuple[str | None, str | None, bool]:
+    """Apply profile provider/model context from a profile config if present."""
+    if not (profile_home and has_profile and not provider_context):
+        return model, provider_context, False
+
+    try:
+        import yaml as _yaml_pp
+
+        _pp_cfg_path = Path(profile_home) / "config.yaml"
+        if not _pp_cfg_path.is_file():
+            return model, provider_context, False
+
+        _pp_cfg = _yaml_pp.safe_load(_pp_cfg_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(_pp_cfg, dict):
+            return model, provider_context, False
+
+        _pp = (_pp_cfg.get("model", {}).get("provider") or "").strip()
+        if not _pp:
+            return model, provider_context, False
+
+        _pp_default = (_pp_cfg.get("model", {}).get("default") or "").strip()
+        return _apply_profile_provider_context_to_streaming_model(
+            model,
+            provider_context,
+            _pp,
+            _pp_default,
+        )
+    except Exception:
+        logger.warning("profile provider read failed", exc_info=True)
+        return model, provider_context, False
+
+
 def _resolve_custom_provider_runtime_overrides(
     resolved_provider: str | None,
     resolved_api_key: str | None,
@@ -4663,31 +4700,15 @@ def _run_agent_streaming(
         # Profile-aware provider/model enrichment: when the session belongs
         # to a profile that specifies model.provider and model.default, use
         # those to set provider_context and repair stale models.
-        if not provider_context and _profile_home:
-            try:
-                import yaml as _yaml_pp
-                _pp_cfg_path = Path(_profile_home) / "config.yaml"
-                if _pp_cfg_path.is_file():
-                    _pp_cfg = _yaml_pp.safe_load(
-                        _pp_cfg_path.read_text(encoding="utf-8")
-                    ) or {}
-                    if isinstance(_pp_cfg, dict):
-                        _pp = (_pp_cfg.get("model", {}).get("provider") or "").strip()
-                        _pp_default = (_pp_cfg.get("model", {}).get("default") or "").strip()
-                        if _pp:
-                            model, provider_context, _repaired = (
-                                _apply_profile_provider_context_to_streaming_model(
-                                    model,
-                                    provider_context,
-                                    _pp,
-                                    _pp_default,
-                                )
-                            )
-                            s.model_provider = provider_context
-                            if _repaired and model != (s.model or ""):
-                                s.model = model
-            except Exception:
-                logger.warning("profile provider read failed", exc_info=True)
+        model, provider_context, _repaired = _apply_profile_home_context_to_streaming_model(
+            model=model,
+            provider_context=provider_context,
+            profile_home=_profile_home,
+            has_profile=bool(getattr(s, "profile", None)),
+        )
+        s.model_provider = provider_context
+        if _repaired and model != (s.model or ""):
+            s.model = model
 
         # Capture the resolved profile name now, while profile context is
         # reliable. Used in the compression migration block to stamp s.profile
