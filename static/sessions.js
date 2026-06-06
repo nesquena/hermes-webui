@@ -957,7 +957,7 @@ async function loadSession(sid){
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
       if (_loadingSessionId !== sid) return;
-      attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
+      attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true,restoredLiveTurn});
     }
   }else{
     // Phase 2b: Idle session — load full messages lazily for rendering.

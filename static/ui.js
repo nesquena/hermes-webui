@@ -8212,6 +8212,26 @@ function appendLiveToolCard(tc){
   if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
 
+function replayLiveToolCardsFromState(toolCalls){
+  if(!Array.isArray(toolCalls)||!toolCalls.length) return false;
+  if(!S.session||!S.activeStreamId) return false;
+  if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+  let replayed=false;
+  for(const tc of toolCalls){
+    if(!tc||!tc.name) continue;
+    const tid=tc.tid||'';
+    const turn=$('liveAssistantTurn');
+    const inner=_assistantTurnBlocks(turn);
+    const existing=tid&&inner
+      ? inner.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`)
+      : null;
+    if(existing) continue;
+    appendLiveToolCard(tc);
+    replayed=true;
+  }
+  return replayed;
+}
+
 function clearLiveToolCards(){
   if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
   const inner=_assistantTurnBlocks($('liveAssistantTurn'));

@@ -823,6 +823,7 @@ function closeOtherLiveStreams(activeSid){
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
+  const restoredLiveTurn=reconnecting&&!!options.restoredLiveTurn;
   if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
   else {
     if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded];
@@ -866,7 +867,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _streamingKatexTimer=null; // throttles live KaTeX scans while smd writes deltas
   // On reconnect, the assistantBody already has partial smd-rendered content.
   // We clear it on first new token and restart the parser from the reconnect point.
-  let _smdReconnect=reconnecting;
+  let _smdReconnect=reconnecting&&!restoredLiveTurn;
   // Thinking tag patterns for streaming display
   const _thinkPairs=[
     {open:'<think>',close:'</think>'},
@@ -1100,6 +1101,45 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _freshSegment=false; // consumed — next reuse check is normal again
   }
 
+  function _knownReconnectToolCalls(){
+    const inflight=INFLIGHT[activeSid];
+    if(inflight&&Array.isArray(inflight.toolCalls)&&inflight.toolCalls.length) return inflight.toolCalls;
+    return Array.isArray(S.toolCalls)?S.toolCalls:[];
+  }
+  function _replayRestoredLiveToolCardsIfMissing(){
+    if(!restoredLiveTurn||!_isActiveSession()) return false;
+    const inner=(typeof _assistantTurnBlocks==='function')?_assistantTurnBlocks($('liveAssistantTurn')):null;
+    if(inner&&inner.querySelector('.tool-card-row[data-live-tid],.tool-call-group[data-live-tool-call-group]')) return true;
+    const calls=_knownReconnectToolCalls();
+    if(!calls.length) return false;
+    if(typeof replayLiveToolCardsFromState==='function') return replayLiveToolCardsFromState(calls);
+    if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+    let replayed=false;
+    for(const tc of calls){
+      if(tc&&tc.name&&typeof appendLiveToolCard==='function'){
+        appendLiveToolCard(tc);
+        replayed=true;
+      }
+    }
+    return replayed;
+  }
+  function _normalizedRestoredText(text){
+    return String(text||'').replace(/\s+/g,' ').trim();
+  }
+  function _renderRestoredReconnectDisplay(displayText, fade=false){
+    if(!restoredLiveTurn||!assistantBody) return false;
+    const target=String(displayText||'');
+    const currentText=_normalizedRestoredText(assistantBody.textContent||'');
+    const targetText=_normalizedRestoredText(target);
+    if(!currentText||!targetText) return false;
+    if(fade) _streamFadeVisibleText=target;
+    assistantBody.classList.toggle('stream-fade-active',!!fade);
+    if(targetText===currentText) return true;
+    assistantBody.innerHTML=renderMd ? renderMd(target) : esc(target);
+    _sanitizeSmdLinks(assistantBody);
+    return true;
+  }
+
   // ── Shared SSE handler wiring (used for initial connection and reconnect) ──
   let _reconnectAttempted=false;
   let _terminalStateReached=false;
@@ -1119,6 +1159,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
           if(st.active){
             setComposerStatus('Reconnected');
+            _replayRestoredLiveToolCardsIfMissing();
             _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
             return;
           }
@@ -1626,6 +1667,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _renderStreamingFadeMarkdown(displayText){
     if(!assistantBody) return true;
+    if(_renderRestoredReconnectDisplay(displayText,true)) return true;
     const next=_streamFadeNextText(displayText);
     if(!next.changed) return next.caughtUp;
     assistantBody.classList.add('stream-fade-active');
@@ -1759,7 +1801,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         } else {
           assistantBody.classList.remove('stream-fade-active');
           _resetStreamFadeState();
-          if(!_smdParser&&window.smd){
+          if(_renderRestoredReconnectDisplay(displayText,false)){
+            // Restored live DOM already represents this prefix; keep it visible
+            // until the next token requires a full markdown repaint.
+          } else if(!_smdParser&&window.smd){
             // On reconnect: prior content in assistantBody came from a different smd parser run.
             // Clear it and start fresh — renderMessages() on done will restore the full content.
             if(_smdReconnect){assistantBody.innerHTML='';_smdReconnect=false;}
@@ -2593,6 +2638,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st.active){
               setComposerStatus('Reconnected');
+              _replayRestoredLiveToolCardsIfMissing();
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,document.baseURI||location.href).href,{withCredentials:true}));
               return;
             }
@@ -2841,6 +2887,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     }
     const replayParams=replayOnly?_runJournalReplayParams():'';
+    _replayRestoredLiveToolCardsIfMissing();
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 
