@@ -1092,6 +1092,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _liveThinkingText(){
     return String(liveReasoningText||'').trim() || 'Thinking…';
   }
+  function _liveThinkingPlacement(){
+    const activeSeq=Number(_assistantSegmentSeq||0);
+    const nextSeq=Number(_currentLiveSegmentSeq||0)+1;
+    const segmentSeq=(!assistantRow||_freshSegment||!activeSeq)?nextSeq:activeSeq;
+    return {
+      activityKey:S.activeStreamId?'live:'+S.activeStreamId:null,
+      segmentSeq,
+      burstId:_currentActivityBurstId,
+    };
+  }
+  function _updateLiveThinkingCard(text){
+    const opts=_liveThinkingPlacement();
+    if(typeof updateThinking==='function') updateThinking(text, opts);
+    else appendThinking(text, opts);
+  }
   // Split a content string into {reasoning, content} by extracting any <think>...
   // blocks (or other known reasoning-tag pairs). If reasoning is already
   // populated on the message (e.g. from a separate on_reasoning stream), the
@@ -1430,8 +1445,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(window._showThinking===false){removeThinking();return;}
     const text=(parsed&&parsed.thinkingText)||'';
     if(text||(parsed&&parsed.inThinking)){
-      if(typeof updateThinking==='function') updateThinking(text||'Thinking…');
-      else appendThinking();
+      _updateLiveThinkingCard(text||'Thinking…');
       return;
     }
     // Only remove thinking if we're not in an active reasoning phase.
@@ -2245,7 +2259,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!S.session||S.session.session_id!==activeSid) return;
       _completeAutomaticCompressionOnLiveProgress(activeSid);
       const parsed=_parseStreamState();
-      if(_freshSegment) appendThinking();
+      if(_freshSegment) appendThinking('', _liveThinkingPlacement());
       if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
       _scheduleRender();
     });
@@ -2270,6 +2284,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(String((parsed&&parsed.displayText)||'').trim()||assistantRow){
           ensureAssistantRow(true);
           _flushPendingSegmentRender({force:true});
+          if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
           if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
           recordActivityBoundary();
         }
@@ -2285,10 +2300,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       _completeAutomaticCompressionOnLiveProgress(activeSid);
-      if(typeof updateThinking==='function') updateThinking('');
-      else appendThinking();
       ensureAssistantRow(true);
       _flushPendingSegmentRender({force:true});
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       if(typeof closeCurrentLiveActivityGroup==='function') closeCurrentLiveActivityGroup();
       recordActivityBoundary();
       _resetAssistantSegment();
@@ -2304,8 +2318,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(d.text&&S.session&&S.session.session_id===activeSid) _completeAutomaticCompressionOnLiveProgress(activeSid);
       syncInflightAssistantMessage();
       if(text&&S.session&&S.session.session_id===activeSid){
-        if(typeof updateThinking==='function') updateThinking(_liveThinkingText());
-        else appendThinking(_liveThinkingText());
+        _updateLiveThinkingCard(_liveThinkingText());
       }
     });
 

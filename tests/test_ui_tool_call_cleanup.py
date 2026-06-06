@@ -392,6 +392,41 @@ class TestToolCallGroupingStatic:
             "Tool starts must not split consecutive tools into one-tool Activity rows."
         )
 
+    def test_live_thinking_card_is_segment_scoped_not_global_singleton(self):
+        live_thinking_fn = _function_body(UI_JS, "appendThinking")
+        placement_fn = _function_body(MESSAGES_JS, "_liveThinkingPlacement")
+        update_fn = _function_body(MESSAGES_JS, "_updateLiveThinkingCard")
+        interim_match = re.search(r"source\.addEventListener\('interim_assistant',e=>\{(.*?)\n\s*\}\);", MESSAGES_JS, re.S)
+        assert interim_match, "interim_assistant listener not found"
+        interim_fn = interim_match.group(1)
+
+        assert "data-live-thinking-key" in live_thinking_fn, (
+            "Live Thinking rows need a segment/burst key so later reasoning does not update "
+            "the first Thinking Card in the turn."
+        )
+        assert 'data-live-thinking="1"][data-live-thinking-key="' in live_thinking_fn, (
+            "appendThinking() must query the current segment's live Thinking Card, not a "
+            "turn-global singleton."
+        )
+        assert "segmentSeq" in placement_fn and "_currentLiveSegmentSeq" in placement_fn, (
+            "Thinking placement should reuse the live segment sequence instead of inventing "
+            "a second placement model."
+        )
+        assert "burstId:_currentActivityBurstId" in placement_fn, (
+            "Thinking placement should carry the current activity burst for Worklog ordering."
+        )
+        assert "updateThinking(text, opts)" in update_fn, (
+            "messages.js should pass segment placement into the UI Thinking helper."
+        )
+        assert "updateThinking('')" not in interim_fn, (
+            "Live interim boundaries should finalize the current Thinking Card instead of "
+            "clearing it mid-stream."
+        )
+        assert "finalizeThinkingCard()" in interim_fn, (
+            "Visible interim assistant progress must close the current Thinking segment "
+            "before the next segment starts."
+        )
+
     def test_live_compression_card_splits_current_tool_activity_burst(self):
         compression_fn = _function_body(UI_JS, "appendLiveCompressionCard")
         close_fn = _function_body(UI_JS, "closeCurrentLiveActivityGroup")

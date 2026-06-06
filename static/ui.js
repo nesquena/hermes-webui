@@ -9907,8 +9907,10 @@ function finalizeThinkingCard(){
   if(group){
     const activeReason=turn.querySelector('.wl-reason[data-worklog-reason-active="1"]');
     if(activeReason) activeReason.removeAttribute('data-worklog-reason-active');
-    const active=turn.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
-    if(active) active.removeAttribute('data-thinking-active');
+    turn.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(active=>{
+      active.removeAttribute('data-thinking-active');
+      active.removeAttribute('data-live-thinking');
+    });
     _syncToolCallGroupSummary(group);
   }
 }
@@ -9916,6 +9918,7 @@ function appendThinking(text='', options){
   // Guard: ignore if session was switched during an async SSE stream.
   // The old stream's reasoning events can still fire after switch;
   // without this check they would pollute the new session's DOM.
+  options=options||{};
   const allowPendingPlaceholder=!!(options&&options.pending===true);
   if(!S.session||(!S.activeStreamId&&!allowPendingPlaceholder)) return;
   const empty=$('emptyState');
@@ -9946,26 +9949,43 @@ function appendThinking(text='', options){
   if(!blocks) return;
   const clean=_sanitizeThinkingDisplayText(text);
   if(clean&&window._showThinking!==false){
+    const segmentSeq=options.segmentSeq!==undefined&&options.segmentSeq!==null?String(options.segmentSeq):'';
+    const burstId=options.burstId!==undefined&&options.burstId!==null?String(options.burstId):'';
+    const thinkingKey=String(options.thinkingKey||(
+      segmentSeq?`segment:${segmentSeq}`:
+      burstId?`burst:${burstId}`:
+      'turn'
+    ));
     const group=ensureLiveWorklogContainer(blocks,{
-      activityKey:S.activeStreamId?'live:'+S.activeStreamId:null,
+      activityKey:options.activityKey||(S.activeStreamId?'live:'+S.activeStreamId:null),
     });
     const list=_toolWorklogListEl(group);
     if(list){
-      let row=list.querySelector('.agent-activity-thinking[data-live-thinking="1"]');
+      let row=list.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
       if(!row){
         row=_thinkingActivityNode(clean, false);
         row.setAttribute('data-live-thinking','1');
+        row.setAttribute('data-live-thinking-key',thinkingKey);
+        if(segmentSeq) row.setAttribute('data-live-segment-seq',segmentSeq);
+        if(burstId) row.setAttribute('data-activity-burst-id',burstId);
+        list.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(el=>{
+          if(el!==row){
+            el.removeAttribute('data-thinking-active');
+            el.removeAttribute('data-live-thinking');
+          }
+        });
         row.setAttribute('data-thinking-active','1');
         list.appendChild(row);
       }else{
         _renderThinkingInto(row, clean);
       }
+      row.setAttribute('data-thinking-active','1');
       _syncToolCallGroupSummary(group);
     }
   }
   if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
-function updateThinking(text=''){appendThinking(text);}
+function updateThinking(text='', options){appendThinking(text, options);}
 function removeThinking(){
   if(!isSimplifiedToolCalling()){
     const el=$('thinkingRow');
