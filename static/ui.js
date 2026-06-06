@@ -359,6 +359,7 @@ const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT=140;
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 let _messageVirtualHeightCache=[];
+let _messageVirtualHeightCacheEntries=[];
 let _messageVirtualHeightCacheLen=0;
 let _messageVirtualHeightCacheSrc=null;
 let _messageVirtualEstimatedRowHeight=MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
@@ -375,6 +376,7 @@ function clearVisibleMessageRowCache(){
 }
 function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCache=[];
+  _messageVirtualHeightCacheEntries=[];
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
   _messageVirtualEstimatedRowHeight=MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
@@ -484,12 +486,74 @@ function _messageVirtualWindowKeyFor(windowMetrics){
     windowMetrics.tailStart||0,
   ].join(':');
 }
-function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
-  if(_messageVirtualHeightCacheLen!==S.messages.length || _messageVirtualHeightCacheSrc!==S.messages){
+function _messageVirtualHeightEntryMatches(previousEntry, nextEntry){
+  return !!(
+    previousEntry&&nextEntry&&
+    previousEntry.rawIdx===nextEntry.rawIdx&&
+    previousEntry.m===nextEntry.m
+  );
+}
+function _syncMessageVirtualHeightCache(visWithIdx){
+  const nextEntries=Array.isArray(visWithIdx)
+    ? visWithIdx.map(entry=>entry?{rawIdx:entry.rawIdx,m:entry.m}:entry)
+    : [];
+  if(
+    _messageVirtualHeightCacheLen===S.messages.length &&
+    _messageVirtualHeightCacheSrc===S.messages &&
+    _messageVirtualHeightCacheEntries.length===nextEntries.length
+  ) return;
+  const previousEntries=Array.isArray(_messageVirtualHeightCacheEntries)?_messageVirtualHeightCacheEntries:[];
+  const previousHeights=Array.isArray(_messageVirtualHeightCache)?_messageVirtualHeightCache.slice():[];
+  let nextHeights=null;
+  if(!previousEntries.length){
+    nextHeights=new Array(nextEntries.length);
+  }else if(!nextEntries.length){
     _clearMessageVirtualHeightCache();
     _messageVirtualHeightCacheLen=S.messages.length;
     _messageVirtualHeightCacheSrc=S.messages;
+    return;
+  }else{
+    const sharedPrefix=Math.min(previousEntries.length,nextEntries.length);
+    let prefixMatches=true;
+    for(let i=0;i<sharedPrefix;i++){
+      if(!_messageVirtualHeightEntryMatches(previousEntries[i], nextEntries[i])){
+        prefixMatches=false;
+        break;
+      }
+    }
+    if(prefixMatches){
+      nextHeights=previousHeights.slice(0, sharedPrefix);
+      nextHeights.length=nextEntries.length;
+    }else if(nextEntries.length>=previousEntries.length){
+      const prependedCount=nextEntries.length-previousEntries.length;
+      let suffixMatches=true;
+      for(let i=0;i<previousEntries.length;i++){
+        if(!_messageVirtualHeightEntryMatches(previousEntries[i], nextEntries[i+prependedCount])){
+          suffixMatches=false;
+          break;
+        }
+      }
+      if(suffixMatches){
+        nextHeights=new Array(nextEntries.length);
+        for(let i=0;i<previousEntries.length;i++){
+          nextHeights[prependedCount+i]=previousHeights[i];
+        }
+      }
+    }
   }
+  if(nextHeights===null){
+    _clearMessageVirtualHeightCache();
+    _messageVirtualHeightCache=new Array(nextEntries.length);
+  }else{
+    _messageVirtualHeightCache=nextHeights;
+    _messageVirtualWindowKey='';
+  }
+  _messageVirtualHeightCacheEntries=nextEntries;
+  _messageVirtualHeightCacheLen=S.messages.length;
+  _messageVirtualHeightCacheSrc=S.messages;
+}
+function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
+  _syncMessageVirtualHeightCache(visWithIdx);
   const container=$('messages');
   return _messageVirtualWindow({
     total:visWithIdx.length,
