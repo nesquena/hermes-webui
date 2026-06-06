@@ -133,22 +133,25 @@ def _reap_abandoned_spawn(proc: subprocess.Popen) -> bool:
     return True
 
 
-def _reap_terminal_descendants(limit: int = _TERMINAL_DESCENDANT_REAPER_LIMIT) -> int:
-    """Reap exited terminal descendants that have been reparented to WebUI."""
+def _reap_terminal_descendants(
+    terminal_pgid: int,
+    limit: int = _TERMINAL_DESCENDANT_REAPER_LIMIT,
+) -> int:
+    """Reap exited descendants that still belong to a terminal-owned process group."""
     if not _TERMINAL_SUPPORTED:
+        return 0
+    try:
+        terminal_pgid = abs(int(terminal_pgid))
+    except (TypeError, ValueError):
+        return 0
+    if terminal_pgid <= 0:
         return 0
     reaped = 0
     with _terminal_descendant_reaper_lock:
         for _ in range(max(0, int(limit))):
             try:
-                pid, _status = os.waitpid(-1, os.WNOHANG)
-            except ChildProcessError:
-                break
-            except InterruptedError:
-                continue
-            except OSError as exc:
-                if exc.errno in (errno.ECHILD, errno.EINTR):
-                    break
+                pid, _status = os.waitpid(-terminal_pgid, os.WNOHANG)
+            except (ChildProcessError, OSError):
                 break
             if pid == 0:
                 break
@@ -273,7 +276,7 @@ def _reader_loop(term: TerminalSession) -> None:
     finally:
         term.closed.set()
         code = term.proc.poll()
-        _reap_terminal_descendants()
+        _reap_terminal_descendants(term.proc.pid)
         term.put_output("terminal_closed", {"exit_code": code})
 
 
@@ -442,7 +445,7 @@ def close_terminal(session_id: str) -> bool:
             os.close(term.master_fd)
         except OSError:
             pass
-        _reap_terminal_descendants()
+        _reap_terminal_descendants(term.proc.pid)
     return True
 
 
@@ -452,7 +455,6 @@ def close_all_terminals() -> None:
         session_ids = list(_TERMINALS)
     for session_id in session_ids:
         close_terminal(session_id)
-    _reap_terminal_descendants()
 
 
 atexit.register(close_all_terminals)
