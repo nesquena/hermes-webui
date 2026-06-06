@@ -229,3 +229,44 @@ def test_sse_initial_event_reshows_pending_prompt():
     assert "showApprovalForSession(sid" in MESSAGES_JS
     # the 'initial' SSE event specifically is wired (not only the live event).
     assert "addEventListener('initial'" in MESSAGES_JS
+
+
+def test_close_live_stream_snapshots_turn_before_teardown():
+    """#3668 'stays gone' variant: switching away from a streaming session during
+    a quiet window (mid tool-exec / silent thinking, between content SSE events)
+    must still preserve the live thinking/tool content on switch-back.
+
+    The per-event snapshot (snapshotLiveTurn) only fires on content/tool_complete
+    events, so closeLiveStream() — the switch-away teardown — must capture a DOM
+    snapshot BEFORE closing the source. Otherwise restoreLiveTurnHtmlForSession()
+    finds no/stale snapshot and loadSession()'s fallback rebuilds with an EMPTY
+    appendThinking(), permanently losing the streamed content (only the elapsed
+    clock survives — the reported signature).
+    """
+    # Extract the closeLiveStream body and assert the snapshot precedes teardown.
+    start = MESSAGES_JS.index("function closeLiveStream(")
+    brace = MESSAGES_JS.index("{", start)
+    depth = 0
+    body = ""
+    for i in range(brace, len(MESSAGES_JS)):
+        if MESSAGES_JS[i] == "{":
+            depth += 1
+        elif MESSAGES_JS[i] == "}":
+            depth -= 1
+            if depth == 0:
+                body = MESSAGES_JS[brace + 1 : i]
+                break
+    assert body, "closeLiveStream body not found"
+    snap_idx = body.find("snapshotLiveTurnHtmlForSession(sessionId)")
+    close_idx = body.find("live.source.close()")
+    delete_idx = body.find("delete LIVE_STREAMS[sessionId]")
+    assert snap_idx != -1, (
+        "closeLiveStream() must snapshot the live turn (snapshotLiveTurnHtmlForSession) "
+        "before tearing the stream down, or switch-away during a quiet window loses content (#3668)."
+    )
+    assert close_idx != -1 and snap_idx < close_idx, (
+        "the snapshot must be taken BEFORE live.source.close()."
+    )
+    assert delete_idx != -1 and snap_idx < delete_idx, (
+        "the snapshot must be taken BEFORE LIVE_STREAMS teardown."
+    )

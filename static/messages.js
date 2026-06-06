@@ -787,6 +787,15 @@ function closeLiveStream(sessionId, streamId, source){
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
+  // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
+  // per-event snapshot (snapshotLiveTurn) only fires on content/tool_complete
+  // SSE events, so switching away during a quiet window (mid tool-exec, silent
+  // thinking) would leave a stale-or-absent snapshot — on switch-back
+  // restoreLiveTurnHtmlForSession() then fails and loadSession()'s fallback
+  // rebuilds with an EMPTY appendThinking(), permanently losing the streamed
+  // thinking/tool content (only the elapsed clock survives). Capturing here
+  // guarantees switch-back restores the exact state shown at switch-away. (#3668)
+  if(typeof snapshotLiveTurnHtmlForSession==='function') snapshotLiveTurnHtmlForSession(sessionId);
   try{live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
   // closeLiveStream() is called during session-switch teardown for any session
