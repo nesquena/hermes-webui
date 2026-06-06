@@ -1088,6 +1088,7 @@ from api.config import (
     _get_session_agent_lock,
     SESSION_AGENT_LOCKS,
     SESSION_AGENT_LOCKS_LOCK,
+    CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
     load_settings,
     save_settings,
     set_hermes_default_model,
@@ -10309,14 +10310,19 @@ def _handle_live_models(handler, parsed):
             # Fall back to the custom_providers entries from config.yaml so
             # the live-model enrichment step can add any models that weren't
             # already in the static list (issue #1619).
+            # Collect config-specified model IDs separately so they don't
+            # prevent the live fetch below from running (#3718).
+            _config_ids = []
             if provider == "custom" or provider.startswith("custom:"):
                 for _cp in _custom_provider_entries_for_request():
                     if custom_provider_entry is None:
                         custom_provider_entry = _cp
-                    ids.extend(_custom_provider_model_ids(_cp))
+                    _config_ids.extend(_custom_provider_model_ids(_cp))
             
-            # If still no ids, try fetching from base_url directly (OpenAI-compat endpoint)
-            if not ids and (provider == "custom" or provider.startswith("custom:")):
+            # Always try live fetch for custom providers — config entries are a
+            # fallback, not a replacement.  The live endpoint should return ALL
+            # models the key has access to, not just what's listed in config.yaml.
+            if provider == "custom" or provider.startswith("custom:"):
                 _base_url = None
                 _api_key = None
                 if custom_provider_entry:
@@ -10345,7 +10351,7 @@ def _handle_live_models(handler, parsed):
                             headers={"Authorization": f"Bearer {_api_key}"},
                         )
                         
-                        with urllib.request.urlopen(_req, timeout=8) as _resp:
+                        with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
                             _body = json.loads(_resp.read())
                         
                         # Parse response: {"data": [{"id": "model1", ...}, ...]}
@@ -10363,6 +10369,16 @@ def _handle_live_models(handler, parsed):
                     
                     except Exception as _fetch_err:
                         logger.debug("Live fetch from custom provider failed: %s", _fetch_err)
+                
+                # If live fetch succeeded, merge with config entries (live takes
+                # priority).  If live fetch failed, fall back to config-only list.
+                if ids:
+                    _live_set = set(ids)
+                    for _cid in _config_ids:
+                        if _cid not in _live_set:
+                            ids.append(_cid)
+                else:
+                    ids = list(_config_ids)
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider

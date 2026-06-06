@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.298] — 2026-06-06 — Release JN (stage-3719 — live model probe for custom providers with model config)
+
+### Fixed
+- **`/api/models/live` now probes the upstream `/v1/models` endpoint for custom providers even when a `model:` is configured.** When a `custom_providers` entry had a `model:` field, the live handler added that config model to the `ids` list *before* the `if not ids:` guard that triggers the live fetch — so the probe was skipped and Settings' "refresh models" returned only the single config entry instead of the full upstream catalog (e.g. a LiteLLM proxy exposing 50+ models showed just one). Config models are now collected separately and the live fetch always runs for custom providers; live results take priority and config entries are merged in as a fallback (and used as the full list if the fetch fails). The static `/api/models` endpoint already handled this correctly. (#3719 fixes #3718, @DanielMaly)
+
 ## [v0.51.297] — 2026-06-06 — Release JM (stage-3711 — terminal remote-backend guard)
 
 ### Fixed
