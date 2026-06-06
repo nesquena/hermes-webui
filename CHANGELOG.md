@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.290] — 2026-06-06 — Release JF (stage-s1 — profile provider/model now respected in session resolution)
+
+### Fixed
+- **Profile-bound sessions now resolve their provider and model from the profile** instead of silently falling back to the global active provider. Previously, when a chat was started under a profile and the model string was not `@provider:`-qualified (and no explicit provider was sent), the backend used the catalog's global active provider — so a profile wired to one provider/key could silently run on a different one, causing **wrong credentials/billing** and **silent context truncation** (the global default model's advertised context window could differ from what the provider actually served, so the provider dropped the oldest messages and long chats "forgot" earlier content). Resolution is now authoritative from the profile across all four runtime entry points (chat start, streaming worker incl. background/btw runs, and both deferred `/api/session` display resolvers); stale models are still repaired under the profile provider — including the `openai-codex` profile + stale `openai/…` slash-model case — while native slash IDs on OpenRouter/custom providers are preserved and explicit `@provider:` qualifiers still win. (#3448, @rodboev; fixes #3405)
+
 ## [v0.51.289] — 2026-06-06 — Release JE (hotfix — sidebar ReferenceError #3696 + scope-undef prevention gate)
 
 ### Fixed
