@@ -2758,6 +2758,26 @@ def _memory_advisory_public_envelope() -> dict[str, Any]:
     }
 
 
+def _memory_advisory_context_boundary_line() -> str:
+    """Return a fixed trust-boundary label before advisory memory enters agent context."""
+    envelope = _memory_advisory_public_envelope()
+    gates: list[str] = []
+    for gate in envelope.get("required_gates", []):
+        safe_gate = _active_context_value(gate, 80)
+        if safe_gate and safe_gate != "[REDACTED]":
+            gates.append(safe_gate)
+    if not gates:
+        gates = ["prompt_preflight", "approval", "sandbox_preview", "visual_qa", "rollback_recovery"]
+    return (
+        "Memory Tree trust boundary: "
+        f"metadata_only={str(bool(envelope.get('metadata_only'))).lower()}; "
+        f"advisory_context={str(bool(envelope.get('advisory_context'))).lower()}; "
+        f"context_authority={_active_context_value(envelope.get('context_authority'), 80) or 'untrusted_advisory'}; "
+        f"can_bypass_safety_gates={str(bool(envelope.get('can_bypass_safety_gates'))).lower()}; "
+        f"required_gates={','.join(gates)}"
+    )
+
+
 def _safe_advisory_memory_hit(hit: Any) -> tuple[dict[str, Any] | None, bool, dict[str, Any] | None]:
     """Return a public advisory memory hit plus whether prompt preflight blocked it."""
     if not isinstance(hit, dict) or _memory_hit_is_auto_ingested(hit):
@@ -3546,6 +3566,7 @@ def _build_agent_context_unchecked(space_id: str | None) -> str:
             )
             rendered_memory_hits += 1
         if memory_lines:
+            lines.append(_memory_advisory_context_boundary_line())
             lines.append("relevant Memory Tree slices (source_id|source_type|redaction_status|snippet):")
             lines.extend(memory_lines)
         if blocked_memory_hits:
