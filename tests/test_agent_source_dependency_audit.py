@@ -21,6 +21,17 @@ def _run_audit() -> dict[str, object]:
     return json.loads(proc.stdout)
 
 
+def _run_markdown_audit() -> str:
+    proc = subprocess.run(
+        [sys.executable, str(AUDIT_SCRIPT), str(REPO), "--format", "markdown"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout
+
+
 def _class_by_id(report: dict[str, object]) -> dict[str, dict[str, object]]:
     classes = report["dependency_classes"]
     assert isinstance(classes, list)
@@ -50,6 +61,7 @@ def test_audit_reports_expected_dependency_classes():
     assert set(classes) == {
         "docker_agent_source_volume",
         "startup_dependency_install",
+        "runtime_agent_execution",
         "runtime_auxiliary_model_metadata",
         "runtime_session_state",
         "runtime_gateway_provider",
@@ -81,9 +93,21 @@ def test_audit_reports_startup_install_dependencies():
     texts = _texts(classes["startup_dependency_install"])
 
     assert ("api/startup.py", "HERMES_WEBUI_AGENT_DIR") in anchors
+    assert ("bootstrap.py", "HERMES_WEBUI_AGENT_DIR") in anchors
+    assert ("start.ps1", "HERMES_WEBUI_AGENT_DIR") in anchors
     assert ("api/startup.py", "auto_install_agent_deps") in anchors
     assert ("server.py", "auto_install_agent_deps") in anchors
     assert any("uv pip install" in text and "[all]" in text for text in texts)
+
+
+def test_audit_reports_runtime_agent_execution_imports():
+    classes = _class_by_id(_run_audit())
+    anchors = _anchors(classes["runtime_agent_execution"])
+
+    assert ("api/streaming.py", "run_agent") in anchors
+    assert ("api/routes.py", "tools.skills_tool") in anchors
+    assert ("api/streaming.py", "tools.approval") in anchors
+    assert ("api/routes.py", "cron.jobs") in anchors
 
 
 def test_audit_reports_runtime_auxiliary_and_model_metadata_imports():
@@ -113,3 +137,10 @@ def test_audit_keeps_client_package_candidates_visible():
     assert ("api/streaming.py", "hermes_constants") in anchors
     assert ("api/routes.py", "agent.skill_utils") in anchors
     assert ("api/routes.py", "hermes_cli.plugins") in anchors
+
+
+def test_markdown_output_is_utf8_safe_on_windows_stdout():
+    markdown = _run_markdown_audit()
+
+    assert "# Agent Source Dependency Audit" in markdown
+    assert "runtime_agent_execution" in markdown

@@ -16,7 +16,15 @@ from pathlib import Path
 from typing import Iterable
 
 
-AGENT_MODULE_ROOTS = ("agent", "hermes_cli", "hermes_state", "hermes_constants")
+AGENT_MODULE_ROOTS = (
+    "agent",
+    "cron",
+    "hermes_cli",
+    "hermes_constants",
+    "hermes_state",
+    "run_agent",
+    "tools",
+)
 
 
 @dataclass(frozen=True)
@@ -92,6 +100,12 @@ def _module_root(module_name: str) -> str:
 
 
 def _import_kind(module_name: str) -> str:
+    if module_name == "run_agent" or module_name.startswith("run_agent."):
+        return "runtime_agent_execution_import"
+    if module_name == "tools" or module_name.startswith("tools."):
+        return "runtime_tools_import"
+    if module_name == "cron" or module_name.startswith("cron."):
+        return "runtime_cron_import"
     if module_name == "hermes_state" or module_name.startswith("hermes_state."):
         return "state_import"
     if module_name == "hermes_constants" or module_name.startswith("hermes_constants."):
@@ -176,6 +190,8 @@ def build_report(root: Path) -> dict[str, object]:
         root,
         (
             "server.py",
+            "bootstrap.py",
+            "start.ps1",
             "api/startup.py",
             "api/config.py",
             "api/streaming.py",
@@ -218,6 +234,22 @@ def build_report(root: Path) -> dict[str, object]:
             findings=_findings_by_kind(
                 startup_findings,
                 {"startup_install_function", "agent_dir_env", "agent_source_install", "agent_source_staging"},
+            ),
+        ),
+        DependencyClass(
+            class_id="runtime_agent_execution",
+            title="Runtime agent execution, tools, and cron imports",
+            current_dependency=(
+                "Browser chat, approvals, tools, and scheduled work import Hermes Agent "
+                "execution modules directly from the source checkout."
+            ),
+            replacement_surface=(
+                "Move run orchestration, tool approval/control, and cron execution behind "
+                "Hermes Agent APIs or a versioned client package before removing source mounts."
+            ),
+            findings=_findings_by_kind(
+                runtime_findings,
+                {"runtime_agent_execution_import", "runtime_tools_import", "runtime_cron_import"},
             ),
         ),
         DependencyClass(
@@ -354,6 +386,11 @@ def _print_markdown(report: dict[str, object]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "repo_root",
