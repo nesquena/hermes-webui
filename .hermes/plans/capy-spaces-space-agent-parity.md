@@ -38,6 +38,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub Actions cache metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub Actions caches API payloads (`/repos/{owner}/{repo}/actions/caches`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from safe repository path, cache count, total safe byte size, bounded cache ids, refs, sizes, and safe timestamps while omitting cache keys, versions, URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
+  - Query/fragment origins sanitize to a durable display label and exact safe fetch route, while text fallback payloads, JSON Feed bypasses, malformed rows, userinfo/port origins, and lookalike-host route-shaped URLs fail closed without creating vault records or performing unsafe fetches.
+
 - `feat(capy-memory): ingest GitHub repository webhooks metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub repository webhooks API payloads (`/repos/{owner}/{repo}/hooks`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, hook count, bounded hook ids/names, active flags, event names, safe timestamps, and last response codes while omitting callback URLs, delivery/test/ping URLs, config/auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
