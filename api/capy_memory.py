@@ -4744,6 +4744,33 @@ def _github_topics_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> 
     return "; ".join(parts)[:1_200]
 
 
+def _github_languages_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        language_segment = lowered[4] if len(lowered) > 4 else ""
+        return (
+            len(path_segments) >= 5
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and (language_segment == "languages" or language_segment.startswith("languages\x00"))
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return any(segment.lower().startswith("languages%") for segment in raw_path)
+
+
 def _github_languages_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -4752,12 +4779,11 @@ def _github_languages_path_repo(origin_uri: str) -> str:
     if (parts.hostname or "").strip().lower() != "api.github.com":
         return ""
     path = parts.path.split("/")
-    lowered = [segment.lower() for segment in path]
     if (
         len(path) != 5
         or path[0] != ""
-        or lowered[1] != "repos"
-        or lowered[4] != "languages"
+        or path[1] != "repos"
+        or path[4] != "languages"
         or not _github_repo_path_segment_is_safe(path[2])
         or not _github_repo_path_segment_is_safe(path[3])
     ):
@@ -8939,6 +8965,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_milestones_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_milestones_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_languages_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_languages_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_actions_variables_route_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_variables_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -9040,6 +9069,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_milestones_path_matches(safe_origin_uri):
         if not _github_milestones_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_languages_path_matches(safe_origin_uri):
+        if not _github_languages_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_actions_variables_path_matches(safe_origin_uri):
@@ -9299,6 +9332,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_milestones_path_matches(safe_origin_uri) and (
             not _github_milestones_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_languages_path_matches(safe_origin_uri) and (
+            not _github_languages_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")

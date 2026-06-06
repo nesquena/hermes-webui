@@ -11880,6 +11880,88 @@ def test_run_source_refresh_jobs_default_fetcher_rejects_github_languages_malfor
     assert "raw-prompt" not in serialized
 
 
+def test_run_source_refresh_jobs_default_fetcher_rejects_github_languages_malformed_path_generic_text_bypass(tmp_path, monkeypatch):
+    root = tmp_path / "capy-memory"
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
+    monkeypatch.setenv("CAPY_MEMORY_REFRESH_ALLOWED_HOSTS", "api.github.com")
+    init_memory_tree()
+    register_source_reference({
+        "source_id": "github-languages-unsafe-owner-text-bypass",
+        "title": "GitHub Languages Unsafe Owner Text Bypass",
+        "origin_uri": "https://api.github.com/repos/bad!owner/spaces/languages?access_token=***#raw-prompt",
+    })
+    register_source_reference({
+        "source_id": "github-languages-case-text-bypass",
+        "title": "GitHub Languages Case Text Bypass",
+        "origin_uri": "https://api.github.com/Repos/capy/spaces/Languages?access_token=***#raw-prompt",
+    })
+    register_source_reference({
+        "source_id": "github-languages-trailing-slash-text-bypass",
+        "title": "GitHub Languages Trailing Slash Text Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/languages/?access_token=***#raw-prompt",
+    })
+    register_source_reference({
+        "source_id": "github-languages-extra-segment-text-bypass",
+        "title": "GitHub Languages Extra Segment Text Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/languages/extra?access_token=***#raw-prompt",
+    })
+    register_source_reference({
+        "source_id": "github-languages-encoded-extra-segment-text-bypass",
+        "title": "GitHub Languages Encoded Extra Segment Text Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/languages%2Fextra?access_token=***#raw-prompt",
+    })
+    register_source_reference({
+        "source_id": "github-languages-encoded-slash-text-bypass",
+        "title": "GitHub Languages Encoded Slash Text Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/languages%2f?access_token=***#raw-prompt",
+    })
+    register_source_reference({
+        "source_id": "github-languages-encoded-nul-text-bypass",
+        "title": "GitHub Languages Encoded Nul Text Bypass",
+        "origin_uri": "https://api.github.com/repos/capy/spaces/languages%00?access_token=***#raw-prompt",
+    })
+    text_bypass_body = b"Summary: safe-looking languages summary should not bypass exact path validation."
+    refresh_open_calls = 0
+
+    class FakeResponse:
+        headers = {"Content-Type": "text/plain; charset=utf-8"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return text_bypass_body
+
+    def fake_refresh_open(*_args, **_kwargs):
+        nonlocal refresh_open_calls
+        refresh_open_calls += 1
+        return FakeResponse()
+
+    monkeypatch.setattr(capy_memory, "_refresh_open", fake_refresh_open)
+
+    result = run_source_refresh_jobs(limit=7)
+    serialized = json.dumps(result, sort_keys=True).lower()
+
+    assert result["processed"] == 7
+    assert [job["status"] for job in result["jobs"]] == ["pending"] * 7
+    assert {job["error"] for job in result["jobs"]} <= {"refresh fetcher disabled", "refresh failed"}
+    assert refresh_open_calls == 0
+    assert not (root / "vault" / "github-languages-unsafe-owner-text-bypass.md").exists()
+    assert not (root / "vault" / "github-languages-case-text-bypass.md").exists()
+    assert not (root / "vault" / "github-languages-trailing-slash-text-bypass.md").exists()
+    assert not (root / "vault" / "github-languages-extra-segment-text-bypass.md").exists()
+    assert not (root / "vault" / "github-languages-encoded-extra-segment-text-bypass.md").exists()
+    assert not (root / "vault" / "github-languages-encoded-slash-text-bypass.md").exists()
+    assert not (root / "vault" / "github-languages-encoded-nul-text-bypass.md").exists()
+    assert "safe-looking languages summary" not in serialized
+    assert "bad!owner" not in serialized
+    assert "access_token" not in serialized
+    assert "raw-prompt" not in serialized
+
+
 def test_run_source_refresh_jobs_default_fetcher_ingests_github_check_runs_metadata_only(tmp_path, monkeypatch):
     root = tmp_path / "capy-memory"
     monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(root))
