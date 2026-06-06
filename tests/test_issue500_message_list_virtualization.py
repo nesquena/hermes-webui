@@ -148,6 +148,53 @@ console.log(JSON.stringify({
     assert metrics["total"] == 180
 
 
+def test_height_cache_preserves_measured_prefix_across_append_only_growth():
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT = 140;
+let _messageVirtualHeightCache = [180, 220];
+let _messageVirtualHeightCacheEntries = [];
+let _messageVirtualHeightCacheLen = 2;
+let _messageVirtualHeightCacheSrc = null;
+let _messageVirtualEstimatedRowHeight = 200;
+let _messageVirtualWindowKey = 'stale-key';
+function _clearMessageVirtualHeightCache() {
+  _messageVirtualHeightCache = [];
+  _messageVirtualHeightCacheEntries = [];
+  _messageVirtualHeightCacheLen = 0;
+  _messageVirtualHeightCacheSrc = null;
+  _messageVirtualEstimatedRowHeight = MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
+  _messageVirtualWindowKey = '';
+}
+eval(extractFunc('_messageVirtualHeightEntryMatches'));
+eval(extractFunc('_syncMessageVirtualHeightCache'));
+const first = {id: 'first'};
+const second = {id: 'second'};
+let S = {messages: [first, second]};
+_messageVirtualHeightCacheEntries = [
+  {rawIdx: 0, m: first},
+  {rawIdx: 1, m: second},
+];
+_messageVirtualHeightCacheSrc = S.messages;
+S = {messages: [first, second, {id: 'third'}]};
+_syncMessageVirtualHeightCache([
+  {rawIdx: 0, m: first},
+  {rawIdx: 1, m: second},
+  {rawIdx: 2, m: S.messages[2]},
+]);
+console.log(JSON.stringify({
+  cache: _messageVirtualHeightCache,
+  estimated: _messageVirtualEstimatedRowHeight,
+  windowKey: _messageVirtualWindowKey,
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["cache"][:2] == [180, 220]
+    assert len(metrics["cache"]) == 3
+    assert metrics["estimated"] == 200
+    assert metrics["windowKey"] == ""
+
+
 def test_tool_rows_do_not_carry_message_measurement_hook():
     js = UI_JS_PATH.read_text(encoding="utf-8")
     build_start = js.index("function buildToolCard(tc){")
