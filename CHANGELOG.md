@@ -3,6 +3,12 @@
 
 ## [Unreleased]
 
+## [v0.51.284] — 2026-06-05 — Release IZ (stage-w4 — sidebar status labels + cron-sessions toggle)
+
+### Added
+- **Manual session status labels (Todo / In Progress / Done).** Tag any session from its row's ⋯ menu with a colored status badge (blue Todo / amber In Progress / green Done), stored per-session in localStorage. The badge renders inline on the sidebar row and uses theme variables so it adapts to light/dark and skins. (#3570, @rodboev)
+- **"Show cron sessions" preference** (Settings → Preferences). Surfaces cron-job output as conversations in the sidebar. Off by default and gated under "Show non-WebUI sessions" — only active once non-WebUI sessions are enabled — with a note that high-frequency jobs can flood the sidebar. (#3514, @rodboev; closes #2841)
+
 ## [v0.51.283] — 2026-06-05 — Release IY (stage-w2 — composer queue hint during auto-compaction)
 
 ### Fixed
