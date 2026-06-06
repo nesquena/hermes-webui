@@ -655,6 +655,10 @@ async function send(){
   let streamId;
   try{
     const _modelState=_chatPayloadModelState();
+    const _pendingPick=(typeof _readPendingSessionModel==='function')
+      ? _readPendingSessionModel(activeSid)
+      : null;
+    const _explicitPick=!!(_pendingPick && _pendingPick.model===_modelState.model);
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a
@@ -662,12 +666,17 @@ async function send(){
       model:_modelState.model,workspace:S.session.workspace,
       model_provider:_modelState.model_provider,
       profile:S.activeProfile||S.session.profile||'default',
+      explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined
     })});
 
     if(startData.title) applySessionTitleUpdate(activeSid, startData.title, {provisionalText:displayText.slice(0,64), rememberProvisional:true});
 
     if(startData.effective_model && S.session){
+      const _sentModel=_modelState.model;
+      if(_sentModel && startData.effective_model!==_sentModel && typeof showToast==='function'){
+        showToast('Model changed to '+startData.effective_model+' (provider mismatch with active profile)', 5000);
+      }
       S.session.model=startData.effective_model;
       S.session.model_provider=startData.effective_model_provider||S.session.model_provider||null;
       localStorage.setItem('hermes-webui-model', startData.effective_model);
