@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.288] — 2026-06-06 — Release JD (stage-r24 — collapsible approval card)
+
+### Added
+- **The tool-call approval card can be collapsed to a thin header strip.** A chevron toggle in the approval-card header shrinks the card to just its "Approval required" heading so the tool-call rationale and transcript scrolled above it stay readable; clicking again re-expands it. Includes full ARIA (`aria-expanded`/`aria-controls`/`aria-label`), an icon swap, and transcript reflow that preserves a near-bottom scroll position. State resets to expanded for each new approval, so a fresh approval is never hidden. (#3515, @rodboev; closes #3007)
+
 ## [v0.51.287] — 2026-06-06 — Release JC (stage-r22 — WeCom session classification + worker-profile picker hiding)
 
 ### Fixed
