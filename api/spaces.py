@@ -10502,21 +10502,46 @@ def _camera_stream_url_metadata(raw_url: Any) -> dict[str, Any]:
     }
 
 
-def _camera_stream_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
-    """Return metadata-only evidence that camera stream ingestion is browser-gated."""
-    safe_action = _context_value(action, 120) or "space.camera.add_stream"
+def _required_prompt_preflight_receipt(
+    action: str,
+    *,
+    boundary: str,
+    checks: list[str],
+) -> dict[str, Any]:
+    """Return metadata-only evidence that a trusted boundary still requires preflight."""
+    safe_action = _context_value(action, 120) or "space.action"
+    safe_boundary = _context_value(boundary, 80) or "creator_commit"
+    safe_checks = [_context_value(check, 80) for check in checks[:8]]
     return {
         "available": True,
         "action": safe_action,
-        "boundary": "browser_surface",
+        "boundary": safe_boundary,
         "status": "required",
         "severity": "none",
         "categories": [],
-        "checks": ["camera_stream_approval_required", "prompt_injection_preflight_required"],
+        "checks": [check for check in safe_checks if check],
         "metadata_only": True,
         "raw_prompt_stored": False,
         "local_only": True,
     }
+
+
+def _camera_stream_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
+    """Return metadata-only evidence that camera stream ingestion is browser-gated."""
+    return _required_prompt_preflight_receipt(
+        action,
+        boundary="browser_surface",
+        checks=["camera_stream_approval_required", "prompt_injection_preflight_required"],
+    )
+
+
+def _system_widget_required_prompt_preflight_receipt(action: str = "space.system_widget.upsert") -> dict[str, Any]:
+    """Return metadata-only evidence for trusted system-widget mutation preflight."""
+    return _required_prompt_preflight_receipt(
+        action,
+        boundary="creator_commit",
+        checks=["trusted_system_widget_allowlist", "prompt_injection_preflight_required"],
+    )
 
 
 def _camera_stream_action_policy_receipt(action: str) -> dict[str, Any]:
@@ -10674,8 +10699,10 @@ def upsert_system_widget(
         "revision_event_id": result["revision_event_id"],
     }
     if include_safety_receipts:
-        autonomy_policy = _space_widget_mutation_action_policy_receipt("space.system_widget.upsert", None)
+        prompt_preflight = _system_widget_required_prompt_preflight_receipt()
+        autonomy_policy = _space_widget_mutation_action_policy_receipt("space.system_widget.upsert", prompt_preflight)
         progress_event = _record_space_tool_progress_event(sid, run_prefix="system-widget.upsert")
+        response["prompt_preflight"] = prompt_preflight
         response["autonomy_policy"] = autonomy_policy
         response["progress_event"] = progress_event
         response["output_compaction"] = _space_tool_action_output_compaction_receipt(
