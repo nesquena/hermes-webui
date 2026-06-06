@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 MESSAGING_SOURCES = {
     'discord',
     'email',
+    'wecom',
+    'wecom_callback',
     'slack',
     'telegram',
     'weixin',
@@ -24,6 +26,8 @@ SOURCE_LABELS = {
     'cron': 'Cron',
     'discord': 'Discord',
     'email': 'Email',
+    'wecom': 'WeCom',
+    'wecom_callback': 'WeCom Callback',
     'slack': 'Slack',
     'telegram': 'Telegram',
     'tool': 'Tool',
