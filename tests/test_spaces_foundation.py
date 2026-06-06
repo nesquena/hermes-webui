@@ -4830,6 +4830,118 @@ def test_widget_recovery_enable_disable_tools_record_metadata_only_progress_even
     assert "renderer" not in serialized
 
 
+def test_widget_recovery_admin_tool_alias_receipts_use_requested_action_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-admin-alias-policy-lab", "name": "Widget Admin Alias Policy Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "broken-panel",
+            "kind": "html",
+            "title": "Broken Panel",
+            "renderer": "<script>stored()</script>",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    disabled = spaces.run_space_tool(
+        "space.admin.disable_widget",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "broken-panel",
+            "reason": "safe admin review note with SECRET_VALUE_DO_NOT_LEAK renderer cleanup",
+        },
+    )
+    enabled = spaces.run_space_tool(
+        "space.admin.enable_widget",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "broken-panel",
+            "reason": "safe admin recovery complete after renderer cleanup",
+        },
+    )
+
+    serialized = json.dumps({"disabled": disabled, "enabled": enabled}, sort_keys=True).lower()
+
+    for result, action in (
+        (disabled, "space.admin.disable_widget"),
+        (enabled, "space.admin.enable_widget"),
+    ):
+        assert result["ok"] is True
+        assert result["action"] == action
+
+        preflight = result["prompt_preflight"]
+        assert preflight["action"] == action
+        assert preflight["boundary"] == "recovery_action"
+        assert preflight["status"] == "required"
+        assert preflight["metadata_only"] is True
+        assert preflight["raw_prompt_stored"] is False
+        assert preflight["local_only"] is True
+
+        policy = result["autonomy_policy"]
+        assert policy["action"] == action
+        assert policy["approval_gates"] == ["generated_widget_execution"]
+        assert policy["prompt_preflight_status"] == "required"
+        assert policy["model_route_hint"] == "hint:reasoning"
+        assert policy["metadata_only"] is True
+
+        compaction = result["output_compaction"]
+        assert compaction["tool"] == "capy-spaces-recovery-toggle"
+        assert compaction["command"] == action
+        assert compaction["metadata_only"] is True
+        assert f"action: {action}" in compaction["text"]
+
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+
+def test_widget_recovery_primitives_reject_unsafe_custom_receipt_action(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-unsafe-action-policy-lab", "name": "Widget Unsafe Action Policy Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "broken-panel",
+            "kind": "html",
+            "title": "Broken Panel",
+            "renderer": "<script>stored()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    disabled = spaces.disable_widget_for_recovery(
+        created["space_id"],
+        "broken-panel",
+        reason="safe operator note",
+        action="space.admin.disable_widget<script>SECRET_VALUE_DO_NOT_LEAK</script>",
+    )
+    enabled = spaces.enable_widget_for_recovery(
+        created["space_id"],
+        "broken-panel",
+        reason="safe operator note",
+        action="space.admin.enable_widget source SECRET_SOURCE_DO_NOT_LEAK",
+    )
+
+    serialized = json.dumps({"disabled": disabled, "enabled": enabled}, sort_keys=True).lower()
+
+    assert disabled["prompt_preflight"]["action"] == "space.widget.recovery.disable"
+    assert disabled["autonomy_policy"]["action"] == "space.widget.recovery.disable"
+    assert disabled["output_compaction"]["command"] == "space.widget.recovery.disable"
+    assert enabled["prompt_preflight"]["action"] == "space.widget.recovery.enable"
+    assert enabled["autonomy_policy"]["action"] == "space.widget.recovery.enable"
+    assert enabled["output_compaction"]["command"] == "space.widget.recovery.enable"
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert " source " not in serialized
+
+
 def test_widget_recovery_toggle_outputs_include_compaction_receipts_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "widget-recovery-compaction-lab", "name": "Widget Recovery Compaction Lab"})

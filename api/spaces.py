@@ -640,6 +640,18 @@ def _recovery_toggle_action_policy_receipt(action: str) -> dict[str, Any]:
     )
 
 
+def _safe_recovery_receipt_action(value: Any, fallback: str) -> str:
+    """Return a public recovery receipt action or a canonical safe fallback."""
+    safe = _context_value(value, 120)
+    if not safe:
+        return fallback
+    if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", safe):
+        return fallback
+    if _recovery_reason_summary(safe, 120) == "[REDACTED]":
+        return fallback
+    return safe
+
+
 def _recovery_required_prompt_preflight_receipt(action: str) -> dict[str, Any]:
     """Return metadata-only evidence that a recovery action remains preflight-gated.
 
@@ -8788,7 +8800,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 _space_tool_non_current_space_id_from_aliases(data, positional_space_index=positional_space_index)
             )
         widget_id = validate_widget_id(_space_tool_widget_id(data, positional_widget_index=positional_widget_index))
-        result = disable_widget_for_recovery(space_id, widget_id, reason=data.get("reason") or "disabled from recovery")
+        result = disable_widget_for_recovery(
+            space_id,
+            widget_id,
+            reason=data.get("reason") or "disabled from recovery",
+            action=name,
+        )
         response = {"ok": True, "action": name, **result}
         if is_current:
             response["active_space_id"] = space_id
@@ -8819,7 +8836,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 _space_tool_non_current_space_id_from_aliases(data, positional_space_index=positional_space_index)
             )
         widget_id = validate_widget_id(_space_tool_widget_id(data, positional_widget_index=positional_widget_index))
-        result = enable_widget_for_recovery(space_id, widget_id, reason=data.get("reason") or "enabled from recovery")
+        result = enable_widget_for_recovery(
+            space_id,
+            widget_id,
+            reason=data.get("reason") or "enabled from recovery",
+            action=name,
+        )
         response = {"ok": True, "action": name, **result}
         if is_current:
             response["active_space_id"] = space_id
@@ -11778,7 +11800,13 @@ def enable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, A
     }
 
 
-def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "") -> dict[str, Any]:
+def disable_widget_for_recovery(
+    space_id: str,
+    widget_id: str,
+    *,
+    reason: str = "",
+    action: str = "space.widget.recovery.disable",
+) -> dict[str, Any]:
     """Mark a widget disabled from safe recovery without deleting its source.
 
     The normal widget manifest keeps renderer/data for later repair or rollback,
@@ -11788,8 +11816,8 @@ def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = 
     """
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
-    action = "space.widget.recovery.disable"
-    _ensure_recovery_reason_prompt_preflight(action, reason or "disabled from recovery")
+    safe_action = _safe_recovery_receipt_action(action, "space.widget.recovery.disable")
+    _ensure_recovery_reason_prompt_preflight(safe_action, reason or "disabled from recovery")
     wid = validate_widget_id(widget_id)
     space = read_space(space_id)
     idx = _widget_index(space, wid)
@@ -11804,10 +11832,10 @@ def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = 
     space["widgets"] = widgets
     saved = _write_manifest(space, "widget.recovery_disabled", {"widget_id": wid, "reason": recovery["disabled_reason"]})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.disable")
-    prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
-    autonomy_policy = _recovery_toggle_action_policy_receipt(action)
+    prompt_preflight = _recovery_required_prompt_preflight_receipt(safe_action)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action)
     output_compaction = _recovery_toggle_output_compaction_receipt(
-        action=action,
+        action=safe_action,
         space_id=saved["space_id"],
         target_kind="widget",
         target_id=wid,
@@ -11829,12 +11857,18 @@ def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = 
     }
 
 
-def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "") -> dict[str, Any]:
+def enable_widget_for_recovery(
+    space_id: str,
+    widget_id: str,
+    *,
+    reason: str = "",
+    action: str = "space.widget.recovery.enable",
+) -> dict[str, Any]:
     """Re-enable a widget from safe recovery without exposing or executing its source."""
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
-    action = "space.widget.recovery.enable"
-    _ensure_recovery_reason_prompt_preflight(action, reason or "enabled from recovery")
+    safe_action = _safe_recovery_receipt_action(action, "space.widget.recovery.enable")
+    _ensure_recovery_reason_prompt_preflight(safe_action, reason or "enabled from recovery")
     wid = validate_widget_id(widget_id)
     space = read_space(space_id)
     idx = _widget_index(space, wid)
@@ -11850,10 +11884,10 @@ def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "
     detail_reason = _recovery_reason_summary(reason or "enabled from recovery", 300)
     saved = _write_manifest(space, "widget.recovery_enabled", {"widget_id": wid, "reason": detail_reason})
     progress_event = _record_space_recovery_progress_event(saved["space_id"], action="widget.enable")
-    prompt_preflight = _recovery_required_prompt_preflight_receipt(action)
-    autonomy_policy = _recovery_toggle_action_policy_receipt(action)
+    prompt_preflight = _recovery_required_prompt_preflight_receipt(safe_action)
+    autonomy_policy = _recovery_toggle_action_policy_receipt(safe_action)
     output_compaction = _recovery_toggle_output_compaction_receipt(
-        action=action,
+        action=safe_action,
         space_id=saved["space_id"],
         target_kind="widget",
         target_id=wid,
