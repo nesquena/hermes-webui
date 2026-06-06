@@ -564,6 +564,9 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     keepTailCount,
   });
 }
+function _messageVirtualKeepTailCount(){
+  return Math.min(_currentMessageRenderWindowSize(), MESSAGE_RENDER_WINDOW_DEFAULT);
+}
 function _captureMessageViewportAnchor(){
   const container=$('messages');
   if(!container) return null;
@@ -603,6 +606,7 @@ function _measureMessageVirtualRow(inner, entry){
     let sibling=primary.nextElementSibling;
     while(sibling){
       if(sibling.hasAttribute('data-msg-idx')) break;
+      if(!(sibling.matches&&sibling.matches('.tool-call-group,.tool-card-row,.agent-activity-thinking,.thinking-card-row'))) break;
       totalHeight+=Math.max(0, sibling.getBoundingClientRect().height||0);
       sibling=sibling.nextElementSibling;
     }
@@ -641,7 +645,7 @@ function _scheduleMessageVirtualizedRender(force){
   const inner=$('msgInner');
   if(!container||!inner) return;
   const visWithIdx=_getVisibleMessagesWithIdx();
-  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_currentMessageRenderWindowSize());
+  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
   const nextKey=_messageVirtualWindowKeyFor(virtualWindow);
   if(!force&&nextKey===_messageVirtualWindowKey) return;
   if(!virtualWindow.virtualized){
@@ -652,7 +656,7 @@ function _scheduleMessageVirtualizedRender(force){
   _messageVirtualScrollRaf=requestAnimationFrame(()=>{
     _messageVirtualScrollRaf=0;
     const liveVisWithIdx=_getVisibleMessagesWithIdx();
-    const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_currentMessageRenderWindowSize());
+    const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_messageVirtualKeepTailCount());
     const liveKey=_messageVirtualWindowKeyFor(liveWindow);
     if(!force&&liveKey===_messageVirtualWindowKey) return;
     renderMessages({ preserveScroll:true });
@@ -706,18 +710,6 @@ function _wireMessageWindowLoadEarlierButton(){
   indicator.onclick=()=>{
     if(typeof _loadOlderMessages==='function') _loadOlderMessages();
   };
-}
-function _showEarlierRenderedMessages(){
-  const container=$('messages');
-  const prevScrollH=container?container.scrollHeight:0;
-  const prevScrollTop=container?container.scrollTop:0;
-  _messageRenderWindowSize=_currentMessageRenderWindowSize()+MESSAGE_RENDER_WINDOW_DEFAULT;
-  renderMessages();
-  if(container){
-    const newScrollH=container.scrollHeight;
-    container.scrollTop=prevScrollTop+(newScrollH-prevScrollH);
-  }
-  _scrollPinned=false;
 }
 function _isSessionJumpButtonsEnabled(){
   return window._sessionJumpButtonsEnabled===true;
@@ -8270,7 +8262,6 @@ function renderMessages(options){
   // renderMessages() in this window. Keep the existing loading placeholder.
   if(_loadingSessionId===sid&&msgCount===0&&inner) return;
   if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
-  const renderWindowSize=_currentMessageRenderWindowSize();
   let cachedRenderSignature=null;
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
@@ -8301,7 +8292,7 @@ function renderMessages(options){
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const visWithIdx=_getVisibleMessagesWithIdx();
   $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
-  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,renderWindowSize);
+  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_messageVirtualKeepTailCount());
   const renderWindowKey=_messageVirtualWindowKeyFor(virtualWindow);
   const windowStart=virtualWindow.start;
   const windowEnd=virtualWindow.end;
@@ -8499,6 +8490,10 @@ function renderMessages(options){
   // for(let vi=0;vi<visWithIdx.length;vi++)
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
     if(virtualWindow.virtualized&&virtualWindow.bottomPad>0&&vi===headRenderCount){
+      // The virtual gap breaks assistant-turn adjacency. Reset the current
+      // turn before rendering the always-visible tail so assistant segments do
+      // not merge across the spacer boundary.
+      currentAssistantTurn=null;
       inner.appendChild(_messageVirtualSpacer(virtualWindow.bottomPad,'after'));
     }
     const {m,rawIdx}=renderVisWithIdx[vi];
