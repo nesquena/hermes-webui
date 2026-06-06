@@ -661,6 +661,12 @@ async function send(){
     const _explicitPick=_pendingPick
       && _pendingPick.model===_modelState.model
       && String(_pendingPick.model_provider||'')===String(_modelState.model_provider||'');
+    // Consume the pending explicit-pick marker for THIS send only. The marker is
+    // recorded on modelSelect.onchange and intentionally kept (not cleared on
+    // session-update) so it survives the normal pick→update→send flow; clear it here
+    // once read so a later send of an unchanged dropdown isn't treated as an explicit
+    // pick. (#3739/#3737, Codex catch)
+    if(_explicitPick && typeof _clearPendingSessionModel==='function') _clearPendingSessionModel(activeSid);
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       // S.session.model remains authoritative; the helper only resolves a

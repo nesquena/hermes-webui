@@ -1202,12 +1202,11 @@ $('modelSelect').onchange=async()=>{
     model:modelState.model,
     model_provider:modelState.model_provider||null,
   })});
-  if(typeof _readPendingSessionModel==='function'&&typeof _clearPendingSessionModel==='function'){
-    const pending=_readPendingSessionModel(S.session.session_id);
-    if(!pending||(pending.model===modelState.model&&String(pending.model_provider||'')===String(modelState.model_provider||''))){
-      _clearPendingSessionModel(S.session.session_id);
-    }
-  }
+  // NOTE: do NOT clear the pending explicit-pick marker here. It must survive until
+  // the NEXT send() consumes it, otherwise the normal "pick → session-update → send"
+  // flow loses the explicit-pick signal before /api/chat/start runs and the server
+  // re-reverts a cross-family pick (the #3737 bug, Codex catch). send() clears it
+  // after reading a matching pending pick. (#3739/#3737)
   _applySessionContextMetadataUpdate(data);
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
