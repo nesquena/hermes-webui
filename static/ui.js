@@ -353,8 +353,17 @@ function _statusCardHtml(card){
 }
 
 const MESSAGE_RENDER_WINDOW_DEFAULT=50;
+const MESSAGE_VIRTUAL_THRESHOLD_ROWS=80;
+const MESSAGE_VIRTUAL_BUFFER_PX=900;
+const MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT=140;
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+let _messageVirtualHeightCache=[];
+let _messageVirtualHeightCacheLen=0;
+let _messageVirtualHeightCacheSrc=null;
+let _messageVirtualEstimatedRowHeight=MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
+let _messageVirtualScrollRaf=0;
+let _messageVirtualWindowKey='';
 // Cached visWithIdx array — invalidated when S.messages.length changes.
 let _visWithIdxCache=null;
 let _visWithIdxCacheLen=0;
@@ -364,11 +373,226 @@ function clearVisibleMessageRowCache(){
   _visWithIdxCacheLen=0;
   _visWithIdxCacheSrc=null;
 }
+function _clearMessageVirtualHeightCache(){
+  _messageVirtualHeightCache=[];
+  _messageVirtualHeightCacheLen=0;
+  _messageVirtualHeightCacheSrc=null;
+  _messageVirtualEstimatedRowHeight=MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT;
+  _messageVirtualWindowKey='';
+}
 function _resetMessageRenderWindow(sid){
   _messageRenderWindowSid=sid||null;
   _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+  _cancelMessageVirtualizedRender();
   _clearRenderCache();
   clearVisibleMessageRowCache();
+  _clearMessageVirtualHeightCache();
+}
+function _cancelMessageVirtualizedRender(){
+  if(_messageVirtualScrollRaf){
+    cancelAnimationFrame(_messageVirtualScrollRaf);
+    _messageVirtualScrollRaf=0;
+  }
+}
+function _messageIsRenderable(m){
+  if(!m||!m.role||m.role==='tool') return false;
+  if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
+  if(_isRecoveryControlMessage(m)) return false;
+  const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+  const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+  const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
+  return !!(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m))));
+}
+function _getVisibleMessagesWithIdx(){
+  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
+    const rebuilt=[];
+    let rawIdx=0;
+    for(const m of (S.messages||[])){
+      if(_messageIsRenderable(m)) rebuilt.push({m,rawIdx});
+      rawIdx++;
+    }
+    _visWithIdxCache=rebuilt;
+    _visWithIdxCacheLen=S.messages.length;
+    _visWithIdxCacheSrc=S.messages;
+  }
+  return _visWithIdxCache;
+}
+function _messageVirtualWindow(opts){
+  const total=Math.max(0, Number(opts&&opts.total)||0);
+  const threshold=Math.max(1, Number(opts&&opts.threshold)||MESSAGE_VIRTUAL_THRESHOLD_ROWS);
+  const defaultHeight=Math.max(1, Number(opts&&opts.defaultHeight)||MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHT);
+  const bufferPx=Math.max(0, Number(opts&&opts.bufferPx)||MESSAGE_VIRTUAL_BUFFER_PX);
+  const viewportHeight=Math.max(defaultHeight, Number(opts&&opts.viewportHeight)||defaultHeight*6);
+  const keepTailCount=Math.max(0, Number(opts&&opts.keepTailCount)||0);
+  const tailStart=Math.max(0, total-keepTailCount);
+  const heights=Array.isArray(opts&&opts.heights)?opts.heights:[];
+  const rowHeightFor=(idx)=>{
+    const cached=Number(heights[idx]);
+    return Number.isFinite(cached)&&cached>0?cached:defaultHeight;
+  };
+  if(total<=Math.max(threshold, keepTailCount)){
+    return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
+  }
+  const scrollTop=Math.max(0, Number(opts&&opts.scrollTop)||0);
+  const targetTop=Math.max(0, scrollTop-bufferPx);
+  const targetBottom=scrollTop+viewportHeight+bufferPx;
+  let start=0;
+  let offset=0;
+  while(start<tailStart&&offset+rowHeightFor(start)<=targetTop){
+    offset+=rowHeightFor(start);
+    start++;
+  }
+  if(start>=tailStart){
+    return {virtualized:true,start:tailStart,end:tailStart,topPad:offset,bottomPad:0,total,tailStart};
+  }
+  let end=start;
+  let cursor=offset;
+  while(end<tailStart&&cursor<targetBottom){
+    cursor+=rowHeightFor(end);
+    end++;
+  }
+  if(end<=start) end=Math.min(total, start+1);
+  let bottomPad=0;
+  for(let i=end;i<tailStart;i++) bottomPad+=rowHeightFor(i);
+  return {
+    virtualized:true,
+    start,
+    end,
+    topPad:offset,
+    bottomPad,
+    total,
+    tailStart,
+  };
+}
+function _messageVirtualSpacer(height, where){
+  const spacer=document.createElement('div');
+  spacer.className='message-virtual-spacer';
+  spacer.dataset.virtualSpacer=where||'gap';
+  spacer.setAttribute('aria-hidden','true');
+  spacer.style.height=Math.max(0,Math.round(height||0))+'px';
+  spacer.style.flex='0 0 auto';
+  return spacer;
+}
+function _messageVirtualWindowKeyFor(windowMetrics){
+  if(!windowMetrics) return '';
+  return [
+    windowMetrics.virtualized?1:0,
+    windowMetrics.start,
+    windowMetrics.end,
+    Math.round(windowMetrics.topPad||0),
+    Math.round(windowMetrics.bottomPad||0),
+    windowMetrics.tailStart||0,
+  ].join(':');
+}
+function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
+  if(_messageVirtualHeightCacheLen!==S.messages.length || _messageVirtualHeightCacheSrc!==S.messages){
+    _clearMessageVirtualHeightCache();
+    _messageVirtualHeightCacheLen=S.messages.length;
+    _messageVirtualHeightCacheSrc=S.messages;
+  }
+  const container=$('messages');
+  return _messageVirtualWindow({
+    total:visWithIdx.length,
+    scrollTop:container?container.scrollTop:0,
+    viewportHeight:container?container.clientHeight:(_messageVirtualEstimatedRowHeight*6),
+    heights:_messageVirtualHeightCache,
+    defaultHeight:_messageVirtualEstimatedRowHeight,
+    keepTailCount,
+  });
+}
+function _captureMessageViewportAnchor(){
+  const container=$('messages');
+  if(!container) return null;
+  const containerRect=container.getBoundingClientRect();
+  const rows=Array.from(container.querySelectorAll('[data-msg-idx]'));
+  for(const row of rows){
+    const rawIdx=Number(row&&row.dataset&&row.dataset.msgIdx);
+    if(!Number.isFinite(rawIdx)) continue;
+    const rect=row.getBoundingClientRect();
+    if(rect.bottom>containerRect.top+1){
+      return {rawIdx, topOffset:rect.top-containerRect.top};
+    }
+  }
+  return null;
+}
+function _restoreMessageViewportAnchor(anchor, rawIdxDelta){
+  const container=$('messages');
+  if(!container||!anchor) return false;
+  const targetIdx=Number(anchor.rawIdx)+Number(rawIdxDelta||0);
+  if(!Number.isFinite(targetIdx)) return false;
+  const row=container.querySelector(`[data-msg-idx="${targetIdx}"]`);
+  if(!row) return false;
+  const containerRect=container.getBoundingClientRect();
+  const rect=row.getBoundingClientRect();
+  const targetTop=Number(anchor.topOffset)||0;
+  _programmaticScroll=true;
+  container.scrollTop+=(rect.top-containerRect.top)-targetTop;
+  requestAnimationFrame(()=>{ _programmaticScroll=false; });
+  return true;
+}
+function _measureMessageVirtualRow(inner, entry){
+  if(!inner||!entry) return 0;
+  const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
+  if(!primary) return 0;
+  let totalHeight=Math.max(0, primary.getBoundingClientRect().height||0);
+  if(primary.classList.contains('assistant-segment')){
+    let sibling=primary.nextElementSibling;
+    while(sibling){
+      if(sibling.hasAttribute('data-msg-idx')) break;
+      totalHeight+=Math.max(0, sibling.getBoundingClientRect().height||0);
+      sibling=sibling.nextElementSibling;
+    }
+  }
+  return totalHeight;
+}
+function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow){
+  const inner=$('msgInner');
+  if(!inner||!virtualWindow||!virtualWindow.virtualized||!renderVisWithIdx.length) return;
+  let changed=false;
+  let measuredCount=0;
+  let measuredTotal=0;
+  for(let vi=0;vi<renderVisWithIdx.length;vi++){
+    const entry=renderVisWithIdx[vi];
+    if(!entry) continue;
+    const totalHeight=_measureMessageVirtualRow(inner, entry);
+    if(totalHeight<=0) continue;
+    const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
+    if(!Number.isFinite(visibleIdx)) continue;
+    if(Math.abs((Number(_messageVirtualHeightCache[visibleIdx])||0)-totalHeight)>1){
+      _messageVirtualHeightCache[visibleIdx]=totalHeight;
+      changed=true;
+    }
+    measuredTotal+=totalHeight;
+    measuredCount++;
+  }
+  if(measuredCount>0){
+    _messageVirtualEstimatedRowHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
+  }
+  if(changed){
+    requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true); });
+  }
+}
+function _scheduleMessageVirtualizedRender(force){
+  const container=$('messages');
+  const inner=$('msgInner');
+  if(!container||!inner) return;
+  const visWithIdx=_getVisibleMessagesWithIdx();
+  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,_currentMessageRenderWindowSize());
+  const nextKey=_messageVirtualWindowKeyFor(virtualWindow);
+  if(!force&&nextKey===_messageVirtualWindowKey) return;
+  if(!virtualWindow.virtualized){
+    _messageVirtualWindowKey=nextKey;
+    return;
+  }
+  if(_messageVirtualScrollRaf) return;
+  _messageVirtualScrollRaf=requestAnimationFrame(()=>{
+    _messageVirtualScrollRaf=0;
+    const liveVisWithIdx=_getVisibleMessagesWithIdx();
+    const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_currentMessageRenderWindowSize());
+    const liveKey=_messageVirtualWindowKeyFor(liveWindow);
+    if(!force&&liveKey===_messageVirtualWindowKey) return;
+    renderMessages({ preserveScroll:true });
+  });
 }
 
 // ── renderMd / _renderUserFencedBlocks cache ──────────────────────────────
@@ -404,16 +628,7 @@ function _currentMessageRenderWindowSize(){
   );
 }
 function _messageRenderableMessageCount(){
-  let count=0;
-  for(const m of (S.messages||[])){
-    if(!m||!m.role||m.role==='tool') continue;
-    if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) continue;
-    if(_isRecoveryControlMessage(m)) continue;
-    const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-    const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) count++;
-  }
-  return count;
+  return _getVisibleMessagesWithIdx().length;
 }
 function _messageHiddenBeforeCount(){
   return Math.max(0,_messageRenderableMessageCount()-_currentMessageRenderWindowSize());
@@ -425,8 +640,7 @@ function _wireMessageWindowLoadEarlierButton(){
   const indicator=$('loadOlderIndicator');
   if(!indicator) return;
   indicator.onclick=()=>{
-    if(_messageHiddenBeforeCount()>0) _showEarlierRenderedMessages();
-    else if(typeof _loadOlderMessages==='function') _loadOlderMessages();
+    if(typeof _loadOlderMessages==='function') _loadOlderMessages();
   };
 }
 function _showEarlierRenderedMessages(){
@@ -2633,6 +2847,7 @@ if(typeof window!=='undefined'){
       const showBottomButton=!_scrollPinned && el.scrollHeight-top-el.clientHeight>80;
       _syncScrollToBottomCue(showBottomButton,{newMessage:_newMessageCueVisible});
       if(typeof _updateSessionStartJumpButton==='function') _updateSessionStartJumpButton();
+      _scheduleMessageVirtualizedRender();
       // Prefetch older messages before the reader hits the hard top. Prepending
       // then preserving scrollTop is seamless only if there is runway left for
       // the user's continued upward wheel/touch movement.
@@ -7716,6 +7931,7 @@ function clearMessageRenderCache(){
   _sessionHtmlCache.clear();
   _sessionHtmlCacheSid=null;
   clearVisibleMessageRowCache();
+  _clearMessageVirtualHeightCache();
 }
 
 function _messageRenderCacheSignature(){
@@ -7996,32 +8212,6 @@ function renderMessages(options){
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
     (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
   );
-
-  // Fast path: switching back to a previously rendered session with same count.
-  // Guard: sid !== _sessionHtmlCacheSid ensures in-session updates (edits,
-  // new messages, tool_complete) always get a fresh rebuild.
-  // Skip cache if this session is still streaming — the live smd parser writes
-  // into a DOM node inside the cached subtree; serving cached HTML detaches it.
-  // Also skip cache for transient transcript cards such as /compress and
-  // cross-channel handoff summaries; otherwise the cached transcript returns
-  // before those cards can be inserted.
-  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
-    const renderSignature=_messageRenderCacheSignature();
-    cachedRenderSignature=renderSignature;
-    const cached=_sessionHtmlCache.get(sid);
-    if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize&&cached.signature===renderSignature){
-      inner.innerHTML=cached.html;
-      _sessionHtmlCacheSid=sid;
-      _wireMessageWindowLoadEarlierButton();
-      if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
-      _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-      requestAnimationFrame(()=>postProcessRenderedMessages(inner));
-      if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
-      if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
-      return;
-    }
-  }
-
   const compressionState=(()=>{
     let compressionState=_compressionStateForCurrentSession();
     if(!S.busy && compressionState && compressionState.automatic){
@@ -8045,19 +8235,48 @@ function renderMessages(options){
     S.session && typeof S.session.compression_anchor_summary==='string'
   ) ? S.session.compression_anchor_summary.trim() : '';
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
-  const vis=S.messages.filter(m=>{
-    if(!m||!m.role||m.role==='tool')return false;
-    if(_isContextCompactionMessage(m)) return false;
-    if(_isPreservedCompressionTaskListMessage(m)) return false;
-    if(_isRecoveryControlMessage(m)) return false;
-    if(m.role==='assistant'){
-      const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-      const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-      if(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)) return true;
-      if(_assistantMessageHasVisibleContent(m)) return true;
-      const visibleText=_isAssistantEmptyPlaceholderContent(m,msgContent(m))?'':msgContent(m);
-      return m._statusCard||visibleText||m.attachments?.length;
+  const visWithIdx=_getVisibleMessagesWithIdx();
+  $('emptyState').style.display=(visWithIdx.length||preservedCompressionTaskMessages.length)?'none':'';
+  const virtualWindow=_currentMessageVirtualWindow(visWithIdx,renderWindowSize);
+  const renderWindowKey=_messageVirtualWindowKeyFor(virtualWindow);
+  const windowStart=virtualWindow.start;
+  const windowEnd=virtualWindow.end;
+  const renderHeadVisWithIdx=visWithIdx.slice(windowStart, windowEnd);
+  const renderTailStart=virtualWindow.virtualized?Math.max(windowEnd, virtualWindow.tailStart):windowEnd;
+  const renderTailVisWithIdx=virtualWindow.virtualized&&renderTailStart<visWithIdx.length
+    ? visWithIdx.slice(renderTailStart)
+    : [];
+  const renderVisWithIdx=renderHeadVisWithIdx.concat(renderTailVisWithIdx);
+  const renderVisibleIdxs=[
+    ...renderHeadVisWithIdx.map((_,idx)=>windowStart+idx),
+    ...renderTailVisWithIdx.map((_,idx)=>renderTailStart+idx),
+  ];
+  const headRenderCount=renderHeadVisWithIdx.length;
+
+  // Fast path: switching back to a previously rendered session with same count.
+  // Guard: sid !== _sessionHtmlCacheSid ensures in-session updates (edits,
+  // new messages, tool_complete) always get a fresh rebuild.
+  // Skip cache if this session is still streaming — the live smd parser writes
+  // into a DOM node inside the cached subtree; serving cached HTML detaches it.
+  // Also skip cache for transient transcript cards such as /compress and
+  // cross-channel handoff summaries; otherwise the cached transcript returns
+  // before those cards can be inserted.
+  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
+    const renderSignature=_messageRenderCacheSignature();
+    cachedRenderSignature=renderSignature;
+    const cached=_sessionHtmlCache.get(sid);
+    if(cached&&cached.msgCount===msgCount&&cached.renderWindowKey===renderWindowKey&&cached.signature===renderSignature){
+      inner.innerHTML=cached.html;
+      _messageVirtualWindowKey=renderWindowKey;
+      _sessionHtmlCacheSid=sid;
+      _wireMessageWindowLoadEarlierButton();
+      if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+      _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+      _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
+      requestAnimationFrame(()=>postProcessRenderedMessages(inner));
+      if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
+      if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
+      return;
     }
     return m._statusCard||msgContent(m)||m.attachments?.length;
   });
@@ -8092,29 +8311,6 @@ function renderMessages(options){
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   let preservedCompressionTaskCardsAttached=!!referenceNode;
-  // Cache visWithIdx so expanding the render window (Load earlier) doesn't
-  // re-scan S.messages from scratch.  Invalidate only when the message array
-  // length changes — i.e. new messages arrived or session was truncated.
-  if(!_visWithIdxCache || _visWithIdxCacheLen !== S.messages.length || _visWithIdxCacheSrc !== S.messages){
-    const rebuilt=[];
-    let ri=0;
-    for(const m of S.messages){
-      if(!m||!m.role||m.role==='tool'){ri++;continue;}
-      if(_isContextCompactionMessage(m)){ri++;continue;}
-      if(_isPreservedCompressionTaskListMessage(m)){ri++;continue;}
-      if(_isRecoveryControlMessage(m)){ri++;continue;}
-      const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
-      const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      const hasPartialTc=Array.isArray(m._partial_tool_calls)&&m._partial_tool_calls.length>0;
-      const visibleText=_isAssistantEmptyPlaceholderContent(m,msgContent(m))?'':msgContent(m);
-      if(visibleText||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||hasPartialTc||_messageHasReasoningPayload(m)||_assistantMessageHasVisibleContent(m)))) rebuilt.push({m,rawIdx:ri});
-      ri++;
-    }
-    _visWithIdxCache=rebuilt;
-    _visWithIdxCacheLen=S.messages.length;
-    _visWithIdxCacheSrc=S.messages;
-  }
-  const visWithIdx=_visWithIdxCache;
   const preservedCompressionRawIdxs=[];
   let rawIdx=0;
   for(const m of S.messages){
@@ -8122,35 +8318,25 @@ function renderMessages(options){
     if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
     rawIdx++;
   }
-  // Show a top affordance when earlier transcript content exists either in
-  // memory (DOM windowing) or on the server (paginated session fetch).
-  // Prefer expanding the local render window first so a fully loaded long
-  // session can reduce DOM nodes without losing in-memory transcript data.
-  const windowStart=Math.max(0, visWithIdx.length-renderWindowSize);
-  const hiddenBeforeCount=windowStart;
-  const renderVisWithIdx=visWithIdx.slice(windowStart);
   const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(visWithIdx);
   const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(visWithIdx);
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
   const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
-  if(hiddenBeforeCount>0 || hasServerOlder){
+  if(hasServerOlder&&windowStart===0){
     const indicator=document.createElement('button');
     indicator.type='button';
     indicator.id='loadOlderIndicator';
     indicator.className='load-older-indicator message-window-load-earlier';
-    indicator.textContent=hiddenBeforeCount>0
-      ? `Load earlier messages (${hiddenBeforeCount} hidden)`
-      : (serverOlderCount>0
-        ? `Load earlier messages (${serverOlderCount} older)`
-        : (typeof t==='function'?t('load_older_messages'):'Load earlier messages'));
-    indicator.onclick=()=>{
-      if(hiddenBeforeCount>0) _showEarlierRenderedMessages();
-      else if(typeof _loadOlderMessages==='function') _loadOlderMessages();
-    };
+    indicator.textContent=serverOlderCount>0
+      ? `Load earlier messages (${serverOlderCount} older)`
+      : (typeof t==='function'?t('load_older_messages'):'Load earlier messages');
     inner.appendChild(indicator);
     _wireMessageWindowLoadEarlierButton();
+  }
+  if(virtualWindow.virtualized&&virtualWindow.topPad>0){
+    inner.appendChild(_messageVirtualSpacer(virtualWindow.topPad,'before'));
   }
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){
@@ -8168,9 +8354,15 @@ function renderMessages(options){
   );
   let insertionAnchor=null;
   if(typeof insertionAnchorFull==='number'){
-    if(insertionAnchorFull<windowStart) insertionAnchor=renderVisWithIdx.length?0:null;
-    else if(insertionAnchorFull<windowStart+renderVisWithIdx.length) insertionAnchor=insertionAnchorFull-windowStart;
-    else insertionAnchor=renderVisWithIdx.length?renderVisWithIdx.length-1:null;
+    if(renderVisibleIdxs.length){
+      if(insertionAnchorFull<=renderVisibleIdxs[0]) insertionAnchor=0;
+      else{
+        const nextVisibleIdx=renderVisibleIdxs.findIndex(idx=>idx>=insertionAnchorFull);
+        insertionAnchor=nextVisibleIdx>=0?nextVisibleIdx:renderVisibleIdxs.length-1;
+      }
+    }else{
+      insertionAnchor=null;
+    }
   }
   let _prevSepKey=null;
   let currentAssistantTurn=null;
@@ -8178,18 +8370,12 @@ function renderMessages(options){
   // full visWithIdx.  The jump-to-question button is only rendered for
   // assistant messages that appear in the current render window anyway.
   const questionRawIdxByAssistantRawIdx=new Map();
-  // Seed lastQuestionRawIdx from hidden messages so the first visible
-  // assistant message still gets a valid jump target even when its
-  // corresponding user message sits just before the render window.
   let lastQuestionRawIdx=-1;
-  for(let i=0;i<windowStart;i++){
-    const role=visWithIdx[i]?.m?.role;
-    if(role==='user') lastQuestionRawIdx=visWithIdx[i].rawIdx;
-  }
-  for(const entry of renderVisWithIdx){
+  const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
+  for(const entry of visWithIdx){
     const role=entry&&entry.m&&entry.m.role;
     if(role==='user') lastQuestionRawIdx=entry.rawIdx;
-    else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+    else if(role==='assistant'&&renderedRawIdxs.has(entry.rawIdx)) questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
   }
   const assistantRawIdxByQuestionRawIdx=new Map();
   for(const [aIdx,qIdx] of questionRawIdxByAssistantRawIdx){
@@ -8237,7 +8423,6 @@ function renderMessages(options){
   // range.
   const toolCallAssistantIdxs=new Set();
   if(Array.isArray(S.toolCalls)){
-    const renderedRawIdxs=new Set(renderVisWithIdx.map(e=>e.rawIdx));
     for(const tc of S.toolCalls){
       if(!tc) continue;
       const idx=tc.assistant_msg_idx;
@@ -8249,6 +8434,9 @@ function renderMessages(options){
   // Windowed render loop replaces the legacy full loop:
   // for(let vi=0;vi<visWithIdx.length;vi++)
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
+    if(virtualWindow.virtualized&&virtualWindow.bottomPad>0&&vi===headRenderCount){
+      inner.appendChild(_messageVirtualSpacer(virtualWindow.bottomPad,'after'));
+    }
     const {m,rawIdx}=renderVisWithIdx[vi];
     const _tsSep=m._ts||m.timestamp;
     if(_tsSep){
@@ -8835,6 +9023,7 @@ function renderMessages(options){
       _syncToolCallGroupSummary(state.group);
     });
   }
+  _messageVirtualWindowKey=renderWindowKey;
   // Render per-turn duration and optional token usage on assistant messages.
   // Duration stays visible even when token usage is disabled, because it answers
   // the basic "how long did that turn take?" UX question. Only walk rendered
@@ -9076,10 +9265,11 @@ function renderMessages(options){
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
       const renderSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;
-      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize,signature:renderSignature});
+      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowKey,signature:renderSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
+  _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
 }
 
 function _toolDisplayName(tc){
