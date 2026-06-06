@@ -356,7 +356,10 @@ def _render_html_report(job_id: str, display_name: str, profile: dict,
         log: 本次 run 的 log，含 results[] 標記 forwarded/skipped_dup
     """
     today = datetime.now().strftime('%Y-%m-%d')
-    job_title = get_job_title_from_brief(profile)  # HR 原始檔名
+    try:
+        job_title = get_job_title_from_brief(profile)
+    except ValueError:
+        job_title = profile.get('job_id', '未知職缺')
     threshold_priority = 80  # 與 build_summary 一致
     threshold_consider = 70
 
@@ -453,7 +456,7 @@ def _render_html_report(job_id: str, display_name: str, profile: dict,
         metrics = r.get('metrics', {}) or {}
 
         cards_html.append(f"""
-        <article class="{card_class}">
+        <article id="cand-{rid}" class="{card_class}">
           <header class="card-header">
             <div class="card-title">
               <span class="rank">#{rank}</span>
@@ -695,7 +698,10 @@ def get_job_title_from_brief(profile: dict) -> str:
 def build_summary(name: str, result: dict, body: str, profile: dict) -> str:
     """從完整履歷文字組裝摘要（給「說明」欄），長度依 profile.forward.summary_max_chars"""
     max_chars = profile.get('forward', {}).get('summary_max_chars', 980)
-    display_name = get_job_title_from_brief(profile)
+    try:
+        display_name = get_job_title_from_brief(profile)
+    except ValueError:
+        display_name = profile.get('job_id', '未知職缺')
     residence_kw = profile.get('scoring', {}).get('residence_bonus_keyword', '')
 
     bio = ''
@@ -1657,15 +1663,18 @@ ul li{{margin:6px 0}}
     analysis_md.write_text('\n'.join(md_lines))
 
     # 另外產生 HTML 版本，方便 HR 觀看與列印
-    analysis_html.write_text(_render_html_report(
-        job_id=job_id,
-        display_name=display_name,
-        profile=profile,
-        threshold=threshold,
-        scored=scored,
-        log=log,
-        resume_cache=resume_cache,
-    ))
+    try:
+        analysis_html.write_text(_render_html_report(
+            job_id=job_id,
+            display_name=display_name,
+            profile=profile,
+            threshold=threshold,
+            scored=scored,
+            log=log,
+            resume_cache=resume_cache,
+        ))
+    except (ValueError, PermissionError, OSError) as e:
+        print(f'⚠️ HTML 報告產生失敗（不影響轉寄記錄）：{e}')
     history['runs'].append(log)
     save_history(log_json, already_forwarded, history['runs'])
     save_resume_cache(cache_json, resume_cache)
