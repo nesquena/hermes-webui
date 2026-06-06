@@ -1569,6 +1569,7 @@ _NOUS_FEATURED_THRESHOLD = 25
 _NOUS_FEATURED_TARGET = 15
 _MODEL_PICKER_OVERFLOW_THRESHOLD = _NOUS_FEATURED_THRESHOLD
 _MODEL_PICKER_VISIBLE_TARGET = _NOUS_FEATURED_TARGET
+_OPENROUTER_FREE_TIER_AUGMENT_CAP = 30
 
 # Vendor-prefix priority order for featured selection. Lower index = picked
 # earlier when sampling the live catalog. Reflects which vendors users have
@@ -4806,6 +4807,8 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                             "https://openrouter.ai/api/v1/models",
                             headers={"Accept": "application/json"},
                         )
+                        free_tier_models = []
+                        selected_free_tier_model = None
                         with _urlreq.urlopen(_req, timeout=8.0) as _resp:
                             _payload = json.loads(_resp.read().decode())
                         for _item in _payload.get("data", []) or []:
@@ -4833,8 +4836,27 @@ def get_available_models(*, prefer_cache: bool = False) -> dict:
                             _label = _name.split("/")[-1] if "/" in _name else _name
                             if "(free)" not in _label.lower():
                                 _label = f"{_label} (free)"
-                            seen_ids.add(_mid)
-                            raw_models.append({"id": _mid, "label": _label})
+                            _entry = {"id": _mid, "label": _label}
+                            free_tier_models.append(_entry)
+                            if _model_matches_picker_selection(
+                                _mid,
+                                _picker_selected_model_id,
+                                "openrouter",
+                            ):
+                                selected_free_tier_model = _entry
+                        if len(free_tier_models) > _OPENROUTER_FREE_TIER_AUGMENT_CAP:
+                            free_tier_models = free_tier_models[:_OPENROUTER_FREE_TIER_AUGMENT_CAP]
+                            if (
+                                selected_free_tier_model
+                                and not any(
+                                    m.get("id") == selected_free_tier_model.get("id")
+                                    for m in free_tier_models
+                                )
+                            ):
+                                free_tier_models[-1] = selected_free_tier_model
+                        for _entry in free_tier_models:
+                            seen_ids.add(_entry["id"])
+                            raw_models.append(_entry)
                     except Exception:
                         logger.debug("OpenRouter free-tier live fetch unavailable; using fallback")
 

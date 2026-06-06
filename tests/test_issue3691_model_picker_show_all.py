@@ -60,12 +60,14 @@ def test_populate_model_dropdown_persists_extra_models_for_picker_runtime():
 
 
 def test_show_all_row_uses_i18n_key():
-    assert "t('model_show_all_models',meta.hiddenCount)" in UI_JS, (
+    assert "t('model_show_all_models',hiddenCount)" in UI_JS, (
         "The synthetic overflow row must use an i18n key instead of hardcoded English."
     )
     assert I18N_JS.count("model_show_all_models:") >= 10, (
         "model_show_all_models should be defined across the shipped locale blocks."
     )
+    assert "Mostrar todos los {0} modelos" in I18N_JS
+    assert "Afficher tous les {0} modèles" in I18N_JS
 
 
 def test_openrouter_overflow_preserves_hidden_tail(monkeypatch):
@@ -303,7 +305,7 @@ function $(id) {
   if (id === 'modelSelect') return modelSelect;
   return null;
 }
-const window = { _configuredModelBadges: {} };
+const window = { _configuredModelBadges: payload.configuredBadges || {} };
 const document = { createElement(tag) { return makeNode(tag); } };
 function esc(v) { return String(v || ''); }
 function t(key, ...args) {
@@ -318,7 +320,7 @@ function _providerFromModelValue(v) {
   return '';
 }
 function _normalizeConfiguredModelKey(v) { return String(v || '').toLowerCase(); }
-function _getConfiguredModelBadge() { return null; }
+function _getConfiguredModelBadge(value, badgeMap) { return badgeMap[value] || null; }
 function closeModelDropdown() {}
 function selectModelFromDropdown() {}
 
@@ -444,4 +446,43 @@ def test_runtime_picker_preserves_backend_decorated_nous_heading_without_double_
     )
     assert "Nous (2 of 4)" in heading_html, (
         "The picker should preserve the backend-crafted Nous heading verbatim when overflow exists."
+    )
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_runtime_picker_excludes_configured_hidden_models_from_show_all_count(
+    _dropdown_driver_path,
+):
+    payload = {
+        "groups": [
+            {
+                "provider": "OpenRouter",
+                "provider_id": "openrouter",
+                "models": [
+                    {"id": "openrouter/visible-one", "label": "Visible One"},
+                ],
+                "extra_models": [
+                    {"id": "openrouter/overflow-one", "label": "Overflow One"},
+                    {"id": "openrouter/overflow-two", "label": "Overflow Two"},
+                ],
+            }
+        ],
+        "configuredBadges": {
+            "openrouter/overflow-two": {
+                "label": "Primary",
+                "role": "primary",
+                "provider": "openrouter",
+            }
+        },
+        "searchTerm": "",
+    }
+    out = _run_dropdown_driver(_dropdown_driver_path, payload)
+
+    initial_html = "\n".join(item["html"] for item in out["initial"])
+    assert "Show all 1 models" in initial_html, (
+        "Configured overflow models should be excluded from the provider-group "
+        "show-all count once they are lifted into the Configured section."
+    )
+    assert "Show all 2 models" not in initial_html, (
+        "The show-all label must not over-report configured hidden overflow models."
     )

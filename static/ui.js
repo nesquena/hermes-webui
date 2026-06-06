@@ -1878,6 +1878,12 @@ function renderModelDropdown(){
         return a.name.localeCompare(b.name);
       });
     const configuredIds=new Set(configuredModels.map(m=>m.value));
+    const configuredSemanticKeys=new Set(configuredModels.map(m=>`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`));
+    const _effectiveHiddenCount=(groupKey)=>_modelData.filter(m=>
+      m.groupKey===groupKey
+      && m.hiddenByDefault
+      && !configuredSemanticKeys.has(`${_configuredProviderKey(m)}::${_configuredModelKey(m)}`)
+    ).length;
     dd.innerHTML='';
     dd.appendChild(_scopeNote);
     dd.appendChild(_searchRow);
@@ -1917,6 +1923,7 @@ function renderModelDropdown(){
     for(const groupKey of _groupOrder){
       const meta=_groupMeta.get(groupKey);
       if(!meta) continue;
+      const hiddenCount=_effectiveHiddenCount(groupKey);
       const groupRows=_modelData.filter(m=>
         m.groupKey===groupKey
         && !configuredIds.has(m.value)
@@ -1924,11 +1931,11 @@ function renderModelDropdown(){
         && matches(m)
         && (!m.hiddenByDefault || !!term)
       );
-      const shouldRenderHeading=!!meta.label&&(groupRows.length||meta.endpointErrorOnly||(!term&&meta.hiddenCount));
+      const shouldRenderHeading=!!meta.label&&(groupRows.length||meta.endpointErrorOnly||(!term&&hiddenCount));
       if(shouldRenderHeading){
         const heading=document.createElement('div');
         heading.className='model-group';
-        const count=meta.hiddenCount?0:(meta.modelCount||0);
+        const count=hiddenCount?0:(meta.modelCount||0);
         heading.textContent=count>1?`${meta.label} (${count})`:meta.label;
         dd.appendChild(heading);
         _renderProviderEndpointHint(meta);
@@ -1942,11 +1949,11 @@ function renderModelDropdown(){
         row.onclick=()=>selectModelFromDropdown(m.value,m.providerId||(m.badge&&m.badge.provider)||null);
         dd.appendChild(row);
       }
-      if(!term&&meta.hiddenCount){
+      if(!term&&hiddenCount){
         const showAll=document.createElement('div');
         showAll.className='model-opt model-opt-show-all';
         showAll.tabIndex=0;
-        showAll.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(t('model_show_all_models',meta.hiddenCount)||`Show all ${meta.hiddenCount} models`)}</span></div>`;
+        showAll.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(t('model_show_all_models',hiddenCount)||`Show all ${hiddenCount} models`)}</span></div>`;
         showAll.onclick=(e)=>{
           if(e&&typeof e.stopPropagation==='function') e.stopPropagation();
           _expandOverflowGroup(meta);

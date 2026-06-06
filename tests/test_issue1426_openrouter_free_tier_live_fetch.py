@@ -178,7 +178,8 @@ def test_openrouter_falls_back_to_static_when_live_fails(monkeypatch):
 
 def test_free_tier_cap_prevents_picker_drowning(monkeypatch):
     """OpenRouter may return hundreds of free-tier variants — the implementation
-    must keep the picker usable without dropping the overflow tail."""
+    must keep the picker usable without letting the experimental free-tier
+    augmentation balloon without bound."""
     items = []
     for i in range(50):
         items.append({
@@ -209,10 +210,17 @@ def test_free_tier_cap_prevents_picker_drowning(monkeypatch):
         for m in or_group.get(bucket_name, [])
         if ":free" in m["id"]
     }
-    expected_ids = {f"vendor{i}/model-{i}:free" for i in range(50)}
+    expected_ids = {
+        f"vendor{i}/model-{i}:free"
+        for i in range(config._OPENROUTER_FREE_TIER_AUGMENT_CAP)
+    }
     assert expected_ids.issubset(free_added_ids), (
-        "Every free-tier model returned by the live fetch should remain in the "
-        "picker payload, even if some overflow into extra_models."
+        "The picker should retain the first capped tranche of free-tier models "
+        "instead of discarding the augmentation entirely."
+    )
+    assert len(free_added_ids) == config._OPENROUTER_FREE_TIER_AUGMENT_CAP, (
+        "The OpenRouter free-tier live fetch should stay capped so extra_models "
+        "does not balloon to hundreds of experimental variants."
     )
     assert len(or_group.get("extra_models", [])) > 0, (
         "When the visible picker cap is exceeded, free-tier overflow models "
