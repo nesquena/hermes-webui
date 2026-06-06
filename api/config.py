@@ -322,7 +322,7 @@ def reload_config() -> None:
 
 
 def _load_yaml_config_file(config_path: Path) -> dict:
-    """Load yaml config file."""
+    """Load and parse a YAML config file, returning an empty dict on parse error or missing file."""
     try:
         import yaml as _yaml
     except ImportError:
@@ -339,7 +339,7 @@ def _load_yaml_config_file(config_path: Path) -> dict:
 
 
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
-    """Save yaml config file."""
+    """Serialize config_data to YAML and write it to config_path, creating parent directories as needed."""
     try:
         import yaml as _yaml
     except ImportError as exc:
@@ -363,7 +363,6 @@ def _workspace_candidates(raw: str | Path | None = None) -> list[Path]:
     candidates: list[Path] = []
 
     def add(candidate: str | Path | None) -> None:
-        """Add."""
         if candidate in (None, ""):
             return
         try:
@@ -742,7 +741,7 @@ def _resolve_provider_alias(name: str) -> str:
 
 
 def _custom_provider_slug_from_name(name: object) -> str:
-    """Custom provider slug from name."""
+    """Convert a custom provider display name to its 'custom:<slug>' id, returning '' for blank input."""
     raw = str(name or "").strip().lower()
     if not raw:
         return ""
@@ -752,7 +751,7 @@ def _custom_provider_slug_from_name(name: object) -> str:
 
 
 def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
-    """Custom provider entries."""
+    """Return the list of valid custom_providers dicts from the given config or the module-level cache."""
     source = config_obj if isinstance(config_obj, dict) else cfg
     entries = source.get("custom_providers", [])
     if not isinstance(entries, list):
@@ -761,7 +760,7 @@ def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
 
 
 def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
-    """Named custom provider slugs."""
+    """Return the set of 'custom:<slug>' ids for all named custom providers in the given config."""
     return {
         slug
         for slug in (
@@ -776,7 +775,7 @@ def _named_custom_provider_slug_for_provider(
     provider: object,
     config_obj: dict | None = None,
 ) -> str:
-    """Named custom provider slug for provider."""
+    """Look up the 'custom:<slug>' id matching a provider name or slug, returning '' when none matches."""
     raw = str(provider or "").strip().lower()
     if not raw:
         return ""
@@ -879,7 +878,7 @@ def _canonicalise_provider_id(name: object) -> str:
 
 
 def _normalize_base_url_for_match(value: object) -> str:
-    """Normalize base url for match."""
+    """Normalize a base URL to scheme://host/path (no trailing slash) for reliable equality comparisons."""
     url = str(value or "").strip().rstrip("/")
     if not url:
         return ""
@@ -896,7 +895,7 @@ def _named_custom_provider_slug_for_base_url(
     base_url: object,
     config_obj: dict | None = None,
 ) -> str:
-    """Named custom provider slug for base url."""
+    """Find the 'custom:<slug>' id for the custom_providers entry whose base_url matches the given URL."""
     target = _normalize_base_url_for_match(base_url)
     if not target:
         return ""
@@ -1105,7 +1104,6 @@ def _format_ollama_label(mid: str) -> str:
     name_part, _, variant = mid.partition(":")
 
     def _fmt(s: str) -> str:
-        """Fmt."""
         tokens = s.replace("-", " ").replace("_", " ").split()
         out = []
         for t in tokens:
@@ -1216,7 +1214,6 @@ def _build_nous_featured_set(
     chosen_set: set[str] = set()
 
     def _add(mid: str) -> None:
-        """Add."""
         if mid and mid not in chosen_set:
             chosen.append(mid)
             chosen_set.add(mid)
@@ -1662,7 +1659,6 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
         return None, None
 
     def _slugify(value: str) -> str:
-        """Slugify."""
         s = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
         while "--" in s:
             s = s.replace("--", "-")
@@ -1677,7 +1673,6 @@ def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, st
     cfg_data = get_config()
 
     def _resolve_key(raw_api_key, raw_key_env) -> str | None:
-        """Resolve key."""
         api_key = None
         if raw_api_key is not None:
             key_text = str(raw_api_key).strip()
@@ -2064,7 +2059,7 @@ def _models_cache_source_fingerprint() -> dict:
 
 
 def _delete_models_cache_on_disk() -> None:
-    """Delete models cache on disk."""
+    """Delete the on-disk models cache file, silently ignoring missing-file errors."""
     try:
         os.unlink(str(_models_cache_path))
     except OSError:
@@ -2477,13 +2472,11 @@ def get_available_models() -> dict:
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
     def _build_available_models_uncached() -> dict:
-        """Build available models uncached."""
         active_provider = None
         default_model = get_effective_default_model(cfg)
         groups = []
 
         def _norm_model_id(model_id: str) -> str:
-            """Norm model id."""
             s = str(model_id or "").strip().lower()
             # Strip @provider: prefix (e.g., @custom:jingdong:GLM-5 -> GLM-5).
             # Defensive: if the last segment is empty (trailing colon, malformed
@@ -2499,7 +2492,6 @@ def get_available_models() -> dict:
             return s.replace("-", ".")
 
         def _build_configured_model_badges() -> dict[str, dict[str, str]]:
-            """Build configured model badges."""
             configured_entries: list[dict[str, str]] = []
             if active_provider and default_model:
                 configured_entries.append(
@@ -2812,7 +2804,6 @@ def get_available_models() -> dict:
                     detected_providers.add(_canonical)
 
         def _configured_provider_for_base_url(base_url: object) -> str:
-            """Configured provider for base url."""
             target = _normalize_base_url_for_match(base_url)
             if not target:
                 return ""
@@ -3622,13 +3613,13 @@ class StreamChannel:
     """
 
     def __init__(self):
-        """Initialize init  ."""
+        """Initialize an empty channel with no subscribers and an offline event buffer."""
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue] = []
         self._offline_buffer: list[tuple[str, object]] = []
 
     def subscribe(self) -> queue.Queue:
-        """Subscribe."""
+        """Register a new subscriber queue, replaying the offline buffer into it before returning."""
         q: queue.Queue = queue.Queue()
         with self._lock:
             # Replay buffered events to the new subscriber INSIDE the lock so a
@@ -3642,7 +3633,7 @@ class StreamChannel:
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
-        """Unsubscribe."""
+        """Remove a subscriber queue from the channel, silently ignoring queues that are not subscribed."""
         with self._lock:
             try:
                 self._subscribers.remove(q)
@@ -3650,7 +3641,7 @@ class StreamChannel:
                 pass
 
     def put_nowait(self, item: tuple[str, object]) -> None:
-        """Put nowait."""
+        """Broadcast an event to all subscribers, or buffer it offline when no subscriber is connected."""
         with self._lock:
             subscribers = list(self._subscribers)
             if not subscribers:
@@ -3662,7 +3653,7 @@ class StreamChannel:
 
 
 def create_stream_channel() -> StreamChannel:
-    """Create stream channel."""
+    """Create and return a new StreamChannel for broadcasting SSE events to browser tabs."""
     return StreamChannel()
 
 
@@ -3699,12 +3690,12 @@ _thread_ctx = threading.local()
 
 
 def _set_thread_env(**kwargs):
-    """Set thread env."""
+    """Store a dict of env-var overrides in thread-local storage for the duration of the current request."""
     _thread_ctx.env = kwargs
 
 
 def _clear_thread_env():
-    """Clear thread env."""
+    """Clear the thread-local env-var overrides installed by _set_thread_env."""
     _thread_ctx.env = {}
 
 

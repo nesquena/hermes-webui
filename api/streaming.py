@@ -250,7 +250,7 @@ _GATEWAY_ROUTING_ATTEMPT_KEYS = {
 
 
 def _clean_gateway_routing_scalar(value):
-    """Clean gateway routing scalar."""
+    """Strip and truncate a scalar metadata value to 240 chars, returning None for empties and non-scalars."""
     if value is None:
         return None
     if isinstance(value, (str, int, float, bool)):
@@ -262,7 +262,7 @@ def _clean_gateway_routing_scalar(value):
 
 
 def _find_gateway_metadata_payload(payload):
-    """Find gateway metadata payload."""
+    """Recursively locate the dict carrying gateway routing fields within a nested response payload."""
     if not isinstance(payload, dict):
         return None
     if any(k in payload for k in _GATEWAY_ROUTING_TOP_LEVEL_KEYS) or isinstance(payload.get('routing'), list):
@@ -346,7 +346,7 @@ def _normalize_gateway_routing_metadata(payload, requested_model=None, requested
 
 
 def _extract_gateway_routing_metadata(agent, result, requested_model=None, requested_provider=None):
-    """Extract gateway routing metadata."""
+    """Extract and sanitize LLM Gateway routing metadata from the agent object or the result dict."""
     candidates = []
     if isinstance(result, dict):
         candidates.extend([
@@ -397,7 +397,7 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
 
 
 def _attachment_name(att) -> str:
-    """Attachment name."""
+    """Extract a display name from an attachment dict or raw string, preferring name > filename > path."""
     if isinstance(att, dict):
         return str(att.get('name') or att.get('filename') or att.get('path') or '').strip()
     return str(att or '').strip()
@@ -606,7 +606,7 @@ def _sanitize_generated_title(text: str) -> str:
 
 
 def _looks_invalid_generated_title(text: str) -> bool:
-    """Looks invalid generated title."""
+    """Return True for generated titles that expose chain-of-thought, meta-commentary, or acknowledgement phrases."""
     s = str(text or '')
     if not s.strip():
         return True
@@ -641,12 +641,12 @@ _LEGACY_WORKSPACE_PREFIX_RE = re.compile(r'^\s*\[Workspace:[^\]]+\]\s*')
 
 
 def _escape_workspace_prefix_path(path: str) -> str:
-    """Escape workspace prefix path."""
+    """Escape backslashes and closing brackets in a workspace path for embedding in the v1 workspace tag."""
     return str(path or '').replace('\\', '\\\\').replace(']', '\\]')
 
 
 def _workspace_context_prefix(path: str) -> str:
-    """Workspace context prefix."""
+    """Build the [Workspace::v1: ...] context prefix injected at the start of each user message."""
     return f"[Workspace::v1: {_escape_workspace_prefix_path(path)}]\n"
 
 
@@ -759,7 +759,7 @@ def _is_provisional_title(current_title: str, messages) -> bool:
 
 
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
-    """Title prompts."""
+    """Return the (qa_block, prompts_list) pair used by the LLM title generation call."""
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
     prompts = [
         (
@@ -785,7 +785,7 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
 
 
 def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -> bool:
-    """Is minimax route."""
+    """Return True when any of provider/model/base_url strings indicate a MiniMax routing path."""
     text = ' '.join([
         str(provider or '').lower(),
         str(model or '').lower(),
@@ -837,17 +837,17 @@ def _title_completion_budget(provider: str = '', model: str = '', base_url: str 
     # content.  Keep the budget high enough for MiniMax/Kimi-style reasoning
     # responses without making title generation depend on provider-specific
     # one-off branches.
-    """Title completion budget."""
+    """Return the max_tokens budget for a title generation completion."""
     return 512
 
 
 def _title_retry_completion_budget(provider: str = '', model: str = '', base_url: str = '') -> int:
-    """Title retry completion budget."""
+    """Return the max_tokens budget for a title retry, doubling the initial budget."""
     return max(1024, _title_completion_budget(provider, model, base_url) * 2)
 
 
 def _title_retry_status(status: str) -> bool:
-    """Title retry status."""
+    """Return True for statuses that should trigger a retry with a higher token budget."""
     return status in {
         'llm_length',
         'llm_length_aux',
@@ -857,7 +857,7 @@ def _title_retry_status(status: str) -> bool:
 
 
 def _safe_obj_value(obj, key: str):
-    """Safe obj value."""
+    """Return a dict key or object attribute, treating MagicMock values as absent to keep tests realistic."""
     if obj is None:
         return None
     if isinstance(obj, dict):
@@ -871,7 +871,7 @@ def _safe_obj_value(obj, key: str):
 
 
 def _safe_text_value(value) -> str:
-    """Safe text value."""
+    """Coerce a value to a stripped string, returning '' for None or MagicMock instances."""
     if value is None:
         return ''
     if value.__class__.__module__.startswith('unittest.mock'):
@@ -1102,7 +1102,7 @@ def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, age
 
 
 def _put_title_status(put_event, session_id: str, status: str, reason: str = '', title: str = '', raw_preview: str = '') -> None:
-    """Put title status."""
+    """Emit a title_status SSE event and log the outcome with session, status, and title details."""
     payload = {'session_id': session_id, 'status': status}
     if reason:
         payload['reason'] = reason
@@ -1134,11 +1134,9 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     combined_raw = f"{user_text} {assistant_text}".strip()
 
     def _contains_latin(text: str) -> bool:
-        """Contains latin."""
         return bool(re.search(r'[A-Za-z]', text or ''))
 
     def _extract_named_topic(text: str) -> str:
-        """Extract named topic."""
         m = re.search(r'"([^"\n]{2,24})"', text)
         if m:
             return (m.group(1) or '').strip()
@@ -1466,13 +1464,11 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     prev_safe = _api_safe_message_positions(previous_messages)
 
     def _safe_projection(msg):
-        """Safe projection."""
         if not isinstance(msg, dict):
             return None
         return {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
 
     def _reasoning_only_assistant(msg):
-        """Reasoning only assistant."""
         if not isinstance(msg, dict) or msg.get('role') != 'assistant' or not msg.get('reasoning'):
             return False
         if msg.get('tool_calls'):
@@ -1513,7 +1509,7 @@ def _session_context_messages(session):
 
 
 def _message_identity(msg):
-    """Message identity."""
+    """Return a stable identity tuple for a message so compaction-resilient merge can detect matching turns."""
     if not isinstance(msg, dict):
         return None
     role = str(msg.get('role') or '')
@@ -1536,7 +1532,7 @@ def _message_identity(msg):
 
 
 def _messages_have_prefix(messages, prefix):
-    """Messages have prefix."""
+    """Return True when the messages list starts with the same identity sequence as prefix."""
     if len(messages or []) < len(prefix or []):
         return False
     for idx, expected in enumerate(prefix or []):
@@ -1546,7 +1542,7 @@ def _messages_have_prefix(messages, prefix):
 
 
 def _is_context_compression_marker(msg):
-    """Is context compression marker."""
+    """Return True when a message is an auto-inserted context compression summary from the agent."""
     if not isinstance(msg, dict):
         return False
     text = _message_text(msg.get('content', '')).lower()
@@ -1559,7 +1555,7 @@ def _is_context_compression_marker(msg):
 
 
 def _find_current_user_turn(messages, msg_text):
-    """Find current user turn."""
+    """Return the index of the user turn matching msg_text, falling back to the last user turn seen."""
     needle = " ".join(str(msg_text or '').split())
     fallback = None
     for idx, msg in enumerate(messages or []):
@@ -1964,7 +1960,6 @@ def _run_agent_streaming(
     _metering_stop = threading.Event()
 
     def _metering_ticker():
-        """Metering ticker."""
         while True:
             interval = meter().get_interval()
             if interval >= 10.0:
@@ -1980,7 +1975,6 @@ def _run_agent_streaming(
 
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
-        """Put."""
         if cancel_event.is_set() and event not in ('cancel', 'error'):
             return
         try:
@@ -1989,7 +1983,6 @@ def _run_agent_streaming(
             logger.debug("Failed to put event to queue")
 
     def _agent_status_callback(kind, message):
-        """Bridge Agent lifecycle compression status into WebUI SSE."""
         _message = str(message or '').strip()
         _kind = str(kind or '').strip().lower()
         if not _message:
