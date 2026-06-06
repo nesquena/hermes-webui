@@ -5076,6 +5076,7 @@ _SETTINGS_DEFAULTS = {
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
     "fade_text_effect": False,  # animate newly streamed words with a lightweight fade-in effect
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
+    "show_cron_sessions": False,  # surface cron sessions in the sidebar (subordinate to show_cli_sessions)
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
@@ -5242,6 +5243,7 @@ _SETTINGS_BOOL_KEYS = {
     "show_tps",
     "fade_text_effect",
     "show_cli_sessions",
+    "show_cron_sessions",
     "show_previous_messaging_sessions",
     "sync_to_insights",
     "check_for_updates",

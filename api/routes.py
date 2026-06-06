@@ -2716,7 +2716,7 @@ def _is_duplicate_webui_state_projection(session: dict, represented_webui_ids: s
     return bool(_session_lineage_ids(session) & represented_webui_ids)
 
 
-def _dedupe_cli_sidebar_sessions_for_api(cli: list[dict], represented_webui_ids: set[str]) -> list[dict]:
+def _dedupe_cli_sidebar_sessions_for_api(cli: list[dict], represented_webui_ids: set[str], *, show_cron_sessions: bool = False) -> list[dict]:
     """Return CLI/state sidebar rows while preserving project-hidden cron rows.
 
     Agent-side cron sessions come from state.db rather than the WebUI session
@@ -2735,7 +2735,7 @@ def _dedupe_cli_sidebar_sessions_for_api(cli: list[dict], represented_webui_ids:
         and not _is_duplicate_webui_state_projection(s, represented_webui_ids)
         and is_cli_session_row_visible(s)
     ]
-    visible = [s for s in candidates if not _cron_hide(s)]
+    visible = [s for s in candidates if not _cron_hide(s, show_cron=show_cron_sessions)]
     return _include_project_hidden_background_sidebar_sessions(candidates, visible)
 
 
@@ -5395,7 +5395,8 @@ def handle_get(handler, parsed) -> bool:
                 represented_webui_ids = set()
                 for s in webui_sessions:
                     represented_webui_ids.update(_session_lineage_ids(s))
-                deduped_cli = _dedupe_cli_sidebar_sessions_for_api(cli, represented_webui_ids)
+                show_cron_sessions = bool(settings.get("show_cron_sessions"))
+                deduped_cli = _dedupe_cli_sidebar_sessions_for_api(cli, represented_webui_ids, show_cron_sessions=show_cron_sessions)
             else:
                 diag.stage("filter_webui_sessions")
                 webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]

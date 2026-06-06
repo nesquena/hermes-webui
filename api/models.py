@@ -2369,11 +2369,11 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None, p
         s.save()
     return s
 
-def _hide_from_default_sidebar(session: dict) -> bool:
+def _hide_from_default_sidebar(session: dict, *, show_cron: bool = False) -> bool:
     """Return True for internal/background sessions hidden from the default list."""
     sid = str(session.get('session_id') or '')
     source = session.get('source_tag') or session.get('source')
-    if source == 'cron' or sid.startswith('cron_'):
+    if not show_cron and (source == 'cron' or sid.startswith('cron_')):
         return True
     if bool(session.get('pre_compression_snapshot')):
         return not bool(session.get('_show_pre_compression_snapshot'))
