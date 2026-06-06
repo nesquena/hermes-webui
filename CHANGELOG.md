@@ -3,6 +3,21 @@
 
 ## [Unreleased]
 
+## [v0.51.292] — 2026-06-06 — Release JH (stage-s4 — compression-exhausted turns surface as errors, not fake completions)
+
+### Fixed
+- **Context-compression-exhausted turns are no longer finalized as a falsely "completed" response.** When Hermes Agent exhausts context compression in a long tool-heavy turn, the streamed result can end on a tool result or an assistant `tool_calls` turn with no final assistant answer. WebUI previously rendered that as a settled, completed reply. It now classifies a persisted transcript that ends in a tool/tool-call/empty-assistant tail (or an internal `[CONTEXT COMPACTION — REFERENCE ONLY]` marker) — and `compression_exhausted`/`failed`/`partial` agent results — as a terminal failure and surfaces a clear error instead. The compression session-id migration and pre-compression snapshot now run **before** the terminal-failure path returns, so frontend/backend session state stays consistent when exhaustion fires after the agent rotates `session_id`. (#3316, @franksong2702; fixes #3315)
+
+## [v0.51.291] — 2026-06-06 — Release JG (stage-s2 — preserve live turn content when switching away mid-stream)
+
+### Fixed
+- **Switching away from a streaming session no longer loses the in-progress thinking/tool content.** When you clicked to another chat while a session was streaming during a quiet window (mid tool-execution or silent reasoning, between content events) and then switched back, the live turn's tool cards and thinking could disappear permanently — only the elapsed-time clock survived — until the response finished and the transcript re-rendered from the server. Cause: the live-turn DOM snapshot was only captured on content/`tool_complete` SSE events, so the switch-away teardown could run with a stale-or-absent snapshot, and the switch-back fallback rebuilt an empty thinking card. `closeLiveStream()` now snapshots the live turn **before** tearing the stream down, so switching back restores the exact state shown at switch-away. (#3668)
+
+## [v0.51.290] — 2026-06-06 — Release JF (stage-s1 — profile provider/model now respected in session resolution)
+
+### Fixed
+- **Profile-bound sessions now resolve their provider and model from the profile** instead of silently falling back to the global active provider. Previously, when a chat was started under a profile and the model string was not `@provider:`-qualified (and no explicit provider was sent), the backend used the catalog's global active provider — so a profile wired to one provider/key could silently run on a different one, causing **wrong credentials/billing** and **silent context truncation** (the global default model's advertised context window could differ from what the provider actually served, so the provider dropped the oldest messages and long chats "forgot" earlier content). Resolution is now authoritative from the profile across all four runtime entry points (chat start, streaming worker incl. background/btw runs, and both deferred `/api/session` display resolvers); stale models are still repaired under the profile provider — including the `openai-codex` profile + stale `openai/…` slash-model case — while native slash IDs on OpenRouter/custom providers are preserved and explicit `@provider:` qualifiers still win. (#3448, @rodboev; fixes #3405)
+
 ## [v0.51.289] — 2026-06-06 — Release JE (hotfix — sidebar ReferenceError #3696 + scope-undef prevention gate)
 
 ### Fixed
