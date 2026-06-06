@@ -597,6 +597,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
         or not _github_actions_variables_path_repo(origin_uri)
     ):
         origin_uri = f"capy-memory://{source_id}"
+    if _github_actions_workflow_permissions_route_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or not _github_actions_workflow_permissions_path_repo(origin_uri)
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_actions_secrets_public_key_path_matches(raw_origin_text):
         actions_secrets_public_key_origin = _github_actions_secrets_public_key_safe_origin(raw_origin_text)
         actions_secrets_public_key_repo = _github_actions_secrets_public_key_path_repo(actions_secrets_public_key_origin or "")
@@ -4434,6 +4439,90 @@ def _github_actions_variables_refresh_summary(origin_uri: str, payload: dict[str
             row_parts.append(f"updated: {updated}")
         parts.append("; ".join(row_parts))
     return _bounded_refresh_summary("; ".join(parts))
+
+
+def _github_actions_workflow_permissions_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.netloc.strip() != "api.github.com" or parts.scheme != "https":
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "actions"
+        or path[5] != "permissions"
+        or path[6] != "workflow"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_actions_workflow_permissions_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 6
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "actions"
+            and lowered[5].startswith("permissions")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return any(segment.lower().startswith("permissions%") for segment in raw_path)
+
+
+def _github_actions_workflow_permissions_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_actions_workflow_permissions_route_path_matches(origin_uri)
+
+
+_GITHUB_ACTIONS_WORKFLOW_PERMISSION_LEVELS = {"read", "write"}
+
+
+def _json_payload_is_github_actions_workflow_permissions_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_actions_workflow_permissions_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    default_workflow_permissions = payload.get("default_workflow_permissions")
+    can_approve_pull_request_reviews = payload.get("can_approve_pull_request_reviews")
+    return (
+        default_workflow_permissions in _GITHUB_ACTIONS_WORKFLOW_PERMISSION_LEVELS
+        and isinstance(can_approve_pull_request_reviews, bool)
+    )
+
+
+def _github_actions_workflow_permissions_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    repo = _github_actions_workflow_permissions_path_repo(origin_uri) or "repository"
+    default_workflow_permissions = _safe_public_text(payload.get("default_workflow_permissions"), limit=20)
+    can_approve = str(bool(payload.get("can_approve_pull_request_reviews"))).lower()
+    return _bounded_refresh_summary(
+        "GitHub Actions workflow permissions for "
+        f"{repo}; default workflow permissions: {default_workflow_permissions}; "
+        f"can approve pull request reviews: {can_approve}"
+    )
 
 
 def _github_actions_secrets_public_key_path_repo(origin_uri: str) -> str:
@@ -8874,6 +8963,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_actions_variables_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    actions_workflow_permissions_repo = _github_actions_workflow_permissions_path_repo(origin_uri)
+    if actions_workflow_permissions_repo:
+        if not _json_payload_is_github_actions_workflow_permissions_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub Actions workflow permissions {actions_workflow_permissions_repo}",
+            "summary": _github_actions_workflow_permissions_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_actions_workflow_permissions_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     actions_secrets_public_key_repo = _github_actions_secrets_public_key_path_repo(origin_uri)
     if actions_secrets_public_key_repo:
         if not _json_payload_is_github_actions_secrets_public_key_metadata(origin_uri, payload):
@@ -9216,6 +9317,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_actions_variables_route_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_variables_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_actions_workflow_permissions_route_path_matches(raw_origin_uri):
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_workflow_permissions_path_repo(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_actions_secrets_public_key_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_actions_secrets_public_key_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -9334,6 +9438,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_actions_variables_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_actions_workflow_permissions_path_matches(safe_origin_uri):
+        if not _github_actions_workflow_permissions_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_actions_secrets_public_key_path_matches(safe_origin_uri):
         if not _github_actions_secrets_public_key_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -9446,6 +9554,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_actions_variables_path_repo(final_url)
             or _github_actions_variables_path_repo(final_url) != _github_actions_variables_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_workflow_permissions_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_actions_workflow_permissions_path_repo(final_url)
+            or _github_actions_workflow_permissions_path_repo(final_url) != _github_actions_workflow_permissions_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_secrets_public_key_path_matches(safe_origin_uri) and (
@@ -9614,6 +9728,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_actions_variables_path_matches(safe_origin_uri) and (
             not _github_actions_variables_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_actions_workflow_permissions_path_matches(safe_origin_uri) and (
+            not _github_actions_workflow_permissions_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")

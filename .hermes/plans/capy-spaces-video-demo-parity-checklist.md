@@ -11,6 +11,8 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- GitHub Actions workflow-permissions source-refresh metadata now has a narrow JSON-only parser for exact `/repos/{owner}/{repo}/actions/permissions/workflow` API payloads, making repository workflow permission defaults visible only from safe permission level plus pull-request-review approval boolean while failing closed on text fallback/lookalike-host route bypasses and omitting URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-looking fixture values from receipts/search/vault output.
+
 - GitHub Actions workflow-run timing source-refresh metadata now has a narrow JSON-only parser for exact `/repos/{owner}/{repo}/actions/runs/{run_id}/timing` API payloads, making CI timing freshness visible only from safe run duration plus billable OS total/job counts while ignoring nested job-run details, URLs, API-auth fields, prompts, scripts, renderer/source fields, and secret-looking fixture values.
 
 - Space Agent package import compaction receipts now preserve the metadata-only import prompt-preflight status alongside package format, Space id, widget count, policy/model-route, and progress evidence, matching export receipt parity without rendering package YAML, generated widget bodies, renderer/source/API-auth fields, scripts, or secret-looking fixture values.
