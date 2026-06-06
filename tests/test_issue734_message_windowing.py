@@ -20,7 +20,8 @@ def test_message_virtualization_switches_render_messages_to_scroll_driven_window
 def test_load_earlier_only_pages_server_history_and_preserves_scroll():
     assert "function _wireMessageWindowLoadEarlierButton()" in UI_JS
     assert "if(typeof _loadOlderMessages==='function') _loadOlderMessages();" in UI_JS
-    assert "if(hasServerOlder&&windowStart===0)" in UI_JS
+    assert "if(hasServerOlder){" in UI_JS
+    assert "if(virtualWindow.virtualized&&virtualWindow.topPad>0)" in UI_JS
     assert "_messageRenderWindowSize=_currentMessageRenderWindowSize()+Math.max(addedRenderable, MESSAGE_RENDER_WINDOW_DEFAULT);" in SESSIONS_JS
     assert "renderMessages({ preserveScroll: true });" in SESSIONS_JS
     assert "_scheduleMessageVirtualizedRender();" in UI_JS
@@ -49,3 +50,12 @@ def test_virtualization_affordances_have_styling_hooks():
     assert ".message-window-load-earlier" in CSS
     assert ".message-virtual-spacer" in CSS
     assert "border-radius:999px" in CSS
+
+
+def test_measurement_rerenders_are_bounded_per_virtual_window_cycle():
+    assert "const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;" in UI_JS
+    assert "function _messageVirtualMeasurementCycleKeyFor(windowMetrics)" in UI_JS
+    assert "function _scheduleMessageVirtualMeasurementRefresh(windowMetrics)" in UI_JS
+    assert "if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS) return;" in UI_JS
+    assert "_scheduleMessageVirtualMeasurementRefresh(virtualWindow);" in UI_JS
+    assert "_markMessageVirtualMeasurementsSettled(virtualWindow);" in UI_JS
