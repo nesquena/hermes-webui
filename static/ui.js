@@ -5792,6 +5792,18 @@ async function _waitForServerThenReload(opts){
             return;
           }
           if(
+            nextServerIdentity===null &&
+            baselineServerIdentity.serverStartedAt!==null &&
+            baselineServerIdentity.uptimeSeconds===null
+          ){
+            // If the replacement server comes back healthy without either
+            // identity field, but the baseline only had server_started_at,
+            // treat that healthy response as the new server instead of
+            // timing out on an uncomparable identity shape.
+            location.reload();
+            return;
+          }
+          if(
             nextServerIdentity!==null&&(
               (baselineServerIdentity.serverStartedAt===null&&nextServerIdentity.serverStartedAt!==null)||
               (baselineServerIdentity.serverStartedAt!==null&&nextServerIdentity.serverStartedAt!==null&&nextServerIdentity.serverStartedAt!==baselineServerIdentity.serverStartedAt)||

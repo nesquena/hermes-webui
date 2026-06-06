@@ -1144,6 +1144,45 @@ global.fetch = async () => {{
 """
         subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
 
+    def test_wait_for_server_reloads_when_replacement_health_has_no_identity_fields(self):
+        src = read('static/ui.js')
+        normalize_fn = extract_js_function(src, '_normalizeHealthServerIdentity')
+        identity_fn = extract_js_function(src, '_healthResponseServerIdentity')
+        wait_fn = extract_js_function(src, '_waitForServerThenReload')
+
+        script = f"""
+let now = 0;
+let reloads = 0;
+let fetches = 0;
+const responses = [
+  {{ ok: true, data: {{ status: 'ok', server_started_at: null, uptime_seconds: null }} }},
+];
+global.window = {{}};
+global.document = {{ baseURI: 'http://127.0.0.1:8788/' }};
+global.location = {{ reload: () => {{ reloads += 1; }} }};
+global.$ = () => null;
+global.Date = {{ now: () => now }};
+global.setTimeout = (cb, ms) => {{ now += ms || 0; cb(); return 0; }};
+global.fetch = async () => {{
+  fetches += 1;
+  const next = responses.shift();
+  if (!next) throw new Error('unexpected extra fetch');
+  return {{
+    ok: next.ok,
+    json: async () => next.data,
+  }};
+}};
+{normalize_fn}
+{identity_fn}
+{wait_fn}
+(async () => {{
+  await _waitForServerThenReload({{ interval: 1, maxMs: 20, baselineServerIdentity: {{ serverStartedAt: '1001.234', uptimeSeconds: null }} }});
+  if (fetches !== 1) throw new Error('expected identity-less healthy replacement to trigger reload on first probe, got '+fetches);
+  if (reloads !== 1) throw new Error('expected exactly one reload when replacement health exposes no identity fields, got '+reloads);
+}})().catch(err => {{ console.error(err.stack || err.message); process.exit(1); }});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
     def test_apply_and_force_updates_capture_identity(self):
         src = read('static/ui.js')
         apply_fn = re.search(r'function\s+applyUpdates\b.*?\n\}', src, re.DOTALL)
