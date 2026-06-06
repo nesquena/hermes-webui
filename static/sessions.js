@@ -2393,6 +2393,10 @@ async function _loadOlderMessages() {
     // Use $('messages') — the scrollable container (#msgInner is not scrollable).
     const container = $('messages');
     const prevScrollH = container ? container.scrollHeight : 0;
+    const oldTop = container ? container.scrollTop : 0;
+    const viewportAnchor = (container && typeof _captureMessageViewportAnchor === 'function')
+      ? _captureMessageViewportAnchor()
+      : null;
     // Carry forward ephemeral turn fields (_turnUsage/_turnDuration/_turnTps/
     // _gatewayRouting/_statusCard/_anchor_stream_id) before the wholesale replace so the badge
     // does not briefly appear and disappear during older-message expansion.
@@ -2418,14 +2422,19 @@ async function _loadOlderMessages() {
     _oldestIdx = responseSession._messages_offset || 0;
     renderMessages({ preserveScroll: true });
     if (container) {
-      // Prepending older messages must not teleport the reader. Preserve the
-      // currently visible viewport by adding the inserted height to scrollTop.
-      const oldTop = container.scrollTop;
-      const newScrollH = container.scrollHeight;
-      const addedHeight = Math.max(0, newScrollH - prevScrollH);
-      _programmaticScroll = true;
-      container.scrollTop = oldTop + addedHeight;
-      requestAnimationFrame(()=>{ _programmaticScroll = false; });
+      // Prepending older messages must not teleport the reader. Anchor to the
+      // first visible rendered row and restore that row's top offset after the
+      // prepend so synthetic virtual spacer heights cannot skew the delta.
+      const restoredViaAnchor = (viewportAnchor && typeof _restoreMessageViewportAnchor === 'function')
+        ? _restoreMessageViewportAnchor(viewportAnchor, olderMsgs.length)
+        : false;
+      if (!restoredViaAnchor) {
+        const newScrollH = container.scrollHeight;
+        const addedHeight = Math.max(0, newScrollH - prevScrollH);
+        _programmaticScroll = true;
+        container.scrollTop = oldTop + addedHeight;
+        requestAnimationFrame(()=>{ _programmaticScroll = false; });
+      }
     }
     _scrollPinned = false;
   } catch(e) {
