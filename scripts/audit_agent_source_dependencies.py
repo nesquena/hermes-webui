@@ -180,7 +180,7 @@ def _embedded_python_import_findings(rel: str, base_line: int, source: str) -> l
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if _module_root(alias.name) in AGENT_MODULE_ROOTS:
-                    line = base_line + node.lineno
+                    line = base_line + node.lineno - 1
                     findings.append(
                         Finding(
                             path=rel,
@@ -191,7 +191,7 @@ def _embedded_python_import_findings(rel: str, base_line: int, source: str) -> l
                         )
                     )
         elif isinstance(node, ast.ImportFrom) and node.module and _module_root(node.module) in AGENT_MODULE_ROOTS:
-            line = base_line + node.lineno
+            line = base_line + node.lineno - 1
             findings.append(
                 Finding(
                     path=rel,

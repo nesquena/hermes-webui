@@ -53,6 +53,12 @@ def _texts(dep_class: dict[str, object]) -> list[str]:
     return [str(finding["text"]) for finding in findings]
 
 
+def _findings(dep_class: dict[str, object]) -> list[dict[str, object]]:
+    findings = dep_class["findings"]
+    assert isinstance(findings, list)
+    return findings
+
+
 def test_audit_reports_expected_dependency_classes():
     report = _run_audit()
 
@@ -118,6 +124,19 @@ def test_audit_reports_runtime_auxiliary_and_model_metadata_imports():
     assert ("api/streaming.py", "agent.model_metadata") in anchors
     assert ("api/config.py", "hermes_cli.models") in anchors
     assert ("api/providers.py", "agent.account_usage") in anchors
+
+
+def test_audit_embedded_worker_import_line_anchors_are_source_lines():
+    classes = _class_by_id(_run_audit())
+    provider_findings = _findings(classes["runtime_auxiliary_model_metadata"])
+    account_usage = next(
+        finding
+        for finding in provider_findings
+        if finding["path"] == "api/providers.py" and finding["anchor"] == "agent.account_usage"
+    )
+
+    assert account_usage["line"] == 168
+    assert account_usage["text"] == "from agent.account_usage import fetch_account_usage"
 
 
 def test_audit_reports_runtime_state_and_provider_imports():
