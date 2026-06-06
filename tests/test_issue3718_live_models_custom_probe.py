@@ -10,7 +10,6 @@ config entries as a fallback after the fetch.
 import json
 import pathlib
 import unittest
-from io import BytesIO
 from unittest import mock
 
 REPO = pathlib.Path(__file__).parent.parent
