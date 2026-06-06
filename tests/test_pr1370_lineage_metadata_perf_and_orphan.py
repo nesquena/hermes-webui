@@ -132,6 +132,42 @@ def test_orphan_parent_reference_not_exposed_in_metadata(tmp_path):
     )
 
 
+def test_old_schema_without_source_or_messages_table_keeps_lineage(tmp_path):
+    """Old state.db schemas may lack optional source/message tables but still carry lineage."""
+    from api.agent_sessions import read_session_lineage_metadata
+
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+    CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT,
+        started_at REAL NOT NULL,
+        parent_session_id TEXT,
+        ended_at REAL,
+        end_reason TEXT
+    );
+    CREATE INDEX idx_sessions_parent ON sessions(parent_session_id);
+    """)
+    t0 = time.time() - 100
+    conn.execute(
+        "INSERT INTO sessions (id, title, started_at, ended_at, end_reason) VALUES (?, ?, ?, ?, ?)",
+        ("old_root", "old_root", t0, t0 + 5, "compression"),
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, title, started_at, parent_session_id) VALUES (?, ?, ?, ?)",
+        ("old_tip", "old_tip", t0 + 6, "old_root"),
+    )
+    conn.commit()
+    conn.close()
+
+    result = read_session_lineage_metadata(db, ["old_tip"])
+
+    assert result["old_tip"]["parent_session_id"] == "old_root"
+    assert result["old_tip"]["_lineage_root_id"] == "old_root"
+    assert result["old_tip"]["_compression_segment_count"] == 2
+
+
 def test_cycle_in_parent_chain_terminates(tmp_path):
     """Pathological data with a parent cycle (A→B→A) must not infinite-loop."""
     from api.agent_sessions import read_session_lineage_metadata

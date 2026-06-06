@@ -279,23 +279,50 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         children.sort(key=lambda row: row.get('started_at') or 0, reverse=True)
 
     def compression_tip(row: dict) -> tuple[dict | None, int]:
-        current = row
-        seen = {row['id']}
+        """Return the freshest importable continuation descendant for ``row``.
+
+        Compression parents can have multiple continuation-looking children when
+        a stale segment is resumed after a newer compressed branch already
+        exists. Picking the newest *direct* child can hide the branch whose
+        deeper descendant has the actual latest activity. Walk all reachable
+        continuation descendants and select by real message activity instead.
+        """
         latest_importable = row if (row.get('actual_message_count') or 0) > 0 else None
-        segment_count = 1
-        for _ in range(len(rows_by_id) + 1):
-            candidates = [
-                child for child in children_by_parent.get(current['id'], [])
-                if child['id'] not in seen and _is_continuation_session(current, child)
-            ]
-            if not candidates:
-                return latest_importable, segment_count
-            current = candidates[0]
-            seen.add(current['id'])
+        segment_count = 0
+        best_depth = 1
+        best_score = (
+            latest_importable.get('last_activity') or latest_importable.get('started_at') or 0
+            if latest_importable
+            else 0
+        )
+        stack: list[tuple[dict, int]] = [(row, 1)]
+        seen: set[str] = set()
+
+        while stack:
+            current, depth = stack.pop()
+            current_id = current.get('id')
+            if not current_id or current_id in seen:
+                continue
+            seen.add(current_id)
             segment_count += 1
-            if (current.get('actual_message_count') or 0) > 0:
+
+            current_score = current.get('last_activity') or current.get('started_at') or 0
+            if (
+                (current.get('actual_message_count') or 0) > 0
+                and (current_score > best_score or (current_score == best_score and depth >= best_depth))
+            ):
                 latest_importable = current
-        return latest_importable, segment_count
+                best_depth = depth
+                best_score = current_score
+            for child in children_by_parent.get(current_id, []):
+                child_id = child.get('id')
+                if not child_id or child_id in seen:
+                    continue
+                if not _is_continuation_session(current, child):
+                    continue
+                stack.append((child, depth + 1))
+
+        return latest_importable, max(segment_count, 1)
 
     projected = []
     for row in rows:
@@ -346,7 +373,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
 
 def read_importable_agent_session_rows(
     db_path: Path,
-    limit: int = 200,
+    limit: int | None = 200,
     log=None,
     exclude_sources: tuple[str, ...] | None = ("cron", "webui"),
 ) -> list[dict]:
@@ -684,6 +711,8 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             if 'parent_session_id' not in session_cols or 'end_reason' not in session_cols:
                 return {}
             session_source_expr = _optional_col('session_source', session_cols)
+            source_expr = _optional_col('source', session_cols)
+            message_count_expr = _optional_col('message_count', session_cols, '0')
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
             # full table scan. The sessions table grows unbounded over time
             # (1000+ rows is normal, 10000+ for power users), and this function
@@ -692,7 +721,9 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             #
             # Fetch the wanted ids first, then chase parent_session_id chains
             # in batches until no new ids appear. Each batch hits PRIMARY KEY
-            # so it's effectively O(N) lookups.
+            # so it's effectively O(N) lookups. Then walk continuation children
+            # from the materialized ancestors so branchy compression lineages can
+            # mark the real freshest tip, not just the newest direct sibling.
             #
             # IN-clause is chunked to 500 to stay under SQLITE_MAX_VARIABLE_NUMBER
             # on older sqlite (Python 3.9 ships sqlite 3.31 which defaults to 999;
@@ -717,7 +748,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, s.source, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason
+                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
                         FROM sessions s
                         WHERE s.id IN ({placeholders})
                         """,
@@ -730,9 +761,123 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     parent_id = rows.get(sid, {}).get('parent_session_id')
                     if parent_id and parent_id not in rows and parent_id not in to_fetch:
                         to_fetch.add(parent_id)
+
+            # Fetch descendants from the discovered ancestors using the parent
+            # index. This keeps the sidebar read scoped while still giving the
+            # collapse metadata enough information to choose the active branch.
+            to_expand = set(rows)
+            expanded: set[str] = set()
+            for _hop in range(20):
+                frontier = [sid for sid in to_expand if sid not in expanded]
+                if not frontier:
+                    break
+                to_expand = set()
+                for i in range(0, len(frontier), IN_CHUNK):
+                    chunk = frontier[i:i + IN_CHUNK]
+                    placeholders = ','.join('?' * len(chunk))
+                    cur.execute(
+                        f"""
+                        SELECT s.id, {source_expr}, {session_source_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        FROM sessions s
+                        WHERE s.parent_session_id IN ({placeholders})
+                        """,
+                        chunk,
+                    )
+                    for row in cur.fetchall():
+                        child = dict(row)
+                        rows[child['id']] = child
+                        parent_id = child.get('parent_session_id')
+                        parent = rows.get(str(parent_id)) if parent_id else None
+                        if parent and child['id'] not in expanded and _is_continuation_session(parent, child):
+                            to_expand.add(child['id'])
+                expanded.update(frontier)
+
+            message_stats: dict[str, dict] = {}
+            cur.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'")
+            has_messages_table = cur.fetchone() is not None
+            row_ids = list(rows)
+            if has_messages_table:
+                for i in range(0, len(row_ids), IN_CHUNK):
+                    chunk = row_ids[i:i + IN_CHUNK]
+                    placeholders = ','.join('?' * len(chunk))
+                    cur.execute(
+                        f"""
+                        SELECT session_id, COUNT(*) AS actual_message_count, MAX(timestamp) AS last_message_at
+                        FROM messages
+                        WHERE session_id IN ({placeholders})
+                        GROUP BY session_id
+                        """,
+                        chunk,
+                    )
+                    for row in cur.fetchall():
+                        message_stats[row['session_id']] = dict(row)
+            for sid, row in rows.items():
+                stats = message_stats.get(sid) or {}
+                if has_messages_table:
+                    row['actual_message_count'] = int(stats.get('actual_message_count') or 0)
+                else:
+                    row['actual_message_count'] = int(row.get('message_count') or 0)
+                row['last_message_at'] = stats.get('last_message_at')
     except Exception:
         return {}
 
+    children_by_parent: dict[str, list[dict]] = {}
+    for row in rows.values():
+        parent_id = row.get('parent_session_id')
+        if parent_id:
+            children_by_parent.setdefault(parent_id, []).append(row)
+
+    def continuation_root_and_depth(sid: str) -> tuple[str, int]:
+        root_id = sid
+        current_id = sid
+        depth = 1
+        seen = {sid}
+        while True:
+            current = rows.get(current_id)
+            raw_parent_id = current.get('parent_session_id') if current else None
+            parent_id = str(raw_parent_id) if raw_parent_id else ''
+            if not parent_id:
+                break
+            parent = rows.get(parent_id)
+            if not parent or parent_id in seen:
+                break
+            if not _is_continuation_session(parent, current):
+                break
+            root_id = parent_id
+            current_id = parent_id
+            seen.add(parent_id)
+            depth += 1
+        return root_id, depth
+
+    def freshest_continuation_tip(root_id: str) -> tuple[str, int]:
+        best_id = root_id
+        best_depth = 1
+        segment_count = 0
+        best_score = float(rows.get(root_id, {}).get('last_message_at') or rows.get(root_id, {}).get('started_at') or 0)
+        stack: list[tuple[str, int]] = [(root_id, 1)]
+        seen: set[str] = set()
+        while stack:
+            current_id, depth = stack.pop()
+            if current_id in seen:
+                continue
+            seen.add(current_id)
+            current = rows.get(current_id)
+            if not current:
+                continue
+            segment_count += 1
+            actual_count = int(current.get('actual_message_count') or 0)
+            score = float(current.get('last_message_at') or current.get('started_at') or 0)
+            if actual_count > 0 and (score > best_score or (score == best_score and depth >= best_depth)):
+                best_id = current_id
+                best_depth = depth
+                best_score = score
+            for child in children_by_parent.get(current_id, []):
+                if _is_continuation_session(current, child):
+                    stack.append((child['id'], depth + 1))
+
+        return best_id, max(segment_count, best_depth)
+
+    lineage_tip_cache: dict[str, tuple[str, int]] = {}
     metadata: dict[str, dict] = {}
     for sid in wanted:
         row = rows.get(sid)
@@ -770,26 +915,15 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     entry['_parent_lineage_root_id'] = parent_root
                 continue
 
-        root_id = sid
-        current_id = sid
-        segment_count = 1
-        seen = {sid}
-        while True:
-            current = rows.get(current_id)
-            parent_id = current.get('parent_session_id') if current else None
-            parent = rows.get(parent_id) if parent_id else None
-            if not parent or parent_id in seen:
-                break
-            if not _is_continuation_session(parent, current):
-                break
-            root_id = parent_id
-            current_id = parent_id
-            seen.add(parent_id)
-            segment_count += 1
+        root_id, segment_count = continuation_root_and_depth(sid)
 
         if root_id != sid:
             entry = metadata.setdefault(sid, {})
             entry['_lineage_root_id'] = root_id
-            entry['_compression_segment_count'] = segment_count
+            if root_id not in lineage_tip_cache:
+                lineage_tip_cache[root_id] = freshest_continuation_tip(root_id)
+            tip_id, tip_depth = lineage_tip_cache[root_id]
+            entry['_lineage_tip_id'] = tip_id
+            entry['_compression_segment_count'] = max(segment_count, tip_depth)
 
     return metadata
