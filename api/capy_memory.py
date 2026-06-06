@@ -4525,6 +4525,198 @@ def _github_actions_workflow_permissions_refresh_summary(origin_uri: str, payloa
     )
 
 
+def _github_repository_webhooks_path_repo(origin_uri: str) -> str:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_authority_is_exact(origin_uri, "api.github.com"):
+        return ""
+    path = parts.path.split("/")
+    if (
+        len(path) != 5
+        or path[0] != ""
+        or path[1] != "repos"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or path[4] != "hooks"
+    ):
+        return ""
+    return f"{path[2]}/{path[3]}"
+
+
+def _github_repository_webhooks_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _matches_hooks_shape(raw_path: str) -> bool:
+        path = raw_path.split("/")
+        return (
+            len(path) == 5
+            and path[0] == ""
+            and path[1] == "repos"
+            and _github_repo_path_segment_is_safe(path[2])
+            and _github_repo_path_segment_is_safe(path[3])
+            and path[4] == "hooks"
+        )
+
+    return _matches_hooks_shape(parts.path) or _matches_hooks_shape(unquote(parts.path))
+
+
+def _github_repository_webhooks_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_repository_webhooks_route_path_matches(origin_uri)
+
+
+def _github_repository_webhooks_safe_origin(origin_uri: str) -> str:
+    if not _github_repository_webhooks_route_path_matches(origin_uri):
+        return ""
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return ""
+    if parts.scheme != "https" or not _github_raw_hostname_is_exact(origin_uri, "api.github.com"):
+        return ""
+    try:
+        if parts.port is not None:
+            return ""
+    except ValueError:
+        return ""
+    safe_origin = urlunsplit(("https", "api.github.com", parts.path, "", ""))
+    if not _github_repository_webhooks_path_repo(safe_origin):
+        return ""
+    return safe_origin
+
+
+_GITHUB_REPOSITORY_WEBHOOK_ALLOWED_KEYS = {
+    "type",
+    "id",
+    "name",
+    "active",
+    "events",
+    "config",
+    "updated_at",
+    "created_at",
+    "url",
+    "test_url",
+    "ping_url",
+    "deliveries_url",
+    "last_response",
+}
+_GITHUB_REPOSITORY_WEBHOOK_CONFIG_KEYS = {"url", "content_type", "insecure_ssl"}
+_GITHUB_REPOSITORY_WEBHOOK_LAST_RESPONSE_KEYS = {"code", "status", "message"}
+_GITHUB_REPOSITORY_WEBHOOK_MAX_ROWS = 25
+
+
+def _github_repository_webhook_text_token_is_safe(value: Any, *, limit: int = 120) -> bool:
+    text = _safe_public_text(value, limit=limit)
+    return bool(text and re.fullmatch(r"[A-Za-z0-9_.:-]{1,120}", text) and not _refresh_value_is_blocked(text))
+
+
+def _github_repository_webhook_config_is_safe(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or set(value) - _GITHUB_REPOSITORY_WEBHOOK_CONFIG_KEYS:
+        return False
+    if any(str(key).strip().lower() in {"secret", "token", "api_key", "api_auth", "authorization"} for key in value):
+        return False
+    for key, item in value.items():
+        if key != "url" and _refresh_value_is_blocked(item):
+            return False
+    return True
+
+
+def _github_repository_webhook_last_response_is_safe(value: Any) -> bool:
+    if value is None:
+        return True
+    if not isinstance(value, dict) or set(value) - _GITHUB_REPOSITORY_WEBHOOK_LAST_RESPONSE_KEYS:
+        return False
+    code = value.get("code")
+    if code is not None and _safe_optional_nonnegative_int(code) is None:
+        return False
+    for key in ("status", "message"):
+        raw = value.get(key)
+        if raw is not None and not _github_repository_webhook_text_token_is_safe(raw, limit=120):
+            return False
+    return True
+
+
+def _github_repository_webhook_row_is_safe(row: Any) -> bool:
+    if not isinstance(row, dict) or set(row) - _GITHUB_REPOSITORY_WEBHOOK_ALLOWED_KEYS:
+        return False
+    hook_id = _safe_optional_nonnegative_int(row.get("id"))
+    if hook_id is None or hook_id <= 0:
+        return False
+    if not _github_repository_webhook_text_token_is_safe(row.get("name"), limit=80):
+        return False
+    hook_type = row.get("type")
+    if hook_type is not None and not _github_repository_webhook_text_token_is_safe(hook_type, limit=80):
+        return False
+    active = row.get("active")
+    if active is not None and not isinstance(active, bool):
+        return False
+    events = row.get("events")
+    if not isinstance(events, list) or len(events) > 25:
+        return False
+    for event in events:
+        if not isinstance(event, str) or not re.fullmatch(r"[a-z0-9_.-]{1,80}", event.strip()):
+            return False
+        if _refresh_value_is_blocked(event):
+            return False
+    for field in ("created_at", "updated_at"):
+        raw_timestamp = row.get(field)
+        if raw_timestamp is not None and not _safe_iso_timestamp(raw_timestamp):
+            return False
+    if not _github_repository_webhook_config_is_safe(row.get("config")):
+        return False
+    if not _github_repository_webhook_last_response_is_safe(row.get("last_response")):
+        return False
+    return True
+
+
+def _json_payload_is_github_repository_webhooks_metadata(origin_uri: str, payload: Any) -> bool:
+    if not _github_repository_webhooks_path_repo(origin_uri):
+        return False
+    if not isinstance(payload, list) or len(payload) > _GITHUB_REPOSITORY_WEBHOOK_MAX_ROWS:
+        return False
+    return all(_github_repository_webhook_row_is_safe(row) for row in payload)
+
+
+def _github_repository_webhooks_refresh_summary(origin_uri: str, payload: list[Any]) -> str:
+    repo = _github_repository_webhooks_path_repo(origin_uri) or "repository"
+    safe_rows = [row for row in payload if _github_repository_webhook_row_is_safe(row)]
+    parts = [f"GitHub repository webhooks for {repo}", f"hook count: {len(payload)}"]
+    for row in safe_rows[:5]:
+        hook_id = _safe_optional_nonnegative_int(row.get("id")) or 0
+        name = _safe_public_text(row.get("name"), limit=80)
+        row_parts = [f"hook {hook_id}: {name}"]
+        if isinstance(row.get("active"), bool):
+            row_parts.append(f"active: {str(row.get('active')).lower()}")
+        events = [
+            event.strip()
+            for event in row.get("events", [])
+            if isinstance(event, str) and re.fullmatch(r"[a-z0-9_.-]{1,80}", event.strip())
+        ]
+        if events:
+            row_parts.append("events: " + ", ".join(events[:8]))
+        updated = _safe_iso_timestamp(row.get("updated_at")) if row.get("updated_at") is not None else ""
+        if updated:
+            row_parts.append(f"updated: {updated}")
+        last_response = row.get("last_response") if isinstance(row.get("last_response"), dict) else {}
+        response_code = _safe_optional_nonnegative_int(last_response.get("code")) if isinstance(last_response, dict) else None
+        if response_code is not None:
+            row_parts.append(f"last response code: {response_code}")
+        parts.append("; ".join(row_parts))
+    return _bounded_refresh_summary("; ".join(parts))
+
+
 def _github_actions_secrets_public_key_path_repo(origin_uri: str) -> str:
     try:
         parts = urlsplit(origin_uri)
@@ -8975,6 +9167,18 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_actions_workflow_permissions_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    repository_webhooks_repo = _github_repository_webhooks_path_repo(origin_uri)
+    if repository_webhooks_repo:
+        if not _json_payload_is_github_repository_webhooks_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub repository webhooks {repository_webhooks_repo}",
+            "summary": _github_repository_webhooks_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_repository_webhooks_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     actions_secrets_public_key_repo = _github_actions_secrets_public_key_path_repo(origin_uri)
     if actions_secrets_public_key_repo:
         if not _json_payload_is_github_actions_secrets_public_key_metadata(origin_uri, payload):
@@ -9329,6 +9533,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_repository_events_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_repository_events_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_repository_webhooks_route_path_matches(raw_origin_uri):
+        if not _github_repository_webhooks_safe_origin(raw_origin_uri):
+            raise RuntimeError("refresh fetcher disabled")
     if _github_repository_artifacts_path_matches(raw_origin_uri):
         if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or not _github_repository_artifacts_path_repo(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
@@ -9359,6 +9566,9 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     environment_variables_safe_origin = _github_environment_variables_safe_origin(raw_origin_uri)
     if environment_variables_safe_origin:
         safe_origin_uri = environment_variables_safe_origin
+    repository_webhooks_safe_origin = _github_repository_webhooks_safe_origin(raw_origin_uri)
+    if repository_webhooks_safe_origin:
+        safe_origin_uri = repository_webhooks_safe_origin
     if not _source_refresh_allowed(safe_origin_uri):
         raise RuntimeError("refresh fetcher disabled")
     request_accept = "text/html,text/plain,text/markdown,application/rss+xml,application/atom+xml,application/xml,text/xml,application/json;q=0.8,application/feed+json;q=0.8"
@@ -9454,6 +9664,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         if not _github_repository_events_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
+    if _github_repository_webhooks_path_matches(safe_origin_uri):
+        if not _github_repository_webhooks_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
     if _github_repository_artifacts_path_matches(safe_origin_uri):
         if not _github_repository_artifacts_path_repo(safe_origin_uri) or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
@@ -9531,6 +9745,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_repository_events_path_repo(final_url)
             or _github_repository_events_path_repo(final_url) != _github_repository_events_path_repo(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_repository_webhooks_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or not _github_repository_webhooks_path_repo(final_url)
+            or _github_repository_webhooks_path_repo(final_url) != _github_repository_webhooks_path_repo(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
         if _github_repository_artifacts_path_matches(safe_origin_uri) and (
@@ -9748,6 +9968,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_repository_events_path_matches(safe_origin_uri) and (
             not _github_repository_events_path_repo(safe_origin_uri)
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_repository_webhooks_path_matches(safe_origin_uri) and (
+            not _github_repository_webhooks_path_repo(safe_origin_uri)
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
