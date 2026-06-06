@@ -480,6 +480,11 @@ def register_source_reference(record: dict[str, Any]) -> dict[str, Any]:
             origin_uri = issue_timeline_safe_origin
         else:
             origin_uri = f"capy-memory://{source_id}"
+    if _github_branch_protection_route_path_matches(raw_origin_text) and (
+        not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com")
+        or _github_branch_protection_path_info(origin_uri) is None
+    ):
+        origin_uri = f"capy-memory://{source_id}"
     if _github_issue_events_path_matches(raw_origin_text) and not _github_raw_hostname_is_exact(raw_origin_text, "api.github.com"):
         origin_uri = f"capy-memory://{source_id}"
     if _github_issue_labels_path_matches(raw_origin_text) and not _github_raw_authority_is_exact(raw_origin_text, "api.github.com"):
@@ -1926,6 +1931,187 @@ def _github_releases_refresh_summary(origin_uri: str, payload: list[Any]) -> str
 
 
 _GITHUB_WORKFLOW_STATES = {"active", "disabled_manually", "disabled_inactivity", "disabled_fork", "deleted"}
+
+
+def _github_branch_protection_path_info(origin_uri: str) -> tuple[str, str] | None:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return None
+    if parts.netloc.strip() != "api.github.com":
+        return None
+    path = parts.path.split("/")
+    if (
+        len(path) != 7
+        or path[0] != ""
+        or path[1] != "repos"
+        or path[4] != "branches"
+        or path[6] != "protection"
+        or not _github_repo_path_segment_is_safe(path[2])
+        or not _github_repo_path_segment_is_safe(path[3])
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}", path[5])
+        or _refresh_value_is_blocked(path[5])
+    ):
+        return None
+    return f"{path[2]}/{path[3]}", path[5]
+
+
+def _github_branch_protection_route_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+
+    def _segments_match(path_segments: list[str]) -> bool:
+        lowered = [segment.lower() for segment in path_segments]
+        return (
+            len(path_segments) >= 7
+            and path_segments[0] == ""
+            and lowered[1] == "repos"
+            and lowered[4] == "branches"
+            and lowered[6].startswith("protection")
+        )
+
+    raw_path = parts.path.split("/")
+    if _segments_match(raw_path):
+        return True
+    decoded_path = unquote(parts.path).split("/")
+    if _segments_match(decoded_path):
+        return True
+    return any(segment.lower().startswith("protection%") for segment in raw_path)
+
+
+def _github_branch_protection_path_matches(origin_uri: str) -> bool:
+    try:
+        parts = urlsplit(origin_uri)
+    except ValueError:
+        return False
+    if (parts.hostname or "").strip().lower() != "api.github.com":
+        return False
+    return _github_branch_protection_route_path_matches(origin_uri)
+
+
+def _github_branch_protection_enabled(payload: dict[str, Any], key: str) -> bool | None:
+    raw = payload.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    enabled = raw.get("enabled")
+    return enabled if isinstance(enabled, bool) else None
+
+
+def _github_branch_protection_status_check_count(payload: dict[str, Any]) -> int | None:
+    checks = payload.get("required_status_checks")
+    if checks is None:
+        return None
+    if not isinstance(checks, dict):
+        return None
+    count = 0
+    contexts = checks.get("contexts", [])
+    if contexts is None:
+        contexts = []
+    if not isinstance(contexts, list):
+        return None
+    for context in contexts:
+        safe_context = _safe_public_text(context, limit=120)
+        if not safe_context or _refresh_value_is_blocked(context):
+            return None
+        count += 1
+    check_rows = checks.get("checks", [])
+    if check_rows is None:
+        check_rows = []
+    if not isinstance(check_rows, list):
+        return None
+    for row in check_rows:
+        if not isinstance(row, dict):
+            return None
+        context = row.get("context")
+        if context is not None:
+            safe_context = _safe_public_text(context, limit=120)
+            if not safe_context or _refresh_value_is_blocked(context):
+                return None
+        count += 1
+    if "strict" in checks and not isinstance(checks.get("strict"), bool):
+        return None
+    return count
+
+
+def _json_payload_is_github_branch_protection_metadata(origin_uri: str, payload: Any) -> bool:
+    if _github_branch_protection_path_info(origin_uri) is None:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if _json_payload_is_feed(payload) or "items" in payload or "version" in payload:
+        return False
+    known_keys = {
+        "required_status_checks",
+        "required_pull_request_reviews",
+        "enforce_admins",
+        "required_linear_history",
+        "allow_force_pushes",
+        "allow_deletions",
+        "required_conversation_resolution",
+    }
+    if not any(key in payload for key in known_keys):
+        return False
+    if "required_status_checks" in payload and _github_branch_protection_status_check_count(payload) is None:
+        return False
+    reviews = payload.get("required_pull_request_reviews")
+    if reviews is not None:
+        if not isinstance(reviews, dict):
+            return False
+        approvals = reviews.get("required_approving_review_count")
+        if approvals is not None and _safe_optional_nonnegative_int(approvals) is None:
+            return False
+        for field in ("dismiss_stale_reviews", "require_code_owner_reviews"):
+            if field in reviews and not isinstance(reviews.get(field), bool):
+                return False
+    for field in (
+        "enforce_admins",
+        "required_linear_history",
+        "allow_force_pushes",
+        "allow_deletions",
+        "required_conversation_resolution",
+    ):
+        if field in payload and _github_branch_protection_enabled(payload, field) is None:
+            return False
+    return True
+
+
+def _github_branch_protection_refresh_summary(origin_uri: str, payload: dict[str, Any]) -> str:
+    path_info = _github_branch_protection_path_info(origin_uri)
+    repo, branch = path_info if path_info is not None else ("repository", "branch")
+    parts = [f"GitHub branch protection for {repo} branch {branch}"]
+    status_count = _github_branch_protection_status_check_count(payload)
+    if status_count is not None:
+        raw_checks = payload.get("required_status_checks")
+        checks = raw_checks if isinstance(raw_checks, dict) else {}
+        parts.append("required status checks: true")
+        if isinstance(checks.get("strict"), bool):
+            parts.append(f"strict status checks: {str(checks.get('strict')).lower()}")
+        parts.append(f"status check count: {status_count}")
+    reviews = payload.get("required_pull_request_reviews")
+    if isinstance(reviews, dict):
+        parts.append("pull request reviews: true")
+        approvals = _safe_optional_nonnegative_int(reviews.get("required_approving_review_count"))
+        if approvals is not None:
+            parts.append(f"required approvals: {approvals}")
+        if isinstance(reviews.get("require_code_owner_reviews"), bool):
+            parts.append(f"code owner reviews: {str(reviews.get('require_code_owner_reviews')).lower()}")
+        if isinstance(reviews.get("dismiss_stale_reviews"), bool):
+            parts.append(f"dismiss stale reviews: {str(reviews.get('dismiss_stale_reviews')).lower()}")
+    for field, label in (
+        ("enforce_admins", "enforce admins"),
+        ("required_linear_history", "linear history"),
+        ("allow_force_pushes", "allow force pushes"),
+        ("allow_deletions", "allow deletions"),
+        ("required_conversation_resolution", "conversation resolution"),
+    ):
+        enabled = _github_branch_protection_enabled(payload, field)
+        if enabled is not None:
+            parts.append(f"{label}: {str(enabled).lower()}")
+    return _bounded_refresh_summary("; ".join(parts))
 
 
 def _json_payload_is_github_branch_metadata(origin_uri: str, payload: dict[str, Any]) -> bool:
@@ -9174,6 +9360,19 @@ def _refresh_record_from_json(source_id: str, origin_uri: str, payload: Any) -> 
         }
     if _github_issue_timeline_path_matches(origin_uri):
         raise ValueError("refresh failed")
+    branch_protection_info = _github_branch_protection_path_info(origin_uri)
+    if branch_protection_info is not None:
+        repo, branch = branch_protection_info
+        if not _json_payload_is_github_branch_protection_metadata(origin_uri, payload):
+            raise ValueError("refresh failed")
+        return {
+            "metadata_only": True,
+            "title": f"GitHub branch protection {repo} {branch}",
+            "summary": _github_branch_protection_refresh_summary(origin_uri, payload),
+            "origin_uri": _safe_origin_uri(origin_uri, source_id=source_id),
+        }
+    if _github_branch_protection_path_matches(origin_uri):
+        raise ValueError("refresh failed")
     issue_events_info = _github_issue_events_path_info(origin_uri)
     if issue_events_info is not None:
         if not _json_payload_is_github_issue_events_metadata(origin_uri, payload):
@@ -9962,6 +10161,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
     if _github_issue_timeline_route_path_matches(raw_origin_uri):
         if not _github_issue_timeline_safe_origin(raw_origin_uri):
             raise RuntimeError("refresh fetcher disabled")
+    if _github_branch_protection_route_path_matches(raw_origin_uri):
+        branch_protection_origin = _safe_origin_uri(raw_origin_uri, source_id=_safe_public_id(source_id, fallback="source"))
+        if not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com") or _github_branch_protection_path_info(branch_protection_origin) is None:
+            raise RuntimeError("refresh fetcher disabled")
     if _github_issue_events_path_matches(raw_origin_uri) and not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com"):
         raise RuntimeError("refresh fetcher disabled")
     if _github_issue_labels_path_matches(raw_origin_uri):
@@ -10128,6 +10331,10 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
         request_accept = "application/json"
     if _github_issue_timeline_path_matches(safe_origin_uri):
         if _github_issue_timeline_path_info(safe_origin_uri) is None or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
+            raise RuntimeError("refresh fetcher disabled")
+        request_accept = "application/json"
+    if _github_branch_protection_path_matches(safe_origin_uri):
+        if _github_branch_protection_path_info(safe_origin_uri) is None or not _github_raw_hostname_is_exact(safe_origin_uri, "api.github.com"):
             raise RuntimeError("refresh fetcher disabled")
         request_accept = "application/json"
     if _github_issue_events_path_matches(safe_origin_uri):
@@ -10298,6 +10505,12 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             or _github_issue_timeline_path_info(final_url) != _github_issue_timeline_path_info(safe_origin_uri)
         ):
             raise RuntimeError("refresh fetcher disabled")
+        if _github_branch_protection_path_matches(safe_origin_uri) and (
+            not _github_raw_hostname_is_exact(final_url, "api.github.com")
+            or _github_branch_protection_path_info(final_url) is None
+            or _github_branch_protection_path_info(final_url) != _github_branch_protection_path_info(safe_origin_uri)
+        ):
+            raise RuntimeError("refresh fetcher disabled")
         if _github_rulesets_path_matches(safe_origin_uri) and (
             not _github_raw_hostname_is_exact(final_url, "api.github.com")
             or not _github_rulesets_path_repo(safe_final_url)
@@ -10420,6 +10633,11 @@ def _default_source_refresh_fetcher(*, source_id: str, origin_uri: str) -> dict[
             raise RuntimeError("refresh fetcher disabled")
         if _github_issue_timeline_path_matches(safe_origin_uri) and (
             _github_issue_timeline_path_info(safe_origin_uri) is None
+            or content_type != "application/json"
+        ):
+            raise RuntimeError("refresh fetcher disabled")
+        if _github_branch_protection_path_matches(safe_origin_uri) and (
+            _github_branch_protection_path_info(safe_origin_uri) is None
             or content_type != "application/json"
         ):
             raise RuntimeError("refresh fetcher disabled")
@@ -11342,6 +11560,11 @@ def run_source_refresh_jobs(
                 origin_uri = issue_timeline_origin
             else:
                 origin_uri = f"capy-memory://{source_id}"
+        elif _github_branch_protection_route_path_matches(raw_origin_uri) and (
+            not _github_raw_hostname_is_exact(raw_origin_uri, "api.github.com")
+            or _github_branch_protection_path_info(_safe_origin_uri(raw_origin_uri, source_id=source_id)) is None
+        ):
+            origin_uri = f"capy-memory://{source_id}"
         elif _github_repository_events_path_matches(raw_origin_uri) and not _github_repository_events_path_repo(raw_origin_uri):
             origin_uri = f"capy-memory://{source_id}"
         elif _github_pages_path_matches(raw_origin_uri) and (
