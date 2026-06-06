@@ -114,7 +114,7 @@ def main():
     proc = subprocess.Popen(
         [sys.executable, server_py], cwd=repo_root, env=env,
         stdout=log, stderr=subprocess.STDOUT,
-        **({"creationflags": 0x08000000} if sys.platform == "win32" else {}),
+        **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
     )
     try:
         if not _wait_for_health(timeout=30):

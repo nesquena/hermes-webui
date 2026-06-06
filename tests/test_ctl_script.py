@@ -145,7 +145,7 @@ def windows_pid(pid: int) -> int | None:
 def start_fake_launchd_process() -> subprocess.Popen:
     return subprocess.Popen(
         ["bash", "-lc", "exec sleep 30"],
-        **({"creationflags": 0x08000000} if sys.platform == "win32" else {}),
+        **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
     )
 
 
@@ -321,7 +321,7 @@ def test_stale_pid_file_is_removed_without_killing_unrelated_process(tmp_path):
     pid_file = hermes_home / "webui.pid"
     sleeper = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(30)"],
-        **({"creationflags": 0x08000000} if sys.platform == "win32" else {}),
+        **({"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {}),
     )
     try:
         pid_file.write_text(str(sleeper.pid), encoding="utf-8")
