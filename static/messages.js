@@ -1316,6 +1316,35 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   const _STREAM_FADE_DONE_DRAIN_MAX_MS=900;
   const _streamFadeEnabledForStream=window._fadeTextEffect===true;
 
+  function _mergeSettledToolCallsWithLiveMetadata(rawCalls){
+    const liveCalls=Array.isArray(S.toolCalls)?S.toolCalls:[];
+    const byTid=new Map();
+    liveCalls.forEach((tc,idx)=>{
+      if(!tc||typeof tc!=='object') return;
+      const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+      if(tid&&!byTid.has(tid)) byTid.set(tid,{tc,idx});
+    });
+    const used=new Set();
+    return (rawCalls||[]).map((raw,idx)=>{
+      const next={...(raw||{}),done:true};
+      const tid=next.tid||next.id||next.tool_call_id||next.call_id||'';
+      let matchEntry=tid?byTid.get(tid):null;
+      if(!matchEntry){
+        const name=next.name||((next.function||{}).name)||'';
+        const matchIdx=liveCalls.findIndex((tc,i)=>tc&&!used.has(i)&&(!name||tc.name===name));
+        if(matchIdx>=0) matchEntry={tc:liveCalls[matchIdx],idx:matchIdx};
+      }
+      if(matchEntry){
+        used.add(matchEntry.idx);
+        const live=matchEntry.tc||{};
+        for(const key of ['activityBurstId','duration','started_at']){
+          if((next[key]===undefined||next[key]===null)&&live[key]!==undefined&&live[key]!==null) next[key]=live[key];
+        }
+      }
+      return next;
+    });
+  }
+
   // rAF-throttled rendering: buffer tokens, render at most once per frame
   let _renderPending=false;
   // Extract display text from assistantText, stripping completed thinking blocks
@@ -1825,6 +1854,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     } else {
       assistantBody.innerHTML=esc(displayText);
     }
+    if(typeof _syncLiveWorklogReasonsForAnchor==='function') _syncLiveWorklogReasonsForAnchor(assistantRow, displayText);
   }
   function _resetAssistantSegment(){
     assistantRow=null;
@@ -2149,6 +2179,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             assistantBody.innerHTML = renderMd ? renderMd(fallbackText) : esc(fallbackText);
           }
         }
+        if(typeof _syncLiveWorklogReasonsForAnchor==='function') _syncLiveWorklogReasonsForAnchor(assistantRow, displayText);
       }
       scrollIfPinned();
       snapshotLiveTurn();
@@ -2159,6 +2190,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     } else {
       _pendingRafHandle=setTimeout(()=>requestAnimationFrame(_doRender), frameIntervalMs-sinceLastMs);
     }
+  }
+
+  function _completeAutomaticCompressionOnLiveProgress(sessionId){
+    const sid=String(sessionId||'');
+    const hasRunningLiveCard=!!document.querySelector('[data-live-compression-card="1"][data-compression-started-at]');
+    const hasRunningState=!!(window._compressionUi&&window._compressionUi.automatic&&window._compressionUi.phase==='running'&&(!sid||!window._compressionUi.sessionId||String(window._compressionUi.sessionId)===sid));
+    if(!hasRunningLiveCard&&!hasRunningState) return false;
+    if(typeof appendLiveCompressionCard==='function'){
+      appendLiveCompressionCard({
+        sessionId:sid,
+        phase:'done',
+        automatic:true,
+        message:'Context auto-compressed',
+      });
+    }
+    return true;
   }
 
   function _wireSSE(source){
@@ -2545,7 +2592,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
           const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
-          // Persist reasoning trace so thinking card survives page reload
+          // Persist reasoning trace for diagnostics; normal transcript rendering
+          // keeps provider reasoning hidden unless it is emitted as visible text.
           if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
           // Strip any inline <think> blocks still embedded in the server-side
           // content (M3 OpenAI-compat doesn't separate reasoning). Move them
@@ -2616,8 +2664,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             return hasTc||hasPartialTc||hasTu;
           });
           if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
-            S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
+            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
           } else {
+            if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
           }
           if(typeof renderSessionArtifacts==='function') renderSessionArtifacts();
@@ -2746,34 +2795,32 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
       if(d.session_id&&d.session_id!==activeSid) return;
-      if(typeof setCompressionUi==='function'){
-        const state={
-          sessionId:activeSid,
-          phase:'running',
-          automatic:true,
-          message:d.message||'Auto-compressing context...',
-          startedAt:Date.now()/1000,
-        };
-        setCompressionUi(state);
-        const liveAnswerStarted=!!(assistantRow||String(((_parseStreamState&&_parseStreamState())||{}).displayText||'').trim());
-        if(liveAnswerStarted&&typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state)){
-          // The live card is now anchored in the turn. Keeping the same running
-          // state in global transient UI makes later renderMessages() calls insert
-          // a duplicate Automatic Compression card.
-          window._compressionUi=null;
-          if(typeof _restoreCompressionPlaceholder==='function') _restoreCompressionPlaceholder();
-          snapshotLiveTurn();
-          return;
-        }
+      const state={
+        sessionId:activeSid,
+        phase:'running',
+        automatic:true,
+        message:'Compressing context',
+        startedAt:Date.now()/1000,
+      };
+      if(typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state)){
+        // Keep automatic compression inside the active Worklog. Calling
+        // renderMessages() here rebuilds from the still-empty persisted
+        // transcript during active streams and can erase already replayed tools.
+        if(typeof clearCompressionUi==='function') clearCompressionUi();
+        else window._compressionUi=null;
+        snapshotLiveTurn();
+        return;
       }
-      if(typeof renderMessages==='function') renderMessages({preserveScroll:true});
+      if(typeof setCompressionUi==='function'){
+        setCompressionUi(state);
+      }
       snapshotLiveTurn();
     });
 
     source.addEventListener('compressed',e=>{
-      // Context was auto-compressed during this turn. Render it through the
-      // same transient compression-card path as manual /compress, without
-      // inserting a fake assistant message into history or model context.
+      // Context was auto-compressed during this turn. Keep the live timeline
+      // honest by transitioning the running divider into a completed divider;
+      // final settlement removes live-only compression rows from the Worklog.
       if(!S.session) return;
       const currentSid=S.session.session_id;
       let d={};
@@ -2783,39 +2830,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||d.new_session_id===currentSid||d.continuation_session_id===currentSid));
       if(!eventMatchesCurrent) return;
       const displaySid=currentSid;
-      const message=String(d.message||'Context auto-compressed to continue the conversation').trim();
       if(d.usage&&typeof _syncCtxIndicator==='function'){
         S.lastUsage=typeof _mergeUsageForCtxIndicator==='function'
           ? _mergeUsageForCtxIndicator(d.usage,S.lastUsage||{})
           : {...(S.lastUsage||{}),...d.usage};
         _syncCtxIndicator(S.lastUsage);
       }
-      if(typeof setCompressionUi==='function'){
-        const state={
+      if(typeof appendLiveCompressionCard==='function'){
+        appendLiveCompressionCard({
           sessionId:displaySid,
           phase:'done',
           automatic:true,
-          message,
-          engine:d.engine,
-          mode:d.mode,
-          details:d.details,
-          summary:{headline:message},
+          message:'Context auto-compressed',
           continuationSessionId:continuationSid,
-        };
-        setCompressionUi(state);
-        const appended=typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state);
-        if(appended){
-          // The live card is now anchored in the turn. Do not keep the automatic
-          // completion state as global transient UI, otherwise every subsequent
-          // render projects the same Auto Compression card again.
-          window._compressionUi=null;
-          if(typeof _restoreCompressionPlaceholder==='function') _restoreCompressionPlaceholder();
-          snapshotLiveTurn();
-        }
+        });
       }
+      if(typeof clearCompressionUi==='function') clearCompressionUi();
+      else window._compressionUi=null;
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
       if(!S.busy&&typeof renderMessages==='function') renderMessages();
-      showToast(message||'Context compressed', 8000);
     });
 
     source.addEventListener('metering',e=>{
@@ -3114,8 +3147,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           return hasTc||hasPartialTc||hasTu;
         });
         if(!hasMessageToolMetadata&&session.tool_calls&&session.tool_calls.length){
-          S.toolCalls=(session.tool_calls||[]).map(tc=>({...tc,done:true}));
+          S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(session.tool_calls||[]);
         }else{
+          if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
           S.toolCalls=[];
         }
         if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
@@ -3190,7 +3224,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }catch(_){}
     }
-    const replayParams=replayOnly?_runJournalReplayParams():'';
+    const replayParams=(reconnecting||replayOnly)?_runJournalReplayParams():'';
     _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}${replayParams}`,document.baseURI||location.href).href,{withCredentials:true}));
   })();
 
