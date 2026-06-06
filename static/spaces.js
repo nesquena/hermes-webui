@@ -974,6 +974,8 @@
     const musicPreview = renderMusicSmokePreview(musicFlow);
     const researchPreview = demo === 'demo_research_harness_pdf_export' ? renderResearchHarnessSmokePreview(data) : '';
     const actionPolicy = renderDemoSmokeActionPolicyEvidence(data && data.autonomy_policy);
+    const promptPreflight = renderPromptPreflightEvidence(data && data.prompt_preflight);
+    const progressPreview = renderPackageProgressEvidence(data && data.progress_event, 'Demo progress');
     const compactionPreview = renderCompactionEvidence(data && (data.output_compaction || data.compaction));
     const contextStatus = renderContextLayerStatus(data && (data.context_status || data.contextStatus));
     const demoSpaceId = space.space_id ? String(space.space_id) : '';
@@ -993,7 +995,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+researchPreview+actionPolicy+compactionPreview+contextStatus+'</div>';
+      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+promptFlowPreview+notesPreview+kanbanPreview+snakePreview+stockPreview+musicPreview+researchPreview+promptPreflight+actionPolicy+progressPreview+compactionPreview+contextStatus+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){
@@ -1001,6 +1003,9 @@
     const passed = Number(data && data.passed || 0);
     const failed = Number(data && data.failed || 0);
     const results = Array.isArray(data && data.results) ? data.results : [];
+    const suitePreflight = renderPromptPreflightEvidence(data && data.prompt_preflight);
+    const suitePolicy = renderDemoSmokeActionPolicyEvidence(data && data.autonomy_policy);
+    const suiteProgress = renderPackageProgressEvidence(data && data.progress_event, 'Demo progress');
     const suiteCompaction = renderCompactionEvidence(data && (data.output_compaction || data.compaction));
     const contextStatus = renderContextLayerStatus(data && (data.context_status || data.contextStatus));
     const rows = results.slice(0, 20).map(function(item){
@@ -1077,7 +1082,7 @@
     }).join('');
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke suite '+(failed ? 'finished' : 'passed')+'</h3>' +
       '<div class="capy-spaces-muted">'+passed+' / '+total+' metadata-only smokes passed</div>' +
-      suiteCompaction + contextStatus +
+      suitePreflight + suitePolicy + suiteProgress + suiteCompaction + contextStatus +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 

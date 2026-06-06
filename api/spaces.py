@@ -4481,12 +4481,38 @@ def _space_demo_output_compaction(summary: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _space_demo_action_policy_receipt(demo: str) -> dict[str, Any]:
-    """Return metadata-only autonomy evidence for one individual demo smoke run."""
+def _space_demo_required_prompt_preflight_receipt(action: str, *, boundary: str = "space_demo_run") -> dict[str, Any]:
+    """Return metadata-only evidence that demo smoke runs remain preflight-gated.
+
+    Demo smokes use fixed metadata-only fixtures, but they cross creator/widget,
+    recovery, browser-surface, and source/context-adjacent boundaries. Surface the
+    required prompt-injection preflight gate without storing or echoing prompts.
+    """
+    safe_action = _context_value(action, 120) or "space.demo.run"
+    safe_boundary = _context_value(boundary, 80) or "space_demo_run"
+    return {
+        "available": True,
+        "action": safe_action,
+        "boundary": safe_boundary,
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": [
+            "creator_commit_approval_required",
+            "generated_widget_execution_approval_required",
+            "prompt_injection_preflight_required",
+        ],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+
+
+def _space_demo_action_policy_receipt_for_action(action: str) -> dict[str, Any]:
+    """Return metadata-only autonomy evidence for a demo smoke action."""
     from api.capy_policy import action_policy_receipt
 
-    safe_demo = str(demo or "").strip()
-    safe_action = f"space.demo.run.{safe_demo}" if safe_demo else "space.demo.run"
+    safe_action = _context_value(action, 120) or "space.demo.run"
     receipt = action_policy_receipt(
         safe_action,
         approval_gates=["creator_commit", "generated_widget_execution"],
@@ -4501,6 +4527,13 @@ def _space_demo_action_policy_receipt(demo: str) -> dict[str, Any]:
     }
     receipt.pop("model_route", None)
     return receipt
+
+
+def _space_demo_action_policy_receipt(demo: str) -> dict[str, Any]:
+    """Return metadata-only autonomy evidence for one individual demo smoke run."""
+    safe_demo = str(demo or "").strip()
+    safe_action = f"space.demo.run.{safe_demo}" if safe_demo else "space.demo.run"
+    return _space_demo_action_policy_receipt_for_action(safe_action)
 
 
 def _record_space_demo_progress_event(demo: str, space_id: str, event_type: str) -> dict[str, Any]:
@@ -4541,7 +4574,8 @@ def space_demo_run(name: str) -> dict[str, Any]:
     except Exception:
         _record_space_demo_progress_event(demo, space_id, "run.failed")
         raise
-    _record_space_demo_progress_event(demo, space_id, "run.completed" if result.get("ok") is True else "run.failed")
+    progress_event = _record_space_demo_progress_event(demo, space_id, "run.completed" if result.get("ok") is True else "run.failed")
+    result["progress_event"] = progress_event
     return result
 
 
@@ -4957,6 +4991,7 @@ def _space_demo_run_body(name: str) -> dict[str, Any]:
 
     summary = _space_demo_run_summary(demo, template, space_id, action=action)
     summary.update(extra)
+    summary["prompt_preflight"] = _space_demo_required_prompt_preflight_receipt(f"space.demo.run.{demo}")
     summary["autonomy_policy"] = _space_demo_action_policy_receipt(demo)
     summary["output_compaction"] = _space_demo_output_compaction(summary)
     summary["context_status"] = _space_demo_context_status()
@@ -5072,7 +5107,7 @@ def _space_demo_context_status() -> dict[str, Any]:
 def _record_space_demo_suite_progress_event(event_type: str) -> dict[str, Any]:
     """Best-effort metadata-only progress event for demo-suite smoke runs."""
     safe_event_type = event_type if event_type in {"run.started", "run.completed", "run.failed"} else "run.failed"
-    run_id = "space-demo-suite:run-all"
+    run_id = "space-demo:run-all"
     try:
         from api.capy_progress import record_progress_event
 
@@ -5105,7 +5140,7 @@ def space_demo_run_all() -> dict[str, Any]:
             exit_status=0 if passed == total else 1,
             max_chars=600,
         )
-        _record_space_demo_suite_progress_event("run.completed" if passed == total else "run.failed")
+        progress_event = _record_space_demo_suite_progress_event("run.completed" if passed == total else "run.failed")
         return {
             "ok": passed == total,
             "action": "space.demo.run_all",
@@ -5113,6 +5148,9 @@ def space_demo_run_all() -> dict[str, Any]:
             "total": total,
             "passed": passed,
             "failed": total - passed,
+            "prompt_preflight": _space_demo_required_prompt_preflight_receipt("space.demo.run_all", boundary="space_demo_run_all"),
+            "autonomy_policy": _space_demo_action_policy_receipt_for_action("space.demo.run_all"),
+            "progress_event": progress_event,
             "output_compaction": output_compaction,
             "context_status": _space_demo_context_status(),
             "results": results,

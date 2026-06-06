@@ -663,6 +663,36 @@ global.fetch = async function(path, opts = {}) {
         source: 'SECRET_SOURCE',
         html: '<img src=x onerror=bad()>',
       },
+      prompt_preflight: {
+        available: true,
+        action: 'space.demo.run.' + demo,
+        boundary: 'space_demo_run',
+        status: 'required',
+        severity: 'none',
+        categories: [],
+        checks: ['creator_commit_approval_required', 'generated_widget_execution_approval_required', 'prompt_injection_preflight_required'],
+        metadata_only: true,
+        raw_prompt_stored: false,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        html: '<img src=x onerror=bad()>',
+      },
+      progress_event: {
+        event_id: 'evt-demo-run-completed',
+        event_type: 'run.completed',
+        family: 'run',
+        run_id: 'space-demo:' + demo,
+        space_id: demo,
+        redaction_status: 'metadata_only',
+        stored: true,
+        metadata_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        html: '<img src=x onerror=bad()>',
+      },
       context_status: {
         available: true,
         metadata_only: true,
@@ -681,6 +711,48 @@ global.fetch = async function(path, opts = {}) {
       passed: 6,
       failed: 0,
       mode: 'metadata-only-smoke',
+      autonomy_policy: {
+        available: true,
+        action: 'space.demo.run_all',
+        mode: 'supervised',
+        label: 'Supervised',
+        approval_required: true,
+        approval_gates: ['creator_commit', 'generated_widget_execution'],
+        prompt_preflight_status: 'required',
+        model_route_hint: 'hint:reasoning',
+        metadata_only: true,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      prompt_preflight: {
+        available: true,
+        action: 'space.demo.run_all',
+        boundary: 'space_demo_run_all',
+        status: 'required',
+        severity: 'none',
+        categories: [],
+        checks: ['creator_commit_approval_required', 'generated_widget_execution_approval_required', 'prompt_injection_preflight_required'],
+        metadata_only: true,
+        raw_prompt_stored: false,
+        local_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
+      progress_event: {
+        event_id: 'evt-demo-run-all-completed',
+        event_type: 'run.completed',
+        family: 'run',
+        run_id: 'space-demo:run-all',
+        redaction_status: 'metadata_only',
+        stored: true,
+        metadata_only: true,
+        raw_prompt: 'SECRET_VALUE_DO_NOT_LEAK',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+      },
       output_compaction: {
         original_chars: 24000,
         compacted_chars: 900,
@@ -6376,6 +6448,12 @@ def test_spaces_ui_time_travel_walkthrough_is_visible_and_opens_widget_manager_m
     assert "Gates: Creator commit approval, Generated widget execution approval" in out["rootHtml"]
     assert "Model route hint: hint:reasoning" in out["rootHtml"]
     assert "metadata-only · local-only" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Boundary: space_demo_run" in out["rootHtml"]
+    assert "Status: required" in out["rootHtml"]
+    assert "Demo progress" in out["rootHtml"]
+    assert "run.completed" in out["rootHtml"]
+    assert "space-demo:demo_time_travel_restore" in out["rootHtml"]
     assert "openai" not in out["rootHtml"].lower()
     assert "gpt-5" not in out["rootHtml"].lower()
     assert "Model route: Reasoning" not in out["rootHtml"]
@@ -6408,6 +6486,12 @@ def test_spaces_ui_admin_recovery_walkthrough_is_visible_and_opens_recovery_widg
     assert "Gates: Creator commit approval, Generated widget execution approval" in out["rootHtml"]
     assert "Model route hint: hint:reasoning" in out["rootHtml"]
     assert "metadata-only · local-only" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Boundary: space_demo_run" in out["rootHtml"]
+    assert "Status: required" in out["rootHtml"]
+    assert "Demo progress" in out["rootHtml"]
+    assert "run.completed" in out["rootHtml"]
+    assert "space-demo:demo_safe_admin_recovery" in out["rootHtml"]
     assert "openai" not in out["rootHtml"].lower()
     assert "gpt-5" not in out["rootHtml"].lower()
     assert "Model route: Reasoning" not in out["rootHtml"]
@@ -6617,6 +6701,15 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
     assert "Safe admin recovery checklist" in out["rootHtml"]
     assert "Admin recovery flow: metadata-only · generated widgets not rendered · disabled widgets 1 · rollback controls available · repair controls available · module quarantine available" in out["rootHtml"]
     assert "Compaction evidence" in out["rootHtml"]
+    assert "Prompt preflight" in out["rootHtml"]
+    assert "Boundary: space_demo_run_all" in out["rootHtml"]
+    assert "Status: required" in out["rootHtml"]
+    assert "Action policy" in out["rootHtml"]
+    assert "Action: space.demo.run_all" in out["rootHtml"]
+    assert "Mode: Supervised · Approval required: yes · Prompt preflight: required" in out["rootHtml"]
+    assert "Demo progress" in out["rootHtml"]
+    assert "run.completed" in out["rootHtml"]
+    assert "space-demo:run-all" in out["rootHtml"]
     assert "Original output: 24000 chars" in out["rootHtml"]
     assert "Compacted output: 900 chars" in out["rootHtml"]
     assert "Redaction: redacted" in out["rootHtml"]

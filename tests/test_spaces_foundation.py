@@ -21349,7 +21349,7 @@ def test_spaces_demo_run_all_exposes_safe_output_compaction_receipt(monkeypatch,
     assert progress["active_run_count"] == 0
     assert progress["recent_family_counts"].get("run", 0) >= 2
     progress_records = [json.loads(line) for line in progress_events_log_path().read_text(encoding="utf-8").splitlines()]
-    demo_run_events = [item for item in progress_records if item.get("run_id") == "space-demo-suite:run-all"]
+    demo_run_events = [item for item in progress_records if item.get("run_id") == "space-demo:run-all"]
     assert [item["event_type"] for item in demo_run_events] == ["run.started", "run.completed"]
     assert all(item.get("redaction_status") == "metadata_only" for item in demo_run_events)
 
@@ -21384,7 +21384,7 @@ def test_spaces_demo_run_all_records_failed_progress_when_post_processing_fails(
     progress = progress_status()
     assert progress["active_run_count"] == 0
     progress_records = [json.loads(line) for line in progress_events_log_path().read_text(encoding="utf-8").splitlines()]
-    demo_run_events = [item for item in progress_records if item.get("run_id") == "space-demo-suite:run-all"]
+    demo_run_events = [item for item in progress_records if item.get("run_id") == "space-demo:run-all"]
     assert [item["event_type"] for item in demo_run_events] == ["run.started", "run.failed"]
     assert all(item.get("family") == "run" for item in demo_run_events)
     assert all(item.get("redaction_status") == "metadata_only" for item in demo_run_events)
@@ -21456,6 +21456,19 @@ def test_space_demo_run_exposes_metadata_only_action_policy_for_restore_and_reco
         result = spaces.space_demo_run(demo_name)
 
         assert result["ok"] is True
+        preflight = result["prompt_preflight"]
+        assert preflight == {
+            "available": True,
+            "action": f"space.demo.run.{demo_name}",
+            "boundary": "space_demo_run",
+            "status": "required",
+            "severity": "none",
+            "categories": [],
+            "checks": ["creator_commit_approval_required", "generated_widget_execution_approval_required", "prompt_injection_preflight_required"],
+            "metadata_only": True,
+            "raw_prompt_stored": False,
+            "local_only": True,
+        }
         receipt = result["autonomy_policy"]
         assert receipt["available"] is True
         assert receipt["action"] == f"space.demo.run.{demo_name}"
@@ -21473,7 +21486,14 @@ def test_space_demo_run_exposes_metadata_only_action_policy_for_restore_and_reco
         assert "resolved_provider" not in receipt["model_route_resolution"]
         assert "resolved_model" not in receipt["model_route_resolution"]
 
-        serialized = json.dumps(receipt, sort_keys=True).lower()
+        progress = result["progress_event"]
+        assert progress["event_type"] == "run.completed"
+        assert progress["family"] == "run"
+        assert progress["run_id"] == f"space-demo:{demo_name}"
+        assert progress["space_id"] == demo_name
+        assert progress["redaction_status"] == "metadata_only"
+
+        serialized = json.dumps({"policy": receipt, "preflight": preflight, "progress": progress}, sort_keys=True).lower()
         assert "openai" not in serialized
         assert "gpt-5" not in serialized
         assert "resolved_provider" not in serialized
@@ -21485,12 +21505,66 @@ def test_space_demo_run_exposes_metadata_only_action_policy_for_restore_and_reco
         assert "api_auth" not in serialized
         assert "api_key" not in serialized
         assert "bearer" not in serialized
-        assert "raw_prompt" not in serialized
+        assert '"raw_prompt":' not in serialized
         assert "html" not in serialized
         assert "source" not in serialized
         assert "token" not in serialized
         assert "generated body" not in serialized
         assert "source code" not in serialized
+
+
+def test_spaces_demo_run_all_exposes_metadata_only_policy_preflight_and_progress_receipts(monkeypatch, tmp_path):
+    monkeypatch.setenv("CAPY_MEMORY_TREE_ROOT", str(tmp_path / "capy-memory-tree"))
+    monkeypatch.setenv("CAPY_AUTONOMY_MODE", "semi_autonomous")
+    monkeypatch.setenv(
+        "CAPY_MODEL_ROUTING_HINTS",
+        json.dumps({"hint:reasoning": {"provider": "openai", "model": "gpt-5"}}),
+    )
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    suite = spaces.space_demo_run_all()
+
+    assert suite["ok"] is True
+    assert suite["action"] == "space.demo.run_all"
+    assert suite["prompt_preflight"] == {
+        "available": True,
+        "action": "space.demo.run_all",
+        "boundary": "space_demo_run_all",
+        "status": "required",
+        "severity": "none",
+        "categories": [],
+        "checks": ["creator_commit_approval_required", "generated_widget_execution_approval_required", "prompt_injection_preflight_required"],
+        "metadata_only": True,
+        "raw_prompt_stored": False,
+        "local_only": True,
+    }
+    receipt = suite["autonomy_policy"]
+    assert receipt["action"] == "space.demo.run_all"
+    assert receipt["mode"] == "semi_autonomous"
+    assert receipt["approval_gates"] == ["creator_commit", "generated_widget_execution"]
+    assert receipt["prompt_preflight_status"] == "required"
+    assert receipt["model_route_hint"] == "hint:reasoning"
+    assert receipt["model_route_resolution"] == {"hint": "hint:reasoning", "metadata_only": True, "local_only": True}
+    assert "model_route" not in receipt
+    progress = suite["progress_event"]
+    assert progress["event_type"] == "run.completed"
+    assert progress["family"] == "run"
+    assert progress["run_id"] == "space-demo:run-all"
+    assert progress["redaction_status"] == "metadata_only"
+
+    serialized = json.dumps({"preflight": suite["prompt_preflight"], "policy": receipt, "progress": progress}, sort_keys=True).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "ignore previous" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_auth" not in serialized
+    assert "api_key" not in serialized
+    assert "bearer" not in serialized
+    assert '"raw_prompt":' not in serialized
+    assert "generated body" not in serialized
+    assert "source code" not in serialized
+    assert "openai" not in serialized
+    assert "gpt-5" not in serialized
 
 
 def test_space_demo_run_records_browser_smoke_progress(monkeypatch, tmp_path):
