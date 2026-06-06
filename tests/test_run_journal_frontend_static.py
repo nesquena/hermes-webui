@@ -11,7 +11,7 @@ def test_reattach_path_uses_replay_when_status_reports_journal():
 
     assert "st.replay_available" in block
     assert "replayOnly=true" in block
-    assert "replayOnly?_runJournalReplayParams():''" in block
+    assert "(reconnecting||replayOnly)?_runJournalReplayParams():''" in block
     assert "_clearOwnerInflightState()" in block
 
 
@@ -65,7 +65,7 @@ def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
         )
 
     assert "updateThinking(" in wire_block, "reasoning replay should use the live Thinking card path"
-    assert "appendLiveToolCard(tc)" in wire_block, "tool replay should use live tool-card rendering"
+    assert "appendLiveToolCard(tc" in wire_block, "tool replay should use live tool-card rendering"
     # Compression replay must dispatch through setCompressionUi(...). The handler
     # body may build the state object inline (`setCompressionUi({...})`) or hoist
     # it into a `state` variable first (`setCompressionUi(state)`) — both forms

@@ -4,12 +4,12 @@ Issue 1: reasoningText accumulates across turns within a single SSE stream.
   - reasoningText must be reset at each turn boundary (tool and interim_assistant
     events) so the done event only persists the current turn's reasoning.
 
-Issue 2: ui.js display prefers m.reasoning over m.reasoning_content.
-  - The rendering path must prefer m.reasoning_content (the clean per-turn value
-    from the backend) over m.reasoning (which can be corrupted by Issue 1).
+Issue 2: provider reasoning metadata should not become visible Worklog text.
+  - The rendering path must keep m.reasoning_content / m.reasoning as diagnostics
+    rather than promoting either field into thinkingText.
 
-Both fixes are needed: Issue 2 alone cannot cover providers that stream reasoning
-events without populating reasoning_content on the final API message.
+Both fixes are needed: Issue 1 keeps persisted diagnostics scoped to a turn,
+while Issue 2 prevents those diagnostics from duplicating visible assistant prose.
 """
 
 import pathlib
@@ -89,44 +89,37 @@ class TestReasoningTextResetOnInterimAssistant:
         )
 
 
-# ── Issue 2: reasoning_content preference on read ────────────────────────────
+# ── Issue 2: reasoning metadata is persisted, not rendered ───────────────────
 
 
 class TestReasoningContentPreference:
-    """The rendering path in ui.js must prefer m.reasoning_content (the clean
-    per-turn value from the backend) over m.reasoning (which can be corrupted
-    by Issue 1's accumulation bug)."""
+    """Provider reasoning metadata is retained for diagnostics/cache signatures,
+    but must not drive the normal Worklog/thinking display path."""
 
-    def test_reasoning_content_checked_before_reasoning(self):
+    def test_reasoning_payload_still_in_message_signature(self):
         src = read('static/ui.js')
-        assert 'm.reasoning_content' in src, (
-            "ui.js must reference m.reasoning_content so the clean per-turn "
-            "value from the backend is used for thinking card display"
+        sig_fn = src.split("function _messageHasReasoningPayload(m)", 1)[1].split("function", 1)[0]
+        assert 'm.reasoning' in sig_fn, (
+            "ui.js should still treat persisted reasoning as message metadata "
+            "for cache/signature invalidation"
         )
 
-    def test_reasoning_content_preferred_in_thinking_text_fallback(self):
+    def test_reasoning_metadata_not_used_as_thinking_text(self):
         src = read('static/ui.js')
-        lines = src.splitlines()
-        for line in lines:
-            if 'thinkingText' in line and 'm.reasoning' in line:
-                if 'm.reasoning_content' not in line and 'reasoning_content' not in line:
-                    if 'Array.isArray' not in line:
-                        raise AssertionError(
-                            f"Line references m.reasoning without checking "
-                            f"m.reasoning_content first: {line.strip()}"
-                        )
+        extraction = src.split("let thinkingText='';", 1)[1].split("const isUser=m.role==='user';", 1)[0]
+        assert 'm.reasoning_content' not in extraction
+        assert 'm.reasoning' not in extraction
 
-    def test_reasoning_content_has_priority_over_reasoning(self):
-        """The fallback expression must evaluate reasoning_content first."""
+    def test_no_reasoning_content_to_thinking_text_assignment(self):
+        """Provider reasoning should not be promoted into Worklog prose."""
         src = read('static/ui.js')
         m = re.search(
             r"thinkingText\s*=\s*(m\.reasoning_content\s*\|\|\s*m\.reasoning)",
             src,
         )
-        assert m, (
-            "thinkingText assignment must use m.reasoning_content || m.reasoning "
-            "so the clean backend value takes priority over the potentially "
-            "corrupted frontend-accumulated value"
+        assert not m, (
+            "thinkingText must not be assigned from reasoning_content/reasoning; "
+            "those fields are diagnostics, not normal transcript Worklog text"
         )
 
 

@@ -2896,6 +2896,7 @@ from api.models import (
     get_state_db_session_messages,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    _active_stream_ids,
     _session_message_merge_key,
     _active_stream_ids,
     _is_empty_partial_activity_message,
@@ -8425,7 +8426,14 @@ def _parse_run_journal_after_seq(qs: dict, stream_id: str | None = None) -> int 
         return 0
 
 
-def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
+def _replay_run_journal(
+    handler,
+    stream_id: str,
+    after_seq: int | None,
+    *,
+    max_seq: int | None = None,
+    include_stale: bool = True,
+) -> bool:
     summary = find_run_summary(stream_id)
     if not summary:
         return False
@@ -8433,6 +8441,7 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
         str(summary.get("session_id") or ""),
         stream_id,
         after_seq=after_seq,
+        max_seq=max_seq,
     )
     for entry in journal.get("events") or []:
         _sse_with_id(
@@ -8441,7 +8450,7 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
             entry.get("payload"),
             entry.get("event_id"),
         )
-    if not summary.get("terminal"):
+    if include_stale and not summary.get("terminal"):
         stale = stale_interrupted_event(
             str(summary.get("session_id") or ""),
             stream_id,
@@ -8450,6 +8459,13 @@ def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
         if stale:
             _sse_with_id(handler, stale["event"], stale["payload"], stale["event_id"])
     return True
+
+
+def _run_journal_same_run_seq(event_id: str | None, stream_id: str) -> int | None:
+    event_run_id, event_seq = _parse_run_journal_event_id(event_id)
+    if event_run_id != stream_id:
+        return None
+    return event_seq
 
 
 def _runner_stream_cursor_from_query(qs: dict) -> str | None:
@@ -8569,26 +8585,58 @@ def _handle_sse_stream(handler, parsed):
         except _CLIENT_DISCONNECT_ERRORS:
             pass
         return True
-    subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
+    if hasattr(stream, "subscribe_with_snapshot"):
+        subscriber, stream_snapshot = stream.subscribe_with_snapshot()
+    else:
+        subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
+        stream_snapshot = {}
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
     handler.send_header("Cache-Control", "no-cache")
     handler.send_header("X-Accel-Buffering", "no")
     handler.send_header("Connection", "close")
     handler.end_headers()
+    replay_cutoff_seq = None
+    if qs.get("replay", [""])[0] or qs.get("after_seq", [None])[0] not in (None, "") or qs.get("after_event_id", [None])[0]:
+        snapshot_cutoff_seq = _run_journal_same_run_seq(
+            str(stream_snapshot.get("last_event_id") or ""),
+            stream_id,
+        )
+        try:
+            replayed = _replay_run_journal(
+                handler,
+                stream_id,
+                _parse_run_journal_after_seq(qs, stream_id),
+                max_seq=snapshot_cutoff_seq,
+                include_stale=False,
+            )
+            if replayed:
+                replay_cutoff_seq = snapshot_cutoff_seq
+        except _CLIENT_DISCONNECT_ERRORS:
+            raise
+        except Exception:
+            logger.debug("Failed to replay active run journal for stream %s", stream_id, exc_info=True)
     try:
         while True:
             try:
-                event, data = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
+                item = subscriber.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
                 handler.wfile.write(b": heartbeat\n\n")
                 handler.wfile.flush()
                 continue
+            if len(item) >= 3:
+                event, data, queued_event_id = item[0], item[1], item[2]
+            else:
+                event, data = item
+                queued_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
             # Stage-364: emit `id:` from STREAM_LAST_EVENT_ID side-channel so
             # the frontend's `_lastRunJournalSeq` cursor advances during live
             # streaming. Without this, mid-stream error→replay would arrive
             # with after_seq=0 and double-render every journaled event.
-            event_id = STREAM_LAST_EVENT_ID.get(stream_id)
+            event_id = queued_event_id or STREAM_LAST_EVENT_ID.get(stream_id)
+            event_seq = _run_journal_same_run_seq(event_id, stream_id)
+            if replay_cutoff_seq is not None and event_seq is not None and event_seq <= replay_cutoff_seq:
+                continue
             if event_id:
                 _sse_with_id(handler, event, data, event_id)
             else:
@@ -10852,6 +10900,41 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
+def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
+    """Return whether an active_stream_id still owns this session's next turn.
+
+    ``active_stream_id`` is written before the SSE channel is registered, so a
+    very fresh pending turn must also block duplicate chat_start requests. If we
+    only check STREAMS here, a second request can race through the registration
+    gap and overwrite the sidecar owner.
+    """
+    if not stream_id:
+        return False
+    with STREAMS_LOCK:
+        if stream_id in STREAMS:
+            return True
+    try:
+        from api import config as _live_config
+        with _live_config.ACTIVE_RUNS_LOCK:
+            if stream_id in (_live_config.ACTIVE_RUNS or {}):
+                return True
+    except Exception:
+        pass
+    if getattr(session, "pending_user_message", None):
+        try:
+            from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
+            grace_seconds = float(_REPAIR_STALE_PENDING_GRACE_SECONDS)
+        except Exception:
+            grace_seconds = 30.0
+        try:
+            pending_started_at = float(getattr(session, "pending_started_at", None) or 0)
+        except Exception:
+            pending_started_at = 0.0
+        if pending_started_at and time.time() - pending_started_at < grace_seconds:
+            return True
+    return False
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -10872,10 +10955,7 @@ def _start_chat_stream_for_session(
     diag.stage("active_stream_check") if diag else None
     current_stream_id = getattr(s, "active_stream_id", None)
     if current_stream_id:
-        diag.stage("active_stream_lock_wait") if diag else None
-        with STREAMS_LOCK:
-            current_active = current_stream_id in STREAMS
-        if current_active:
+        if _active_stream_blocks_chat_start(s, current_stream_id):
             diag.stage("response_write") if diag else None
             return {
                 "error": "session already has an active stream",
@@ -10893,21 +10973,45 @@ def _start_chat_stream_for_session(
         goal_related = True
         PENDING_GOAL_CONTINUATION.discard(s.session_id)
 
-    stream_id = uuid.uuid4().hex
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
-    with session_lock:
-        diag.stage("save_pending_state") if diag else None
-        was_hidden_empty_session = _is_hidden_empty_session(s)
-        _prepare_chat_start_session_for_stream(
-            s,
-            msg=msg,
-            attachments=attachments,
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            stream_id=stream_id,
-        )
+    while True:
+        with session_lock:
+            locked_stream_id = getattr(s, "active_stream_id", None)
+            if locked_stream_id:
+                if _active_stream_blocks_chat_start(s, locked_stream_id):
+                    diag.stage("response_write") if diag else None
+                    return {
+                        "error": "session already has an active stream",
+                        "active_stream_id": locked_stream_id,
+                        "_status": 409,
+                    }
+                needs_stale_cleanup = True
+            else:
+                needs_stale_cleanup = False
+                stream_id = uuid.uuid4().hex
+                diag.stage("save_pending_state") if diag else None
+                was_hidden_empty_session = _is_hidden_empty_session(s)
+                _prepare_chat_start_session_for_stream(
+                    s,
+                    msg=msg,
+                    attachments=attachments,
+                    workspace=workspace,
+                    model=model,
+                    model_provider=model_provider,
+                    stream_id=stream_id,
+                )
+                break
+        if needs_stale_cleanup:
+            diag.stage("stale_stream_cleanup") if diag else None
+            cleared = _clear_stale_stream_state(s)
+            if not cleared and getattr(s, "active_stream_id", None):
+                diag.stage("response_write") if diag else None
+                return {
+                    "error": "session already has an active stream",
+                    "active_stream_id": getattr(s, "active_stream_id", None),
+                    "_status": 409,
+                }
     if was_hidden_empty_session:
         publish_session_list_changed("session_new", profile=getattr(s, "profile", None))
     diag.stage("turn_journal_submitted") if diag else None

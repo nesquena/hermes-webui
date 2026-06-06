@@ -4871,8 +4871,13 @@ class StreamChannel:
         self._lock = threading.Lock()
         self._subscribers: list[queue.Queue] = []
         self._offline_buffer: list[tuple[str, object]] = []
+        self._last_event_id: str | None = None
 
     def subscribe(self) -> queue.Queue:
+        q, _snapshot = self.subscribe_with_snapshot()
+        return q
+
+    def subscribe_with_snapshot(self) -> tuple[queue.Queue, dict[str, object]]:
         q: queue.Queue = queue.Queue()
         with self._lock:
             # Replay buffered events to the new subscriber INSIDE the lock so a
@@ -4882,8 +4887,12 @@ class StreamChannel:
             # is safe. Per Opus advisor on stage-292.
             for item in self._offline_buffer:
                 q.put_nowait(item)
+            snapshot = {
+                "offline_buffered_events": len(self._offline_buffer),
+                "last_event_id": self._last_event_id,
+            }
             self._subscribers.append(q)
-        return q
+        return q, snapshot
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
@@ -4892,8 +4901,18 @@ class StreamChannel:
             except ValueError:
                 pass
 
-    def put_nowait(self, item: tuple[str, object]) -> None:
+    def note_last_event_id(self, event_id: str | None) -> None:
+        """Record the latest journal event id without changing the queue shape."""
+        if not event_id:
+            return
         with self._lock:
+            self._last_event_id = event_id
+
+    def put_nowait(self, item: tuple[str, object] | tuple[str, object, str | None]) -> None:
+        event_id = item[2] if len(item) >= 3 else None
+        with self._lock:
+            if event_id:
+                self._last_event_id = event_id
             subscribers = list(self._subscribers)
             if not subscribers:
                 self._offline_buffer.append(item)
@@ -4902,7 +4921,7 @@ class StreamChannel:
         for q in subscribers:
             q.put_nowait(item)
 
-    def diagnostic_snapshot(self) -> dict[str, int]:
+    def diagnostic_snapshot(self) -> dict[str, object]:
         """Return non-sensitive stream observation counters for health checks."""
         with self._lock:
             return {

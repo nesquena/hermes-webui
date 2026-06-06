@@ -264,8 +264,12 @@ _CANCEL_MARKER_PATTERNS = ('task cancelled', 'task canceled', 'response interrup
 
 _WEBUI_PROGRESS_PROMPT = """
 WebUI progress guidance:
-- Match the normal Hermes messaging style; do not add extra status updates solely because this is a browser session.
-- For long multi-step work that uses tools, you may provide brief user-visible progress updates before continuing with tool calls.
+- Match the normal Hermes messaging style, but do not let long tool-running WebUI turns appear silent.
+- For long multi-step work that uses tools, emit brief user-visible progress updates as normal assistant content, not only as hidden reasoning.
+- Before the first tool batch in a long task, say what you are about to inspect.
+- After each meaningful batch of tool calls, say what you just confirmed and what you will check next before continuing with more tools.
+- Do not run many independent tool batches back-to-back without visible assistant text between them when the task is still ongoing.
+- Do not keep progress only in reasoning, thinking, or tool-result channels; those are not a substitute for visible interim updates.
 - Each update should say what you are about to check, what you just confirmed, or why the next tool call is needed.
 - Keep updates concise, factual, and in the user's language. One or two short sentences are enough.
 - Do not reveal hidden reasoning, chain-of-thought, private scratchpads, secrets, raw logs, or long tool output.
@@ -808,6 +812,12 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
     _is_rate_limit = (not _is_quota) and (
         'rate limit' in _err_lower or '429' in err_str or (exc is not None and 'RateLimitError' in _exc_name)
     )
+    _is_compression_exhausted = (
+        'compression_exhausted' in _err_lower
+        or 'compression exhausted' in _err_lower
+        or ('context length exceeded' in _err_lower and 'cannot compress further' in _err_lower)
+        or ('context compression' in _err_lower and 'max compression attempts' in _err_lower)
+    )
     if _is_quota:
         return {
             'label': 'Out of credits',
@@ -831,6 +841,12 @@ def _classify_provider_error(err_str: str, exc=None, *, silent_failure: bool = F
             'label': 'Model not found',
             'type': 'model_not_found',
             'hint': 'The selected model was not found by the provider. Check the model ID in Settings or run `hermes model` to verify it exists for your provider.',
+        }
+    if _is_compression_exhausted:
+        return {
+            'label': 'Context compression exhausted',
+            'type': 'compression_exhausted',
+            'hint': 'The conversation context is too large to compress safely. Start a new conversation or retry with a narrower task.',
         }
     if silent_failure:
         return {
@@ -2894,6 +2910,37 @@ def _deduplicate_context_messages(messages):
     return deduped
 
 
+def _prune_context_tool_results_after_compression(agent, context_messages):
+    """Run the active compressor's cheap tool-result pruning on model context.
+
+    Auto-compression can happen mid-turn and then the agent may run more tools
+    before producing the final answer. Those completed tail tool results are
+    model-facing context, but they were produced after the compression pass and
+    therefore did not go through the compressor's tool-output pruning. Apply the
+    same cheap pruning once more after a confirmed compression event. This keeps
+    the visible transcript untouched while preventing the next turn from seeing
+    raw post-compression tool dumps.
+    """
+    if not context_messages:
+        return context_messages
+    compressor = getattr(agent, 'context_compressor', None)
+    prune = getattr(compressor, '_prune_old_tool_results', None)
+    if not callable(prune):
+        return context_messages
+    try:
+        pruned_messages, pruned_count = prune(
+            copy.deepcopy(context_messages),
+            protect_tail_count=getattr(compressor, 'protect_last_n', 20),
+            protect_tail_tokens=getattr(compressor, 'tail_token_budget', None),
+        )
+    except Exception:
+        logger.debug("post-compression context tool-result pruning failed", exc_info=True)
+        return context_messages
+    if not pruned_count:
+        return context_messages
+    return _deduplicate_context_messages(pruned_messages)
+
+
 def _restore_reasoning_metadata(previous_messages, updated_messages):
     """Carry forward display-only metadata lost during API-safe history sanitization.
 
@@ -3618,6 +3665,52 @@ def _assistant_reply_added_after_current_turn(result_messages, previous_context,
         and str(m.get('content') or '').strip()
         for m in candidates
     )
+
+
+def _session_lacks_final_assistant_answer(messages) -> bool:
+    """Return True when the persisted transcript ends before a final answer."""
+    for msg in reversed(list(messages or [])):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get('_error'):
+            return False
+        if _is_context_compression_marker(msg):
+            continue
+        role = msg.get('role')
+        if role == 'tool':
+            return True
+        if role == 'assistant':
+            content = msg.get('content')
+            if isinstance(content, list):
+                text = '\n'.join(
+                    str(part.get('text') or part.get('content') or '')
+                    for part in content
+                    if isinstance(part, dict)
+                )
+            else:
+                text = str(content or '')
+            if msg.get('tool_calls'):
+                return True
+            if text.strip():
+                return False
+            continue
+        if role == 'user':
+            return True
+    return True
+
+
+def _agent_result_terminal_failure(result) -> bool:
+    """Return True for agent results that must not be finalized as done."""
+    if not isinstance(result, dict):
+        return False
+    status = str(result.get('status') or result.get('state') or '').strip().lower()
+    if status in {'failed', 'error', 'partial', 'compression_exhausted'}:
+        return True
+    if result.get('compression_exhausted'):
+        return True
+    if result.get('failed') or result.get('partial'):
+        return True
+    return False
 
 
 _TOOL_RESULT_SNIPPET_MAX = 4000
@@ -4531,6 +4624,7 @@ def _run_agent_streaming(
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and event not in ('cancel', 'error'):
             return
+        event_id = None
         if run_journal is not None:
             try:
                 journaled = run_journal.append_sse_event(event, data)
@@ -4547,6 +4641,11 @@ def _run_agent_streaming(
                     STREAM_LAST_EVENT_ID[stream_id] = event_id
             except Exception:
                 logger.debug("Failed to append run journal event %s for stream %s", event, stream_id, exc_info=True)
+        if event_id and hasattr(q, "note_last_event_id"):
+            try:
+                q.note_last_event_id(event_id)
+            except Exception:
+                logger.debug("Failed to note event_id %s for stream %s", event_id, stream_id, exc_info=True)
         try:
             q.put_nowait((event, data))
         except Exception:
@@ -4576,7 +4675,7 @@ def _run_agent_streaming(
         if _is_compression_start:
             put('compressing', {
                 'session_id': session_id,
-                'message': 'Auto-compressing context to continue...',
+                'message': 'Compressing context',
             })
             return
         # Pass through rate-limit and fallback messages so the frontend can
@@ -5887,11 +5986,12 @@ def _run_agent_streaming(
                                 if isinstance(_part, dict) and isinstance(_part.get('text'), str):
                                     _part['text'] = _strip_xml_tool_calls(_part['text'])
 
-                # ── Detect silent agent failure (no assistant reply produced) ──
-                # When the agent catches an auth/network error internally it may return
-                # an empty final_response without raising — the stream would end with
-                # a done event containing zero assistant messages, leaving the user with
-                # no feedback. Emit an apperror so the client shows an inline error.
+                # ── Detect missing final assistant reply ──
+                # The agent may stream progress/interim text, run tools, then fail
+                # without persisting a final assistant answer. That must not fall
+                # through to done: the persisted session would look complete while
+                # ending on a tool/result row and the user would never see a final
+                # answer or error.
                 # Keep the current-turn assistant detection aligned with the
                 # display-merge logic. A compacted or replayed result payload
                 # is not always a simple append-only suffix, so use the
@@ -5905,8 +6005,10 @@ def _run_agent_streaming(
                     _previous_context_messages,
                     msg_text,
                 )
-                # _token_sent tracks whether on_token() was called (any streamed text)
-                if not _assistant_added and not _token_sent:
+                _terminal_failure = _agent_result_terminal_failure(result) or _session_lacks_final_assistant_answer(_all_result_messages)
+                if _terminal_failure:
+                    _assistant_added = False
+                if _terminal_failure or not _assistant_added:
                     if cancel_event.is_set():
                         _finalize_cancelled_turn(s, ephemeral=ephemeral)
                         if not ephemeral:
@@ -6215,6 +6317,10 @@ def _run_agent_streaming(
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
+                    s.context_messages = _prune_context_tool_results_after_compression(
+                        agent,
+                        s.context_messages,
+                    )
                     visible_after = visible_messages_for_anchor(s.messages, auto_compression=True)
                     # Find the LAST [CONTEXT COMPACTION] marker in s.messages
                     # and count visible messages before it. This is the correct
@@ -6278,7 +6384,7 @@ def _run_agent_streaming(
                         'old_session_id': _compression_origin_session_id,
                         'new_session_id': _compression_continuation_session_id,
                         'continuation_session_id': _compression_continuation_session_id,
-                        'message': 'Context auto-compressed to continue the conversation',
+                        'message': 'Compression finished',
                         'usage': _live_usage_snapshot(),
                     })
 
@@ -7698,6 +7804,12 @@ def cancel_stream(stream_id: str) -> bool:
                 logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
     if _emit_cancel_event and q:
+        _cancel_event_id = STREAM_LAST_EVENT_ID.get(stream_id)
+        if _cancel_event_id and hasattr(q, "note_last_event_id"):
+            try:
+                q.note_last_event_id(_cancel_event_id)
+            except Exception:
+                logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
             q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
         except Exception:

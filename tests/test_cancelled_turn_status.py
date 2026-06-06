@@ -122,6 +122,8 @@ class TestCancelledTurnPersistenceGuards:
     def test_silent_failure_path_checks_cancel_event_before_persisting_provider_error(self):
         src = _read("api/streaming.py")
         silent_idx = src.find("# ── Detect silent agent failure")
+        if silent_idx == -1:
+            silent_idx = src.find("# ── Detect missing final assistant reply")
         assert silent_idx != -1, "silent-failure block not found"
         apperror_idx = src.find("put('apperror', _error_payload)", silent_idx)
         assert apperror_idx != -1, "silent-failure apperror emission not found"
@@ -133,6 +135,19 @@ class TestCancelledTurnPersistenceGuards:
         )
         assert "cancelled" in block.lower(), (
             "The cancellation guard should persist/report a cancelled turn, not silently drop state."
+        )
+
+    def test_streamed_progress_without_final_assistant_still_reports_error(self):
+        src = _read("api/streaming.py")
+        missing_idx = src.find("# ── Detect missing final assistant reply")
+        assert missing_idx != -1, "missing-final-assistant guard not found"
+        apperror_idx = src.find("put('apperror', _error_payload)", missing_idx)
+        assert apperror_idx != -1, "missing-final-assistant guard must emit apperror"
+        block = src[missing_idx:apperror_idx]
+
+        assert "if not _assistant_added:" in block
+        assert "if not _assistant_added and not _token_sent" not in block, (
+            "Interim streamed progress must not mask a missing final assistant answer."
         )
 
     def test_exception_path_classifies_after_cancel_event_before_generic_error(self):

@@ -99,11 +99,14 @@ class TestToolCallGroupingStatic:
     def test_render_messages_gates_settled_activity_grouping(self):
         fn = _function_body(UI_JS, "renderMessages")
         helper = _function_body(UI_JS, "ensureActivityGroup")
-        assert "isSimplifiedToolCalling()" in fn, (
-            "Settled compact inline activity rendering should be gated by the Compact tool activity toggle."
+        assert "byActivity = new Map()" in fn, (
+            "Settled tool rendering should bucket by worklog segments/bursts."
         )
-        assert "tool-cards-toggle" in fn, (
-            "The non-simplified path should preserve the upstream loose tool-card controls."
+        assert "_toolWorklogListEl(group)" in fn, (
+            "Settled tools should render through the worklog list container."
+        )
+        assert "_syncToolCallGroupSummary(state.group)" in fn, (
+            "Settled worklog groups should refresh summary state."
         )
         assert "data-tool-call-group" in helper, (
             "Tool-call groups need a stable data-tool-call-group attribute for CSS and tests."
@@ -156,16 +159,20 @@ class TestToolCallGroupingStatic:
     def test_live_tool_cards_use_grouping_only_when_simplified(self):
         live_fn = _function_body(UI_JS, "appendLiveToolCard")
         settled_fn = _function_body(UI_JS, "renderMessages")
-        assert "isSimplifiedToolCalling()" in live_fn, (
-            "Live streaming tool cards should branch on the Compact tool activity timeline mode."
+        assert "isSimplifiedToolCalling()" not in live_fn, (
+            "Live streaming tool cards should no longer branch on compact/timeline mode."
         )
-        assert "ensureActivityGroup" in live_fn, (
-            "Compact live tool rendering should use the grouped activity container."
+        assert "ensureLiveWorklogContainer" in live_fn, (
+            "Live tool rendering should use the direct Worklog container."
         )
-        assert "toolRunningRow" in live_fn, (
-            "The non-simplified live tool path should preserve the upstream running-dots row."
+        assert "ensureActivityGroup" not in live_fn, (
+            "Live tool rendering must not show the settled L1 Activity summary while streaming."
         )
-        assert "buildToolCard" in live_fn and "buildToolCard" in settled_fn, (
+        assert "_toolWorklogListEl(group)" in live_fn, (
+            "Live tool cards should insert into the worklog list container."
+        )
+        step_fn = _function_body(UI_JS, "_appendWorklogStep")
+        assert "buildToolCard" in live_fn and "buildToolCard" in step_fn and "_appendWorklogStep" in settled_fn, (
             "Live and settled tool rendering should share buildToolCard() for consistent markup."
         )
         assert "data-live-tid" in live_fn, (
@@ -201,18 +208,31 @@ class TestToolCallGroupingStatic:
         assert "live:" in live_fn + thinking_fn, (
             "Live Activity groups should be keyed by active stream id."
         )
-        assert "_copyActivityDisclosureState('live:'+streamId, 'assistant:'" in done_fn, (
-            "When a live turn settles, its saved disclosure state should transfer to the persisted assistant turn."
+        assert "_copyActivityDisclosureState('live:'+streamId, 'assistant:'" not in done_fn, (
+            "Live disclosure state must not transfer to the final assistant turn; final L1 starts collapsed."
         )
 
-    def test_live_tool_activity_defaults_collapsed_unless_saved_open(self):
+    def test_live_tool_worklog_is_direct_until_settled(self):
         live_fn = _function_body(UI_JS, "appendLiveToolCard")
+        live_container = _function_body(UI_JS, "ensureLiveWorklogContainer")
         helper = _function_body(UI_JS, "ensureActivityGroup")
-        assert "collapsed:false" not in re.sub(r"\s+", "", live_fn), (
-            "Compact live tool activity should not force-open every time a chat is revisited."
+        assert "ensureLiveWorklogContainer" in live_fn, (
+            "Live tool events should append into the direct Worklog timeline."
+        )
+        assert "tool-worklog-list" in live_container and "data-live-worklog-shell" in live_container, (
+            "The direct live Worklog shell should own the L2 list without an L1 summary row."
+        )
+        assert "activity-summary" not in live_container and "tool-call-group-summary" not in live_container, (
+            "The settled Activity summary should not be present while the stream is running."
         )
         assert "savedState==='open'" in helper or 'savedState==="open"' in helper, (
-            "A previously-open Activity group should still restore open from persisted state."
+            "Live Activity groups can still restore explicit live open state."
+        )
+        assert "if(live && savedState==='open')" in helper or 'if(live && savedState==="open")' in helper, (
+            "Saved open state must be scoped to live groups so final L1 defaults collapsed."
+        )
+        assert "savedState==='closed'" in helper or 'savedState==="closed"' in helper, (
+            "A saved closed Activity group should still override the live expanded default."
         )
 
     def test_live_activity_summary_shows_readable_progress_without_persisted_content(self):
@@ -232,6 +252,35 @@ class TestToolCallGroupingStatic:
         )
         assert "tool-call-group-list" not in sync_fn, (
             "Readable progress must not reintroduce the noisy secondary tool-name list."
+        )
+
+    def test_terminal_worklog_titles_summarize_common_diagnostic_commands(self):
+        start = UI_JS.find("function _toolCommandTitle")
+        end = UI_JS.find("function _toolQueryTitle", start)
+        assert start != -1 and end != -1, "_toolCommandTitle() source window not found"
+        command_fn = UI_JS[start:end]
+        assert "git fetch" in command_fn and "git ahead/behind" in command_fn, (
+            "Terminal Worklog rows should distinguish common git audit commands "
+            "instead of falling back to the generic 'command' title."
+        )
+        assert "git log" in command_fn, (
+            "Commit/PR audit commands should show a git log title instead of "
+            "the generic command fallback."
+        )
+        assert "health check" in command_fn, (
+            "curl localhost /health checks should get a readable L2 title."
+        )
+        assert "process check" in command_fn and "port ${m[1]} check" in command_fn, (
+            "ps/grep and lsof diagnostics should be scannable in L2 while full "
+            "commands remain in L3 detail."
+        )
+        assert "launchctl" in command_fn, (
+            "launchd service checks should keep their service intent visible in "
+            "the Worklog row title."
+        )
+        assert "return _shortToolLabel(normalized,72);" in command_fn, (
+            "Long shell diagnostics should still expose a short L2 command "
+            "summary instead of falling back to the bare 'command' title."
         )
 
     def test_live_thinking_suppresses_visible_interim_echoes(self):
@@ -270,16 +319,17 @@ class TestToolCallGroupingStatic:
         )
         render_fn = _function_body(UI_JS, "renderMessages")
         assert "isSimplifiedToolCalling()" in render_fn and "assistantThinking.set(rawIdx, thinkingText)" in render_fn, (
-            "Compact settled transcript rendering should preserve Thinking cards after switching sessions."
+            "Compact settled transcript rendering should keep reasoning metadata available without promoting it to visible prose."
         )
-        assert "_thinkingActivityNode(thinkingText, false)" in render_fn, (
-            "Settled Thinking cards should render inside the compact Activity disclosure."
+        helper = _function_body(UI_JS, "_worklogReasoningTextFromMessage")
+        assert "return '';" in helper, (
+            "Provider reasoning metadata should not render as Worklog prose."
         )
-        assert "body.appendChild(_thinkingActivityNode(thinkingText, false))" in render_fn, (
-            "Settled Thinking cards should stay inside the same Activity body as the related tools."
+        assert "_appendWorklogStep" in render_fn, (
+            "Visible assistant anchors and tools should still build the compact Activity disclosure."
         )
-        assert ".agent-activity-thinking:not([data-live-thinking=\"1\"])" in render_fn, (
-            "Settled rerenders must remove previously inserted Thinking activity rows before rebuilding."
+        assert ".wl-reason[data-worklog-reason-source=\"reasoning\"]" in render_fn, (
+            "Settled rerenders must remove previously inserted reasoning Worklog rows before rebuilding."
         )
         assert "seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText))" in render_fn, (
             "The non-simplified path should preserve standalone settled thinking cards."
@@ -289,14 +339,17 @@ class TestToolCallGroupingStatic:
         live_thinking_fn = _function_body(UI_JS, "appendThinking")
         live_tool_fn = _function_body(UI_JS, "appendLiveToolCard")
         helper = _function_body(UI_JS, "ensureActivityGroup")
-        assert "isSimplifiedToolCalling()" in live_thinking_fn, (
-            "Live thinking should branch on the Compact tool activity toggle."
+        assert "isSimplifiedToolCalling()" not in live_thinking_fn, (
+            "Live provider thinking should not render through either compact or legacy thinking-card UI."
         )
-        assert "_thinkingActivityNode(thinkingText, false)" in live_thinking_fn, (
-            "Compact live thinking should render inside the Activity disclosure."
+        assert "_worklogReasonNodeFromText(thinkingText" not in live_thinking_fn, (
+            "Provider reasoning should not render as live Worklog prose."
         )
-        assert "ensureActivityGroup(blocks,{live:true" in live_thinking_fn and "body.appendChild(row)" in live_thinking_fn, (
-            "Compact live thinking should share the same Activity body as live tool cards."
+        assert "thinking-card-row" not in live_thinking_fn and "_renderThinkingInto" not in live_thinking_fn, (
+            "Live provider thinking should stay diagnostic-only instead of leaking as a thinking card."
+        )
+        assert "Provider reasoning/thinking is retained as diagnostics" in live_thinking_fn, (
+            "The live Thinking path should document that visible interim assistant text is the Worklog prose source."
         )
         assert "removeAttribute('data-live-activity-current')" not in live_thinking_fn, (
             "Reasoning/Thinking updates alone should not split consecutive tools into one-tool Activity rows."
@@ -307,15 +360,15 @@ class TestToolCallGroupingStatic:
         assert "group.setAttribute('data-live-activity-current','1')" in helper, (
             "New live Activity bursts must be marked current so later tools append to the right group."
         )
-        assert "body.querySelector" in live_tool_fn and "data-live-tid" in live_tool_fn, (
+        assert "querySelector" in live_tool_fn and "data-live-tid" in live_tool_fn, (
             "tool_complete must still update its current live Activity burst by tool id."
         )
         finalize_fn = _function_body(UI_JS, "finalizeThinkingCard")
-        assert "turn.querySelector('.agent-activity-thinking[data-thinking-active=\"1\"]')" in finalize_fn, (
-            "Compact Thinking cards live inside the assistant turn, so finalization must clear the active marker from the whole turn."
+        assert "turn.querySelector('.wl-reason[data-worklog-reason-active=\"1\"]')" in finalize_fn, (
+            "Finalization should still clean up any legacy active reasoning marker."
         )
-        assert "body.querySelector('.agent-activity-thinking[data-thinking-active=\"1\"]')" in live_thinking_fn and "setAttribute('data-thinking-active','1')" in live_thinking_fn, (
-            "Compact live thinking should reactivate the latest existing Thinking card instead of stacking a new card after every tool boundary."
+        assert "data-worklog-reason-active" not in live_thinking_fn, (
+            "New live reasoning text should not create active Worklog prose rows."
         )
         reset_fn = _function_body(MESSAGES_JS, "_resetAssistantSegment")
         assert "function closeCurrentLiveActivityGroup()" in UI_JS, (
@@ -411,28 +464,23 @@ class TestToolCardDesignTokens:
     def test_tool_card_css_uses_design_tokens_for_chrome(self):
         css_min = re.sub(r"\s+", "", CSS)
         assert ".tool-card{" in css_min, ".tool-card rule missing"
-        assert "border-radius:var(--radius-card)" in css_min, (
-            ".tool-card border radius should use --radius-card, not hardcoded px."
-        )
-        assert "background:var(--surface-subtle)" in css_min, (
-            ".tool-card background should use --surface-subtle."
-        )
-        assert "border:1pxsolidvar(--border-subtle)" in css_min, (
-            ".tool-card border should use --border-subtle."
+        tool_card_rule = css_min.rsplit(".tool-card{", 1)[1].split("}", 1)[0]
+        rows_rule = css_min.split(".tg-rows{", 1)[1].split("}", 1)[0]
+        assert "background:transparent" in tool_card_rule
+        assert "border:0" in tool_card_rule
+        assert "border-left:0" in tool_card_rule
+        assert "border-left:1pxsolidvar(--border-subtle)" in rows_rule, (
+            "Nested tool groups should be expressed with only a subtle left guide line."
         )
 
     def test_tool_card_header_and_text_use_spacing_and_font_tokens(self):
         css_min = re.sub(r"\s+", "", CSS)
         assert ".tool-card-header{" in css_min, ".tool-card-header rule missing"
-        assert "gap:var(--space-2)" in css_min, (
-            ".tool-card-header gap should use --space-2."
-        )
-        assert "padding:var(--space-1)var(--space-3)" in css_min, (
-            ".tool-card-header padding should use spacing tokens."
-        )
-        assert ".tool-card-name{" in css_min and "font-size:var(--font-size-xs)" in css_min, (
-            ".tool-card-name should use --font-size-xs."
-        )
-        assert ".tool-card-preview{" in css_min and "font-size:var(--font-size-xs)" in css_min, (
-            ".tool-card-preview should use --font-size-xs."
-        )
+        header_rule = css_min.rsplit(".tool-card-header{", 1)[1].split("}", 1)[0]
+        title_rule = css_min.split(".tl-title{", 1)[1].split("}", 1)[0]
+        assert "gap:7px" in header_rule
+        assert "padding:3px8px" in header_rule
+        assert "border-radius:7px" in header_rule
+        assert ".tool-card-name{" in css_min and "font-size:var(--message-body-font-size)" in css_min
+        assert "font-size:var(--message-body-font-size)" in title_rule
+        assert "font-family:var(--font-mono)" in title_rule

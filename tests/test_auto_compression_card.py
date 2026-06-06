@@ -2,7 +2,10 @@ from pathlib import Path
 
 from api.compression_anchor import visible_messages_for_anchor
 from api.models import Session
-from api.streaming import _is_fallback_lifecycle_message
+from api.streaming import (
+    _is_fallback_lifecycle_message,
+    _prune_context_tool_results_after_compression,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +33,46 @@ def _compressing_listener_block() -> str:
     return src[start:end]
 
 
+def test_post_compression_context_prunes_tail_tool_results_with_active_compressor():
+    class FakeCompressor:
+        protect_last_n = 20
+        tail_token_budget = 4096
+
+        def __init__(self):
+            self.calls = []
+
+        def _prune_old_tool_results(self, messages, protect_tail_count, protect_tail_tokens=None):
+            self.calls.append(
+                {
+                    "protect_tail_count": protect_tail_count,
+                    "protect_tail_tokens": protect_tail_tokens,
+                }
+            )
+            out = []
+            pruned = 0
+            for msg in messages:
+                next_msg = dict(msg)
+                if next_msg.get("role") == "tool" and len(str(next_msg.get("content") or "")) > 200:
+                    next_msg["content"] = "[browser_navigate] opened page (large snapshot summarized)"
+                    pruned += 1
+                out.append(next_msg)
+            return out, pruned
+
+    compressor = FakeCompressor()
+    agent = type("Agent", (), {"context_compressor": compressor})()
+    context_messages = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_big"}]},
+        {"role": "tool", "tool_call_id": "call_big", "content": "x" * 5000},
+        {"role": "assistant", "content": "Final answer"},
+    ]
+
+    pruned = _prune_context_tool_results_after_compression(agent, context_messages)
+
+    assert compressor.calls == [{"protect_tail_count": 20, "protect_tail_tokens": 4096}]
+    assert pruned[1]["content"] == "[browser_navigate] opened page (large snapshot summarized)"
+    assert context_messages[1]["content"] == "x" * 5000
+
+
 def test_auto_compression_running_sse_uses_active_session_running_card():
     block = _compressing_listener_block()
 
@@ -39,7 +82,8 @@ def test_auto_compression_running_sse_uses_active_session_running_card():
     assert "setCompressionUi" in block
     assert "phase:'running'" in block
     assert "automatic:true" in block
-    assert "message:d.message||'Auto-compressing context...'" in block
+    assert "message:'Compressing context'" in block
+    assert "message:d.message||'Compressing context'" not in block
 
 
 def test_agent_status_callback_emits_compressing_and_warning_events():
@@ -53,7 +97,7 @@ def test_agent_status_callback_emits_compressing_and_warning_events():
     # compressing events for compression lifecycle notices
     assert "put('compressing'" in block
     assert "'session_id': session_id" in block
-    assert "'message': 'Auto-compressing context to continue...'" in block
+    assert "'message': 'Compressing context'" in block
     assert "'preflight compression'" in block
     assert "'compressing'" in block
     assert "'compacting context'" in block
@@ -95,7 +139,7 @@ def test_fallback_lifecycle_message_predicate_matches_agent_emitters():
     )
     assert not _is_fallback_lifecycle_message(
         "lifecycle",
-        "Auto-compressing context to continue...",
+        "Compressing context",
     )
 
 
@@ -105,7 +149,18 @@ def test_auto_compression_completion_transition_is_preserved_after_running_liste
     compressed_idx = src.find("source.addEventListener('compressed'")
     assert compressing_idx != -1 and compressed_idx != -1
     assert compressing_idx < compressed_idx
+    assert "appendLiveCompressionCard({" in _compressed_listener_block()
     assert "phase:'done'" in _compressed_listener_block()
+    assert "message:'Context auto-compressed'" in _compressed_listener_block()
+    assert "clearCompressionUi()" in _compressed_listener_block()
+
+
+def test_auto_compression_completion_ignores_legacy_payload_message():
+    block = _compressed_listener_block()
+
+    assert "d.message||'Compression finished'" not in block
+    assert "setCompressionUi" not in block
+    assert "message:'Context auto-compressed'" in block
 
 
 def test_auto_compression_running_sse_stamps_elapsed_timer_start():
@@ -115,7 +170,7 @@ def test_auto_compression_running_sse_stamps_elapsed_timer_start():
     assert block.index("startedAt:Date.now()/1000") < block.index("setCompressionUi(state)")
 
 
-def test_auto_compression_running_card_renders_elapsed_timer_and_caps_updates():
+def test_auto_compression_running_card_keeps_elapsed_timer_out_of_visible_copy():
     src = _read("static/ui.js")
     start = src.find("function _autoCompressionPreviewText")
     assert start != -1, "auto compression preview helper not found"
@@ -126,8 +181,9 @@ def test_auto_compression_running_card_renders_elapsed_timer_and_caps_updates():
     assert "const _COMPRESSION_ELAPSED_MAX_SECONDS=5*60;" in src
     assert "function _compressionElapsedLabel(state)" in src
     assert "_formatActiveElapsedTimer" in src
-    assert "_compressionElapsedLabel(state)" in helper
-    assert "elapsedLabel" in helper
+    assert "_compressionElapsedLabel(state)" not in helper
+    assert "elapsedLabel" not in helper
+    assert "`Elapsed: ${elapsedLabel}`" not in helper
     assert "_autoCompressionPreviewText(state)" in helper
     assert "_autoCompressionDetailText(state)" in helper
     assert "function _startCompressionElapsedTimer()" in src
@@ -135,6 +191,104 @@ def test_auto_compression_running_card_renders_elapsed_timer_and_caps_updates():
     assert "function _updateCompressionElapsedCards(state)" in src
     assert "_startCompressionElapsedTimer();" in src
     assert "_clearCompressionElapsedTimer();" in src
+
+
+def test_auto_compression_uses_command_action_copy():
+    src = _read("static/ui.js")
+    start = src.find("function _autoCompressionPreviewText")
+    assert start != -1, "auto compression preview helper not found"
+    end = src.find("function _autoCompressionDetailText", start)
+    assert end != -1, "auto compression detail helper not found after preview helper"
+    helper = src[start:end]
+
+    assert "Compressing context" in helper
+    assert "Context auto-compressed" in helper
+    assert "Compression finished" not in helper
+    assert "return running?'Running':'Done';" not in helper
+
+
+def test_auto_compression_running_card_defaults_collapsed():
+    src = _read("static/ui.js")
+    start = src.find("function _autoCompressionCardsHtml")
+    assert start != -1, "auto compression card helper not found"
+    end = src.find("function _compressionCardsNode", start)
+    assert end != -1, "compression cards node helper not found after auto helper"
+    helper = src[start:end]
+
+    assert "auto-compression-divider" in helper
+    assert "open: false" not in helper
+    assert "open: running" not in helper
+
+
+def test_auto_compression_uses_centered_noninteractive_divider():
+    src = _read("static/style.css")
+
+    assert ".auto-compression-divider" in src
+    assert "grid-template-columns:minmax(32px,1fr) auto minmax(32px,1fr)" in src
+    assert "pointer-events:none" in src
+    override = src.split(".auto-compression-divider{", 1)[1].split("}", 1)[0]
+    assert "color:var(--muted)" in override
+    assert "user-select:none" in override
+
+
+def test_auto_compression_worklog_row_does_not_use_tool_card_affordances():
+    src = _read("static/ui.js")
+    start = src.find("function _autoCompressionWorklogNode")
+    assert start != -1, "auto compression worklog node helper not found"
+    end = src.find("function _compressionCardsNode", start)
+    assert end != -1, "compression cards node helper not found after worklog helper"
+    helper = src[start:end]
+
+    assert "tool-card-running-dot" not in helper
+    assert "auto_compress_label" not in helper
+    assert "tool-card-header" not in helper
+    assert "onclick" not in helper
+    assert "tabindex" not in helper
+    assert "tl-caret" not in helper
+    assert "auto-compression-divider" in helper
+    assert "auto-compression-divider-line" in helper
+    assert "_autoCompressionPreviewText(state)" in helper
+
+
+def test_auto_compression_live_card_appends_to_worklog_timeline():
+    src = _read("static/ui.js")
+    start = src.find("function appendLiveCompressionCard")
+    assert start != -1, "live compression card append helper not found"
+    end = src.find("function _isHandoffSummaryToolPayload", start)
+    assert end != -1, "handoff helper not found after live compression helper"
+    helper = src[start:end]
+
+    assert "ensureLiveWorklogContainer" in helper
+    assert "_toolWorklogListEl(group)" in helper
+    assert "_autoCompressionWorklogNode(state)" in helper
+    automatic_branch = helper.split("if(state.automatic){", 1)[1].split("const node=_compressionCardsNode(state);", 1)[0]
+    assert "inner.appendChild(node)" not in automatic_branch
+    assert "list.appendChild(node)" in automatic_branch
+
+
+def test_final_settle_removes_live_auto_compression_row():
+    src = _read("static/ui.js")
+    start = src.find("function clearLiveToolCards")
+    assert start != -1, "live tool cleanup helper not found"
+    end = src.find("function _removeEmptyLiveWorklogShells", start)
+    assert end != -1, "next live worklog helper not found after cleanup helper"
+    helper = src[start:end]
+
+    assert ".live-worklog[data-live-worklog-shell]" in helper
+    assert "data-live-compression-card" in src
+
+
+def test_final_settle_drops_transient_automatic_compression_state():
+    src = _read("static/ui.js")
+    start = src.find("function renderMessages")
+    assert start != -1, "renderMessages not found"
+    end = src.find("function _toolDisplayName", start)
+    assert end != -1, "renderMessages end marker not found"
+    helper = src[start:end]
+
+    assert "compressionState && compressionState.automatic" in helper
+    assert "window._compressionUi=null;" in helper
+    assert "compressionState=null;" in helper
 
 
 def test_auto_compression_elapsed_cap_uses_non_frozen_label():
@@ -158,11 +312,12 @@ def test_auto_compression_running_detail_avoids_duplicate_message_text():
     assert end != -1, "auto compression card helper not found after detail helper"
     helper = src[start:end]
 
-    assert "return elapsedLabel?`Elapsed: ${elapsedLabel}`:base;" in helper
+    assert "if(running)return '';" in helper
+    assert "`Elapsed: ${elapsedLabel}`" not in helper
     assert "${base}\\nElapsed:" not in helper
 
 
-def test_auto_compression_done_detail_surfaces_continuation_handoff():
+def test_auto_compression_done_detail_is_not_persisted_in_worklog():
     src = _read("static/ui.js")
     start = src.find("function _autoCompressionDetailText")
     assert start != -1, "auto compression detail helper not found"
@@ -170,9 +325,9 @@ def test_auto_compression_done_detail_surfaces_continuation_handoff():
     assert end != -1, "auto compression card helper not found after detail helper"
     helper = src[start:end]
 
-    assert "continuationSessionId" in helper
-    assert "Continued in compressed session" in helper
-    assert "return [base,handoff].filter(Boolean).join('\\n');" in helper
+    assert "continuationSessionId" not in helper
+    assert "Continued in compressed session" not in helper
+    assert "return '';" in helper
 
 
 def test_auto_compression_live_card_keeps_elapsed_state_for_timer_refresh():
@@ -188,16 +343,69 @@ def test_auto_compression_live_card_keeps_elapsed_state_for_timer_refresh():
     assert "_compressionLiveCardState" in src
 
 
-def test_auto_compression_does_not_rerender_over_live_answer_text():
+def test_auto_compression_does_not_rerender_over_live_worklog():
     block = _compressing_listener_block()
     src = _read("static/ui.js")
 
-    assert "const liveAnswerStarted=" in block
+    assert "const liveAnswerStarted=" not in block
     assert "appendLiveCompressionCard(state)" in block
-    assert block.index("appendLiveCompressionCard(state)") < block.index("renderMessages({preserveScroll:true})")
-    assert "window._compressionUi=null;" in block
+    assert "renderMessages({preserveScroll:true})" not in block
+    assert "restoreLiveTurnHtmlForSession(activeSid)" not in block
+    assert block.index("appendLiveCompressionCard(state)") < block.index("setCompressionUi(state)")
+    assert "clearCompressionUi()" in block
     assert "function appendLiveCompressionCard(state)" in src
     assert 'data-live-compression-card' in src
+
+
+def test_auto_compression_live_repeated_starts_keep_only_current_running_row():
+    src = _read("static/ui.js")
+    start = src.find("function appendLiveCompressionCard(state)")
+    assert start != -1, "live compression card append helper not found"
+    end = src.find("function _isHandoffSummaryToolPayload", start)
+    assert end != -1, "handoff helper not found after live compression helper"
+    helper = src[start:end]
+
+    assert "node.setAttribute('data-compression-phase',String(state.phase||''));" in helper
+    assert "const existingRunning=group.querySelector('[data-live-compression-card=\"1\"][data-compression-started-at]');" in helper
+    assert 'const existing=state.phase===\'running\'?existingRunning:(existingRunning||existingDone);' in helper
+    assert "if(existing) existing.replaceWith(node);" in helper
+    assert "else list.appendChild(node);" in helper
+
+
+def test_auto_compression_running_card_completes_on_followup_live_events():
+    src = _read("static/messages.js")
+
+    assert "function _completeAutomaticCompressionOnLiveProgress" in src
+    helper = src.split("function _completeAutomaticCompressionOnLiveProgress", 1)[1].split("source.addEventListener('token'", 1)[0]
+    assert "data-live-compression-card=\"1\"][data-compression-started-at]" in helper
+    assert "window._compressionUi&&window._compressionUi.automatic&&window._compressionUi.phase==='running'" in helper
+    assert "phase:'done'" in helper
+    assert "message:'Context auto-compressed'" in helper
+    assert "appendLiveCompressionCard({" in helper
+
+    for event_name in ("token", "interim_assistant", "reasoning", "tool", "tool_complete"):
+        start = src.find(f"source.addEventListener('{event_name}'")
+        assert start != -1, f"{event_name} listener not found"
+        end = src.find("source.addEventListener(", start + 1)
+        assert end != -1, f"{event_name} listener end not found"
+        block = src[start:end]
+        assert "_completeAutomaticCompressionOnLiveProgress(activeSid)" in block
+        assert "settleLiveCompressionCards" not in block
+        assert "clearCompressionUi()" not in block
+
+
+def test_auto_compression_elapsed_update_is_not_visible_detail_churn():
+    src = _read("static/ui.js")
+    start = src.find("function _updateCompressionElapsedCards")
+    assert start != -1, "elapsed update helper not found"
+    end = src.find("function _startCompressionElapsedTimer", start)
+    assert end != -1, "timer helper not found after elapsed updater"
+    helper = src[start:end]
+
+    assert "return false;" in helper
+    assert ".tool-card-compress-auto" not in helper
+    assert "tool-card-preview" not in helper
+    assert "tool-card-result" not in helper
 
 
 def test_auto_compression_sse_uses_transient_card_not_fake_message():
@@ -207,13 +415,12 @@ def test_auto_compression_sse_uses_transient_card_not_fake_message():
 
     assert "*[Context was auto-compressed to continue the conversation]*" not in src
     assert "S.messages.push" not in block
-    assert "setCompressionUi" in block
+    assert "setCompressionUi" not in block
     assert "phase:'done'" in block
     assert "automatic:true" in block
+    assert "appendLiveCompressionCard" in block
     assert "_setCompressionSessionLock" in block
-    assert "const appended=typeof appendLiveCompressionCard==='function'&&appendLiveCompressionCard(state);" in block
-    assert "window._compressionUi=null;" in block
-    assert block.index("appendLiveCompressionCard(state)") < block.index("window._compressionUi=null;")
+    assert "clearCompressionUi()" in block
 
 
 def test_auto_compression_sse_keeps_inactive_and_malformed_paths_safe():
@@ -221,7 +428,7 @@ def test_auto_compression_sse_keeps_inactive_and_malformed_paths_safe():
 
     guard = "if(!S.session) return;"
     assert guard in block
-    assert block.index(guard) < block.index("setCompressionUi")
+    assert block.index(guard) < block.index("appendLiveCompressionCard")
     assert "try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }" in block
     assert "const eventSid=d.old_session_id||d.session_id||activeSid;" in block
     assert "const eventMatchesCurrent=" in block
@@ -257,9 +464,8 @@ def test_auto_compression_done_accepts_event_after_current_session_rotates():
     assert "const currentSid=S.session.session_id;" in block
     assert "const eventMatchesCurrent=" in block
     assert "const displaySid=currentSid;" in block
-    assert "sessionId:displaySid" in block
     assert block.index("const eventSid=") < block.index("const eventMatchesCurrent=")
-    assert block.index("const displaySid=") < block.index("setCompressionUi(state)")
+    assert block.index("const displaySid=") < block.index("appendLiveCompressionCard")
 
 
 def test_auto_compression_done_sse_refreshes_context_indicator_usage():
@@ -268,7 +474,7 @@ def test_auto_compression_done_sse_refreshes_context_indicator_usage():
     assert "if(d.usage&&typeof _syncCtxIndicator==='function')" in block
     assert "_mergeUsageForCtxIndicator(d.usage,S.lastUsage||{})" in block
     assert "_syncCtxIndicator(S.lastUsage);" in block
-    assert block.index("_syncCtxIndicator(S.lastUsage);") < block.index("setCompressionUi")
+    assert block.index("_syncCtxIndicator(S.lastUsage);") < block.index("appendLiveCompressionCard")
 
 
 def test_auto_compression_done_payload_includes_live_usage_snapshot():
@@ -283,6 +489,7 @@ def test_auto_compression_done_payload_includes_live_usage_snapshot():
     assert "'old_session_id': _compression_origin_session_id" in block
     assert "'new_session_id': _compression_continuation_session_id" in block
     assert "'continuation_session_id': _compression_continuation_session_id" in block
+    assert "'message': 'Compression finished'" in block
     assert "'usage': _live_usage_snapshot()" in block
 
 
@@ -310,24 +517,17 @@ def test_auto_compression_card_reuses_compression_card_renderer():
     helper = src[start:end]
 
     assert "if(state.automatic) return _autoCompressionCardsHtml(state);" in src
-    assert "tool-card-row compression-card-row" in helper
-    assert "tool-card-compress-complete tool-card-compress-auto" in helper
-    assert "auto_compress_label" in helper
+    assert "tool-card-row compression-card-row auto-compression-divider-row" in helper
+    assert "auto-compression-divider-line" in helper
+    assert "variantClass: 'tool-card-compress-auto'" not in helper
+    assert "statusLabel: preview" not in helper
 
 
-def test_auto_compression_compressed_sse_showtoast_has_explicit_longer_duration():
+def test_auto_compression_compressed_sse_does_not_show_persistent_completion_toast():
     block = _compressed_listener_block()
 
-    assert 'showToast' in block
-    # Must call showToast with an explicit duration that is meaningfully longer
-    # than the default (3000 ms) so the compressed event toast is harder to miss.
-    import re
-    m = re.search(r'showToast\(.*?,\s*(\d+)\s*\)', block)
-    assert m is not None, 'showToast call in compressed SSE handler has no explicit duration'
-    duration = int(m.group(1))
-    assert duration >= 8000, (
-        f'compressed SSE showToast duration ({duration} ms) must be >= 8000 ms'
-    )
+    assert 'showToast' not in block
+    assert "Compression finished" not in block
 
 
 def test_auto_compression_card_survives_compression_session_rotation():
@@ -379,7 +579,27 @@ def test_context_compaction_branch_precedes_user_bubble_branch():
     assert context_idx != -1, "context compaction render branch not found"
     assert user_idx != -1, "normal user bubble render branch not found"
     assert context_idx < user_idx
-    assert "_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard)" in render_prefix
+    assert "_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard)" not in render_prefix
+    assert "continue;" in render_prefix[context_idx:user_idx]
+
+
+def test_settled_transcript_suppresses_context_compaction_reference_cards():
+    src = _read("static/ui.js")
+
+    assert "function _shouldShowSettledCompressionReference" in src
+    assert "!_isContextCompactionText(referenceText)" in src
+
+    visible_filter_start = src.find("const vis=S.messages.filter")
+    assert visible_filter_start != -1, "visible message filter not found"
+    visible_filter_end = src.find("$('emptyState')", visible_filter_start)
+    visible_filter = src[visible_filter_start:visible_filter_end]
+    assert "if(_isContextCompactionMessage(m)) return false;" in visible_filter
+
+    vis_idx_start = src.find("for(const m of S.messages)", visible_filter_end)
+    assert vis_idx_start != -1, "raw message index loop not found"
+    vis_idx_end = src.find("let lastUserRawIdx", vis_idx_start)
+    vis_idx_loop = src[vis_idx_start:vis_idx_end]
+    assert "if(_isContextCompactionMessage(m)){ri++;continue;}" in vis_idx_loop
 
 
 def test_preserved_task_list_skips_normal_visible_message_path():
@@ -416,7 +636,8 @@ def test_preserved_task_list_renders_through_compression_card_path():
     assert "tool-card-compress-reference" in helper
     assert "data-compression-card=\"1\"" in helper
     assert "li('list-todo',13)" in helper
-    assert "_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard)" in src
+    assert "const preservedOnlyNode=" in src
+    assert "_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)" in src
 
 
 def test_context_anchor_reference_uses_session_summary_fallback():
@@ -426,7 +647,8 @@ def test_context_anchor_reference_uses_session_summary_fallback():
     assert "const sessionCompressionSummary" in src
     assert "referenceText=referenceMessage" in src
     assert ": sessionCompressionSummary" in src
-    assert "!!referenceText && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary)" in src
+    assert "_shouldShowSettledCompressionReference(referenceText)" in src
+    assert "!_isContextCompactionText(referenceText)" in src
 
 
 def test_compression_anchor_matching_tolerates_legacy_missing_timestamp():
@@ -580,9 +802,8 @@ def test_preserved_task_list_attaches_once_per_render():
     assert "const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);" in src
     assert "S.messages.filter(m=>_isPreservedCompressionTaskListMessage(m))" not in src
     assert "let preservedCompressionTaskCardsAttached=!!referenceNode;" in src
-    assert "const preservedForThisCard=preservedCompressionTaskCardsAttached?[]:preservedCompressionTaskMessages;" in src
-    assert "if(preservedForThisCard.length) preservedCompressionTaskCardsAttached=true;" in src
-    assert "(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)" in src
+    assert "const preservedOnlyNode=" in src
+    assert "(!preservedCompressionTaskCardsAttached&&(!referenceNode||compressionState)&&preservedCompressionTaskMessages.length)" in src
 
 
 def test_preserved_task_list_is_suppressed_when_latest_todo_state_has_no_active_items():
