@@ -38,6 +38,11 @@ Product implication: future Space Agent parity should be judged not only by demo
 
 Recent completed slices:
 
+- `feat(capy-memory): ingest GitHub Actions selected-actions metadata`
+  - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub Actions selected-actions API payloads (`/repos/{owner}/{repo}/actions/permissions/selected-actions`) produce metadata-only advisory summaries.
+  - The parser reconstructs summaries from safe repository path, GitHub-owned/verified booleans, allowed pattern count, and bounded safe pattern samples while omitting raw URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
+  - Query/fragment origins sanitize to the exact safe GitHub API URL, while unsafe traversal-like or URL/domain-like patterns, lookalike hosts, suffixed selected-actions routes, encoded suffixes, and explicit-port authorities fail closed before persistence or unsafe fetches.
+
 - `feat(capy-memory): ingest GitHub repository custom properties metadata`
   - Added RED/GREEN Memory Tree source-refresh coverage proving exact GitHub repository custom-properties API payloads (`/repos/{owner}/{repo}/properties/values`) produce metadata-only advisory summaries.
   - The parser reconstructs summaries from safe repository path, property count, bounded property names, value type, and multi-value counts while omitting raw property values, row/global URLs, API-auth fields, prompts, scripts, renderer/source/data/html fields, and secret-like fixture values from receipts/search/vault output.
