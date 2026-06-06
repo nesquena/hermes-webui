@@ -8,6 +8,7 @@ multi-provider support).
 from __future__ import annotations
 
 import base64
+import atexit
 import hashlib
 import json
 import logging
@@ -1225,12 +1226,19 @@ class _AccountUsageProbeWorker:
     def __init__(self, home: Path):
         self.home = Path(home)
         self.last_used = time.monotonic()
-        self._lock = threading.Lock()
+        self._generation = 0
+        self._lock = threading.RLock()
         self._proc: subprocess.Popen[str] | None = None
 
     def close(self) -> None:
-        proc = self._proc
-        self._proc = None
+        with self._lock:
+            proc = self._proc
+            self._proc = None
+            self._generation += 1
+        self._close_process(proc)
+
+    @staticmethod
+    def _close_process(proc: subprocess.Popen[str] | None) -> None:
         if proc is None:
             return
         for stream_name in ("stdin", "stdout"):
@@ -1252,6 +1260,7 @@ class _AccountUsageProbeWorker:
 
     def fetch(self, provider: str, *, api_key: str | None = None) -> Any:
         with self._lock:
+            self.last_used = time.monotonic()
             proc = self._ensure_process(provider, api_key)
             if proc is None or proc.stdin is None or proc.stdout is None:
                 return None
@@ -1306,7 +1315,10 @@ class _AccountUsageProbeWorker:
     def _ensure_process(self, provider: str, api_key: str | None) -> subprocess.Popen[str] | None:
         if self._proc is not None and self._proc.poll() is None:
             return self._proc
-        self.close()
+        old_proc = self._proc
+        self._proc = None
+        self._generation += 1
+        self._close_process(old_proc)
         try:
             from api.config import PYTHON_EXE
         except Exception:
@@ -1358,11 +1370,15 @@ def _cleanup_account_usage_probe_workers(
     stale: list[tuple[str, _AccountUsageProbeWorker]] = []
     with _account_usage_worker_pool_lock:
         for key, worker in list(_account_usage_worker_pool.items()):
-            proc = worker._proc
-            is_dead = proc is not None and proc.poll() is not None
-            if is_dead or cutoff - worker.last_used >= idle_seconds:
-                stale.append((key, worker))
-                _account_usage_worker_pool.pop(key, None)
+            if worker._lock.acquire(blocking=False):
+                try:
+                    proc = worker._proc
+                    is_dead = proc is not None and proc.poll() is not None
+                    if is_dead or cutoff - worker.last_used >= idle_seconds:
+                        stale.append((key, worker))
+                        _account_usage_worker_pool.pop(key, None)
+                finally:
+                    worker._lock.release()
     for _key, worker in stale:
         worker.close()
 
@@ -1373,6 +1389,9 @@ def _close_account_usage_probe_workers() -> None:
         _account_usage_worker_pool.clear()
     for worker in workers:
         worker.close()
+
+
+atexit.register(_close_account_usage_probe_workers)
 
 
 def _account_usage_cache_key(provider: str, home: Path, api_key: str | None) -> tuple[str, str, str]:
@@ -1400,10 +1419,12 @@ def invalidate_account_usage_status_cache(provider_id: str | None = None) -> Non
     with _account_usage_status_cache_lock:
         if not normalized:
             _account_usage_status_cache.clear()
+            _close_account_usage_probe_workers()
             return
         for key in list(_account_usage_status_cache):
             if key[0] == normalized:
                 _account_usage_status_cache.pop(key, None)
+    _close_account_usage_probe_workers()
 
 
 def _set_cached_account_usage(
