@@ -3,6 +3,11 @@
 
 ## [Unreleased]
 
+## [v0.51.299] — 2026-06-06 — Release JO (stage-3713 — update flow waits for a genuinely new server instance)
+
+### Fixed
+- **"Update now" no longer reloads onto the old server process (or shows a premature error toast).** The post-update reload waited for the first healthy `/health` response, but didn't confirm the server *instance* had actually changed — so on a slow restart the client could reload too early and land back on the old process, or surface an upgrade error that resolved itself after a manual refresh. The update trigger now captures a baseline server identity (from `/health`'s already-present `server_started_at` / `SERVER_START_TIME`) and `_waitForServerThenReload()` only reloads once it observes a *changed* identity. (#3713 fixes #3619, @rodboev)
+
 ## [v0.51.298] — 2026-06-06 — Release JN (stage-3719 — live model probe for custom providers with model config)
 
 ### Fixed
