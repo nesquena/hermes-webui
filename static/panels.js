@@ -7713,6 +7713,7 @@ async function saveSettings(andClose){
   const showTps=!!($('settingsShowTps')||{}).checked;
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
+  const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
@@ -7739,6 +7740,9 @@ async function saveSettings(andClose){
   body.terminal_auto_expand_on_output=!!($('settingsTerminalAutoExpand')||{}).checked;
   body.api_redact_enabled=!!($('settingsApiRedact')||{}).checked;
   body.show_cli_sessions=showCliSessions;
+  // Cron sessions are gated on CLI sessions (server short-circuits otherwise);
+  // mirror the autosave path so the explicit Save Settings button persists it too. (#3514)
+  body.show_cron_sessions=showCliSessions&&showCronSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
